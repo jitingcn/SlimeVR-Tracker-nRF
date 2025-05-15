@@ -35,17 +35,17 @@
 
 	spi3_default: spi3_default {
 		group1 {
-			psels = <NRF_PSEL(SPIM_MISO, 0, 24)>,
-					<NRF_PSEL(SPIM_MOSI, 0, 6)>,
-					<NRF_PSEL(SPIM_SCK, 0, 8)>;
+			psels = <NRF_PSEL(SPIM_MISO, 0, 11)>,
+					<NRF_PSEL(SPIM_MOSI, 0, 24)>,
+					<NRF_PSEL(SPIM_SCK, 0, 22)>;
 		};
 	};
 
 	spi3_sleep: spi3_sleep {
 		group1 {
-			psels = <NRF_PSEL(SPIM_MISO, 0, 24)>,
-					<NRF_PSEL(SPIM_MOSI, 0, 6)>,
-					<NRF_PSEL(SPIM_SCK, 0, 8)>;
+			psels = <NRF_PSEL(SPIM_MISO, 0, 11)>,
+					<NRF_PSEL(SPIM_MOSI, 0, 24)>,
+					<NRF_PSEL(SPIM_SCK, 0, 22)>;
 			low-power-enable;
 		};
 	};
@@ -73,13 +73,13 @@
 	buttons {
 		compatible = "gpio-keys";
 		button0: button_0 {
-			gpios = <&gpio0 22 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			gpios = <&gpio0 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "Push button switch 0";
 		};
 	};
 
 	aliases {
-		// sw0 = &button0; // Uncomment to Enable SW0
+		sw0 = &button0; // Uncomment to Enable SW0
 		pwm-led0 = &pwm_led0;
 	};
 
@@ -98,9 +98,11 @@
 	};
 
 	zephyr,user {
-		int0-gpios = <&gpio0 17 0>;
+		pwr-gpios = <&gpio0 17 GPIO_OPEN_SOURCE>;
+        gnd-gpios = <&gpio0 20 GPIO_OPEN_DRAIN>;
+		int0-gpios = <&gpio0 2 0>;
 		led-gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
-		// clk-gpios = <&gpio0 20 GPIO_OPEN_DRAIN>; // Uncomment and set to correct pin if using an external clock (crystal oscillator)
+		clk-gpios = <&gpio1 11 GPIO_OPEN_DRAIN>; // Uncomment and set to correct pin if using an external clock (crystal oscillator)
 	};
 
 };
@@ -162,7 +164,7 @@ zephyr_udc0: &usbd {
 	pinctrl-0 = <&spi3_default>;
 	pinctrl-1 = <&spi3_sleep>;
 	pinctrl-names = "default", "sleep";
-	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>;
 
 	imu_spi: imu_spi@0 {
 		compatible = "vnd,spi-device";
