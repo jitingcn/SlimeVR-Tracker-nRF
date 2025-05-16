@@ -43,13 +43,20 @@ bool retained_validate(void)
 	/* Check the build timestamp of the firmware that last updated
 	 * the retained data.
 	 */
-	valid &= (retained->build_timestamp == BUILD_TIMESTAMP);
+	bool timestamp = (retained->build_timestamp == BUILD_TIMESTAMP);
 
-	/* If the CRC isn't valid or the build timestamp is different
-	 * from the current build timestamp, reset the retained data.
-	 */
+	/* If the CRC isn't valid reset the retained data. */
 	if (!valid) {
 		memset(retained, 0, sizeof(struct retained_data));
+		retained->build_timestamp = BUILD_TIMESTAMP;
+		retained->gyroSensScale[0] = 1.0f;
+		retained->gyroSensScale[1] = 1.0f;
+		retained->gyroSensScale[2] = 1.0f;
+
+	/* If the build timestamp is different
+	 * from the current data, reset the timestamp.
+	 */	
+	} else if (!timestamp){
 		retained->build_timestamp = BUILD_TIMESTAMP;
 	}
 

@@ -677,6 +677,14 @@ void main_imu_thread(void)
 					float gz = raw_g[2];
 					float g[] = {SENSOR_GYROSCOPE_AXES_ALIGNMENT};
 
+					// Apply sensitivity scaling
+					if (retained) {
+						g[0] *= retained->gyroSensScale[0];
+						g[1] *= retained->gyroSensScale[1];
+						g[2] *= retained->gyroSensScale[2];
+					}
+	
+	
 					// Process fusion
 					sensor_fusion->update_gyro(g, gyro_actual_time);
 
