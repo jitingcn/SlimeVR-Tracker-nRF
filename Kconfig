@@ -150,14 +150,14 @@ endchoice
 
 config ACTIVE_TIMEOUT_THRESHOLD
     int "Activity timeout threshold (ms)"
-    default 15000
+    default 30000
     depends on USE_ACTIVE_TIMEOUT
     help
         Trigger activity timeout after a certain threshold of activity.
 
 config ACTIVE_TIMEOUT_DELAY
     int "Activity timeout delay (ms)"
-    default 900000
+    default 1800000
     depends on USE_ACTIVE_TIMEOUT
     help
         Activity timeout duration when triggered.
