@@ -182,22 +182,24 @@ static void print_info(void)
 	printk("\nTracker ID: %u\n", retained->paired_addr[1]);
 	printk("Device address: %012llX\n", *(uint64_t *)NRF_FICR->DEVICEADDR & 0xFFFFFFFFFFFF);
 	printk("Receiver address: %012llX\n", (*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	// Display Gyro sensitivity
 	if (retained) {
 				float scale_x = retained->gyroSensScale[0];
 				float scale_y = retained->gyroSensScale[1];
 				float scale_z = retained->gyroSensScale[2];
-		
+			
 				// Calculate the approximate input degrees difference based on the stored scale factor
-				// degrees = (1.0 - (1.0 / scale)) * 720.0
-				float deg_x = (1.0f - (1.0f / scale_x)) * 720.0f;
-				float deg_y = (1.0f - (1.0f / scale_y)) * 720.0f;
-				float deg_z = (1.0f - (1.0f / scale_z)) * 720.0f;
+				// degrees = (1.0 - (1.0 / scale)) * 360.0 * number of revolutions
+				float deg_x = (1.0f - (1.0f / scale_x)) * (360.0f * CONFIG_SENSOR_SENS_REV);
+				float deg_y = (1.0f - (1.0f / scale_y)) * (360.0f * CONFIG_SENSOR_SENS_REV);
+				float deg_z = (1.0f - (1.0f / scale_z)) * (360.0f * CONFIG_SENSOR_SENS_REV);
 		
-				printk("Gyroscope sensitivity (degrees diff over 2 rev): %.3f %.3f %.3f\n", (double)deg_x, (double)deg_y, (double)deg_z);
+				printk("Gyroscope sensitivity (degrees diff over %u rev): %.3f %.3f %.3f\n", (int)CONFIG_SENSOR_SENS_REV, (double)deg_x, (double)deg_y, (double)deg_z);
 			} else {
 				printk("Gyroscope sensitivity: Retained data unavailable.\n");
 		}
+#endif		
 }
 
 static void print_uptime(const uint64_t ticks, const char *name)
@@ -256,9 +258,10 @@ static void console_thread(void)
 	printk("uptime                       Get device uptime\n");
 	printk("reboot                       Soft reset the device\n");
 	printk("calibrate                    Calibrate sensor ZRO\n");
-	printk("sens <x>,<y>,<z>             Set gyro sensitivity (deg diff over 2 rev)\n");
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION	
+	printk("sens <x>,<y>,<z>             Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
 	printk("sens reset                   Reset gyro sensitivity calibration\n");
-
+#endif
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
 	uint8_t command_reboot[] = "reboot";
@@ -289,8 +292,10 @@ static void console_thread(void)
 	printk("meow                         Meow!\n");
 
 	uint8_t command_meow[] = "meow";
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION	
 	uint8_t command_sens[] = "sens";
 	uint8_t command_sens_reset[] = "sens reset";
+#endif
 
 	while (1) {
 #if USB_EXISTS
@@ -320,6 +325,7 @@ static void console_thread(void)
 		{
 			sensor_request_calibration();
 		}
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION		
 			else if (memcmp(line, command_sens_reset, sizeof(command_sens_reset) - 1) == 0)
 			{
 				if (retained) {
@@ -374,9 +380,9 @@ static void console_thread(void)
 				
 				if (retained) {
 					float scale_x, scale_y, scale_z; // Local variables for scale
-					float den_x = 1.0f - (deg_x / (360.0f * 2.0f));
-					float den_y = 1.0f - (deg_y / (360.0f * 2.0f));
-					float den_z = 1.0f - (deg_z / (360.0f * 2.0f));
+					float den_x = 1.0f - (deg_x / (360.0f * CONFIG_SENSOR_SENS_REV));
+					float den_y = 1.0f - (deg_y / (360.0f * CONFIG_SENSOR_SENS_REV));
+					float den_z = 1.0f - (deg_z / (360.0f * CONFIG_SENSOR_SENS_REV));
 
 					// Prevent division by zero or near-zero
 					if (fabsf(den_x) < 1e-6f || fabsf(den_y) < 1e-6f || fabsf(den_z) < 1e-6f) {
@@ -409,6 +415,7 @@ static void console_thread(void)
 					printk("Example: sens 10.5,-2.1,15.0\n");
 			}
 			}
+#endif			
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 		else if (memcmp(line, command_6_side, sizeof(command_6_side)) == 0)
 		{
