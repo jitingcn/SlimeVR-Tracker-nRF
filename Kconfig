@@ -195,7 +195,7 @@ config SENSOR_GYRO_FS
 
 config SENSOR_USE_MAG
     bool "Magnetometer support"
-    default y
+    default n
     help
         Use magnetometer if it is present.
 
