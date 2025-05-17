@@ -233,6 +233,22 @@ config SENSOR_USE_6_SIDE_CALIBRATION
         Use 6-side calibration for accelerometer.
         Calibration can be completed through the basic console.
 
+config SENSOR_USE_SENS_CALIBRATION
+    bool "Use gyro sensitivity calibration"
+    default y
+    depends on USE_SLIMENRF_CONSOLE
+    help
+        Use sensitivity calibration for gyroscope.
+        Calibration can be completed by rotating the tracker specified number of times around all axis.
+        Note any resulting yaw drift in degrees and enter these three observed values in the basic console.
+
+config SENSOR_SENS_REV
+    int "Number of rotations (rev)"
+    default 2
+    depends on SENSOR_USE_SENS_CALIBRATION
+    help
+       Number of rotations used in calculating sensitivity calibration.
+
 config RADIO_TX_POWER
     int "Radio output power (dBm)"
     default 8
