@@ -232,15 +232,16 @@ int set_sensor_clock(bool enable, float rate, float *actual_rate)
 
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
 static const struct gpio_dt_spec button0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
-static int64_t press_time;
+static int64_t press_time = 0;
 static int64_t last_press_duration = 0;
 
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	bool pressed = button_read();
-	if (press_time && !pressed && k_uptime_get() - press_time > 50) // debounce
-		last_press_duration = k_uptime_get() - press_time;
-	press_time = pressed ? k_uptime_get() : 0;
+	int64_t current_time = k_uptime_get();
+	if (press_time && !pressed && current_time - press_time > 50) // debounce
+		last_press_duration = current_time - press_time;
+	press_time = pressed ? current_time : 0;
 }
 
 static struct gpio_callback button_cb_data;
@@ -273,8 +274,8 @@ static void button_thread(void)
 	int64_t last_press = 0;
 	while (1)
 	{
-		if (press_time)
-			set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
+		if (press_time && k_uptime_get() - press_time > 50) // debounce
+			set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
 		if (last_press_duration > 50) // debounce
 		{
 			num_presses++;
@@ -294,7 +295,14 @@ static void button_thread(void)
 			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
 		}
 		if (press_time && k_uptime_get() - press_time > 1000 && button_read()) // Button is being held
-			sys_user_shutdown();
+		{
+			if (sys_user_shutdown()) // held for 5 seconds, reset pairing
+			{
+				LOG_INF("Pairing requested");
+				esb_reset_pair();
+				press_time = 0;
+			}
+		}
 		k_msleep(20);
 	}
 }
@@ -352,23 +360,36 @@ bool stby_read(void)
 #endif
 }
 
-#if USER_SHUTDOWN_ENABLED
-void sys_user_shutdown(void)
+int sys_user_shutdown(void)
 {
+	int64_t start_time = k_uptime_get();
+#if USER_SHUTDOWN_ENABLED
 	LOG_INF("User shutdown requested");
 	reboot_counter_write(0);
 	set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
+#endif
 	k_msleep(1500);
 	if (button_read()) // If alternate button is available and still pressed, wait for the user to stop pressing the button
 	{
 		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
 		while (button_read())
+		{
+			if (k_uptime_get() - start_time > 4000) // held for over 5 seconds, cancel shutdown
+			{
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				return 1;
+			}
 			k_msleep(1);
+		}
 		set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
 	}
+#if USER_SHUTDOWN_ENABLED
 	sys_request_system_off();
-}
+#else
+	sys_request_system_reboot();
 #endif
+	return 0;
+}
 
 void sys_reset_mode(uint8_t mode)
 {

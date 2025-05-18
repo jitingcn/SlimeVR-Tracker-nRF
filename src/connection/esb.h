@@ -51,6 +51,7 @@ void esb_set_addr_paired(void);
 
 void esb_pair(void);
 void esb_reset_pair(void);
+void esb_clear_pair(void);
 
 void esb_write(uint8_t* data);  // TODO: give packets some names
 

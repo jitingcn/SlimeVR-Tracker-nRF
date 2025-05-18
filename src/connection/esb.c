@@ -313,11 +313,6 @@ inline void esb_set_addr_paired(void)
 
 void esb_pair(void)
 {
-	// TODO: make its own thread
-	// Read paired address from retained
-	// TODO: should pairing data stay within esb?
-	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
-
 	if (!paired_addr[0]) // zero, no receiver paired
 	{
 		LOG_INF("Pairing");
@@ -369,8 +364,14 @@ void esb_reset_pair(void)
 {
 	esb_deinitialize(); // make sure esb is off
 	esb_paired = false;
-	uint8_t empty_addr[8] = {0};
-	sys_write(PAIRED_ID, &retained->paired_addr, empty_addr, sizeof(paired_addr)); // write zeroes
+	memset(paired_addr, 0, sizeof(paired_addr));
+	LOG_INF("Pairing requested");
+}
+
+void esb_clear_pair(void)
+{
+	esb_reset_pair();
+	sys_write(PAIRED_ID, &retained->paired_addr, paired_addr, sizeof(paired_addr)); // write zeroes
 	LOG_INF("Pairing data reset");
 }
 
@@ -398,6 +399,9 @@ bool esb_ready(void)
 
 static void esb_thread(void)
 {
+	// Read paired address from retained
+	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
+
 	while (1)
 	{
 		if (!esb_paired)

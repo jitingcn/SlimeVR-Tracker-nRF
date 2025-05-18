@@ -279,9 +279,11 @@ static void console_thread(void)
 	uint8_t command_mag[] = "mag";
 #endif
 
-	printk("pair                         Clear pairing data\n");
+	printk("pair                         Enter pairing mode\n");
+	printk("clear                        Clear pairing data\n");
 
 	uint8_t command_pair[] = "pair";
+	uint8_t command_clear[] = "clear";
 
 #if DFU_EXISTS
 	printk("dfu                          Enter DFU bootloader\n");
@@ -430,9 +432,11 @@ static void console_thread(void)
 #endif
 		else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) 
 		{
-//			reboot_counter_write(102);
-			esb_reset_pair(); // TODO: make not require reboot
-			sys_request_system_reboot();
+			esb_reset_pair();
+		}
+		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) 
+		{
+			esb_clear_pair();
 		}
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0)

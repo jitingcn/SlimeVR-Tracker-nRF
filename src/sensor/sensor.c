@@ -945,8 +945,8 @@ void main_imu_thread(void)
 		main_running = false;
 		int64_t time_delta = k_uptime_get() - time_begin;
 
-		if (time_delta > sensor_update_time_ms)
-			max_loop_time = MAX(max_loop_time, time_delta);
+		if (time_delta > sensor_update_time_ms && time_delta > max_loop_time)
+			max_loop_time = time_delta;
 
 		if (k_uptime_get() - last_status_time > STATUS_INTERVAL_MS)
 		{
