@@ -49,7 +49,7 @@ static void set_params()
 {
 	init_params(&params);
 	// optimized with ICM-45686 data, (in parentheses based on BMI270 characteristics)
-	params.tauAcc = 4.5f; // best result from optimizer (best result for VQF from paper: 4.5)
+	params.tauAcc = 6.0f; // best result from optimizer (best result for VQF from paper: 4.5)
 	params.tauMag = 10.0f; // best result for VQF from paper	
 	params.biasSigmaInit = 0.337976f; // best result from optimizer (based on gyro ZRO temperature drift: 0.25)
 	params.biasForgettingTime = 352.235500f; // best result from optimizer (based on time for temperature change: 200)
