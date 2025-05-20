@@ -88,13 +88,13 @@
 	buttons {
 		compatible = "gpio-keys";
 		button0: button_0 {
-			gpios = <&gpio0 11 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			gpios = <&gpio0 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 			label = "Push button switch 0";
 		};
 	};
 
 	aliases {
-		// sw0 = &button0; // Uncomment to Enable SW0
+		sw0 = &button0; // Uncomment to Enable SW0
 		pwm-led0 = &pwm_led0;
 	};
 
