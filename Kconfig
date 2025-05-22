@@ -150,7 +150,7 @@ endchoice
 
 config ACTIVE_TIMEOUT_THRESHOLD
     int "Activity timeout threshold (ms)"
-    default 30000
+    default 15000
     depends on USE_ACTIVE_TIMEOUT
     help
         Trigger activity timeout after a certain threshold of activity.
