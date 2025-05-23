@@ -59,7 +59,7 @@
 #define SOFT_RESET_MASK 0x80
 #define SOFT_RESET_CLEAR 0x00
 
-static const float sensitivity = 1000 / 4000.0f; // ~0.25 mgauss/LSB @ 8G range
+static const float sensitivity = 1 / 4000.0f; // ~0.25 mgauss/LSB @ 8G range -> ~0.00025 G/LSB
 
 static uint8_t last_state = 0xff;
 static bool lastOvfl = false;
@@ -196,7 +196,7 @@ void qmc_mag_process(uint8_t *raw_m, float m[3])
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
 		m[i] = ((int16_t*)raw_m)[i];
-		m[i] *= sensitivity; // result in mGauss
+		m[i] *= sensitivity; // Gauss
 	}
 }
 
