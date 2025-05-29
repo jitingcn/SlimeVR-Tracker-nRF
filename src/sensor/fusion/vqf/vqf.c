@@ -48,29 +48,35 @@ void vqf_update_sensor_ids(int imu)
 static void set_params()
 {
 	init_params(&params);
-	// optimized with ICM-45686 data, (in parentheses based on BMI270 characteristics)
-	params.tauAcc = 6.5f; // best result from optimizer (best result for VQF from paper: 4.5)
+	params.biasClip = 5.0f;
+	params.tauAcc = 6.5f; // best result from Lyall
 	params.tauMag = 10.0f; // best result for VQF from paper	
-	params.biasSigmaInit = 0.337976f; // best result from optimizer (based on gyro ZRO temperature drift: 0.25)
-	params.biasForgettingTime = 352.235500f; // best result from optimizer (based on time for temperature change: 200)
-	params.biasClip = 5.0f; // globally set (based on gyro ZRO: 1.0f)
-	params.biasSigmaMotion = 0.985346f; // best result from optimizer
-	params.biasVerticalForgettingFactor = 0.007959f; // best result from optimizer
-	params.biasSigmaRest = 0.028897f; // best result from optimizer (changed, unknown reason: 0.01f)
-	params.restMinT = 4.648680f; // best result from optimizer
-	params.restFilterTau = 1.900166f; // best result from optimizer
-	params.restThGyr = 2.620598f; // best result from optimizer (based on gyro noise: 0.5f)
-	params.restThAcc = 2.142593f; // best result from optimizer (based on accel noise: 0.1f)
-	params.magCurrentTau = 0.05f;
-	params.magRefTau = 20.0f;
-	params.magNormTh = 0.1f;
-	params.magDipTh = 10.0f;
-	params.magNewTime = 20.0f;
-	params.magNewFirstTime = 5.0f;
-	params.magNewMinGyr = 20.0f;
-	params.magMinUndisturbedTime = 0.5f;
-	params.magMaxRejectionTime = 60.0f;
-	params.magRejectionFactor = 2.0f;
+	// optimized with ICM-45686 data, (in parentheses based on BMI270 characteristics)
+	if (imu_id == IMU_ICM45686)
+	{
+//		params.tauAcc = 7.171490f; // best result from optimizer (best result for VQF from paper: 4.5)
+//		params.tauMag = 10.0f; // best result for VQF from paper	
+		params.biasSigmaInit = 0.337976f; // best result from optimizer (based on gyro ZRO temperature drift: 0.25)
+		params.biasForgettingTime = 352.235500f; // best result from optimizer (based on time for temperature change: 200)
+//		params.biasClip = 5.0f; // globally set (based on gyro ZRO: 1.0f)
+		params.biasSigmaMotion = 0.985346f; // best result from optimizer
+		params.biasVerticalForgettingFactor = 0.007959f; // best result from optimizer
+		params.biasSigmaRest = 0.028897f; // best result from optimizer (changed, unknown reason: 0.01f)
+		params.restMinT = 4.648680f; // best result from optimizer
+		params.restFilterTau = 1.900166f; // best result from optimizer
+		params.restThGyr = 2.620598f; // best result from optimizer (based on gyro noise: 0.5f)
+		params.restThAcc = 2.142593f; // best result from optimizer (based on accel noise: 0.1f)
+//		params.magCurrentTau = 0.05f;
+//		params.magRefTau = 20.0f;
+//		params.magNormTh = 0.1f;
+//		params.magDipTh = 10.0f;
+//		params.magNewTime = 20.0f;
+//		params.magNewFirstTime = 5.0f;
+//		params.magNewMinGyr = 20.0f;
+//		params.magMinUndisturbedTime = 0.5f;
+//		params.magMaxRejectionTime = 60.0f;
+//		params.magRejectionFactor = 2.0f;
+	}
 	// Per-IMU parameters, from ESP firmware
 	switch (imu_id)
 	{

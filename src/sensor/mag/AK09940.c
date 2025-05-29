@@ -74,7 +74,8 @@ int ak_update_odr(float time, float *actual_time)
 	else
 	{
 		MODE = MODE_SMM;
-		time = INFINITY;
+//		time = INFINITY;
+		time = 0; // unsure if SMM is working at the needed rate
 	}
 
 	if (last_odr == MODE)
@@ -85,7 +86,7 @@ int ak_update_odr(float time, float *actual_time)
 	if (MODE == MODE_SMM)
 		MODE = MODE_PDM; // set PDM, oneshot will set SMM
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL3, MT_LND2 << 5 | MODE_SMM);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL3, MT_LND2 << 5 | MODE);
 	if (err)
 		LOG_ERR("Communication error");
 

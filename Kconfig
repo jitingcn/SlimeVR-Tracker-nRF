@@ -50,11 +50,19 @@ config LED_TRI_COLOR
 
 endchoice
 
+config USER_EXTRA_ACTIONS
+    bool "Multiple press actions"
+    default y
+    help
+        Allow user to use multiple presses to calibrate, pair, or enter DFU.
+        By default, pairing is available when holding down sw0 for 5 seconds.
+        By default, DFU is available when holding down sw0 and plugging in a USB cable.
+
 config IGNORE_RESET
     bool "Ignore reset"
     default y
     help
-        If sw0 is available, don't change any reset behavior.
+        If sw0 is available, don't perform any extra actions on reset.
 
 config USER_SHUTDOWN
     bool "User shutdown support"
