@@ -25,7 +25,7 @@ LOG_MODULE_REGISTER(system, LOG_LEVEL_INF);
 #if DT_NODE_HAS_PROP(DT_ALIAS(sw0), gpios) // Alternate button if available to use as "reset key"
 #define BUTTON_EXISTS true
 static void button_thread(void);
-K_THREAD_DEFINE(button_thread_id, 512, button_thread, NULL, NULL, NULL, 6, 0, 0); // TODO: stack increased because of reboot request
+K_THREAD_DEFINE(button_thread_id, 1024, button_thread, NULL, NULL, NULL, 6, 0, 0); // TODO: stack increased because of reboot request (to 512) and sensor scan (to 1024)
 #else
 #pragma message "Button GPIO does not exist"
 #endif

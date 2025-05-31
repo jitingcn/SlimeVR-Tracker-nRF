@@ -184,6 +184,7 @@ int sensor_init(void)
 	{
 		if (imu_id >= (int)ARRAY_SIZE(sensor_imus) || sensor_imus[imu_id] == NULL || sensor_imus[imu_id] == &sensor_imu_none)
 		{
+			sensor_scan_clear(); // clear invalid sensor data
 			sensor_imu = &sensor_imu_none;
 			sensor_sensor_scanning = false; // done
 //			if (sensor_imu_dev.addr < 0xFF) // If for some reason there actually is a valid IMU but we found some unsupported device first
@@ -205,6 +206,7 @@ int sensor_init(void)
 	}
 	else
 	{
+		sensor_scan_clear(); // clear invalid sensor data
 		sensor_imu = &sensor_imu_none;
 		sensor_sensor_scanning = false; // done
 		set_status(SYS_STATUS_SENSOR_ERROR, true);
@@ -377,7 +379,7 @@ void sensor_retained_write(void) // TODO: move to sys?
 void sensor_shutdown(void) // Communicate all imus to shut down
 {
 	sys_interface_resume();
-	int err = sensor_init(); // try initialization if possible
+	int err = sensor_init(); // try initialization if possible // TODO: run in sensor thread, large stack usage
 	if (mag_available) // try to shutdown magnetometer first (in case of passthrough)
 		sensor_mag->shutdown();
 	if (!err)
@@ -390,7 +392,7 @@ void sensor_shutdown(void) // Communicate all imus to shut down
 uint8_t sensor_setup_WOM(void)
 {
 	sys_interface_resume();
-	int err = sensor_init(); // try initialization if possible
+	int err = sensor_init(); // try initialization if possible // TODO: run in sensor thread, large stack usage
 	if (!err)
 		return sensor_imu->setup_WOM();
 	sys_interface_suspend(); // TODO: not suspending after WOM setup

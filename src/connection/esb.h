@@ -49,6 +49,8 @@ void esb_deinitialize(void);
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);
 
+void esb_set_pair(uint64_t addr);
+
 void esb_pair(void);
 void esb_reset_pair(void);
 void esb_clear_pair(void);

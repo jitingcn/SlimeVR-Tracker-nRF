@@ -49,12 +49,12 @@ static void set_params()
 {
 	init_params(&params);
 	params.biasClip = 5.0f;
-	params.tauAcc = 6.5f; // best result from Lyall
+	params.tauAcc = 4.5f; // best result for VQF from paper
 	params.tauMag = 10.0f; // best result for VQF from paper	
 	// optimized with ICM-45686 data, (in parentheses based on BMI270 characteristics)
 	if (imu_id == IMU_ICM45686)
 	{
-//		params.tauAcc = 7.171490f; // best result from optimizer (best result for VQF from paper: 4.5)
+		params.tauAcc = 6.5f; // best result from Lyall (best result from optimizer: 7.171490)
 //		params.tauMag = 10.0f; // best result for VQF from paper	
 		params.biasSigmaInit = 0.337976f; // best result from optimizer (based on gyro ZRO temperature drift: 0.25)
 		params.biasForgettingTime = 352.235500f; // best result from optimizer (based on time for temperature change: 200)

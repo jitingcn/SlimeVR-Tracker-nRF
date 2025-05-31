@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdlib.h>
 
 #include "connection/connection.h"
 
@@ -181,7 +182,8 @@ static void print_info(void)
 
 	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
 
-	printk("\nTracker ID: %u\n", retained->paired_addr[1]);
+	bool paired = retained->paired_addr[0];
+	printk(paired ? "\nTracker ID: %u\n" : "\nTracker ID: None\n", retained->paired_addr[1]);
 	printk("Device address: %012llX\n", *(uint64_t *)NRF_FICR->DEVICEADDR & 0xFFFFFFFFFFFF);
 	printk("Receiver address: %012llX\n", (*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -202,6 +204,7 @@ static void print_info(void)
 				printk("Gyroscope sensitivity: Retained data unavailable.\n");
 		}
 #endif		
+	printk(paired ? "Receiver address: %012llX\n" : "Receiver address: None\n", (*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
 }
 
 static void print_uptime(const uint64_t ticks, const char *name)
@@ -284,9 +287,11 @@ static void console_thread(void)
 	uint8_t command_mag[] = "mag";
 #endif
 
+	printk("set <address>                Manually set receiver\n");
 	printk("pair                         Enter pairing mode\n");
 	printk("clear                        Clear pairing data\n");
 
+	uint8_t command_set[] = "set";
 	uint8_t command_pair[] = "pair";
 	uint8_t command_clear[] = "clear";
 
@@ -310,8 +315,18 @@ static void console_thread(void)
 #else
 		uint8_t *line = rtt_console_getline();
 #endif
-		for (uint8_t *p = line; *p; ++p) {
+		uint8_t *arg = NULL;
+		for (uint8_t *p = line; *p; ++p)
+		{
 			*p = tolower(*p);
+			if (*p == ' ' && !arg)
+			{
+				*p = 0;
+				p++;
+				*p = tolower(*p);
+				if (*p)
+					arg = p;
+			}
 		}
 
 		if (memcmp(line, command_debug, sizeof(command_debug)) == 0)
@@ -439,6 +454,16 @@ static void console_thread(void)
 			sensor_calibration_clear_mag(NULL, true);
 		}
 #endif
+		else if (memcmp(line, command_set, sizeof(command_set)) == 0) 
+		{
+			uint64_t addr = strtoull(arg, NULL, 16);
+			uint8_t buf[17];
+			snprintk(buf, 17, "%016llx", addr);
+			if (addr != 0 && memcmp(buf, arg, 17) == 0)
+				esb_set_pair(addr);
+			else
+				printk("Invalid address\n");
+		}
 		else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) 
 		{
 			esb_reset_pair();
