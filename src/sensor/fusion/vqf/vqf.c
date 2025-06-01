@@ -52,7 +52,7 @@ static void set_params()
 	params.tauAcc = 4.5f; // best result for VQF from paper
 	params.tauMag = 10.0f; // best result for VQF from paper	
 	// optimized with ICM-45686 data, (in parentheses based on BMI270 characteristics)
-	if (imu_id == IMU_ICM45686)
+	if (imu_id == IMU_ICM45686 || imu_id == IMU_LSM6DSR)
 	{
 		params.tauAcc = 6.5f; // best result from Lyall (best result from optimizer: 7.171490)
 //		params.tauMag = 10.0f; // best result for VQF from paper	
@@ -87,12 +87,9 @@ static void set_params()
 		params.restThGyr = 0.5f;
 		params.restThAcc = 0.196f;
 		break;
-	case IMU_ICM45686: // currently defaults
-		params.biasSigmaInit = 0.337976f;
+//	case IMU_ICM45686:
 		// params.biasClip = 1.0f;
-		params.restThGyr = 2.620598f;
-		params.restThAcc = 2.142593f;
-		break;
+//		break;
 	case IMU_LSM6DS3:
 		params.biasSigmaInit = 3.0f;
 		// params.biasClip = 6.0f;
@@ -100,7 +97,7 @@ static void set_params()
 		params.restThAcc = 0.392f;
 		break;
 	case IMU_LSM6DSO:
-	case IMU_LSM6DSR:
+//	case IMU_LSM6DSR:
 	case IMU_LSM6DSV:
 		params.biasSigmaInit = 1.0f;
 		// params.biasClip = 2.0f;
