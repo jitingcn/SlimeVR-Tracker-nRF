@@ -50,6 +50,38 @@ config LED_TRI_COLOR
 
 endchoice
 
+menu "Status LED default status color"
+    depends on LED_RGB_COLOR
+
+config LED_DEFAULT_COLOR_R
+    int "Red value"
+    range 0 10000
+    default 4000
+    depends on LED_RGB_COLOR
+    help
+        Red color for default status.
+        Valid range is 0 to 10000.
+
+config LED_DEFAULT_COLOR_G
+    int "Green value"
+    range 0 10000
+    default 6000
+    depends on LED_RGB_COLOR
+    help
+        Green color for default status.
+        Valid range is 0 to 10000.
+
+config LED_DEFAULT_COLOR_B
+    int "Blue value"
+    range 0 10000
+    default 0
+    depends on LED_RGB_COLOR
+    help
+        Blue color for default status.
+        Valid range is 0 to 10000.
+
+endmenu
+
 config USER_EXTRA_ACTIONS
     bool "Multiple press actions"
     default y

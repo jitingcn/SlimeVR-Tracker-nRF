@@ -316,7 +316,7 @@ uint16_t icm_fifo_read(uint8_t *data, uint16_t len)
 			packets = limit;
 			count = packets * PACKET_SIZE;
 		}
-		err |= ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_DATA, data, count, 240); // Read FIFO data, less than 255 at a time (for nRF52832)
+		err |= ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_DATA, data, count, PACKET_SIZE);
 		if (err)
 			LOG_ERR("Communication error");
 		data += packets * PACKET_SIZE;

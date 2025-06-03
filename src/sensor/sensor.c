@@ -33,7 +33,7 @@
 
 #include "sensor.h"
 
-#if DT_NODE_EXISTS(DT_NODELABEL(imu_spi))
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(imu_spi), okay)
 #define SENSOR_IMU_SPI_EXISTS true
 #define SENSOR_IMU_SPI_NODE DT_NODELABEL(imu_spi)
 #define SPI_OP SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8)
@@ -41,7 +41,7 @@ static struct spi_dt_spec sensor_imu_spi_dev = SPI_DT_SPEC_GET(SENSOR_IMU_SPI_NO
 #else
 static struct spi_dt_spec sensor_imu_spi_dev = {0};
 #endif
-#if DT_NODE_EXISTS(DT_NODELABEL(imu))
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(imu), okay)
 #define SENSOR_IMU_EXISTS true
 #define SENSOR_IMU_NODE DT_NODELABEL(imu)
 static struct i2c_dt_spec sensor_imu_dev = I2C_DT_SPEC_GET(SENSOR_IMU_NODE);
@@ -53,7 +53,7 @@ static struct i2c_dt_spec sensor_imu_dev = {0};
 #endif
 static uint8_t sensor_imu_dev_reg = 0xFF;
 
-#if DT_NODE_EXISTS(DT_NODELABEL(mag))
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
 #define SENSOR_MAG_EXISTS true
 #define SENSOR_MAG_NODE DT_NODELABEL(mag)
 static struct i2c_dt_spec sensor_mag_dev = I2C_DT_SPEC_GET(SENSOR_MAG_NODE);
