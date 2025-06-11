@@ -402,7 +402,7 @@ uint8_t sensor_setup_WOM(void)
 
 void sensor_fusion_invalidate(void)
 {
-	main_imu_restart(); // reinitialize fusion
+	// TODO: reinitialize fusion
 	if (sensor_fusion_init)
 	{ // clear fusion gyro offset
 		float g_off[3] = {0};
@@ -1018,10 +1018,4 @@ void main_imu_wakeup(void)
 {
 	if (!main_suspended) // don't wake up if pending suspension
 		k_wakeup(main_imu_thread_id);
-}
-
-void main_imu_restart(void)
-{
-	if (main_ok) // only restart fusion if initialized
-		sensor_fusion->init(gyro_actual_time, accel_actual_time, 6 / 1000.0f); // TODO: using default initial time
 }
