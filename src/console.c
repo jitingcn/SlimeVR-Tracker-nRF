@@ -306,7 +306,6 @@ static void console_thread(void)
 	uint8_t command_meow[] = "meow";
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION	
 	uint8_t command_sens[] = "sens";
-	uint8_t command_sens_reset[] = "sens reset";
 #endif
 
 	while (1) {
@@ -356,7 +355,14 @@ static void console_thread(void)
 			sensor_request_calibration();
 		}
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION		
-			else if (memcmp(line, command_sens_reset, sizeof(command_sens_reset) - 1) == 0)
+		else if (memcmp(line, command_sens, sizeof(command_sens)) == 0)
+		{
+			// check if there are any arguments at all.
+			if (arg == NULL) {
+				printk("Error: Missing arguments. Use 'sens <x>,<y>,<z>' or 'sens reset'.\n");
+			}
+			// check if the argument is "reset"
+			else if (strcmp((char*)arg, "reset") == 0)
 			{
 				if (retained) {
 					printk("Resetting gyro sensitivity calibration.\n");
@@ -364,87 +370,59 @@ static void console_thread(void)
 					retained->gyroSensScale[1] = 1.0f;
 					retained->gyroSensScale[2] = 1.0f;
 					retained_update(); // Save changes
-					printk("Gyro sensitivity reset to 0, 0, 0\n");
+					sys_write(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, retained->gyroSensScale, sizeof(retained->gyroSensScale));
+					printk("Gyro sensitivity reset.\n");
 				} else {
 					printk("Error: Retained data not available.\n");
 				}
 			}
-			else if (strncmp(line, command_sens, sizeof(command_sens) - 1) == 0)
+			else
 			{
-				float deg_x = 0.0f, deg_y = 0.0f, deg_z = 0.0f;
-				bool parse_ok = false;
-			char *values_str_modifiable = (char *)line + sizeof(command_sens) - 1;
+				char *token;
+				char *endptr;
+				int token_count = 0;
+				float values[3];
 
-			char *token;
-			char *endptr; // For strtof error checking
-			int token_count = 0;
-
-			// Get the first token (X value)
-			token = strtok(values_str_modifiable, ",");
-			if (token != NULL) {
-				deg_x = strtof(token, &endptr);
-				// Check if conversion was successful (endptr should point to '\0' or the comma)
-				if (*endptr == '\0' || *endptr == ',') {
+				token = strtok((char*)arg, ",");
+				while (token != NULL && token_count < 3) {
+					values[token_count] = strtof(token, &endptr);
+					if (token == endptr || *endptr != '\0') {
+						break; // Invalid float, stop parsing
+					}
 					token_count++;
-					// Get the second token (Y value)
 					token = strtok(NULL, ",");
-					if (token != NULL) {
-						deg_y = strtof(token, &endptr);
-						if (*endptr == '\0' || *endptr == ',') {
-							token_count++;
-							// Get the third token (Z value)
-							token = strtok(NULL, ","); // Use comma or just end of string
-							if (token != NULL) {
-								deg_z = strtof(token, &endptr);
-								// For the last token, endptr must point to the null terminator
-								if (*endptr == '\0') {
-									token_count++;
-										parse_ok = true;
-									}
-								}
-						}
-						}
-					}
-
-			if (parse_ok && token_count == 3) {
-				
-				if (retained) {
-					float scale_x, scale_y, scale_z; // Local variables for scale
-					float den_x = 1.0f - (deg_x / (360.0f * CONFIG_SENSOR_SENS_REV));
-					float den_y = 1.0f - (deg_y / (360.0f * CONFIG_SENSOR_SENS_REV));
-					float den_z = 1.0f - (deg_z / (360.0f * CONFIG_SENSOR_SENS_REV));
-
-					// Prevent division by zero or near-zero
-					if (fabsf(den_x) < 1e-6f || fabsf(den_y) < 1e-6f || fabsf(den_z) < 1e-6f) {
-						printk("Error: Invalid input degrees leading to division by zero. Calibration not applied.\n");
-					} else {
-						// Calculate the scale factors
-						scale_x = 1.0f / den_x;
-						scale_y = 1.0f / den_y;
-						scale_z = 1.0f / den_z;
-
-						// Assign calculated scales to the retained structure 
-						retained->gyroSensScale[0] = scale_x;
-						retained->gyroSensScale[1] = scale_y;
-						retained->gyroSensScale[2] = scale_z;
-
-						// Save the updated retained data
-						retained_update();
-
-						printk("Gyro sensitivity scale set to: %.3f, %.3f, %.3f\n", (double)deg_x, (double)deg_y, (double)deg_z);
-					}
 				}
 
-					
+				if (token_count == 3) { 
+					if (retained) {
+						float deg_x = values[0];
+						float deg_y = values[1];
+						float deg_z = values[2];
+
+						float den_x = 1.0f - (deg_x / (360.0f * CONFIG_SENSOR_SENS_REV));
+						float den_y = 1.0f - (deg_y / (360.0f * CONFIG_SENSOR_SENS_REV));
+						float den_z = 1.0f - (deg_z / (360.0f * CONFIG_SENSOR_SENS_REV));
+
+						// Prevent division by zero or near-zero
+						if (fabsf(den_x) < 1e-6f || fabsf(den_y) < 1e-6f || fabsf(den_z) < 1e-6f) {
+							printk("Error: Invalid input degrees leading to division by zero. Calibration not applied.\n");
+						} else {
+							retained->gyroSensScale[0] = 1.0f / den_x;
+							retained->gyroSensScale[1] = 1.0f / den_y;
+							retained->gyroSensScale[2] = 1.0f / den_z;
+							retained_update();
+							sys_write(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, retained->gyroSensScale, sizeof(retained->gyroSensScale));
+							printk("Gyro sensitivity difference set to: %.3f, %.3f, %.3f\n", (double)deg_x, (double)deg_y, (double)deg_z);
+						}
+					} else {
+						printk("Error: Retained data not available.\n");
+					}
 				} else {
-					printk("Error: Invalid format. Use: sens <x>,<y>,<z>\n");
+					printk("Error: Invalid format. Use: 'sens <x>,<y>,<z>' or 'sens reset'.\n");
 					printk("Example: sens 10.5,-2.1,15.0\n");
-				}  
-				} else {
-					printk("Error: Invalid format. Use: sens <x>,<y>,<z>\n");
-					printk("Example: sens 10.5,-2.1,15.0\n");
+				}
 			}
-			}
+		}
 #endif			
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 		else if (memcmp(line, command_6_side, sizeof(command_6_side)) == 0)

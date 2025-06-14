@@ -12,6 +12,7 @@
 #define MAIN_GYRO_BIAS_ID 4
 #define MAIN_MAG_BIAS_ID 5
 #define MAIN_ACC_6_BIAS_ID 7
+#define MAIN_GYRO_SENS_ID 9
 
 void configure_sense_pins(void);
 
