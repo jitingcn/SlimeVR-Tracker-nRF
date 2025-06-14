@@ -163,5 +163,5 @@ const sensor_mag_t sensor_mag_ist8308 = {
 	*mag_none_temp_read,
 
 	*ist8308_mag_process,
-	IST8306_DATAXL
+	6, 6
 };

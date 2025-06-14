@@ -86,22 +86,10 @@ uint8_t imu_none_setup_WOM(void)
 	return 0;
 }
 
-int imu_none_ext_setup(uint8_t ext_addr, uint8_t ext_reg)
+int imu_none_ext_setup(void)
 {
 	LOG_DBG("imu_none_ext_setup, sensor has no IMU or IMU has no ext support");
 	return -1;
-}
-
-int imu_none_fifo_process_ext(uint16_t index, uint8_t *data, float a[3], float g[3], uint8_t *raw_m)
-{
-	LOG_DBG("imu_none_fifo_process_ext, sensor has no IMU or IMU has no ext FIFO");
-	return -1;
-}
-
-void imu_none_ext_read(uint8_t *raw_m)
-{
-	LOG_DBG("imu_none_ext_read, sensor has no IMU or IMU has no ext data register");
-	return;
 }
 
 int imu_none_ext_passthrough(bool passthrough)
@@ -126,8 +114,6 @@ const sensor_imu_t sensor_imu_none = {
 	*imu_none_setup_WOM,
 	
 	*imu_none_ext_setup,
-	*imu_none_fifo_process_ext,
-	*imu_none_ext_read,
 	*imu_none_ext_passthrough
 };
 
@@ -184,5 +170,5 @@ const sensor_mag_t sensor_mag_none = {
 	*mag_none_temp_read,
 
 	*mag_none_mag_process,
-	0xff
+	UINT8_MAX, UINT8_MAX
 };

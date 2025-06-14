@@ -150,8 +150,13 @@ float icm45_temp_read(void);
 
 uint8_t icm45_setup_WOM(void);
 
+int icm45_ext_setup(void);
 int icm45_ext_passthrough(bool passthrough);
 
+int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes);
+int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read);
+
 extern const sensor_imu_t sensor_imu_icm45686;
+extern const sensor_ext_ssi_t sensor_ext_icm45686;
 
 #endif

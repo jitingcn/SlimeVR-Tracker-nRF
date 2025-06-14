@@ -7,15 +7,21 @@
 
 #if DEBUG || DEBUG_RATE
 LOG_MODULE_REGISTER(sensor_interface, LOG_LEVEL_DBG);
+#else
+LOG_MODULE_REGISTER(sensor_interface, LOG_LEVEL_INF);
 #endif
 
-// TODO: move all sensor devices here?
+// TODO: move all sensor devices here? currently they are scanned by sensor loop
 
 struct spi_dt_spec *sensor_interface_dev_spi[SENSOR_INTERFACE_DEV_COUNT];
 struct i2c_dt_spec *sensor_interface_dev_i2c[SENSOR_INTERFACE_DEV_COUNT];
 enum sensor_interface_spec sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_COUNT];
 
 uint32_t sensor_interface_dev_spi_dummy_reads[SENSOR_INTERFACE_DEV_COUNT] = {0};
+
+uint8_t ext_addr = 0x00;
+uint8_t min_ext_burst = 0;
+static const sensor_ext_ssi_t *ext_ssi = NULL;
 
 // TODO: only one active spi transaction at a time
 // TODO: spi burst read multiple buffers
@@ -46,15 +52,46 @@ void sensor_interface_register_sensor_mag_spi(struct spi_dt_spec *dev)
 	sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] = SENSOR_INTERFACE_SPEC_SPI;
 }
 
-void sensor_interface_register_sensor_mag_i2c(struct i2c_dt_spec *dev)
+void sensor_interface_register_sensor_mag_i2c(struct i2c_dt_spec *dev) // also used for passthrough
 {
 	sensor_interface_dev_i2c[SENSOR_INTERFACE_DEV_MAG] = dev;
 	sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] = SENSOR_INTERFACE_SPEC_I2C;
 }
 
-void sensor_interface_register_sensor_mag_ext(struct i2c_dt_spec *dev) // only using mag i2c dev if needed
+int sensor_interface_register_sensor_mag_ext(uint8_t addr, uint8_t min_burst, uint8_t burst)
 {
-	// TODO: redirect to imu, need driver implementation
+	switch (sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU])
+	{
+	case SENSOR_INTERFACE_SPEC_SPI:
+		if (ext_ssi != NULL)
+		{
+			if (burst < ext_ssi->ext_burst)
+			{
+				if (min_burst < ext_ssi->ext_burst)
+				{
+					LOG_ERR("Unsupported burst length");
+					return -1;
+				}
+				LOG_WRN("Using minimum burst length");
+			}
+			min_ext_burst = min_burst;
+			ext_addr = addr;
+			sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] = SENSOR_INTERFACE_SPEC_EXT;
+			return 0;
+		}
+		else
+		{
+			LOG_ERR("IMU must configure external interface before registering magnetometer");
+			return -1;
+		}
+		break;
+	case SENSOR_INTERFACE_SPEC_I2C:
+		LOG_ERR("External interface not used over I2C");
+		return -1;
+	default:
+		LOG_ERR("IMU must be registered before registering magnetometer");
+	}
+	return -1;
 }
 
 // must be called to set correct frequency
@@ -65,6 +102,16 @@ int sensor_interface_spi_configure(enum sensor_interface_dev dev, uint32_t frequ
 	sensor_interface_dev_spi[dev]->config.frequency = frequency;
 	sensor_interface_dev_spi_dummy_reads[dev] = dummy_reads; // shoutout to BMI270
 	return 0;
+}
+
+void sensor_interface_ext_configure(const sensor_ext_ssi_t *ext)
+{
+	ext_ssi = ext;
+}
+
+const sensor_ext_ssi_t *sensor_interface_ext_get(void)
+{
+	return ext_ssi;
 }
 
 // TODO: spi config by device
@@ -132,6 +179,9 @@ int ssi_read(enum sensor_interface_dev dev, uint8_t *buf, uint32_t num_bytes)
 #endif
 	case SENSOR_INTERFACE_SPEC_I2C:
 		return i2c_read_dt(sensor_interface_dev_i2c[dev], buf, num_bytes);
+	case SENSOR_INTERFACE_SPEC_EXT:
+		if (ext_ssi != NULL)
+			return ext_ssi->ext_write(ext_addr, buf, num_bytes);
 	default:
 		return -1;
 	}
@@ -172,6 +222,13 @@ int ssi_write_read(enum sensor_interface_dev dev, const void *write_buf, size_t 
 #endif
 	case SENSOR_INTERFACE_SPEC_I2C:
 		return i2c_write_read_dt(sensor_interface_dev_i2c[dev], write_buf, num_write, read_buf, num_read);
+	case SENSOR_INTERFACE_SPEC_EXT:
+		if (ext_ssi != NULL)
+		{
+			if (num_read > ext_ssi->ext_burst)
+				num_read = min_ext_burst;
+			return ext_ssi->ext_write_read(ext_addr, write_buf, num_write, read_buf, num_read);
+		}
 	default:
 		return -1;
 	}

@@ -21,10 +21,6 @@ uint8_t last_gyro_mode = 0xff;
 uint8_t last_accel_odr = 0xff;
 uint8_t last_gyro_odr = 0xff;
 
-static uint8_t ext_addr = 0xff;
-static uint8_t ext_reg = 0xff;
-static bool use_ext_fifo = false;
-
 static float freq_scale = 1; // ODR is scaled by INTERNAL_FREQ_FINE
 
 LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
@@ -47,8 +43,6 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, 0x06); // enable Continuous mode
 	if (err)
 		LOG_ERR("Communication error");
-//	if (use_ext_fifo)
-//		err |= lsm_ext_init(ext_addr, ext_reg);
 	return (err < 0 ? err : 0);
 }
 
@@ -431,41 +425,10 @@ uint8_t lsm_setup_WOM(void)
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
-int lsm_ext_setup(uint8_t addr, uint8_t reg)
+int lsm_ext_setup(void)
 {
-	ext_addr = addr;
-	ext_reg = reg;
-	if (addr != 0xff && addr != 0xff)
-	{
-		use_ext_fifo = true;
-		return 0;
-	}
-	else
-	{
-		use_ext_fifo = false;
-		return 1;
-	}
-}
-
-int lsm_fifo_process_ext(uint16_t index, uint8_t *data, float a[3], float g[3], uint8_t *raw_m)
-{
-	if (!lsm_fifo_process(index, data, a, g)) // try processing a+g first
-		return 0;
-	index *= PACKET_SIZE;
-	if ((data[index] >> 3) == 0x0E)
-	{
-		memcpy(raw_m, &data[index + 1], 6);
-		return 0;
-	}
-	// TODO: need to skip invalid data
-	return 1;
-}
-
-void lsm_ext_read(uint8_t *raw_m)
-{
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, raw_m, 6);
-	if (err)
-		LOG_ERR("Communication error");
+	sensor_interface_ext_configure(&sensor_ext_lsm6dsv);
+	return 0;
 }
 
 int lsm_ext_passthrough(bool passthrough)
@@ -488,16 +451,67 @@ int lsm_ext_passthrough(bool passthrough)
 	return 0;
 }
 
-int lsm_ext_init(uint8_t ext_addr, uint8_t ext_reg)
+int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 {
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x80); // enable sensor hub
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x24); // trigger from INT2, MASTER_ON
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, (ext_addr << 1) | 0x01); // set external address, read mode
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_SUBADD, ext_reg); // set external register
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_CONFIG, 0x08 | 0x06); // enable external sensor fifo and set 6 read operations
+	if (num_bytes != 2)
+	{
+		LOG_ERR("Unsupported write");
+		return -1;
+	}
+	// Configure transaction and begin one-shot (AN5922, page 80, One-shot write routine)
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, (addr << 1) | 0x00); // write
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_SUBADD, buf[0]);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_CONFIG, 0xC0 | 0x00); // SHUB_ODR = 440Hz, reading no bytes
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_DATAWRITE_SLV0, buf[1]);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x44); // WRITE_ONCE, enable I2C master
+	// Wait for transaction
+	uint8_t status = 0;
+	int64_t timeout = k_uptime_get() + 10;
+	while ((status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master
+	k_usleep(300);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
-	if (err)
-		LOG_ERR("Communication error");
+	if (~status & 0x80)
+	{
+		LOG_ERR("Write timeout");
+		return -1;
+	}
+	return err;
+}
+
+int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
+{
+	if (num_write != 1 || num_read < 1 || num_read > 8)
+	{
+		LOG_ERR("Unsupported write_read");
+		return -1;
+	}
+	// Configure transaction and begin one-shot (AN5922, page 79, One-shot read routine)
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, (addr << 1) | 0x01); // read
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_SUBADD, ((const uint8_t *)write_buf)[0]);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_CONFIG, 0xC0 | num_read); // SHUB_ODR = 440Hz, reading num_read bytes
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x44); // WRITE_ONCE mandatory for read, enable I2C master
+	// Wait for transaction
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	uint8_t tmp;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear XLDA
+	uint8_t status = 0;
+	int64_t timeout = k_uptime_get() + 10;	
+	while ((status & 0x01) && k_uptime_get() < timeout) // XLDA
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
+	status = 0;
+	timeout = k_uptime_get() + 10;
+	while ((status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER_MAINPAGE, &status);
+	// Read data
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master
+	k_usleep(300);
+	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, read_buf, num_read);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	return err;
 }
 
@@ -516,8 +530,12 @@ const sensor_imu_t sensor_imu_lsm6dsv = {
 
 	*lsm_setup_WOM,
 	
-	*imu_none_ext_setup,
-	*imu_none_fifo_process_ext,
-	*imu_none_ext_read,
+	*lsm_ext_setup,
 	*lsm_ext_passthrough
+};
+
+const sensor_ext_ssi_t sensor_ext_lsm6dsv = {
+	*lsm_ext_write,
+	*lsm_ext_write_read,
+	8
 };

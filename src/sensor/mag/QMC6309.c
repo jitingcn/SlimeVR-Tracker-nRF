@@ -211,5 +211,5 @@ const sensor_mag_t sensor_mag_qmc6309 = {
 	*mag_none_temp_read,
 
 	*qmc_mag_process,
-	QMC6309_OUTX_L_REG
+	6, 6
 };

@@ -158,5 +158,5 @@ const sensor_mag_t sensor_mag_ak09940 = {
 	*ak_temp_read,
 
 	*ak_mag_process,
-	0xff // External interface only reads 6 bytes, this is insufficient
+	9, 9
 };

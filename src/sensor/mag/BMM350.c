@@ -234,5 +234,5 @@ const sensor_mag_t sensor_mag_bmm350 = {
 	*bmm3_temp_read,
 
 	*bmm3_mag_process,
-	0xff // External interface only reads 6 bytes, this is insufficient
+	9, 9
 };

@@ -243,5 +243,5 @@ const sensor_mag_t sensor_mag_mmc5983ma = {
 	*mmc_temp_read,
 
 	*mmc_mag_process,
-	MMC5983MA_XOUT_0 // External interface only reads 6 bytes, the data will be lower precision
+	6, 7 // if only reading 6 bytes, the data will be lower precision
 };

@@ -4,10 +4,4 @@
 /dts-v1/;
 #include "supermini_uf2.dts"
 
-&spi3 {
-    status = "disabled";
-};
-
-&imu_spi {
-    status = "disabled";
-};
+/delete-node/ &spi3;

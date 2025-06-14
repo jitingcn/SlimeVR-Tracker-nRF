@@ -78,6 +78,7 @@
 };
 
 &spi3 {
+	cs-gpios = <&arduino_header 16 GPIO_ACTIVE_LOW>; /* D10 */
 	imu_spi: imu_spi@0 {
 		compatible = "vnd,spi-device";
 		spi-max-frequency = <DT_FREQ_M(32)>;

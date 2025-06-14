@@ -68,8 +68,6 @@ uint16_t lsm6dso_fifo_read(uint8_t *data, uint16_t len);
 
 uint8_t lsm6dso_setup_WOM(void);
 
-int lsm6dso_ext_setup(uint8_t ext_addr, uint8_t ext_reg);
-
 extern const sensor_imu_t sensor_imu_lsm6dso;
 
 #endif

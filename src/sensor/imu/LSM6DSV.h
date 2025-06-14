@@ -17,11 +17,14 @@
 #define LSM6DSV_CTRL9                      0x18
 
 #define LSM6DSV_FIFO_STATUS1               0x1B
+#define LSM6DSV_STATUS_REG                 0x1E
 
 #define LSM6DSV_OUT_TEMP_L                 0x20
 #define LSM6DSV_OUTX_L_G                   0x22
 #define LSM6DSV_OUTX_L_A                   0x28
+#define LSM6DSV_OUTX_H_A                   0x29
 
+#define LSM6DSV_STATUS_MASTER_MAINPAGE     0x48
 #define LSM6DSV_INTERNAL_FREQ_FINE         0x4F
 
 #define LSM6DSV_FUNCTIONS_ENABLE           0x50
@@ -38,6 +41,8 @@
 #define LSM6DSV_SLV0_ADD                   0x15
 #define LSM6DSV_SLV0_SUBADD                0x16
 #define LSM6DSV_SLV0_CONFIG                0x17
+#define LSM6DSV_DATAWRITE_SLV0             0x21
+#define LSM6DSV_STATUS_MASTER              0x22
 
 // Same for XL and G
 #define ODR_OFF     0x00
@@ -102,13 +107,13 @@ float lsm_temp_read(void);
 
 uint8_t lsm_setup_WOM(void);
 
-int lsm_ext_setup(uint8_t ext_addr, uint8_t ext_reg);
-int lsm_fifo_process_ext(uint16_t index, uint8_t *data, float a[3], float g[3], uint8_t *raw_m);
-void lsm_ext_read(uint8_t *raw_m);
+int lsm_ext_setup(void);
 int lsm_ext_passthrough(bool passthrough);
 
-int lsm_ext_init(uint8_t ext_addr, uint8_t ext_reg);
+int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes);
+int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read);
 
 extern const sensor_imu_t sensor_imu_lsm6dsv;
+extern const sensor_ext_ssi_t sensor_ext_lsm6dsv;
 
 #endif

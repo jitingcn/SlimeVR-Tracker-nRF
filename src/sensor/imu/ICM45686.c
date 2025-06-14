@@ -427,7 +427,5 @@ const sensor_imu_t sensor_imu_icm45686 = {
 	*icm45_setup_WOM,
 	
 	*imu_none_ext_setup,
-	*imu_none_fifo_process_ext,
-	*imu_none_ext_read,
 	*icm45_ext_passthrough
 };

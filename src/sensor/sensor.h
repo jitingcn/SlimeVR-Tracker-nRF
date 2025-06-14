@@ -86,9 +86,7 @@ typedef struct sensor_imu {
 
 	uint8_t (*setup_WOM)(void);
 
-	int (*ext_setup)(uint8_t, uint8_t); // setup external magnetometer
-	int (*fifo_process_ext)(uint16_t, uint8_t*, float[3], float[3], uint8_t*); // g, deg/s, raw magnetometer data
-	void (*ext_read)(uint8_t*); // raw data, to be processed in magnetometer driver
+	int (*ext_setup)(void); // register write/writeread with interface, return 0 if success, -1 if error or not available
 	int (*ext_passthrough)(bool); // enable/disable passthrough mode, return 0 if success, -1 if error or not available
 } sensor_imu_t;
 
@@ -103,7 +101,8 @@ typedef struct sensor_mag {
 	float (*temp_read)(float[3]); // deg C
 
 	void (*mag_process)(uint8_t*, float[3]); // use if magnetometer is present as an auxiliary sensor, from data read by IMU
-	uint8_t ext_reg; // register for auxiliary interface to read magnetometer data
+	uint8_t ext_min_burst; // minimum supported burst length for external interface
+	uint8_t ext_burst; // default supported burst length
 } sensor_mag_t;
 
 #endif

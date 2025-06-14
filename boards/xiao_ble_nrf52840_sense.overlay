@@ -10,18 +10,6 @@
 	};
 };
 
-&i2c1_default {
-	group1 {
-		bias-disable;
-	};
-};
-
-&i2c1_sleep {
-	group1 {
-		bias-disable;
-	};
-};
-
 &pwm0_default {
 	group1 {
 		psels = <NRF_PSEL(PWM_OUT0, 0, 26)>,
@@ -87,6 +75,8 @@
 
 };
 
+/delete-node/ &uart0;
+
 &i2c0 {
 	zephyr,concat-buf-size = <1023>;
 	zephyr,flash-buf-max-size = <1023>;
@@ -98,6 +88,10 @@
 	};
 
 };
+
+/delete-node/ &i2c1;
+/delete-node/ &spi2;
+/delete-node/ &qspi;
 
 &cryptocell {
 	status = "disabled";

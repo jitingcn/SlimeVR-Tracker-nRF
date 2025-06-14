@@ -12,10 +12,6 @@
 static uint8_t accel_fs = DSM_FS_XL_16G;
 static uint8_t gyro_fs = DSM_FS_G_2000DPS;
 
-static uint8_t ext_addr = 0xff;
-static uint8_t ext_reg = 0xff;
-static bool use_ext_fifo = false;
-
 static uint8_t fifo_pattern_length;
 static bool fifo_pattern_gyro_dominant; // if more samples are gyro than accel in a pattern
 
@@ -33,8 +29,6 @@ int lsm6dsm_init(float clock_rate, float accel_time, float gyro_time, float *acc
 	err |= lsm6dsm_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
 	if (err)
 		LOG_ERR("Communication error");
-//	if (use_ext_fifo)
-//		err |= lsm_ext_init(ext_addr, ext_reg);
 	return (err < 0 ? err : 0);
 }
 
@@ -378,22 +372,6 @@ uint8_t lsm6dsm_setup_WOM(void) // TODO:
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
-int lsm6dsm_ext_setup(uint8_t addr, uint8_t reg)
-{
-	ext_addr = addr;
-	ext_reg = reg;
-	if (addr != 0xff && addr != 0xff)
-	{
-		use_ext_fifo = true;
-		return 0;
-	}
-	else
-	{
-		use_ext_fifo = false;
-		return 1;
-	}
-}
-
 const sensor_imu_t sensor_imu_lsm6dsm = {
 	*lsm6dsm_init,
 	*lsm_shutdown,
@@ -410,7 +388,5 @@ const sensor_imu_t sensor_imu_lsm6dsm = {
 	*lsm6dsm_setup_WOM,
 	
 	*imu_none_ext_setup,
-	*imu_none_fifo_process_ext,
-	*imu_none_ext_read,
 	*lsm_ext_passthrough
 };

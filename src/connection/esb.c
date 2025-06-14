@@ -236,7 +236,7 @@ int esb_initialize(bool tx)
 		//config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true; // TODO: while pairing, should be set to false
-		config.use_fast_ramp_up = true;
+//		config.use_fast_ramp_up = true;
 	}
 	else
 	{
@@ -251,7 +251,7 @@ int esb_initialize(bool tx)
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		config.use_fast_ramp_up = true;
+//		config.use_fast_ramp_up = true;
 	}
 
 	err = esb_init(&config);

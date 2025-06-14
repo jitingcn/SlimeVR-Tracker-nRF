@@ -38,9 +38,7 @@ float imu_none_temp_read(void);
 
 uint8_t imu_none_setup_WOM(void);
 
-int imu_none_ext_setup(uint8_t ext_addr, uint8_t ext_reg);
-int imu_none_fifo_process_ext(uint16_t index, uint8_t *data, float a[3], float g[3], uint8_t *raw_m);
-void imu_none_ext_read(uint8_t *raw_m);
+int imu_none_ext_setup(void);
 int imu_none_ext_passthrough(bool passthrough);
 
 extern const sensor_imu_t sensor_imu_none;

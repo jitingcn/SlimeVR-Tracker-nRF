@@ -1,30 +1,3 @@
-&pinctrl {
-	pwm1_default: pwm1_default {
-		group1 {
-			psels = <NRF_PIN_DISCONNECTED>;
-		};
-	};
-
-	pwm1_sleep: pwm1_sleep {
-		group1 {
-			psels = <NRF_PIN_DISCONNECTED>;
-			low-power-enable;
-		};
-	};
-};
-
-&i2c0_default {
-	group1 {
-		bias-disable;
-	};
-};
-
-&i2c0_sleep {
-	group1 {
-		bias-disable;
-	};
-};
-
 &i2c1_default {
 	group1 {
 		bias-disable;
@@ -82,12 +55,6 @@
 		pwm-led2 = &pwm_led2;
 	};
 
-	pwmclock: pwmclock {
-		compatible = "pwm-clock";
-		#clock-cells = <1>;
-		pwms = <&pwm1 0 PWM_HZ(32768) PWM_POLARITY_NORMAL>;
-	};
-
 	battery-divider {
         compatible = "voltage-divider";
         status = "okay";
@@ -104,6 +71,8 @@
 	};
 
 };
+
+/delete-node/ &uart0;
 
 &i2c1 {
 	compatible = "nordic,nrf-twim";
@@ -125,11 +94,24 @@
 
 };
 
-&pwm1 {
+/delete-node/ &spi2;
+/delete-node/ &qspi;
+
+&spi3 {
+	compatible = "nordic,nrf-spim";
 	status = "okay";
-	pinctrl-0 = <&pwm1_default>;
-	pinctrl-1 = <&pwm1_sleep>;
+	max-frequency = <DT_FREQ_M(24)>;
+	pinctrl-0 = <&spi2_default>;
+	pinctrl-1 = <&spi2_sleep>;
 	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio1 12 GPIO_ACTIVE_LOW>;
+
+	imu_spi: imu_spi@0 {
+		compatible = "vnd,spi-device";
+		spi-max-frequency = <DT_FREQ_M(24)>;
+		label = "imu-spi";
+		reg = <0>;
+	};
 };
 
 &cryptocell {

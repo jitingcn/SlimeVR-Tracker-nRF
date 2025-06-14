@@ -153,13 +153,13 @@ static void print_info(void)
 	printk("SOC: " CONFIG_SOC "\n");
 	printk("Target: " CONFIG_BOARD_TARGET "\n");
 
-	printk("\nIMU: %s\n", sensor_get_sensor_imu_name());
+	printk("\nIMU: %s\n", (retained->imu_addr & 0x7F) != 0x7F ? sensor_get_sensor_imu_name() : "Not searching");
 	if (retained->imu_reg != 0xFF)
 		printk("Interface: %s\n", (retained->imu_reg & 0x80) ? "SPI" : "I2C");
 	printk("Address: 0x%02X%02X\n", retained->imu_addr, retained->imu_reg);
 
 #if SENSOR_MAG_EXISTS
-	printk("\nMagnetometer: %s\n", sensor_get_sensor_mag_name());
+	printk("\nMagnetometer: %s\n", (retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching");
 	if (retained->mag_reg != 0xFF)
 		printk("Interface: %s%s\n", (retained->mag_reg & 0x80) ? "SPI" : "I2C", (retained->mag_addr & 0x80) ? ", external" : "");
 	printk("Address: 0x%02X%02X\n", retained->mag_addr, retained->mag_reg);

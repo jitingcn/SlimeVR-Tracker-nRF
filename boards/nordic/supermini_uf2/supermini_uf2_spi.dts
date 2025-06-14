@@ -4,14 +4,4 @@
 /dts-v1/;
 #include "supermini_uf2.dts"
 
-&i2c0 {
-	status = "disabled";
-};
-
-&imu {
-	status = "disabled";
-};
-
-&mag {
-	status = "disabled";
-};
+/delete-node/ &i2c0;
