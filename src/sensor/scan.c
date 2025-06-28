@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(sensor_scan, LOG_LEVEL_INF);
 
 // Any address out of range (00, 7f, etc.) will search all addresses, otherwise it will check provided address and register first
 
-int sensor_scan(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_addr_count, const uint8_t dev_addr[], const uint8_t dev_reg[], const uint8_t dev_id[], const int dev_ids[])
+int sensor_scan_i2c(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_addr_count, const uint8_t dev_addr[], const uint8_t dev_reg[], const uint8_t dev_id[], const int dev_ids[])
 {
 	if (i2c_dev->addr >= 0x7F) // ignoring device
 	{
@@ -129,7 +129,7 @@ int sensor_scan(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_addr_
 		LOG_WRN("No device found at address: 0x%02X", i2c_dev->addr);
 		i2c_dev->addr = 0;
 		*i2c_dev_reg = 0xFF;
-		return sensor_scan(i2c_dev, i2c_dev_reg, dev_addr_count, dev_addr, dev_reg, dev_id, dev_ids);
+		return sensor_scan_i2c(i2c_dev, i2c_dev_reg, dev_addr_count, dev_addr, dev_reg, dev_id, dev_ids);
 	}
 
 	i2c_dev->addr = 0xFF; // no device found, mark as ignored

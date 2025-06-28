@@ -29,7 +29,7 @@ const char* sensor_get_sensor_imu_name(void);
 const char* sensor_get_sensor_mag_name(void);
 const char* sensor_get_sensor_fusion_name(void);
 
-int sensor_init(void);
+int sensor_request_scan(bool force);
 
 void sensor_scan_read(void);
 void sensor_scan_write(void);
@@ -43,8 +43,6 @@ uint8_t sensor_setup_WOM(void);
 
 void sensor_fusion_invalidate(void);
 
-int main_imu_init(void);
-void main_imu_thread(void);
 void wait_for_threads(void);
 void main_imu_suspend(void);
 void main_imu_resume(void);

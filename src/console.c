@@ -263,6 +263,7 @@ static void console_thread(void)
 	printk("info                         Get device information\n");
 	printk("uptime                       Get device uptime\n");
 	printk("reboot                       Soft reset the device\n");
+	printk("scan                         Restart sensor scan\n");
 	printk("calibrate                    Calibrate sensor ZRO\n");
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION	
 	printk("sens <x>,<y>,<z>             Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
@@ -273,6 +274,7 @@ static void console_thread(void)
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
 	uint8_t command_reboot[] = "reboot";
+	uint8_t command_scan[] = "scan";
 	uint8_t command_calibrate[] = "calibrate";
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
@@ -349,6 +351,10 @@ static void console_thread(void)
 		else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0)
 		{
 			sys_request_system_reboot();
+		}
+		else if (memcmp(line, command_scan, sizeof(command_scan)) == 0)
+		{
+			sensor_request_scan(true);
 		}
 		else if (memcmp(line, command_calibrate, sizeof(command_calibrate)) == 0)
 		{

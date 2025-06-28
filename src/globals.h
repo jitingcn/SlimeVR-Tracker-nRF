@@ -49,6 +49,10 @@
 #define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.7071f, 0.0f, 0.0f
 #endif
 
+#if defined(CONFIG_BOARD_SLIMENRF_R1) || defined(CONFIG_BOARD_SLIMENRF_R2) || defined(CONFIG_BOARD_SLIMENRF_R3)
+#define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f
+#endif
+
 #ifndef SENSOR_GYROSCOPE_AXES_ALIGNMENT
 #define SENSOR_GYROSCOPE_AXES_ALIGNMENT gx, -gy, -gz // gyro axes alignment to sensor body
 #endif
@@ -59,7 +63,7 @@
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz // mag axes alignment to sensor body
 #endif
 #ifndef SENSOR_QUATERNION_CORRECTION
-#define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f // correction quat for sensor to mounting orientation
+#define SENSOR_QUATERNION_CORRECTION 1.0f, 0.0f, 0.0f, 0.0f // correction quat for sensor to mounting orientation
 #endif
 
 #endif

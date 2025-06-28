@@ -85,7 +85,8 @@ void event_handler(struct esb_evt const *event)
 		{
 			if (!paired_addr[0]) // zero, not paired
 			{
-				if (rx_payload.length == 8)
+				LOG_DBG("tx: %16llX rx: %16llX", *(uint64_t *)tx_payload_pair.data, *(uint64_t *)rx_payload.data);
+				if (rx_payload.length == 8 && tx_payload_pair.data[1] == 1) // ack to second packet in pairing burst
 					memcpy(paired_addr, rx_payload.data, sizeof(paired_addr));
 			}
 			else
@@ -371,9 +372,18 @@ void esb_pair(void)
 			}
 			esb_flush_rx();
 			esb_flush_tx();
+			tx_payload_pair.data[1] = 0; // send pairing request
 			esb_write_payload(&tx_payload_pair);
 			esb_start_tx();
-			k_msleep(1000);
+			k_msleep(2);
+			tx_payload_pair.data[1] = 1; // receive ack data
+			esb_write_payload(&tx_payload_pair);
+			esb_start_tx();
+			k_msleep(2);
+			tx_payload_pair.data[1] = 2; // "acknowledge" pairing from receiver
+			esb_write_payload(&tx_payload_pair);
+			esb_start_tx();
+			k_msleep(996);
 		}
 		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_CONNECTION);
 		LOG_INF("Paired");

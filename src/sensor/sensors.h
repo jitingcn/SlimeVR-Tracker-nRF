@@ -239,12 +239,12 @@ const int i2c_dev_mag[] = {
 
 int sensor_scan_imu(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg)
 {
-	return sensor_scan(i2c_dev, i2c_dev_reg, i2c_dev_imu_addr_count, i2c_dev_imu_addr, i2c_dev_imu_reg, i2c_dev_imu_id, i2c_dev_imu);
+	return sensor_scan_i2c(i2c_dev, i2c_dev_reg, i2c_dev_imu_addr_count, i2c_dev_imu_addr, i2c_dev_imu_reg, i2c_dev_imu_id, i2c_dev_imu);
 }
 
 int sensor_scan_mag(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg)
 {
-	return sensor_scan(i2c_dev, i2c_dev_reg, i2c_dev_mag_addr_count, i2c_dev_mag_addr, i2c_dev_mag_reg, i2c_dev_mag_id, i2c_dev_mag);
+	return sensor_scan_i2c(i2c_dev, i2c_dev_reg, i2c_dev_mag_addr_count, i2c_dev_mag_addr, i2c_dev_mag_reg, i2c_dev_mag_id, i2c_dev_mag);
 }
 
 int sensor_scan_imu_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
@@ -257,7 +257,7 @@ int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 	return sensor_scan_spi(bus, spi_dev_reg, i2c_dev_mag_addr_count, i2c_dev_mag_reg, i2c_dev_mag_id, i2c_dev_mag);
 }
 
-int sensor_scan_mag_ext(const sensor_ext_ssi_t *ext_ssi, uint8_t *ext_dev_addr, uint8_t *ext_dev_reg)
+int sensor_scan_mag_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uint8_t *ext_dev_reg)
 {
 	return sensor_scan_ext(ext_ssi, ext_dev_addr, ext_dev_reg, i2c_dev_mag_addr_count, i2c_dev_mag_addr, i2c_dev_mag_reg, i2c_dev_mag_id, i2c_dev_mag);
 }

@@ -130,7 +130,13 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_DBG);
 LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 #endif
 
-K_THREAD_DEFINE(main_imu_thread_id, 1024, main_imu_thread, NULL, NULL, NULL, 7, 0, 0);
+static int sensor_scan(void);
+static int sensor_init(void);
+static void sensor_loop(void);
+static struct k_thread sensor_thread_id;
+static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
+
+K_THREAD_DEFINE(sensor_init_thread_id, 128, sensor_request_scan, true, NULL, NULL, 7, 0, 0);
 
 const char *sensor_get_sensor_imu_name(void)
 {
@@ -153,7 +159,27 @@ const char *sensor_get_sensor_fusion_name(void)
 	return fusion_names[fusion_id];
 }
 
-int sensor_init(void)
+void sensor_scan_thread(void)
+{
+	int err;
+	sys_interface_resume(); // make sure interfaces are enabled
+	err = sensor_scan(); // IMUs discovery
+	if (err)
+	{
+		k_msleep(5);
+		LOG_INF("Retrying sensor detection");
+
+		// Reset address before retrying sensor detection
+		sensor_imu_dev.addr = 0x00;
+
+		err = sensor_scan(); // on POR, the sensor may not be ready yet
+	}
+	sys_interface_suspend();
+//	if (err)
+//		return err;
+}
+
+int sensor_scan(void)
 {
 	while (sensor_sensor_scanning)
 		k_usleep(1); // already scanning
@@ -327,6 +353,35 @@ int sensor_init(void)
 	return 0;
 }
 
+static bool main_running = false;
+
+int sensor_request_scan(bool force)
+{
+	if (sensor_sensor_init && !force)
+		return 0; // already initialized
+	main_imu_suspend();
+	k_thread_abort(&sensor_thread_id); // stop the sensor thread // TODO: may need to handle fusion state
+	LOG_INF("Aborted sensor thread");
+	main_suspended = false;
+	sensor_sensor_init = false;
+	if (force)
+	{
+		sensor_imu_dev.addr = 0x00;
+		sensor_mag_dev.addr = 0x00;
+		sensor_imu_dev_reg = 0xFF;
+		sensor_mag_dev_reg = 0xFF;
+		LOG_INF("Requested sensor scan");
+	}
+	k_thread_create(&sensor_thread_id, sensor_thread_id_stack, K_THREAD_STACK_SIZEOF(sensor_thread_id_stack), (k_thread_entry_t)sensor_scan_thread, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
+	k_thread_join(&sensor_thread_id, K_FOREVER); // wait for the thread to finish
+	if (sensor_sensor_init && force)
+	{		
+		k_thread_create(&sensor_thread_id, sensor_thread_id_stack, K_THREAD_STACK_SIZEOF(sensor_thread_id_stack), (k_thread_entry_t)sensor_loop, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
+		LOG_INF("Started sensor loop");
+	}
+	return !sensor_sensor_init;
+}
+
 void sensor_scan_read(void) // TODO: move some of this to sys?
 {
 	if (retained->imu_addr != 0)
@@ -394,26 +449,37 @@ void sensor_retained_write(void) // TODO: move to sys?
 
 void sensor_shutdown(void) // Communicate all imus to shut down
 {
-	sys_interface_resume();
-	int err = sensor_init(); // try initialization if possible // TODO: run in sensor thread, large stack usage
-	if (mag_available) // try to shutdown magnetometer first (in case of passthrough)
-		sensor_mag->shutdown();
-	if (!err)
-		sensor_imu->shutdown();
+	int err = sensor_request_scan(false); // try initialization if possible
+	if (mag_available || !err)
+	{
+		sys_interface_resume();
+		if (mag_available) // try to shutdown magnetometer first (in case of passthrough)
+			sensor_mag->shutdown();
+		if (!err)
+			sensor_imu->shutdown();
+		sys_interface_suspend();
+	}
 	else
+	{
 		LOG_ERR("Failed to shutdown sensors");
-	sys_interface_suspend();
+	}
 }
 
 uint8_t sensor_setup_WOM(void)
 {
-	sys_interface_resume();
-	int err = sensor_init(); // try initialization if possible // TODO: run in sensor thread, large stack usage
+	int err = sensor_request_scan(false); // try initialization if possible
 	if (!err)
-		return sensor_imu->setup_WOM();
-	sys_interface_suspend(); // TODO: not suspending after WOM setup
-	LOG_ERR("Failed to configure IMU wake up");
-	return 0;
+	{
+		sys_interface_resume();
+		err = sensor_imu->setup_WOM();
+		sys_interface_suspend();
+		return err;
+	}
+	else
+	{
+		LOG_ERR("Failed to configure IMU wake up");
+		return 0;
+	}
 }
 
 void sensor_fusion_invalidate(void)
@@ -440,23 +506,10 @@ static void set_update_time_ms(int time_ms)
 	sensor_update_time_ms = time_ms; // TODO: terrible naming
 }
 
-int main_imu_init(void)
+int sensor_init(void)
 {
 	int err;
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
-	err = sensor_init(); // IMUs discovery
-	if (err)
-	{
-		k_msleep(5);
-		LOG_INF("Retrying sensor detection");
-
-		// Reset address before retrying sensor detection
-		sensor_imu_dev.addr = 0x00;
-
-		err = sensor_init(); // on POR, the sensor may not be ready yet
-		if (err)
-			return err;
-	}
 	if (mag_available) // shutdown magnetometer first (in case of passthrough)
 		sensor_mag->shutdown(); // TODO: is this needed?
 	sensor_imu->shutdown(); // TODO: is this needed?
@@ -554,7 +607,6 @@ enum sensor_sensor_timeout {
 
 static enum sensor_sensor_timeout sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 
-static bool main_running = false;
 static bool main_ok = false;
 static bool send_info = false;
 
@@ -575,10 +627,13 @@ static uint64_t total_gyro_samples = 0;
 static uint64_t total_accel_samples = 0;
 #endif
 
-void main_imu_thread(void)
+void sensor_loop(void)
 {
+	if (!sensor_sensor_init)
+		return;
 	main_running = true;
-	int err = main_imu_init(); // Initialize IMUs and Fusion
+	sys_interface_resume(); // make sure interfaces are enabled
+	int err = sensor_init(); // Initialize IMUs and Fusion
 	// TODO: handle imu init error, maybe restart device?
 	// TODO: on failure to init, disable sensor interface
 	if (err)
@@ -998,7 +1053,7 @@ void main_imu_thread(void)
 			k_msleep(sensor_update_time_ms - time_delta);
 
 		if (main_suspended) // TODO:
-			k_thread_suspend(main_imu_thread_id);
+			k_thread_suspend(&sensor_thread_id);
 
 		main_running = true;
 	}
@@ -1019,7 +1074,7 @@ void main_imu_suspend(void) // TODO: add timeout
 		k_usleep(1); // try not to interrupt scanning
 	while (main_running) // TODO: change to detect if i2c is busy
 		k_usleep(1); // try not to interrupt anything actually
-	k_thread_suspend(main_imu_thread_id);
+	k_thread_suspend(&sensor_thread_id);
 	LOG_INF("Suspended sensor thread");
 }
 
@@ -1027,14 +1082,14 @@ void main_imu_resume(void)
 {
 	if (!main_suspended) // not suspended
 		return;
-	k_thread_resume(main_imu_thread_id);
+	k_thread_resume(&sensor_thread_id);
 	LOG_INF("Resumed sensor thread");
 }
 
 void main_imu_wakeup(void)
 {
 	if (!main_suspended) // don't wake up if pending suspension
-		k_wakeup(main_imu_thread_id);
+		k_wakeup(&sensor_thread_id);
 }
 
 void main_imu_restart(void)
