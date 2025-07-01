@@ -1,5 +1,6 @@
 #include "globals.h"
 #include "system/system.h"
+#include "system/battery_tracker.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration.h"
 #include "connection/esb.h"
@@ -205,6 +206,55 @@ static void print_info(void)
 		}
 #endif		
 	printk(paired ? "Receiver address: %012llX\n" : "Receiver address: None\n", (*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
+
+	int battery_mV = sys_get_valid_battery_mV();
+	int16_t calibrated_pptt = sys_get_calibrated_battery_pptt(sys_get_valid_battery_pptt());
+	uint64_t unplugged_time = sys_get_last_unplugged_time();
+	uint64_t remaining = sys_get_battery_remaining_time_estimate();
+	uint64_t runtime = sys_get_battery_runtime_estimate();
+	if (battery_mV > 0)
+	{
+		unplugged_time = k_ticks_to_us_floor64(k_uptime_ticks() - unplugged_time);
+		uint32_t hours = unplugged_time / 3600000000;
+		unplugged_time %= 3600000000;
+		uint8_t minutes = unplugged_time / 60000000;
+		if (hours > 0 || minutes > 0)
+			printk("\nBattery: %.0f%% (Read %uh %umin ago)\n", (double)calibrated_pptt / 100.0, hours, minutes);
+		else
+			printk("\nBattery: %.0f%%\n", (double)calibrated_pptt / 100.0);
+	}
+	else if (unplugged_time == 0)
+	{
+		printk("\nBattery: Waiting for valid reading\n");
+	}
+	else
+	{
+		printk("\nBattery: None\n");
+	}
+	if (remaining > 0)
+	{
+		remaining = k_ticks_to_us_floor64(remaining);
+		uint32_t hours = remaining / 3600000000;
+		remaining %= 3600000000;
+		uint8_t minutes = remaining / 60000000;
+		printk("Remaining runtime: %uh %umin\n", hours, minutes);
+	}
+	else
+	{
+		printk("Remaining runtime: Not available\n");
+	}
+	if (runtime > 0)
+	{
+		runtime = k_ticks_to_us_floor64(runtime);
+		uint32_t hours = runtime / 3600000000;
+		runtime %= 3600000000;
+		uint8_t minutes = runtime / 60000000;
+		printk("Fully charged runtime: %uh %umin\n", hours, minutes);
+	}
+	else
+	{
+		printk("Fully charged runtime: Not available\n");
+	}
 }
 
 static void print_uptime(const uint64_t ticks, const char *name)
@@ -221,6 +271,59 @@ static void print_uptime(const uint64_t ticks, const char *name)
 	uint16_t microseconds = uptime % 1000;
 
 	printk("%s: %02u:%02u:%02u.%03u,%03u\n", name, hours, minutes, seconds, milliseconds, microseconds);
+}
+
+static void print_battery(void)
+{
+	int adc_mV = sys_get_battery_mV();
+	printk("ADC: %d mV\n", adc_mV);
+
+	int battery_mV = sys_get_valid_battery_mV();
+	int16_t pptt = sys_get_valid_battery_pptt();
+	int16_t calibrated_pptt = sys_get_calibrated_battery_pptt(pptt);
+	uint64_t unplugged_time = sys_get_last_unplugged_time();
+	if (battery_mV > 0)
+		printk("\nBattery: %.2f%% (Raw %.2f%%, %d mV)\n", (double)calibrated_pptt / 100.0, (double)pptt / 100.0, battery_mV);
+	else
+		printk("\nBattery: None\n");
+	if (unplugged_time > 0)
+		print_uptime(k_uptime_ticks() - unplugged_time, "Last updated");
+	else
+		printk("Last updated: Never\n");
+
+	uint64_t runtime = sys_get_battery_runtime_estimate();
+	uint64_t remaining = sys_get_battery_remaining_time_estimate();
+	if (remaining > 0)
+		print_uptime(remaining, "\nRemaining runtime");
+	else
+		printk("Remaining runtime: Not available\n");
+	if (runtime > 0)
+		print_uptime(runtime, "Fully charged runtime");
+	else
+		printk("Fully charged runtime: Not available\n");
+
+	int16_t last_min = sys_get_last_cycle_min_pptt();
+	int16_t last_max = sys_get_last_cycle_max_pptt();
+	int16_t last_calibrated_min = sys_get_calibrated_battery_pptt(last_min);
+	int16_t last_calibrated_max = sys_get_calibrated_battery_pptt(last_max);
+	uint64_t last_runtime = sys_get_last_cycle_runtime();
+	if (last_min >= 0 && last_max >= 0 && last_runtime > 0)
+	{
+		printk("\nLast discharge cycle: %.2f%% -> %.2f%% (Raw %.2f%% -> %.2f%%)\n", (double)last_calibrated_max / 100.0, (double)last_calibrated_min / 100.0, (double)last_max / 100.0, (double)last_min / 100.0);
+		print_uptime(last_runtime, "Last cycle runtime");
+	}
+	else
+	{
+		printk("\nLast cycle: Not available\n");
+	}
+
+	int16_t min = sys_get_calibrated_battery_range_min_pptt();
+	int16_t max = sys_get_calibrated_battery_range_max_pptt();
+	if (min >= 0 && max >= 0)
+		printk("\nCalibration: %.0f%% - %.0f%%\n", (double)min / 100.0, (double)max / 100.0);
+	else
+		printk("\nCalibration: None\n");
+	printk("Cycle count: ~%.2f\n", (double)sys_get_battery_cycles());
 }
 
 static void print_meow(void)
@@ -259,10 +362,10 @@ static void console_thread(void)
 	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
 #endif
 	printk(FW_STRING);
-	printk("debug\n");
 	printk("info                         Get device information\n");
 	printk("uptime                       Get device uptime\n");
 	printk("reboot                       Soft reset the device\n");
+	printk("battery                      Get battery information\n");
 	printk("scan                         Restart sensor scan\n");
 	printk("calibrate                    Calibrate sensor ZRO\n");
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION	
@@ -270,10 +373,10 @@ static void console_thread(void)
 	printk("sens reset                   Reset gyro sensitivity calibration\n");
 #endif
 
-	uint8_t command_debug[] = "debug";
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
 	uint8_t command_reboot[] = "reboot";
+	uint8_t command_battery[] = "battery";
 	uint8_t command_scan[] = "scan";
 	uint8_t command_calibrate[] = "calibrate";
 
@@ -309,6 +412,19 @@ static void console_thread(void)
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION	
 	uint8_t command_sens[] = "sens";
 #endif
+
+	// debug
+	uint8_t command_debug[] = "debug";
+	uint8_t command_reset[] = "reset";
+	uint8_t command_reset_arg_zro[] = "zro";
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	uint8_t command_reset_arg_acc[] = "acc";
+#endif
+#if SENSOR_MAG_EXISTS
+	uint8_t command_reset_arg_mag[] = "mag";
+#endif
+	uint8_t command_reset_arg_bat[] = "bat";
+	uint8_t command_reset_arg_all[] = "all";
 
 	while (1) {
 #if USB_EXISTS
@@ -351,6 +467,10 @@ static void console_thread(void)
 		else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0)
 		{
 			sys_request_system_reboot();
+		}
+		else if (memcmp(line, command_battery, sizeof(command_battery)) == 0)
+		{
+			print_battery();
 		}
 		else if (memcmp(line, command_scan, sizeof(command_scan)) == 0)
 		{
@@ -475,6 +595,37 @@ static void console_thread(void)
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) 
 		{
 			print_meow();
+		}
+		else if (memcmp(line, command_reset, sizeof(command_reset)) == 0)
+		{
+			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0)
+			{
+				sensor_calibration_clear(NULL, NULL, true);
+			}
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+			else if (arg && memcmp(arg, command_reset_arg_acc, sizeof(command_reset_arg_acc)) == 0)
+			{
+				sensor_calibration_clear_6_side(NULL, true);
+			}
+#endif
+#if SENSOR_MAG_EXISTS
+			else if (arg && memcmp(arg, command_reset_arg_mag, sizeof(command_reset_arg_mag)) == 0)
+			{
+				sensor_calibration_clear_mag(NULL, true);
+			}
+#endif
+			else if (arg && memcmp(arg, command_reset_arg_bat, sizeof(command_reset_arg_bat)) == 0)
+			{
+				sys_reset_battery_tracker();
+			}
+			else if (arg && memcmp(arg, command_reset_arg_all, sizeof(command_reset_arg_all)) == 0)
+			{
+				sys_clear();
+			}
+			else
+			{
+				printk("Invalid argument\n");
+			}
 		}
 		else
 		{

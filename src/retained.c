@@ -28,8 +28,24 @@ struct retained_data *retained = (struct retained_data *)DT_REG_ADDR(MEMORY_REGI
 #define RETAINED_CRC_OFFSET offsetof(struct retained_data, crc)
 #define RETAINED_CHECKED_SIZE (RETAINED_CRC_OFFSET + sizeof(retained->crc))
 
+static uint64_t init_time;
+
+static int retained_init(void)
+{
+	init_time = k_uptime_ticks(); // Get current uptime in ticks as soon as possible
+	return 0;
+}
+
+// TODO: priority?
+SYS_INIT(retained_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
 bool retained_validate(void)
 {
+	NRF_STATIC_ASSERT((RETAINED_CHECKED_SIZE <= 1024), "Retained data size exceeds 1 KB limit");
+
+	uint64_t now = init_time;
+//	uint64_t now = k_uptime_ticks(); // Get current uptime in ticks as soon as possible
+
 	/* The residue of a CRC is what you get from the CRC over the
 	 * message catenated with its CRC.  This is the post-final-xor
 	 * residue for CRC-32 (CRC-32/ISO-HDLC) which Zephyr calls
@@ -57,7 +73,8 @@ bool retained_validate(void)
 	}
 
 	/* Reset to accrue runtime from this session. */
-	retained->uptime_latest = 0;
+	retained->uptime_latest = now;
+	retained->battery_uptime_latest = now;
 
 	return valid;
 }

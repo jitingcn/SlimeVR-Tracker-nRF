@@ -1,8 +1,8 @@
 # Copyright (c) 2024 Nordic Semiconductor ASA
 # SPDX-License-Identifier: Apache-2.0
 
-identifier: supermini_uf2/nrf52840/i2c
-name: supermini_uf2_i2c
+identifier: promicro_uf2/nrf52840/spi
+name: promicro_uf2_spi
 vendor: nordic
 type: mcu
 arch: arm

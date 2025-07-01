@@ -1,6 +1,7 @@
 #include "globals.h"
 #include "sensor/sensor.h"
 #include "battery.h"
+#include "battery_tracker.h"
 #include "connection/connection.h"
 #include "system.h"
 #include "led.h"
@@ -25,7 +26,9 @@ enum sys_regulator {
 	SYS_REGULATOR_LDO
 };
 
-static int16_t last_battery_pptt[16] = {[0 ... 15] = -1};
+static int16_t calibrated_battery_pptt = -1;
+static int16_t current_battery_pptt = -1;
+static int16_t last_battery_pptt[15] = {[0 ... 14] = -1};
 static int last_battery_pptt_index = 0;
 static bool battery_low = false;
 
@@ -204,7 +207,8 @@ void sys_request_WOM(bool force) // TODO: if IMU interrupt does not exist what d
 	nrf_gpio_cfg_sense_set(int0_gpios, pin_config & 0xF);
 	LOG_INF("Configured IMU wake up GPIO");
 	LOG_INF("Powering off nRF");
-	retained_update();
+	sys_update_battery_tracker(current_battery_pptt, device_plugged);
+//	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
@@ -228,7 +232,8 @@ void sys_request_system_off(void) // TODO: add timeout
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
 	LOG_INF("Powering off nRF");
-	retained_update();
+	sys_update_battery_tracker(current_battery_pptt, device_plugged);
+//	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
@@ -243,7 +248,8 @@ void sys_request_system_reboot(void) // TODO: add timeout
 //	sensor_retained_write();
 	// Set system reboot
 	LOG_INF("Rebooting nRF");
-	retained_update();
+	sys_update_battery_tracker(current_battery_pptt, device_plugged);
+//	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
@@ -294,13 +300,24 @@ static void power_thread(void)
 		bool usb_plugged = false;
 #endif
 
+		if (!device_plugged && (charging || charged || plugged || usb_plugged))
+		{
+			device_plugged = true;
+			set_status(SYS_STATUS_PLUGGED, true);
+		}
+		else if (device_plugged && !(charging || charged || plugged || usb_plugged))
+		{
+			device_plugged = false;
+			set_status(SYS_STATUS_PLUGGED, false);
+		}
+
 		if (!power_init)
 		{
 			// log battery state once
 			if (battery_available)
-				LOG_INF("Battery %u%% (%dmV)", battery_pptt/100, battery_mV);
+				LOG_INF("Battery %u%% (%d mV)", battery_pptt/100, battery_mV);
 			else
-				LOG_INF("Battery not available (%dmV)", battery_mV);
+				LOG_INF("Battery not available (%d mV)", battery_mV);
 			if (abnormal_reading)
 			{
 				LOG_ERR("Battery voltage reading is abnormal");
@@ -313,7 +330,10 @@ static void power_thread(void)
 		if (battery_discharged || docked)
 		{
 			if (battery_discharged)
+			{
 				LOG_WRN("Discharged battery");
+				sys_update_battery_tracker(0, device_plugged);
+			}
 			sys_request_system_off();
 		}
 
@@ -339,23 +359,16 @@ static void power_thread(void)
 		last_battery_pptt_index %= 15;
 
 		// Store the average battery level with hysteresis (Effectively 100-10000 -> 1-100%)
-		if (average_battery_pptt + 100 < last_battery_pptt[15]) // Lower bound -100pptt
-			last_battery_pptt[15] = average_battery_pptt + 100;
-		else if (average_battery_pptt > last_battery_pptt[15]) // Upper bound +0pptt
-			last_battery_pptt[15] = average_battery_pptt;
+		if (average_battery_pptt + 100 < current_battery_pptt) // Lower bound -100pptt
+			current_battery_pptt = average_battery_pptt + 100;
+		else if (average_battery_pptt > current_battery_pptt) // Upper bound +0pptt
+			current_battery_pptt = average_battery_pptt;
 
-		connection_update_battery(battery_available, charging || charged || plugged || usb_plugged, last_battery_pptt[15], battery_mV);
+		sys_update_battery_tracker_voltage(battery_mV, device_plugged);
+		sys_update_battery_tracker(current_battery_pptt, device_plugged);
+		calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
 
-		if (!device_plugged && (charging || charged || plugged || usb_plugged))
-		{
-			device_plugged = true;
-			set_status(SYS_STATUS_PLUGGED, true);
-		}
-		else if (device_plugged && !(charging || charged || plugged || usb_plugged))
-		{
-			device_plugged = false;
-			set_status(SYS_STATUS_PLUGGED, false);
-		}
+		connection_update_battery(battery_available, device_plugged, calibrated_battery_pptt, battery_mV);
 
 		if (charging)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);

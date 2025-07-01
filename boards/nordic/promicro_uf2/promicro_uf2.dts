@@ -68,8 +68,8 @@
 //end
 
 / {
-	model = "supermini_uf2";
-	compatible = "supermini_uf2";
+	model = "promicro_uf2";
+	compatible = "promicro_uf2";
 
 	chosen {
 		zephyr,sram = &sram0;

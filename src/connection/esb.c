@@ -458,11 +458,13 @@ static void esb_thread(void)
 		}
 		if (tx_errors >= 100)
 		{
-			if (CONFIG_USER_SHUTDOWN && k_uptime_get() - last_tx_success > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected
+#if USER_SHUTDOWN_ENABLED
+			if (k_uptime_get() - last_tx_success > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected
 			{
 				LOG_WRN("No response from receiver in %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
 				sys_request_system_off();
 			}
+#endif
 		}
 		k_msleep(100);
 	}

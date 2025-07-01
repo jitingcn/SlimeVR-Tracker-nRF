@@ -11,7 +11,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Example of validatable retained data. */
 struct retained_data {
 	/* The build version of the firmware that last updated the
 	 * retained data.
@@ -27,6 +26,27 @@ struct retained_data {
 	 * uptime_latest of this session.
 	 */
 	uint64_t uptime_sum;
+
+	/* Battery statistics.  Tracking for discharge curve only begins
+	 * after ~3% discharged.  If battery_pptt has changed significantly
+	 * compared to min_battery_pptt since the last update,
+	 * the statistics are cleared and may be saved to NVS.
+	 */
+	int16_t max_battery_pptt;
+	int16_t min_battery_pptt;
+
+	/* Battery uptime from last retained update */
+	uint64_t battery_uptime_latest;
+
+	/* Cumulative runtime */
+	uint64_t battery_runtime_sum;
+
+	/* Last interval stored in NVS */
+	int16_t battery_pptt_saved;
+	uint64_t battery_runtime_saved;
+
+	/* Calibrated discharge curve */
+	int16_t battery_pptt_curve[18];
 
 	uint8_t reboot_counter;
 	uint8_t paired_addr[8];
@@ -55,6 +75,10 @@ struct retained_data {
 	 */
 	uint32_t crc;
 };
+
+/* Up to 1 KB of retained data allowed right now.
+ */
+#define RETAINED_SIZE (sizeof(struct retained_data))
 
 /* For simplicity in the sample just allow anybody to see and
  * manipulate the retained state.

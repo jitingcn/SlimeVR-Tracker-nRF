@@ -161,12 +161,13 @@ static int sys_retained_init(void)
 		LOG_WRN("Invalidated RAM");
 		sys_nvs_init();
 		// read from nvs to retained
-		nvs_read(&fs, PAIRED_ID, &retained->paired_addr, sizeof(retained->paired_addr));
-		nvs_read(&fs, MAIN_SENSOR_DATA_ID, &retained->sensor_data, sizeof(retained->sensor_data));
-		nvs_read(&fs, MAIN_ACCEL_BIAS_ID, &retained->accelBias, sizeof(retained->accelBias));
-		nvs_read(&fs, MAIN_GYRO_BIAS_ID, &retained->gyroBias, sizeof(retained->gyroBias));
-		nvs_read(&fs, MAIN_MAG_BIAS_ID, &retained->magBAinv, sizeof(retained->magBAinv));
-		nvs_read(&fs, MAIN_ACC_6_BIAS_ID, &retained->accBAinv, sizeof(retained->accBAinv));
+		sys_read(PAIRED_ID, &retained->paired_addr, sizeof(retained->paired_addr));
+		sys_read(MAIN_SENSOR_DATA_ID, &retained->sensor_data, sizeof(retained->sensor_data));
+		sys_read(MAIN_ACCEL_BIAS_ID, &retained->accelBias, sizeof(retained->accelBias));
+		sys_read(MAIN_GYRO_BIAS_ID, &retained->gyroBias, sizeof(retained->gyroBias));
+		sys_read(MAIN_MAG_BIAS_ID, &retained->magBAinv, sizeof(retained->magBAinv));
+		sys_read(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, sizeof(retained->accBAinv));
+		sys_read(BATT_STATS_CURVE_ID, &retained->battery_pptt_curve, sizeof(retained->battery_pptt_curve));
 		nvs_read(&fs, MAIN_GYRO_SENS_ID, &retained->gyroSensScale, sizeof(retained->gyroSensScale));
 		retained_update();
 	}
@@ -208,9 +209,55 @@ void reboot_counter_write(uint8_t reboot_counter)
 void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 {
 	sys_nvs_init();
-	memcpy(retained_ptr, data, len);
-	nvs_write(&fs, id, data, len);
-	retained_update();
+	if (retained_ptr)
+		memcpy(retained_ptr, data, len);
+	int err = nvs_write(&fs, id, data, len);
+	if (err < 0)
+	{
+		LOG_ERR("Failed to write to NVS, error: %d", err);
+		return;
+	}
+	if (retained_ptr)
+		retained_update();
+}
+
+void sys_read(uint16_t id, void *data, size_t len)
+{
+	sys_nvs_init();
+	int err = nvs_read(&fs, id, data, len);
+	if (err < 0)
+	{
+		if (err == -ENOENT) // suppress ENOENT
+		{
+			LOG_DBG("No entry exists for ID %d, read data set to zero", id);
+		}
+		else
+		{
+			LOG_ERR("Failed to read from NVS, error: %d", err);
+			LOG_WRN("Read data set to zero");
+		}
+		memset(data, 0, len);
+		return;
+	}
+}
+
+void sys_clear(void)
+{
+	
+	static bool reset_confirm = false;
+	if (!reset_confirm)
+	{
+		printk("Resetting NVS and retained will clear all pairing, sensor calibration data, and battery calibration data. Are you sure?\n");
+		reset_confirm = true;
+		return;
+	}
+	printk("Resetting NVS and retained\n");
+
+	memset(retained, 0, sizeof(*retained));
+	nvs_clear(&fs);
+	nvs_init = false;
+	reset_confirm = false;
+	LOG_INF("NVS and retained reset");
 }
 
 // return 0 if clock applied, -1 if failed (because there is no clk_en or clk_out)

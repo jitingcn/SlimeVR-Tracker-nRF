@@ -136,7 +136,7 @@ static void sensor_loop(void);
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
 
-K_THREAD_DEFINE(sensor_init_thread_id, 128, sensor_request_scan, true, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(sensor_init_thread_id, 256, sensor_request_scan, true, NULL, NULL, 7, 0, 0);
 
 const char *sensor_get_sensor_imu_name(void)
 {
@@ -633,7 +633,7 @@ void sensor_loop(void)
 		return;
 	main_running = true;
 	sys_interface_resume(); // make sure interfaces are enabled
-	int err = sensor_init(); // Initialize IMUs and Fusion
+	int err = sensor_init(); // Initialize IMUs and Fusion // TODO: run as thread before loop
 	// TODO: handle imu init error, maybe restart device?
 	// TODO: on failure to init, disable sensor interface
 	if (err)
@@ -890,7 +890,7 @@ void sensor_loop(void)
 			if (!calibrating && resting)
 			{
 				int64_t last_data_delta = k_uptime_get() - last_data_time;
-				if (sensor_mode < SENSOR_SENSOR_MODE_LOW_POWER && last_data_delta > 500) // No motion in lp timeout
+				if (sensor_mode < SENSOR_SENSOR_MODE_LOW_POWER && last_data_delta > CONFIG_SENSOR_LP_TIMEOUT) // No motion in lp timeout
 				{
 					LOG_INF("No motion from sensors in %dms", CONFIG_SENSOR_LP_TIMEOUT);
 					sensor_mode = SENSOR_SENSOR_MODE_LOW_POWER;
