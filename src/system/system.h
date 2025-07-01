@@ -12,7 +12,7 @@
 #define MAIN_GYRO_BIAS_ID 4
 #define MAIN_MAG_BIAS_ID 5
 #define MAIN_ACC_6_BIAS_ID 7
-#define MAIN_GYRO_SENS_ID 9
+#define MAIN_GYRO_SENS_ID 6
 
 #define BATT_STATS_LAST_RUN_ID 8
 #define BATT_STATS_INTERVAL_0 9 // ID 9 to 28
