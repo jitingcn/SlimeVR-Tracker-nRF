@@ -292,6 +292,8 @@ static void print_battery(void)
 		printk("Last updated: Never\n");
 
 	uint64_t runtime = sys_get_battery_runtime_estimate();
+	uint64_t runtime_min = sys_get_battery_runtime_min_estimate();
+	uint64_t runtime_max = sys_get_battery_runtime_max_estimate();
 	uint64_t remaining = sys_get_battery_remaining_time_estimate();
 	if (remaining > 0)
 		print_uptime(remaining, "\nRemaining runtime");
@@ -301,6 +303,14 @@ static void print_battery(void)
 		print_uptime(runtime, "Fully charged runtime");
 	else
 		printk("Fully charged runtime: Not available\n");
+	if (runtime_min > 0)
+		print_uptime(runtime_min, "Minimum runtime");
+	else
+		printk("Minimum runtime: Not available\n");
+	if (runtime_max > 0)
+		print_uptime(runtime_max, "Maximum runtime");
+	else
+		printk("Maximum runtime: Not available\n");
 
 	int16_t last_min = sys_get_last_cycle_min_pptt();
 	int16_t last_max = sys_get_last_cycle_max_pptt();

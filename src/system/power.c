@@ -223,6 +223,7 @@ void sys_request_WOM(bool force) // TODO: if IMU interrupt does not exist what d
 void sys_request_system_off(void) // TODO: add timeout
 {
 	LOG_INF("System off requested");
+	// TODO: fails, its possible that it is getting stuck at main_imu_suspend
 	main_imu_suspend(); // TODO: should be a common shutdown step
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	// Clear sensor addresses
@@ -288,7 +289,7 @@ static void power_thread(void)
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
 		bool battery_available = battery_mV > 1500 && !abnormal_reading; // Keep working without the battery connected, otherwise it is obviously too dead to boot system
-		bool battery_discharged = battery_available && battery_pptt == 0;
+		bool battery_discharged = battery_available && (current_battery_pptt >= 0 ? current_battery_pptt : battery_pptt) == 0;
 		// Separate detection of vin
 		if (!plugged && battery_mV > 4300 && !abnormal_reading)
 			plugged = true;

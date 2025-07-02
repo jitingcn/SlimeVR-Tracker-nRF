@@ -12,6 +12,8 @@ int16_t sys_get_valid_battery_pptt(void);
 uint64_t sys_get_last_unplugged_time(void);
 
 uint64_t sys_get_battery_runtime_estimate(void);
+uint64_t sys_get_battery_runtime_min_estimate(void);
+uint64_t sys_get_battery_runtime_max_estimate(void);
 uint64_t sys_get_battery_remaining_time_estimate(void);
 float sys_get_battery_cycles(void);
 
