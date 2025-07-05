@@ -387,6 +387,21 @@ float sys_get_battery_cycles(void)
 	return cycles / 20.0f;
 }
 
+float sys_get_battery_calibration_coverage(void)
+{
+	uint8_t valid_intervals = 0;
+
+	for (uint8_t i = 0; i < 19; i++)
+	{
+		struct battery_tracker_interval interval;
+		sys_read(BATT_STATS_INTERVAL_0 + i, &interval, sizeof(interval));
+		if (interval.cycles > 0)
+			valid_intervals++;
+	}
+
+	return valid_intervals * (100 / 20) / 100.0f; // maximum coverage is 95%
+}
+
 int16_t sys_get_calibrated_battery_range_min_pptt(void)
 {
 	for (uint8_t i = 0; i < 18; i++)
