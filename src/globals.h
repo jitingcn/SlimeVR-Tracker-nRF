@@ -60,10 +60,10 @@
 #define SENSOR_ACCELEROMETER_AXES_ALIGNMENT ax, -ay, -az // accel axes alignment to sensor body
 #endif
 #ifndef SENSOR_MAGNETOMETER_AXES_ALIGNMENT
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz // mag axes alignment to sensor body
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz // mag axes alignment to sensor body
 #endif
 #ifndef SENSOR_QUATERNION_CORRECTION
-#define SENSOR_QUATERNION_CORRECTION 1.0f, 0.0f, 0.0f, 0.0f // correction quat for sensor to mounting orientation
+#define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f // correction quat for sensor to mounting orientation
 #endif
 
 #endif
