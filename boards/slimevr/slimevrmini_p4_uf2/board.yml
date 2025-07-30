@@ -1,0 +1,9 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+board:
+  name: slimevrmini_p4_uf2
+  vendor: slimevr
+  socs:
+    - name: nrf52833
+
