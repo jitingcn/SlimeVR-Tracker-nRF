@@ -54,7 +54,7 @@ static void set_params()
 	// optimized with ICM-45686 data, (in parentheses based on BMI270 characteristics)
 	if (imu_id == IMU_ICM45686 || imu_id == IMU_LSM6DSR)
 	{
-		params.tauAcc = 6.5f; // best result from Lyall (best result from optimizer: 7.171490)
+		params.tauAcc = 7.0f; // best result from Lyall (best result from optimizer: 7.171490)
 //		params.tauMag = 10.0f; // best result for VQF from paper	
 		params.biasSigmaInit = 0.337976f; // best result from optimizer (based on gyro ZRO temperature drift: 0.25)
 		params.biasForgettingTime = 352.235500f; // best result from optimizer (based on time for temperature change: 200)
