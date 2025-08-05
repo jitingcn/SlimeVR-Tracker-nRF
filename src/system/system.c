@@ -289,6 +289,8 @@ static void button_pressed(const struct device *dev, struct gpio_callback *cb, u
 	int64_t current_time = k_uptime_get();
 	if (press_time && !pressed && current_time - press_time > 50) // debounce
 		last_press_duration = current_time - press_time;
+	else if (press_time && pressed) // unusual press event on button already pressed
+		return;
 	press_time = pressed ? current_time : 0;
 }
 
