@@ -259,12 +259,14 @@ void set_led(enum sys_led_pattern led_pattern, int priority)
 		LOG_DBG("set_led: suspended led_thread_id");
 		led_resume();
 		k_thread_resume(led_thread_id);
+		k_wakeup(led_thread_id);
 		LOG_DBG("set_led: resumed led_thread_id");
 	}
 	else
 	{
 		led_resume();
 		k_thread_resume(led_thread_id);
+		k_wakeup(led_thread_id);
 		LOG_DBG("set_led: resumed led_thread_id");
 	}
 #endif
