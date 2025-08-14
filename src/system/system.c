@@ -325,9 +325,15 @@ static void button_thread(void)
 	while (1)
 	{
 		if (press_time && k_uptime_get() - press_time > 50) // debounce
+		{
+			if (!get_status(SYS_STATUS_BUTTON_PRESSED))
+				set_status(SYS_STATUS_BUTTON_PRESSED, true);
 			set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
+		}
 		if (last_press_duration > 50) // debounce
 		{
+			if (!get_status(SYS_STATUS_BUTTON_PRESSED))
+				set_status(SYS_STATUS_BUTTON_PRESSED, true);
 			num_presses++;
 			LOG_INF("Button pressed %d times", num_presses);
 			last_press_duration = 0;
@@ -345,6 +351,7 @@ static void button_thread(void)
 #endif
 			num_presses = 0;
 			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			set_status(SYS_STATUS_BUTTON_PRESSED, false);
 		}
 		if (press_time && k_uptime_get() - press_time > 1000 && button_read()) // Button is being held
 		{
@@ -353,6 +360,7 @@ static void button_thread(void)
 				LOG_INF("Pairing requested");
 				esb_reset_pair();
 				press_time = 0;
+				set_status(SYS_STATUS_BUTTON_PRESSED, false); // TODO: is needed?
 			}
 		}
 		k_msleep(20);

@@ -36,6 +36,9 @@ void set_status(enum sys_status status, bool set) {
 		case SYS_STATUS_CALIBRATION_RUNNING:
 			LOG_INF("Calibration running");
 			break;
+		case SYS_STATUS_BUTTON_PRESSED:
+			LOG_INF("Button pressed");
+			break;
 		default:
 			break;
 		}

@@ -13,3 +13,4 @@ board:
       - name: 'i2c'
       - name: 'spi'
       - name: 'smspi'
+      - name: 'chrysalis'
