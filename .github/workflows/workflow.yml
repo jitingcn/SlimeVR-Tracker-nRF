@@ -26,18 +26,8 @@ jobs:
                   {boardname: "promicro_uf2/nrf52840/spi", fileformat: "uf2", filename: "SlimeNRF_ProMicro_SPI_Tracker"},
                   {boardname: "promicro_uf2/nrf52840/smspi", fileformat: "uf2", filename: "SlimeNRF_ProMicro_smSPI_Tracker"},
                   {boardname: "promicro_uf2/nrf52840/chrysalis", fileformat: "uf2", filename: "SlimeNRF_ProMicro_Chrysalis_Tracker"},
+                  {boardname: "promicro_uf2/nrf52840/lwkj_icm45v1", fileformat: "uf2", filename: "SlimeNRF_ProMicro_lwkj_icm45v1_Tracker"},
                   {boardname: "xiao_ble/nrf52840", fileformat: "uf2", filename: "SlimeNRF_XIAO_Tracker"},
-                  {boardname: "xiao_ble/nrf52840/sense", fileformat: "uf2", filename: "SlimeNRF_XIAO_Sense_Tracker"},
-                  {boardname: "slimenrf_r1/nrf52840", fileformat: "hex", filename: "SlimeNRF_slimenrf_r1_Tracker"},
-                  {boardname: "slimenrf_r2/nrf52832", fileformat: "hex", filename: "SlimeNRF_slimenrf_r2_Tracker"},
-                  {boardname: "slimenrf_r3/nrf52840/uf2", fileformat: "uf2", filename: "SlimeNRF_slimenrf_r3_Tracker"},
-                  {boardname: "slimevrmini_p1_uf2/nrf52833", fileformat: "uf2", filename: "SlimeNRF_slimevrmini_p1_Tracker"},
-                  {boardname: "slimevrmini_p2_uf2/nrf52833", fileformat: "uf2", filename: "SlimeNRF_slimevrmini_p2_Tracker"},
-                  {boardname: "slimevrmini_p3r6_uf2/nrf52833", fileformat: "uf2", filename: "SlimeNRF_slimevrmini_p3_r6_Tracker"},
-                  {boardname: "slimevrmini_p3r7_uf2/nrf52833", fileformat: "uf2", filename: "SlimeNRF_slimevrmini_p3_r7_Tracker"},
-                  {boardname: "slimevrmini_p4_uf2/nrf52833", fileformat: "uf2", filename: "SlimeNRF_slimevrmini_p4_Tracker"},
-                  {boardname: "nrf52dk/nrf52832", fileformat: "hex", filename: "SlimeNRF_nRF52dk_Tracker"},
-                  {boardname: "nrf52840dk/nrf52840", fileformat: "hex", filename: "SlimeNRF_nRF52840dk_Tracker"},
                 ]
     if: always()
     runs-on: ubuntu-latest
@@ -94,9 +84,9 @@ jobs:
         # only for the arm-zephyr-eabi (Cortex-M) architecture, since we don't
         # need the other toolchains (xtensa, riscv, etc.)
         run: |
-          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.2/zephyr-sdk-0.17.2_linux-x86_64_minimal.tar.xz
-          tar xf zephyr-sdk-0.17.2_linux-x86_64_minimal.tar.xz -C ~/
-          ~/zephyr-sdk-0.17.2/setup.sh -c -t arm-zephyr-eabi
+          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.3/zephyr-sdk-0.17.3_linux-x86_64_minimal.tar.xz
+          tar xf zephyr-sdk-0.17.3_linux-x86_64_minimal.tar.xz -C ~/
+          ~/zephyr-sdk-0.17.3/setup.sh -c -t arm-zephyr-eabi
 
       - name: 📂 Cloning Triggered Repository/Branch
         run: |
@@ -118,7 +108,7 @@ jobs:
           pip3 install -r zephyr/scripts/requirements.txt
 
       - name: 🔨 Build SlimeVR-Tracker-nRF - ${{ matrix.boards.boardname }}
-      # Receiver Firmware Build 
+      # Receiver Firmware Build
         if: always()
         run: |
           cd zephyr-workspace
