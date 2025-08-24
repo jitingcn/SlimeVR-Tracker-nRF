@@ -84,7 +84,6 @@ endmenu
 
 config USER_EXTRA_ACTIONS
     bool "Multiple press actions"
-    default y
     help
         Allow user to use multiple presses to calibrate, pair, or enter DFU.
         By default, pairing is available when holding down sw0 for 5 seconds.

@@ -16,6 +16,7 @@
 #define LSM6DSO_CTRL7                      0x16
 #define LSM6DSO_CTRL8                      0x17
 
+#define LSM6DSO_STATUS_MASTER_MAINPAGE     0x39
 #define LSM6DSO_FIFO_STATUS1               0x3A
 
 #define LSM6DSO_TAP_CFG0                   0x56
@@ -68,6 +69,13 @@ uint16_t lsm6dso_fifo_read(uint8_t *data, uint16_t len);
 
 uint8_t lsm6dso_setup_WOM(void);
 
+int lsm6dso_ext_setup(void);
+int lsm6dso_ext_passthrough(bool passthrough);
+
+int lsm6dso_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes);
+int lsm6dso_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read);
+
 extern const sensor_imu_t sensor_imu_lsm6dso;
+extern const sensor_ext_ssi_t sensor_ext_lsm6dso;
 
 #endif

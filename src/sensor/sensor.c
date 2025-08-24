@@ -257,7 +257,7 @@ int sensor_scan(void)
 		if (mag_id >= 0)
 			sensor_interface_register_sensor_mag_i2c(&sensor_mag_dev);
 	}
-	if (mag_id < 0 && !(sensor_imu_dev.addr & 0x80)) // I2C IMU
+	if (mag_id < 0 && !(sensor_imu_dev_reg & 0x80)) // I2C IMU
 	{
 		// IMU may support passthrough mode if the magnetometer is connected through the IMU
 		int err = sensor_imu->ext_passthrough(true); // no need to disable, the imu will be reset later
@@ -283,7 +283,7 @@ int sensor_scan(void)
 	}
 #endif
 #if SENSOR_MAG_EXT_EXISTS
-	if (mag_id < 0 && (sensor_imu_dev.addr & 0x80)) // SPI IMU
+	if (mag_id < 0 && (sensor_imu_dev_reg & 0x80)) // SPI IMU
 	{
 		// IMU may support I2CM if the magnetometer is connected through the IMU
 		int err = sensor_imu->ext_setup();
@@ -749,7 +749,7 @@ void sensor_loop(void)
 					float gx = raw_g[0];
 					float gy = raw_g[1];
 					float gz = raw_g[2];
-					float g[] = {SENSOR_GYROSCOPE_AXES_ALIGNMENT};
+					float g[] = {gx, gy, gz};
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION					
 					// Apply sensitivity scaling
@@ -788,7 +788,7 @@ void sensor_loop(void)
 					float ax = raw_a[0];
 					float ay = raw_a[1];
 					float az = raw_a[2];
-					float a[] = {SENSOR_ACCELEROMETER_AXES_ALIGNMENT};
+					float a[] = {ax, ay, az};
 
 					// Process fusion
 					sensor_fusion->update_accel(a, accel_actual_time);

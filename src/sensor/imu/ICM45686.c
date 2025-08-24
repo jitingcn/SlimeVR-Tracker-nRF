@@ -43,6 +43,13 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 //		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_RTC_CONFIG, 0x23); // enable external CLKIN (0x20, default register value is 0x03)
 	}
 	uint8_t ireg_buf[3];
+	ireg_buf[0] = ICM45686_IPREG_BAR; // address is a word, icm is big endian
+	ireg_buf[1] = ICM45686_IPREG_BAR_REG_58;
+	ireg_buf[2] = 0x01; // disable internal pull resistors for AP pins
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
+	ireg_buf[1] = ICM45686_IPREG_BAR_REG_59;
+	ireg_buf[2] = 0x00; // disable internal pull resistors for AP pins
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	ireg_buf[0] = ICM45686_IPREG_TOP1; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_SREG_CTRL;
 	ireg_buf[2] = 0x02; // set big endian
