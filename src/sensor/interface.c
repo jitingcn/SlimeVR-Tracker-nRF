@@ -65,16 +65,16 @@ int sensor_interface_register_sensor_mag_ext(uint8_t addr, uint8_t min_burst, ui
 	case SENSOR_INTERFACE_SPEC_SPI:
 		if (ext_ssi != NULL)
 		{
-			if (burst < ext_ssi->ext_burst)
+			if (burst > ext_ssi->ext_burst)
 			{
-				if (min_burst < ext_ssi->ext_burst)
+				if (min_burst > ext_ssi->ext_burst)
 				{
 					LOG_ERR("Unsupported burst length");
 					return -1;
 				}
 				LOG_WRN("Using minimum burst length");
 			}
-			min_ext_burst = min_burst;
+			min_ext_burst = min_burst; // fallback if num_read exceeds ext_burst
 			ext_addr = addr;
 			sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] = SENSOR_INTERFACE_SPEC_EXT;
 			return 0;

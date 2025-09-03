@@ -406,11 +406,11 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
-int icm45_ext_passthrough(bool passthrough) // TODO: might need IOC_PAD_SCENARIO_AUX_OVRD instead
+int icm45_ext_passthrough(bool passthrough)
 {
 	int err = 0;
 	if (passthrough)
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x18); // AUX1_MODE_OVRD, AUX1 in I2CM Bypass, AUX1_ENABLE_OVRD, AUX1 enabled
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x18); // AUX1_MODE_OVRD, AUX1 in I2CM Bypass
 	else
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x00); // disable overrides
 	if (err)
