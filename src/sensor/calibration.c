@@ -564,7 +564,7 @@ static int check_sides(const float *a)
 }
 
 static void magneto_reset(void)
-{	
+{
 	magneto_progress = 0; // reusing ata, so guarantee cleared mag progress
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
@@ -601,7 +601,7 @@ int sensor_offsetBias(float *dest1, float *dest2)
 		return -2; // Timeout
 	int64_t sampling_start_time = k_uptime_get();
 	int i = 0;
-	while (k_uptime_get() < sampling_start_time + 3000)
+	while (k_uptime_get() < sampling_start_time + 10000)
 	{
 		if (sensor_wait_accel(rawData, K_MSEC(1000)))
 			return -2; // Timeout
