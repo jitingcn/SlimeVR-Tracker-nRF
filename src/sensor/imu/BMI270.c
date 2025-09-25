@@ -381,6 +381,8 @@ uint8_t bmi_setup_DRDY(uint16_t threshold)
 	buf[0] = threshold & 0xFF;
 	buf[1] = (threshold >> 8) & 0x1F;
 	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_WTM_0, buf, 2);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INT1_MAP_FEAT, 0x00); // disable any_motion_out (interrupt)
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INT1_IO_CTRL, 0x0C); // set INT1 active low, open-drain, output enabled
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INT_MAP_DATA, 0x02); // FIFO threshold interrupt
 	if (err)
 		LOG_ERR("Communication error");
@@ -399,6 +401,7 @@ uint8_t bmi_setup_WOM(void) // TODO: seems too sensitive? try to match icm at le
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_PWR_CTRL, 0x04); // enable accel
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_FEAT_PAGE, 0x01); // go to page 1
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, BMI270_ANYMO_1, config, sizeof(config)); // Start write buffer
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INT_MAP_DATA, 0x00); // disable FIFO threshold interrupt
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INT1_IO_CTRL, 0x0C); // set INT1 active low, open-drain, output enabled
 	k_msleep(55); // wait for sensor to settle
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INT1_MAP_FEAT, 0x40); // enable any_motion_out (interrupt)
