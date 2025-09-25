@@ -45,10 +45,10 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	uint8_t ireg_buf[3];
 	ireg_buf[0] = ICM45686_IPREG_BAR; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_58;
-	ireg_buf[2] = 0x01; // disable internal pull resistors for AP pins
+	ireg_buf[2] = 0xD9 & ~0x48; // disable internal pull resistors for AP pins (pin 13, 12)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_59;
-	ireg_buf[2] = 0x00; // disable internal pull resistors for AP pins
+	ireg_buf[2] = 0xB6 & ~0x92; // disable internal pull resistors for AP pins (pin 7, 1, 14)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	ireg_buf[0] = ICM45686_IPREG_TOP1; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_SREG_CTRL;
