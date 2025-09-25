@@ -27,12 +27,13 @@
 #include "hid.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/crc.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-static uint8_t data_buffer[16] = {0};
+static uint8_t data_buffer[20] = {0};
 static int64_t last_data_time = 0;
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
@@ -281,6 +282,8 @@ void connection_thread(void)
 		if (last_data_time != 0) // have valid data
 		{
 			last_data_time = 0;
+			uint32_t *crc_ptr = (uint32_t *)&data_buffer[16];
+			*crc_ptr = crc32_k_4_2_update(0x93a409eb, data_buffer, 16);
 			esb_write(data_buffer);
 		}
 		else if (k_uptime_get() - last_info_time > 100)
