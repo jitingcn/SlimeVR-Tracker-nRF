@@ -41,6 +41,8 @@ LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 8, 0, 0);
 
+K_MUTEX_DEFINE(data_buffer_mutex);
+
 void connection_clocks_request_start(void)
 {
 	clocks_request_start(0);
@@ -163,9 +165,11 @@ void connection_write_packet_0() // device info
 	data[13] = FW_VERSION_MINOR & 255; // fw_minor
 	data[14] = FW_VERSION_PATCH & 255; // fw_patch
 	data[15] = 0; // rssi (supplied by receiver)
+	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
 	memcpy(data_buffer, data, sizeof(data));
 	last_data_time = k_uptime_get(); // TODO: use ticks
 //	esb_write(data); // TODO: schedule in thread
+	k_mutex_unlock(&data_buffer_mutex);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -182,9 +186,11 @@ void connection_write_packet_1() // full precision quat and accel
 	buf[4] = TO_FIXED_7(sensor_a[0]); // range is ±256m/s² or ±26.1g 
 	buf[5] = TO_FIXED_7(sensor_a[1]);
 	buf[6] = TO_FIXED_7(sensor_a[2]);
+	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
 	memcpy(data_buffer, data, sizeof(data));
 	last_data_time = k_uptime_get(); // TODO: use ticks
 //	esb_write(data); // TODO: schedule in thread
+	k_mutex_unlock(&data_buffer_mutex);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -217,9 +223,11 @@ void connection_write_packet_2() // reduced precision quat and accel with batter
 	buf[1] = TO_FIXED_7(sensor_a[1]);
 	buf[2] = TO_FIXED_7(sensor_a[2]);
 	data[15] = 0; // rssi (supplied by receiver)
+	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
 	memcpy(data_buffer, data, sizeof(data));
 	last_data_time = k_uptime_get(); // TODO: use ticks
 //	esb_write(data); // TODO: schedule in thread
+	k_mutex_unlock(&data_buffer_mutex);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -231,9 +239,11 @@ void connection_write_packet_3() // status
 	data[2] = tracker_svr_status;
 	data[3] = tracker_status;
 	data[15] = 0; // rssi (supplied by receiver)
+	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
 	memcpy(data_buffer, data, sizeof(data));
 	last_data_time = k_uptime_get(); // TODO: use ticks
 //	esb_write(data); // TODO: schedule in thread
+	k_mutex_unlock(&data_buffer_mutex);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -250,9 +260,11 @@ void connection_write_packet_4() // full precision quat and magnetometer
 	buf[4] = TO_FIXED_10(sensor_m[0]); // range is ±32G
 	buf[5] = TO_FIXED_10(sensor_m[1]);
 	buf[6] = TO_FIXED_10(sensor_m[2]);
+	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
 	memcpy(data_buffer, data, sizeof(data));
 	last_data_time = k_uptime_get(); // TODO: use ticks
 //	esb_write(data); // TODO: schedule in thread
+	k_mutex_unlock(&data_buffer_mutex);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -276,15 +288,19 @@ static int64_t last_status_time = 0;
 
 void connection_thread(void)
 {
+	uint8_t data_copy[20];
 	// TODO: checking for connection_update and connection_write events from sensor_loop, here we will time and send them out
 	while (1)
 	{
 		if (last_data_time != 0) // have valid data
 		{
+			k_mutex_lock(&data_buffer_mutex, K_FOREVER);
 			last_data_time = 0;
-			uint32_t *crc_ptr = (uint32_t *)&data_buffer[16];
-			*crc_ptr = crc32_k_4_2_update(0x93a409eb, data_buffer, 16);
-			esb_write(data_buffer);
+			memcpy(data_copy, data_buffer, sizeof(data_copy));
+			k_mutex_unlock(&data_buffer_mutex);
+			uint32_t *crc_ptr = (uint32_t *)&data_copy[16];
+			*crc_ptr = crc32_k_4_2_update(0x93a409eb, data_copy, 16);
+			esb_write(data_copy);
 		}
 		else if (k_uptime_get() - last_info_time > 100)
 		{
