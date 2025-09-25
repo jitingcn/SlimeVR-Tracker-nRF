@@ -47,6 +47,8 @@
 
 #define ICM45686_IPREG_BAR_REG_58          0x3A
 #define ICM45686_IPREG_BAR_REG_59          0x3B
+#define ICM45686_IPREG_BAR_REG_60          0x3C
+#define ICM45686_IPREG_BAR_REG_61          0x3D
 
 // User Bank IPREG_TOP1
 #define ICM45686_IPREG_TOP1                0xA2 // MSB

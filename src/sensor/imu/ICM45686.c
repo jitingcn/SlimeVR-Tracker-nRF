@@ -71,6 +71,15 @@ void icm45_shutdown(void)
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Don't need to wait for ICM to finish reset
+//	k_msleep(1);
+	// TODO: not working
+//	uint8_t ireg_buf[3];
+//	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
+//	ireg_buf[2] = 0x6D & ~0x05; // set internal pull down resistors for AP pins (pin 10, 7)
+//	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
+//	ireg_buf[1] = ICM45686_IPREG_BAR_REG_61;
+//	ireg_buf[2] = 0xBB & ~0x10; // set internal pull down resistors for AP pins (pin 11)
+//	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	if (err)
 		LOG_ERR("Communication error");
 }
