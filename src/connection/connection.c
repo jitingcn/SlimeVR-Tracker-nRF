@@ -33,8 +33,9 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-static uint8_t data_buffer[20] = {0};
+static uint8_t data_buffer[21] = {0};
 static int64_t last_data_time = 0;
+static uint8_t packet_sequence = 0;
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
@@ -288,7 +289,7 @@ static int64_t last_status_time = 0;
 
 void connection_thread(void)
 {
-	uint8_t data_copy[20];
+	uint8_t data_copy[21];
 	// TODO: checking for connection_update and connection_write events from sensor_loop, here we will time and send them out
 	while (1)
 	{
@@ -298,6 +299,7 @@ void connection_thread(void)
 			last_data_time = 0;
 			memcpy(data_copy, data_buffer, sizeof(data_copy));
 			k_mutex_unlock(&data_buffer_mutex);
+			data_copy[20] = packet_sequence++;
 			uint32_t *crc_ptr = (uint32_t *)&data_copy[16];
 			*crc_ptr = crc32_k_4_2_update(0x93a409eb, data_copy, 16);
 			esb_write(data_copy);
