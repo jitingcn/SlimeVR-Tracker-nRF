@@ -884,7 +884,7 @@ void sensor_loop(void)
 					lin_a[i] = (a[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
 			}
 
-			// Check the IMU gyroscope // TODO: gyro sanity not used
+			// Check the IMU gyroscope // TODO: gyro sanity not used // TODO: timeouts and power management should be outside sensor! (ie. sleeping/shutdown even if the imu completely errored out)
 			bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
 			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005) : q_epsilon(q, last_q, 0.05); // TODO: Probably okay to use the constantly updating last_q?
 			if (!calibrating && resting)
@@ -944,6 +944,7 @@ void sensor_loop(void)
 			// Update magnetometer mode
 			if (mag_available && mag_enabled)
 			{
+				// TODO: magnetometer might be better to limit to a lower rate
 				float gyro_speed = sqrtf(max_gyro_speed_square);
 				float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
 				if (mag_target_time < 0.005f && mag_skip_oneshot) // only use continuous modes if oneshot is not available
@@ -977,7 +978,7 @@ void sensor_loop(void)
 				sys_interface_suspend();
 			}
 
-			// Check if last status is outdated
+			// Check if last status is outdated // TODO: move logic to connection // TODO: make consolidated function at connection
 			if (!send_info && (k_uptime_get() - last_info_time > 100))
 			{
 				send_info = true;
@@ -996,29 +997,24 @@ void sensor_loop(void)
 				q_multiply(q, q3, q_offset); // quaternion in device orientation, connection will change format from wxyz to xyzw
 				v_rotate(lin_a, q3, lin_a); // linear acceleration in local device frame, no other transformation will be done
 				connection_update_sensor_data(q_offset, lin_a);
-				if (send_info && !send_precise_quat) // prioritize quat precision
+				if (send_info && !send_precise_quat) // prioritize quat precision TODO: move logic to connection
 				{
-					connection_write_packet_2();
+					connection_write_packet_2(); // TODO: make consolidated function at connection
 					send_info = false;
 				}
-				else if (mag_available && mag_enabled && k_uptime_get() - last_mag_time > 200) // try to send mag data every 200ms
+				else if (mag_available && mag_enabled && k_uptime_get() - last_mag_time > 200) // try to send mag data every 200ms TODO: move logic to connection
 				{
-					connection_write_packet_4();
+					connection_write_packet_4(); // TODO: make consolidated function at connection
 					last_mag_time = k_uptime_get();
 				}
 				else
 				{
-					connection_write_packet_1();
+					connection_write_packet_1(); // TODO: make consolidated function at connection
 				}
 			}
 			else if (send_info)
 			{
-				connection_write_packet_0();
 				send_info = false;
-			}
-			else
-			{
-				connection_clocks_request_stop();
 			}
 
 			// Handle magnetometer calibration
@@ -1046,6 +1042,7 @@ void sensor_loop(void)
 #endif
 		}
 
+		// TODO: sensor loop timing should depend on sensor interrupt/dataready
 //		led_clock_offset += time_delta;
 		if (time_delta > sensor_update_time_ms)
 			k_yield();

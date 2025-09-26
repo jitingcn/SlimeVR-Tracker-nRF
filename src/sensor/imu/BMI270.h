@@ -26,11 +26,13 @@
 #define BMI270_GYR_CONF  0x42
 #define BMI270_GYR_RANGE 0x43
 
+#define BMI270_FIFO_WTM_0 0x46
 #define BMI270_FIFO_CONFIG_0 0x48
 #define BMI270_FIFO_CONFIG_1 0x49
 
 #define BMI270_INT1_IO_CTRL 0x53
 #define BMI270_INT1_MAP_FEAT 0x56
+#define BMI270_INT_MAP_DATA 0x58
 
 #define BMI270_INIT_CTRL 0x59
 #define BMI270_INIT_ADDR_0 0x5B
@@ -85,6 +87,7 @@ void bmi_accel_read(float a[3]);
 void bmi_gyro_read(float g[3]);
 float bmi_temp_read(void);
 
+uint8_t bmi_setup_DRDY(uint16_t threshold);
 uint8_t bmi_setup_WOM(void);
 
 int bmi_crt(uint8_t *data);

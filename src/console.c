@@ -14,8 +14,6 @@
 #if (USB_EXISTS || CONFIG_RTT_CONSOLE) && CONFIG_USE_SLIMENRF_CONSOLE
 
 #if USB_EXISTS
-#include <zephyr/usb/usb_device.h>
-#include <zephyr/usb/class/usb_hid.h>
 #include <zephyr/console/console.h>
 #include <zephyr/logging/log_ctrl.h>
 #else
@@ -23,7 +21,6 @@
 #endif
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/reboot.h>
-#include <zephyr/pm/device.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -34,12 +31,13 @@
 
 LOG_MODULE_REGISTER(console, LOG_LEVEL_INF);
 
-static void usb_init_thread(void);
-K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0, 500); // Wait before enabling USB
-
 static void console_thread(void);
+#if USB_EXISTS
 static struct k_thread console_thread_id;
 static K_THREAD_STACK_DEFINE(console_thread_id_stack, 1024); // TODO: larger stack size to handle reboot and print info
+#else
+K_THREAD_DEFINE(console_thread_id, 1024, console_thread, NULL, NULL, NULL, 6, 0, 0);
+#endif
 
 #define DFU_EXISTS CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
@@ -101,43 +99,17 @@ static const char *meow_suffixes[] = {
 	""
 };
 
-static void console_thread_create(void)
+void console_thread_create(void)
 {
+#if USB_EXISTS
 	k_thread_create(&console_thread_id, console_thread_id_stack, K_THREAD_STACK_SIZEOF(console_thread_id_stack), (k_thread_entry_t)console_thread, NULL, NULL, NULL, 6, 0, K_NO_WAIT);
-}
-
-#if USB_EXISTS
-static void status_cb(enum usb_dc_status_code status, const uint8_t *param)
-{
-	const struct log_backend *backend = log_backend_get_by_name("log_backend_uart");
-	const struct device *const cons = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
-	switch (status)
-	{
-	case USB_DC_CONNECTED:
-		set_status(SYS_STATUS_USB_CONNECTED, true);
-		pm_device_action_run(cons, PM_DEVICE_ACTION_RESUME);
-		log_backend_enable(backend, backend->cb->ctx, CONFIG_LOG_MAX_LEVEL);
-		console_thread_create();
-		break;
-	case USB_DC_DISCONNECTED:
-		set_status(SYS_STATUS_USB_CONNECTED, false);
-		k_thread_abort(&console_thread_id);
-		log_backend_disable(backend);
-		pm_device_action_run(cons, PM_DEVICE_ACTION_SUSPEND);
-		break;
-	default:
-		LOG_DBG("status %u unhandled", status);
-		break;
-	}
-}
 #endif
+}
 
-static void usb_init_thread(void)
+void console_thread_abort(void)
 {
 #if USB_EXISTS
-	usb_enable(status_cb);
-#else
-	console_thread_create();
+	k_thread_abort(&console_thread_id);
 #endif
 }
 
@@ -370,7 +342,7 @@ static void print_meow(void)
 
 static void console_thread(void)
 {
-#if DFU_EXISTS
+#if USB_EXISTS && DFU_EXISTS
 	if (button_read()) // button held on usb connect, enter DFU
 	{
 #if ADAFRUIT_BOOTLOADER

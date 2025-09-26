@@ -375,6 +375,18 @@ float bmi_temp_read(void)
 	return temp;
 }
 
+uint8_t bmi_setup_DRDY(uint16_t threshold)
+{
+	uint8_t buf[2];
+	buf[0] = threshold & 0xFF;
+	buf[1] = (threshold >> 8) & 0x1F;
+	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_WTM_0, buf, 2);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INT_MAP_DATA, 0x02); // FIFO threshold interrupt
+	if (err)
+		LOG_ERR("Communication error");
+	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
+}
+
 uint8_t bmi_setup_WOM(void) // TODO: seems too sensitive? try to match icm at least // TODO: half working.
 {
 	uint8_t config[4] = {0};
@@ -561,6 +573,7 @@ const sensor_imu_t sensor_imu_bmi270 = {
 	*bmi_gyro_read,
 	*bmi_temp_read,
 
+	*bmi_setup_DRDY,
 	*bmi_setup_WOM,
 	
 	*imu_none_ext_setup,

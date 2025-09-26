@@ -26,6 +26,7 @@
 #define ICM45686_GYRO_CONFIG0              0x1C
 
 #define ICM45686_FIFO_CONFIG0              0x1D
+#define ICM45686_FIFO_CONFIG1_0            0x1E
 #define ICM45686_FIFO_CONFIG3              0x21
 
 #define ICM45686_TMST_WOM_CONFIG           0x23
@@ -154,6 +155,7 @@ void icm45_accel_read(float a[3]);
 void icm45_gyro_read(float g[3]);
 float icm45_temp_read(void);
 
+uint8_t icm45_setup_DRDY(uint16_t threshold);
 uint8_t icm45_setup_WOM(void);
 
 int icm45_ext_setup(void);

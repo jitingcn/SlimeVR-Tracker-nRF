@@ -54,6 +54,8 @@ static uint8_t paired_addr[8] = {0};
 static bool esb_initialized = false;
 static bool esb_paired = false;
 
+#define TX_ERROR_THRESHOLD 100
+
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
@@ -64,18 +66,15 @@ void event_handler(struct esb_evt const *event)
 	switch (event->evt_id)
 	{
 	case ESB_EVENT_TX_SUCCESS:
-		if (tx_errors >= 100)
-			set_status(SYS_STATUS_CONNECTION_ERROR, false);
 		tx_errors = 0;
 		if (esb_paired)
 			clocks_stop();
 		break;
 	case ESB_EVENT_TX_FAILED:
-		if (++tx_errors == 100) // consecutive failure to transmit
-		{
+		if (tx_errors < UINT32_MAX)
+			tx_errors++;
+		if (tx_errors == TX_ERROR_THRESHOLD) // consecutive failure to transmit
 			last_tx_success = k_uptime_get();
-			set_status(SYS_STATUS_CONNECTION_ERROR, true);
-		}
 		LOG_DBG("TX FAILED");
 		if (esb_paired)
 			clocks_stop();
@@ -443,25 +442,33 @@ bool esb_ready(void)
 
 static void esb_thread(void)
 {
+	int64_t start_time = k_uptime_get();
+
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
 
 	while (1)
 	{
-		if (!esb_paired)
+		if (!esb_paired && get_status(SYS_STATUS_USB_CONNECTED) == false && k_uptime_get() - 750 > start_time) // only automatically enter pairing while not potentially communicating by usb
 		{
 			esb_pair();
 			esb_initialize(true);
 		}
-		if (tx_errors >= 100)
+		if (tx_errors >= TX_ERROR_THRESHOLD)
 		{
+			if (get_status(SYS_STATUS_CONNECTION_ERROR) == false && get_status(SYS_STATUS_USB_CONNECTED) == false) // only raise error while not potentially communicating by usb
+				set_status(SYS_STATUS_CONNECTION_ERROR, true);
 #if USER_SHUTDOWN_ENABLED
-			if (k_uptime_get() - last_tx_success > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected
+			if (k_uptime_get() - last_tx_success > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected // TODO: is shutdown necessary if usb is connected at the time?
 			{
 				LOG_WRN("No response from receiver in %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
 				sys_request_system_off();
 			}
 #endif
+		}
+		else if (tx_errors == 0 && get_status(SYS_STATUS_CONNECTION_ERROR) == true)
+		{
+			set_status(SYS_STATUS_CONNECTION_ERROR, false);
 		}
 		k_msleep(100);
 	}

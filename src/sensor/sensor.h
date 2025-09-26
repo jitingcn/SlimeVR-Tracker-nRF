@@ -82,6 +82,7 @@ typedef struct sensor_imu {
 	void (*gyro_read)(float[3]); // deg/s
 	float (*temp_read)(void); // deg C
 
+	uint8_t (*setup_DRDY)(uint16_t);
 	uint8_t (*setup_WOM)(void);
 
 	int (*ext_setup)(void); // register write/writeread with interface, return 0 if success, -1 if error or not available
