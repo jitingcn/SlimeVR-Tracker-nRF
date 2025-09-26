@@ -1,0 +1,7 @@
+// Copyright (c) 2024 Nordic Semiconductor ASA
+// SPDX-License-Identifier: Apache-2.0
+
+/dts-v1/;
+#include "styria_mini_uf2.dts"
+
+/delete-node/ &spi3;
