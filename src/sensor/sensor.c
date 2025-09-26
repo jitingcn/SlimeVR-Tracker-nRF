@@ -326,7 +326,7 @@ int sensor_scan(void)
 	{
 		if (mag_id >= (int)ARRAY_SIZE(sensor_mags) || sensor_mags[mag_id] == NULL || sensor_mags[mag_id] == &sensor_mag_none)
 		{
-			sensor_mag = &sensor_mag_none; 
+			sensor_mag = &sensor_mag_none;
 			mag_available = false;
 			LOG_ERR("Magnetometer not supported");
 		}
@@ -338,7 +338,7 @@ int sensor_scan(void)
 	}
 	else
 	{
-		sensor_mag = &sensor_mag_none; 
+		sensor_mag = &sensor_mag_none;
 		mag_available = false; // marked as not available
 	}
 
@@ -375,7 +375,7 @@ int sensor_request_scan(bool force)
 	k_thread_create(&sensor_thread_id, sensor_thread_id_stack, K_THREAD_STACK_SIZEOF(sensor_thread_id_stack), (k_thread_entry_t)sensor_scan_thread, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
 	k_thread_join(&sensor_thread_id, K_FOREVER); // wait for the thread to finish
 	if (sensor_sensor_init && force)
-	{		
+	{
 		k_thread_create(&sensor_thread_id, sensor_thread_id_stack, K_THREAD_STACK_SIZEOF(sensor_thread_id_stack), (k_thread_entry_t)sensor_loop, NULL, NULL, NULL, 7, 0, K_NO_WAIT);
 		LOG_INF("Started sensor loop");
 	}
@@ -548,7 +548,7 @@ int sensor_init(void)
 	if (mag_available && mag_enabled)
 	{
 		// TODO: need to flag passthrough enabled
-//			sensor_imu->ext_passthrough(true); // reenable passthrough
+		sensor_imu->ext_passthrough(true); // reenable passthrough
 		err = sensor_mag->init(mag_initial_time, &mag_actual_time); // configure with ~200Hz ODR
 #if SENSOR_MAG_SPI_EXISTS
 		LOG_INF("Requested SPI frequency: %.2fMHz", (double)sensor_mag_spi_dev.config.frequency / 1000000.0);
@@ -722,7 +722,7 @@ void sensor_loop(void)
 					break;
 				};
 			}
-			
+
 			// Suspend devices
 			sys_interface_suspend();
 
@@ -751,15 +751,15 @@ void sensor_loop(void)
 					float gz = raw_g[2];
 					float g[] = {gx, gy, gz};
 
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION					
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 					// Apply sensitivity scaling
 					if (retained) {
 						g[0] *= retained->gyroSensScale[0];
 						g[1] *= retained->gyroSensScale[1];
 						g[2] *= retained->gyroSensScale[2];
 					}
-#endif	
-	
+#endif
+
 					// Process fusion
 					sensor_fusion->update_gyro(g, gyro_actual_time);
 
@@ -770,7 +770,7 @@ void sensor_loop(void)
 						sensor_fusion->get_gyro_bias(g_off);
 						for (int i = 0; i < 3; i++)
 							g_off[i] = g[i] - g_off[i];
-	
+
 						// Get the highest gyro speed
 						float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1] + g_off[2] * g_off[2];
 						if (gyro_speed_square > max_gyro_speed_square)
