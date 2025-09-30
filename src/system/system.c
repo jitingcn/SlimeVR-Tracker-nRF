@@ -128,13 +128,6 @@ static inline void sys_nvs_init(void)
 	fs.sector_size = info.size; // sector_size equal to the pagesize
 	fs.sector_count = 4U; // 4 sectors
 	int err = nvs_mount(&fs);
-	if (err == -EDEADLK)
-	{
-		LOG_WRN("All sectors closed, erasing all sectors...");
-		err = flash_flatten(fs.flash_device, fs.offset, fs.sector_size * fs.sector_count);
-		if (!err)
-			err = nvs_mount(&fs);
-	}
 	if (err)
 	{
 		LOG_ERR("Failed to mount NVS");
@@ -283,7 +276,7 @@ static const struct gpio_dt_spec button0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios
 static int64_t press_time = 0;
 static int64_t last_press_duration = 0;
 
-static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+static void button_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	bool pressed = button_read();
 	int64_t current_time = k_uptime_get();
@@ -300,7 +293,7 @@ static int sys_button_init(void)
 {
 	gpio_pin_configure_dt(&button0, GPIO_INPUT);
 	gpio_pin_interrupt_configure_dt(&button0, GPIO_INT_EDGE_BOTH);
-	gpio_init_callback(&button_cb_data, button_pressed, BIT(button0.pin));
+	gpio_init_callback(&button_cb_data, button_interrupt_handler, BIT(button0.pin));
 	gpio_add_callback(button0.port, &button_cb_data);
 	return 0;
 }

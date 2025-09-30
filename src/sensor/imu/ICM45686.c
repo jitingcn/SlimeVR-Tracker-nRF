@@ -45,10 +45,10 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	uint8_t ireg_buf[3];
 	ireg_buf[0] = ICM45686_IPREG_BAR; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_58;
-	ireg_buf[2] = 0x01; // disable internal pull resistors for AP pins
+	ireg_buf[2] = 0xD9 & ~0x48; // disable internal pull resistors for AP pins (pin 13, 12)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_59;
-	ireg_buf[2] = 0x00; // disable internal pull resistors for AP pins
+	ireg_buf[2] = 0xB6 & ~0x92; // disable internal pull resistors for AP pins (pin 7, 1, 14)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	ireg_buf[0] = ICM45686_IPREG_TOP1; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_SREG_CTRL;
@@ -71,6 +71,15 @@ void icm45_shutdown(void)
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Don't need to wait for ICM to finish reset
+//	k_msleep(1);
+	// TODO: not working
+//	uint8_t ireg_buf[3];
+//	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
+//	ireg_buf[2] = 0x6D & ~0x05; // set internal pull down resistors for AP pins (pin 10, 7)
+//	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
+//	ireg_buf[1] = ICM45686_IPREG_BAR_REG_61;
+//	ireg_buf[2] = 0xBB & ~0x10; // set internal pull down resistors for AP pins (pin 11)
+//	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	if (err)
 		LOG_ERR("Communication error");
 }
@@ -376,6 +385,18 @@ float icm45_temp_read(void)
 	return temp;
 }
 
+uint8_t icm45_setup_DRDY(uint16_t threshold)
+{
+	uint8_t buf[2];
+	buf[0] = threshold & 0xFF;
+	buf[1] = threshold >> 8;
+	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG1_0, buf, 2);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG0, 0x02); // FIFO threshold interrupt
+	if (err)
+		LOG_ERR("Communication error");
+	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
+}
+
 uint8_t icm45_setup_WOM(void) // TODO: check if working
 {
 	uint8_t interrupts;
@@ -431,6 +452,7 @@ const sensor_imu_t sensor_imu_icm45686 = {
 	*icm45_gyro_read,
 	*icm45_temp_read,
 
+	*icm45_setup_DRDY,
 	*icm45_setup_WOM,
 	
 	*imu_none_ext_setup,

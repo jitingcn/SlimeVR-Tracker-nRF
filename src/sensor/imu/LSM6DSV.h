@@ -6,8 +6,11 @@
 // https://www.st.com/resource/en/datasheet/lsm6dsv.pdf
 #define LSM6DSV_IF_CFG                     0x03
 
+#define LSM6DSV_FIFO_CTRL1                 0x07
 #define LSM6DSV_FIFO_CTRL3                 0x09
 #define LSM6DSV_FIFO_CTRL4                 0x0A
+
+#define LSM6DSV_INT1_CTRL                  0x0D
 
 #define LSM6DSV_CTRL1                      0x10
 #define LSM6DSV_CTRL2                      0x11
@@ -105,6 +108,7 @@ void lsm_accel_read(float a[3]);
 void lsm_gyro_read(float g[3]);
 float lsm_temp_read(void);
 
+uint8_t lsm_setup_DRDY(uint16_t threshold);
 uint8_t lsm_setup_WOM(void);
 
 int lsm_ext_setup(void);

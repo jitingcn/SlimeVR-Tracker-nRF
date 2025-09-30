@@ -40,6 +40,7 @@
 #define ICM42688_SMD_CONFIG                0x57
 
 #define ICM42688_FIFO_CONFIG1              0x5F
+#define ICM42688_FIFO_CONFIG2              0x60
 
 #define ICM42688_INT_SOURCE0               0x65
 #define ICM42688_INT_SOURCE1               0x66
@@ -120,6 +121,7 @@ void icm_accel_read(float a[3]);
 void icm_gyro_read(float g[3]);
 float icm_temp_read(void);
 
+uint8_t icm_setup_DRDY(uint16_t threshold);
 uint8_t icm_setup_WOM(void);
 
 extern const sensor_imu_t sensor_imu_icm42688;

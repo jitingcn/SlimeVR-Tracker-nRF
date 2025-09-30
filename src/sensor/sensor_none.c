@@ -80,6 +80,12 @@ float imu_none_temp_read(void)
 	return 0;
 }
 
+uint8_t imu_none_setup_DRDY(uint16_t threshold)
+{
+	LOG_DBG("imu_none_setup_DRDY, sensor has no IMU or IMU has no FIFO threshold/watermark support");
+	return 0;
+}
+
 uint8_t imu_none_setup_WOM(void)
 {
 	LOG_DBG("imu_none_setup_WOM, sensor has no IMU or IMU has no wake up support");
@@ -111,6 +117,7 @@ const sensor_imu_t sensor_imu_none = {
 	*imu_none_gyro_read,
 	*imu_none_temp_read,
 
+	*imu_none_setup_DRDY,
 	*imu_none_setup_WOM,
 	
 	*imu_none_ext_setup,

@@ -27,6 +27,7 @@
 #include "calibration.h"
 
 #include <math.h>
+#include <hal/nrf_gpio.h>
 
 #include "fusion/fusions.h"
 #include "sensors.h"
@@ -137,6 +138,13 @@ static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
 
 K_THREAD_DEFINE(sensor_init_thread_id, 256, sensor_request_scan, true, NULL, NULL, 7, 0, 0);
+
+#define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
+
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, int0_gpios)
+#define IMU_INT_EXISTS true
+static const struct gpio_dt_spec int0 = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, int0_gpios);
+#endif
 
 const char *sensor_get_sensor_imu_name(void)
 {
@@ -506,6 +514,20 @@ static void set_update_time_ms(int time_ms)
 	sensor_update_time_ms = time_ms; // TODO: terrible naming
 }
 
+bool main_wfi = false;
+
+static void sensor_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	// wake up sensor thread
+	if (main_wfi)
+	{
+		main_wfi = false;
+		k_wakeup(&sensor_thread_id);
+	}
+}
+
+static struct gpio_callback sensor_cb_data;
+
 int sensor_init(void)
 {
 	int err;
@@ -582,6 +604,27 @@ int sensor_init(void)
 		bmi_gain_apply(sensor_calibration_get_sensor_data());
 	}
 
+#if IMU_INT_EXISTS
+	// Setup interrupt
+	float sensor_actual_time = MIN(accel_actual_time, gyro_actual_time);
+	float sensor_fifo_threshold = 0.006f / sensor_actual_time; // target loop rate, hard set to 6ms/166hz // TODO:
+	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d", (double)sensor_fifo_threshold, (int)(sensor_fifo_threshold));
+	uint8_t pin_config = sensor_imu->setup_DRDY(sensor_fifo_threshold);
+	if (pin_config == 0)
+		return -1;
+	uint32_t int0_gpios = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
+	LOG_INF("FIFO THS/WM/WTM GPIO pin: %u, config: %u", int0_gpios, pin_config);
+	uint32_t pull_flags = ((pin_config >> 4) == NRF_GPIO_PIN_PULLDOWN ? GPIO_PULL_DOWN : 0) | ((pin_config >> 4) == NRF_GPIO_PIN_PULLUP ? GPIO_PULL_UP : 0);
+	gpio_pin_configure_dt(&int0, GPIO_INPUT | pull_flags);
+	uint32_t int_flags = ((pin_config & 0xF) == NRF_GPIO_PIN_SENSE_LOW ? GPIO_INT_EDGE_FALLING : 0) | ((pin_config & 0xF) == NRF_GPIO_PIN_SENSE_HIGH ? GPIO_INT_EDGE_RISING : 0);
+	gpio_pin_interrupt_configure_dt(&int0, int_flags);
+	gpio_init_callback(&sensor_cb_data, sensor_interrupt_handler, BIT(int0.pin));
+	gpio_add_callback(int0.port, &sensor_cb_data);
+#else
+	LOG_WRN("IMU FIFO THS/WM/WTM GPIO does not exist");
+	LOG_WRN("IMU FIFO THS/WM/WTM not available");
+#endif
+
 	LOG_INF("Using %s", fusion_names[fusion_id]);
 	LOG_INF("Initialized fusion");
 	sensor_fusion_init = true;
@@ -625,6 +668,8 @@ static uint64_t total_read_packets = 0;
 static uint64_t total_processed_packets = 0;
 static uint64_t total_gyro_samples = 0;
 static uint64_t total_accel_samples = 0;
+static uint64_t total_loop_time = 0;
+static uint64_t total_loop_iterations = 0;
 #endif
 
 void sensor_loop(void)
@@ -645,6 +690,9 @@ void sensor_loop(void)
 		int64_t time_begin = k_uptime_get();
 		if (main_ok)
 		{
+#if DEBUG
+			int64_t loop_begin = k_uptime_ticks();
+#endif
 			// Resume devices
 			sys_interface_resume();
 
@@ -884,7 +932,7 @@ void sensor_loop(void)
 					lin_a[i] = (a[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
 			}
 
-			// Check the IMU gyroscope // TODO: gyro sanity not used
+			// Check the IMU gyroscope // TODO: gyro sanity not used // TODO: timeouts and power management should be outside sensor! (ie. sleeping/shutdown even if the imu completely errored out)
 			bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
 			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005) : q_epsilon(q, last_q, 0.05); // TODO: Probably okay to use the constantly updating last_q?
 			if (!calibrating && resting)
@@ -944,6 +992,7 @@ void sensor_loop(void)
 			// Update magnetometer mode
 			if (mag_available && mag_enabled)
 			{
+				// TODO: magnetometer might be better to limit to a lower rate
 				float gyro_speed = sqrtf(max_gyro_speed_square);
 				float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
 				if (mag_target_time < 0.005f && mag_skip_oneshot) // only use continuous modes if oneshot is not available
@@ -977,7 +1026,7 @@ void sensor_loop(void)
 				sys_interface_suspend();
 			}
 
-			// Check if last status is outdated
+			// Check if last status is outdated // TODO: move logic to connection // TODO: make consolidated function at connection
 			if (!send_info && (k_uptime_get() - last_info_time > 100))
 			{
 				send_info = true;
@@ -996,34 +1045,37 @@ void sensor_loop(void)
 				q_multiply(q, q3, q_offset); // quaternion in device orientation, connection will change format from wxyz to xyzw
 				v_rotate(lin_a, q3, lin_a); // linear acceleration in local device frame, no other transformation will be done
 				connection_update_sensor_data(q_offset, lin_a);
-				if (send_info && !send_precise_quat) // prioritize quat precision
+				if (send_info && !send_precise_quat) // prioritize quat precision TODO: move logic to connection
 				{
-					connection_write_packet_2();
+					connection_write_packet_2(); // TODO: make consolidated function at connection
 					send_info = false;
 				}
-				else if (mag_available && mag_enabled && k_uptime_get() - last_mag_time > 200) // try to send mag data every 200ms
+				else if (mag_available && mag_enabled && k_uptime_get() - last_mag_time > 200) // try to send mag data every 200ms TODO: move logic to connection
 				{
-					connection_write_packet_4();
+					connection_write_packet_4(); // TODO: make consolidated function at connection
 					last_mag_time = k_uptime_get();
 				}
 				else
 				{
-					connection_write_packet_1();
+					connection_write_packet_1(); // TODO: make consolidated function at connection
 				}
 			}
 			else if (send_info)
 			{
-				connection_write_packet_0();
 				send_info = false;
-			}
-			else
-			{
-				connection_clocks_request_stop();
 			}
 
 			// Handle magnetometer calibration
 			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
 				sensor_request_calibration_mag();
+				
+#if DEBUG
+			if (valid_acquisition)
+			{
+				total_loop_time += k_uptime_ticks() - loop_begin;
+				total_loop_iterations++;
+			}
+#endif
 		}
 
 		main_running = false;
@@ -1041,16 +1093,28 @@ void sensor_loop(void)
 				max_loop_time = 0;
 			}
 #if DEBUG
-			LOG_DBG("packets read: %llu, processed: %llu, gyro samples: %llu, accel samples: %llu, total acquisition time: %lld us", total_read_packets, total_processed_packets, total_gyro_samples, total_accel_samples, k_ticks_to_us_near64(total_acquisition_time));
+			LOG_DBG("loop iterations: %llu, packets read: %llu, processed: %llu, gyro samples: %llu, accel samples: %llu, total acquisition time: %lld us, total loop time: %lld us", total_loop_iterations, total_read_packets, total_processed_packets, total_gyro_samples, total_accel_samples, k_ticks_to_us_near64(total_acquisition_time), k_ticks_to_us_near64(total_loop_time));
+			LOG_DBG("sensor loop rate: %.2fHz, processing time: %.2f/%.2f us -> %.2f%%", (double)total_loop_iterations / (double)k_ticks_to_us_near64(total_acquisition_time) * 1000000.0, (double)k_ticks_to_us_near64(total_loop_time) / (double)total_loop_iterations, (double)k_ticks_to_us_near64(total_acquisition_time) / (double)total_loop_iterations, (double)total_loop_time / (double)total_acquisition_time * 100.0);
 			LOG_DBG("reported gyro rate: %.2fHz, actual: %.2fHz, reported accel rate: %.2fHz, actual: %.2fHz", 1.0 / (double)gyro_actual_time, (double)total_gyro_samples / (double)k_ticks_to_us_near64(total_acquisition_time) * 1000000.0, 1.0 / (double)accel_actual_time, (double)total_accel_samples / (double)k_ticks_to_us_near64(total_acquisition_time) * 1000000.0);
 #endif
 		}
 
+#if IMU_INT_EXISTS
+		main_wfi = true; // TODO: this is terrible
+		k_msleep(50); // will be resumed by interrupt // TODO: dont use hard timeout // TODO: need to use sensor_update_time_ms
+		if (main_wfi) // timeout
+		{
+			LOG_WRN("Sensor interrupt timeout");
+			main_wfi = false;
+		}
+#else
+		// TODO: old behavior
 //		led_clock_offset += time_delta;
 		if (time_delta > sensor_update_time_ms)
 			k_yield();
 		else
 			k_msleep(sensor_update_time_ms - time_delta);
+#endif
 
 		if (main_suspended) // TODO:
 			k_thread_suspend(&sensor_thread_id);

@@ -4,8 +4,11 @@
 #include "sensor/sensor.h"
 
 // https://www.st.com/resource/en/datasheet/lsm6dsm.pdf
+#define LSM6DSM_FIFO_CTRL1                 0x06
 #define LSM6DSM_FIFO_CTRL3                 0x08
 #define LSM6DSM_FIFO_CTRL5                 0x0A
+
+#define LSM6DSM_INT1_CTRL                  0x0D
 
 #define LSM6DSM_CTRL1                      0x10
 #define LSM6DSM_CTRL2                      0x11
@@ -64,6 +67,7 @@ int lsm6dsm_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len);
 uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len);
 
+uint8_t lsm6dsm_setup_DRDY(uint16_t threshold);
 uint8_t lsm6dsm_setup_WOM(void);
 
 extern const sensor_imu_t sensor_imu_lsm6dsm;
