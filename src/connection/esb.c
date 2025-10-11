@@ -80,6 +80,7 @@ void event_handler(struct esb_evt const *event)
 			clocks_stop();
 		break;
 	case ESB_EVENT_RX_RECEIVED:
+		// TODO: have to read rx until -ENODATA (or -EACCES/-EINVAL)
 		if (!esb_read_rx_payload(&rx_payload)) // zero, rx success
 		{
 			if (!paired_addr[0]) // zero, not paired
@@ -211,6 +212,12 @@ void clocks_request_stop(uint32_t delay_us)
 
 // this was randomly generated
 // TODO: I have no idea?
+// TODO: see esb information, check CONFIG_ESB_PIPE_COUNT
+/*
+base_addr_p0: Base address for pipe 0, in big endian.
+base_addr_p1: Base address for pipe 1-7, in big endian.
+pipe_prefixes: Address prefix for pipe 0 to 7.
+*/
 static const uint8_t discovery_base_addr_0[4] = {0x62, 0x39, 0x8A, 0xF2};
 static const uint8_t discovery_base_addr_1[4] = {0x28, 0xFF, 0x50, 0xB8};
 static const uint8_t discovery_addr_prefix[8] = {0xFE, 0xFF, 0x29, 0x27, 0x09, 0x02, 0xB2, 0xD6};

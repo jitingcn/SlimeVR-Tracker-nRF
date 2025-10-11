@@ -82,8 +82,6 @@ static float last_lin_a[3] = {0}; // vector to hold last linear accelerometer
 
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
-static int64_t last_info_time;
-static int64_t last_mag_time;
 
 static float max_gyro_speed_square;
 static bool mag_use_oneshot;
@@ -92,6 +90,10 @@ static bool mag_skip_oneshot;
 static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
+
+static float sensor_actual_time;
+static int16_t sensor_fifo_threshold;
+static int64_t sensor_data_time; // ticks
 
 static bool sensor_fusion_init;
 static bool sensor_sensor_init;
@@ -511,6 +513,14 @@ int sensor_update_time_ms = 6;
 // TODO: get rid of it.. ?
 static void set_update_time_ms(int time_ms)
 {
+	// TODO: maybe not get rid of it? it is now repurposed to also change FIFO threshold
+	// TODO: return pin_config and replace call in sensor_init
+#if IMU_INT_EXISTS
+	float fifo_threshold = time_ms / 1000.0f / sensor_actual_time; // target loop rate
+	sensor_fifo_threshold = fifo_threshold;
+	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d", (double)fifo_threshold, sensor_fifo_threshold);
+	sensor_imu->setup_DRDY(sensor_fifo_threshold); // do not need to reset pin config
+#endif
 	sensor_update_time_ms = time_ms; // TODO: terrible naming
 }
 
@@ -521,6 +531,8 @@ static void sensor_interrupt_handler(const struct device *dev, struct gpio_callb
 	// wake up sensor thread
 	if (main_wfi)
 	{
+		// Use to time latency
+		sensor_data_time = k_uptime_ticks();
 		main_wfi = false;
 		k_wakeup(&sensor_thread_id);
 	}
@@ -559,6 +571,7 @@ int sensor_init(void)
 	float gyro_initial_time = 1.0 / CONFIG_SENSOR_GYRO_ODR; // configure with ~1000Hz ODR
 	float mag_initial_time = sensor_update_time_ms / 1000.0; // configure with ~200Hz ODR
 	err = sensor_imu->init(clock_actual_rate, accel_initial_time, gyro_initial_time, &accel_actual_time, &gyro_actual_time);
+	sensor_actual_time = MIN(accel_actual_time, gyro_actual_time);
 #if SENSOR_IMU_SPI_EXISTS
 	LOG_INF("Requested SPI frequency: %.2fMHz", (double)sensor_imu_spi_dev.config.frequency / 1000000.0);
 #endif
@@ -606,9 +619,9 @@ int sensor_init(void)
 
 #if IMU_INT_EXISTS
 	// Setup interrupt
-	float sensor_actual_time = MIN(accel_actual_time, gyro_actual_time);
-	float sensor_fifo_threshold = 0.006f / sensor_actual_time; // target loop rate, hard set to 6ms/166hz // TODO:
-	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d", (double)sensor_fifo_threshold, (int)(sensor_fifo_threshold));
+	float fifo_threshold = sensor_update_time_ms / 1000.0f / sensor_actual_time; // target loop rate
+	sensor_fifo_threshold = fifo_threshold;
+	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d", (double)fifo_threshold, sensor_fifo_threshold);
 	uint8_t pin_config = sensor_imu->setup_DRDY(sensor_fifo_threshold);
 	if (pin_config == 0)
 		return -1;
@@ -651,7 +664,6 @@ enum sensor_sensor_timeout {
 static enum sensor_sensor_timeout sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 
 static bool main_ok = false;
-static bool send_info = false;
 
 static int packet_errors = 0;
 
@@ -754,6 +766,7 @@ void sensor_loop(void)
 
 			if (reconfig) // TODO: get rid of reconfig?
 			{
+				// Changing FIFO threshold here should be fine since FIFO is empty now
 				switch (sensor_mode)
 				{
 				case SENSOR_SENSOR_MODE_LOW_NOISE:
@@ -913,6 +926,10 @@ void sensor_loop(void)
 				packet_errors = 0;
 			}
 
+			// Also check if expected number of packets when using FIFO threshold
+			if (processed_packets && processed_packets != sensor_fifo_threshold)
+				LOG_WRN("Expected %d packets, processed %d", sensor_fifo_threshold, processed_packets);
+
 			// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
 //			sensor_fusion->update_gyro_sanity(g, m);
 
@@ -992,7 +1009,7 @@ void sensor_loop(void)
 			// Update magnetometer mode
 			if (mag_available && mag_enabled)
 			{
-				// TODO: magnetometer might be better to limit to a lower rate
+				// TODO: magnetometer might be better to limit to a lower (fixed) rate
 				float gyro_speed = sqrtf(max_gyro_speed_square);
 				float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
 				if (mag_target_time < 0.005f && mag_skip_oneshot) // only use continuous modes if oneshot is not available
@@ -1026,43 +1043,17 @@ void sensor_loop(void)
 				sys_interface_suspend();
 			}
 
-			// Check if last status is outdated // TODO: move logic to connection // TODO: make consolidated function at connection
-			if (!send_info && (k_uptime_get() - last_info_time > 100))
-			{
-				send_info = true;
-				last_info_time = k_uptime_get();
-			}
-
-			// Send packet with new orientation
+			// Update orientation
 			bool send_quat_data = !q_epsilon(q, last_q, 0.001);
 			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05);
 			if (send_quat_data || send_lin_accel_data)
 			{
-				bool send_precise_quat = q_epsilon(q, last_q, 0.005);
 				memcpy(last_q, q, sizeof(q));
 				memcpy(last_lin_a, lin_a, sizeof(lin_a));
 				float q_offset[4];
 				q_multiply(q, q3, q_offset); // quaternion in device orientation, connection will change format from wxyz to xyzw
 				v_rotate(lin_a, q3, lin_a); // linear acceleration in local device frame, no other transformation will be done
-				connection_update_sensor_data(q_offset, lin_a);
-				if (send_info && !send_precise_quat) // prioritize quat precision TODO: move logic to connection
-				{
-					connection_write_packet_2(); // TODO: make consolidated function at connection
-					send_info = false;
-				}
-				else if (mag_available && mag_enabled && k_uptime_get() - last_mag_time > 200) // try to send mag data every 200ms TODO: move logic to connection
-				{
-					connection_write_packet_4(); // TODO: make consolidated function at connection
-					last_mag_time = k_uptime_get();
-				}
-				else
-				{
-					connection_write_packet_1(); // TODO: make consolidated function at connection
-				}
-			}
-			else if (send_info)
-			{
-				send_info = false;
+				connection_update_sensor_data(q_offset, lin_a, sensor_data_time);
 			}
 
 			// Handle magnetometer calibration
@@ -1100,8 +1091,9 @@ void sensor_loop(void)
 		}
 
 #if IMU_INT_EXISTS
+		sensor_data_time = 0; // reset data time
 		main_wfi = true; // TODO: this is terrible
-		k_msleep(50); // will be resumed by interrupt // TODO: dont use hard timeout // TODO: need to use sensor_update_time_ms
+		k_msleep(sensor_update_time_ms + 10); // will be resumed by interrupt // TODO: dont use hard timeout
 		if (main_wfi) // timeout
 		{
 			LOG_WRN("Sensor interrupt timeout");
