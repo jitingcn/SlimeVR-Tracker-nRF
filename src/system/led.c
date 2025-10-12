@@ -16,6 +16,11 @@ K_THREAD_DEFINE(led_thread_id, 512, led_thread, NULL, NULL, NULL, 6, 0, 0);
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, led_en_gpios)
+#define LED_EN_EXISTS true
+static const struct gpio_dt_spec led_en = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, led_en_gpios);
+#endif
+
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, led_gpios)
 #define LED_EXISTS true
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, led_gpios);
@@ -125,11 +130,21 @@ static void led_suspend(void)
 	pm_device_action_run(pwm_led2.dev, PM_DEVICE_ACTION_SUSPEND);
 #endif
 	led_pin_reset();
+	// disable power
+#if LED_EN_EXISTS
+	gpio_pin_configure_dt(&led_en, GPIO_OUTPUT);
+	gpio_pin_set_dt(&led_en, 0);
+#endif
 }
 
 static void led_resume(void)
 {
 	LOG_DBG("led_resume");
+	// enable power
+#if LED_EN_EXISTS
+	gpio_pin_configure_dt(&led_en, GPIO_OUTPUT);
+	gpio_pin_set_dt(&led_en, 1);
+#endif
 #ifdef PWM_LED_EXISTS
 	pm_device_action_run(pwm_led.dev, PM_DEVICE_ACTION_RESUME);
 #endif
