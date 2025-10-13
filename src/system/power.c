@@ -13,6 +13,9 @@
 #include <zephyr/sys/reboot.h>
 #include <hal/nrf_gpio.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/device.h>
+#include <hal/nrf_spim.h>
+#include <hal/nrf_twim.h>
 
 #include "power.h"
 
@@ -67,6 +70,24 @@ static const struct gpio_dt_spec dcdc_en = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, dc
 static const struct gpio_dt_spec ldo_en = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, ldo_gpios);
 #else
 #pragma message "LDO enable GPIO does not exist"
+#endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, pwr_gpios)
+#define PWR_EXISTS true
+static const struct gpio_dt_spec pwr = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, pwr_gpios);
+#else
+#pragma message "Power GPIO does not exist"
+#endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, int0_gpios)
+#define INT0_EXISTS true
+static const struct gpio_dt_spec int0 = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, int0_gpios);
+#else
+#pragma message "INT0 GPIO does not exist"
+#endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, clk_gpios)
+#define CLK_EXISTS true
+static const struct gpio_dt_spec clk = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, clk_gpios);
+#else
+#pragma message "CLK GPIO does not exist"
 #endif
 
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
@@ -157,6 +178,85 @@ static void set_regulator(enum sys_regulator regulator)
 #endif
 }
 
+static void disconnect_sensor_pins(void)
+{
+#if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
+	LOG_INF("Disconnecting sensor GPIOs");
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(i2c0))
+	const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
+	if (device_is_ready(i2c_dev)) {
+		NRF_TWIM_Type *twim = (NRF_TWIM_Type *)DT_REG_ADDR(DT_NODELABEL(i2c0));
+
+		uint32_t scl_pin = twim->PSEL.SCL;
+		uint32_t sda_pin = twim->PSEL.SDA;
+
+		if (!(scl_pin & (1UL << 31))) {
+			uint32_t scl_pin_num = scl_pin & 0x1F;
+			nrf_gpio_cfg_default(scl_pin_num);
+			LOG_INF("Disconnected I2C SCL pin %u", scl_pin_num);
+		}
+
+		if (!(sda_pin & (1UL << 31))) {
+			uint32_t sda_pin_num = sda_pin & 0x1F;
+			nrf_gpio_cfg_default(sda_pin_num);
+			LOG_INF("Disconnected I2C SDA pin %u", sda_pin_num);
+		}
+	}
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi3))
+	const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi3));
+	if (device_is_ready(spi_dev)) {
+		NRF_SPIM_Type *spim = (NRF_SPIM_Type *)DT_REG_ADDR(DT_NODELABEL(spi3));
+
+		uint32_t sck_pin = spim->PSEL.SCK;
+		uint32_t mosi_pin = spim->PSEL.MOSI;
+		uint32_t miso_pin = spim->PSEL.MISO;
+
+		if (!(sck_pin & (1UL << 31))) {
+			uint32_t sck_pin_num = sck_pin & 0x1F;
+			nrf_gpio_cfg_default(sck_pin_num);
+			LOG_INF("Disconnected SPI SCK pin %u", sck_pin_num);
+		}
+
+		if (!(mosi_pin & (1UL << 31))) {
+			uint32_t mosi_pin_num = mosi_pin & 0x1F;
+			nrf_gpio_cfg_default(mosi_pin_num);
+			LOG_INF("Disconnected SPI MOSI pin %u", mosi_pin_num);
+		}
+
+		if (!(miso_pin & (1UL << 31))) {
+			uint32_t miso_pin_num = miso_pin & 0x1F;
+			nrf_gpio_cfg_default(miso_pin_num);
+			LOG_INF("Disconnected SPI MISO pin %u", miso_pin_num);
+		}
+
+#if DT_NODE_HAS_PROP(DT_NODELABEL(spi3), cs_gpios)
+		const struct gpio_dt_spec cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi3), cs_gpios, 0);
+		if (device_is_ready(cs.port)) {
+			gpio_pin_configure_dt(&cs, GPIO_DISCONNECTED);
+			LOG_INF("Disconnected SPI CS pin %u", cs.pin);
+		}
+#endif
+	}
+#endif
+
+#if PWR_EXISTS
+	gpio_pin_configure_dt(&pwr, GPIO_DISCONNECTED);
+	LOG_INF("Disconnected power GPIO");
+#endif
+#if INT0_EXISTS
+	gpio_pin_configure_dt(&int0, GPIO_DISCONNECTED);
+	LOG_INF("Disconnected INT0 GPIO");
+#endif
+#if CLK_EXISTS
+	gpio_pin_configure_dt(&clk, GPIO_DISCONNECTED);
+	LOG_INF("Disconnected CLK GPIO");
+#endif
+
+	LOG_INF("All sensor GPIO pins disconnected");
+#endif
+}
+
 static void wait_for_logging(void)
 {
 #if CONFIG_LOG_BACKEND_UART
@@ -238,6 +338,9 @@ void sys_request_system_off(void) // TODO: add timeout
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
 	LOG_INF("Powering off nRF");
+#if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
+	disconnect_sensor_pins();
+#endif
 	sys_update_battery_tracker(current_battery_pptt, device_plugged);
 //	retained_update();
 	wait_for_logging();

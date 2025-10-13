@@ -168,7 +168,7 @@ config USE_ACTIVE_TIMEOUT
     help
         Delay IMU wake up state or user shutdown during activity.
 
-choice 
+choice
     prompt "Activity timeout mode"
     default SLEEP_ON_ACTIVE_TIMEOUT
     depends on USE_ACTIVE_TIMEOUT
@@ -200,6 +200,13 @@ config ACTIVE_TIMEOUT_DELAY
     depends on USE_ACTIVE_TIMEOUT
     help
         Activity timeout duration when triggered.
+
+config DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
+    bool "Disable Sensor GPIOs on shutdown"
+    default y
+    help
+        Disable all sensor related GPIOs when system shutdown.
+        May reduce power consumption.
 
 endmenu
 
