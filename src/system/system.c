@@ -150,7 +150,7 @@ static int sys_retained_init(void)
 		ram_retention_valid = true;
 	// All contents of NVS was stored in RAM to not need initializing NVS often
 	if (!retained_validate()) // Check ram retention
-	{ 
+	{
 		LOG_WRN("Invalidated RAM");
 		sys_nvs_init();
 		// read from nvs to retained
@@ -236,7 +236,7 @@ void sys_read(uint16_t id, void *data, size_t len)
 
 void sys_clear(void)
 {
-	
+
 	static bool reset_confirm = false;
 	if (!reset_confirm)
 	{
@@ -459,8 +459,13 @@ void sys_reset_mode(uint8_t mode)
 		esb_reset_pair();
 		break;
 #if DFU_EXISTS // Using DFU bootloader
+#if !defined(CONFIG_BOARD_STYRIA_MINI_UF2)
 	case 3:
 	case 4: // Reset mode DFU
+#else
+  case 5:
+  case 6: // Reset mode DFU
+#endif
 		LOG_INF("DFU requested");
 #if ADAFRUIT_BOOTLOADER
 		NRF_POWER->GPREGRET = 0x57; // DFU_MAGIC_UF2_RESET

@@ -169,18 +169,18 @@ static void print_connection(void)
 				float scale_x = retained->gyroSensScale[0];
 				float scale_y = retained->gyroSensScale[1];
 				float scale_z = retained->gyroSensScale[2];
-			
+
 				// Calculate the approximate input degrees difference based on the stored scale factor
 				// degrees = (1.0 - (1.0 / scale)) * 360.0 * number of revolutions
 				float deg_x = (1.0f - (1.0f / scale_x)) * (360.0f * CONFIG_SENSOR_SENS_REV);
 				float deg_y = (1.0f - (1.0f / scale_y)) * (360.0f * CONFIG_SENSOR_SENS_REV);
 				float deg_z = (1.0f - (1.0f / scale_z)) * (360.0f * CONFIG_SENSOR_SENS_REV);
-		
+
 				printk("Gyroscope sensitivity (degrees diff over %u rev): %.3f %.3f %.3f\n", (int)CONFIG_SENSOR_SENS_REV, (double)deg_x, (double)deg_y, (double)deg_z);
 			} else {
 				printk("Gyroscope sensitivity: Retained data unavailable.\n");
 		}
-#endif		
+#endif
 	printk(paired ? "Receiver address: %012llX\n" : "Receiver address: None\n", (*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
 }
 
@@ -342,6 +342,7 @@ static void print_meow(void)
 
 static void console_thread(void)
 {
+#if !defined(CONFIG_BOARD_STYRIA_MINI_UF2)
 #if USB_EXISTS && DFU_EXISTS
 	if (button_read()) // button held on usb connect, enter DFU
 	{
@@ -353,6 +354,7 @@ static void console_thread(void)
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
 #endif
 	}
+#endif
 #endif
 
 #if USB_EXISTS
@@ -369,7 +371,7 @@ static void console_thread(void)
 	printk("battery                      Get battery information\n");
 	printk("scan                         Restart sensor scan\n");
 	printk("calibrate                    Calibrate sensor ZRO\n");
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION	
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	printk("sens <x>,<y>,<z>             Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
 	printk("sens reset                   Reset gyro sensitivity calibration\n");
 #endif
@@ -410,7 +412,7 @@ static void console_thread(void)
 	printk("meow                         Meow!\n");
 
 	uint8_t command_meow[] = "meow";
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION	
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	uint8_t command_sens[] = "sens";
 #endif
 
@@ -472,7 +474,7 @@ static void console_thread(void)
 		{
 			sensor_request_calibration();
 		}
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION		
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 		else if (memcmp(line, command_sens, sizeof(command_sens)) == 0)
 		{
 			// check if there are any arguments at all.
@@ -511,7 +513,7 @@ static void console_thread(void)
 					token = strtok(NULL, ",");
 				}
 
-				if (token_count == 3) { 
+				if (token_count == 3) {
 					if (retained) {
 						float deg_x = values[0];
 						float deg_y = values[1];
@@ -541,7 +543,7 @@ static void console_thread(void)
 				}
 			}
 		}
-#endif			
+#endif
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 		else if (memcmp(line, command_6_side, sizeof(command_6_side)) == 0)
 		{
@@ -554,7 +556,7 @@ static void console_thread(void)
 			sensor_calibration_clear_mag(NULL, true);
 		}
 #endif
-		else if (memcmp(line, command_set, sizeof(command_set)) == 0) 
+		else if (memcmp(line, command_set, sizeof(command_set)) == 0)
 		{
 			uint64_t addr = strtoull(arg, NULL, 16);
 			uint8_t buf[17];
@@ -564,11 +566,11 @@ static void console_thread(void)
 			else
 				printk("Invalid address\n");
 		}
-		else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) 
+		else if (memcmp(line, command_pair, sizeof(command_pair)) == 0)
 		{
 			esb_reset_pair();
 		}
-		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) 
+		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0)
 		{
 			esb_clear_pair();
 		}
@@ -584,7 +586,7 @@ static void console_thread(void)
 #endif
 		}
 #endif
-		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) 
+		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0)
 		{
 			print_meow();
 		}
