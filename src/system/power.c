@@ -89,6 +89,12 @@ static const struct gpio_dt_spec clk = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, clk_gp
 #else
 #pragma message "CLK GPIO does not exist"
 #endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, vcc_gpios)
+#define VCC_EXISTS true
+static const struct gpio_dt_spec vcc = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, vcc_gpios);
+#else
+#pragma message "VCC GPIO does not exist"
+#endif
 
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
 
@@ -112,46 +118,56 @@ static void sys_disconnect_interface_pins(void)
 	TODO: for promicro, leaving ext_vcc on draws ~50uA, disconnect works, pulldown may be more reliable
 	what to do about boards that use ext_vcc? it is not expected to leave on during WOM
 */
+#if PWR_EXISTS
+	LOG_INF("Power GPIO pin: %u", pwr.pin);
+	nrf_gpio_cfg_default(pwr.pin);
+	LOG_INF("Disconnected power GPIO");
+#endif
+#if VCC_EXISTS
+	LOG_INF("VCC GPIO pin: %u", vcc.pin);
+	nrf_gpio_cfg_default(vcc.pin);
+	LOG_INF("Disconnected VCC GPIO");
+#endif
 }
 
 void sys_interface_suspend(void)
 {
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
-// 	const struct device *const pm_spi_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi)));
-// 	pm_device_action_run(pm_spi_imu, PM_DEVICE_ACTION_SUSPEND);
-// #endif
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
-// 	const struct device *const pm_i2c_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu)));
-// 	pm_device_action_run(pm_i2c_imu, PM_DEVICE_ACTION_SUSPEND);
-// #endif
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
-// 	const struct device *const pm_spi_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi)));
-// 	pm_device_action_run(pm_spi_mag, PM_DEVICE_ACTION_SUSPEND);
-// #endif
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
-// 	const struct device *const pm_i2c_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag)));
-// 	pm_device_action_run(pm_i2c_mag, PM_DEVICE_ACTION_SUSPEND);
-// #endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
+	const struct device *const pm_spi_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi)));
+	pm_device_action_run(pm_spi_imu, PM_DEVICE_ACTION_SUSPEND);
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
+	const struct device *const pm_i2c_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu)));
+	pm_device_action_run(pm_i2c_imu, PM_DEVICE_ACTION_SUSPEND);
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
+	const struct device *const pm_spi_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi)));
+	pm_device_action_run(pm_spi_mag, PM_DEVICE_ACTION_SUSPEND);
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
+	const struct device *const pm_i2c_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag)));
+	pm_device_action_run(pm_i2c_mag, PM_DEVICE_ACTION_SUSPEND);
+#endif
 }
 
 void sys_interface_resume(void)
 {
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
-// 	const struct device *const pm_spi_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi)));
-// 	pm_device_action_run(pm_spi_imu, PM_DEVICE_ACTION_RESUME);
-// #endif
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
-// 	const struct device *const pm_i2c_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu)));
-// 	pm_device_action_run(pm_i2c_imu, PM_DEVICE_ACTION_RESUME);
-// #endif
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
-// 	const struct device *const pm_spi_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi)));
-// 	pm_device_action_run(pm_spi_mag, PM_DEVICE_ACTION_RESUME);
-// #endif
-// #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
-// 	const struct device *const pm_i2c_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag)));
-// 	pm_device_action_run(pm_i2c_mag, PM_DEVICE_ACTION_RESUME);
-// #endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
+	const struct device *const pm_spi_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi)));
+	pm_device_action_run(pm_spi_imu, PM_DEVICE_ACTION_RESUME);
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
+	const struct device *const pm_i2c_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu)));
+	pm_device_action_run(pm_i2c_imu, PM_DEVICE_ACTION_RESUME);
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
+	const struct device *const pm_spi_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi)));
+	pm_device_action_run(pm_spi_mag, PM_DEVICE_ACTION_RESUME);
+#endif
+#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
+	const struct device *const pm_i2c_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag)));
+	pm_device_action_run(pm_i2c_mag, PM_DEVICE_ACTION_RESUME);
+#endif
 }
 
 // TODO: the gpio sense is weird, maybe the device will turn back on immediately after shutdown or after (attempting to) enter WOM
@@ -262,18 +278,18 @@ static void disconnect_sensor_pins(void)
 	}
 #endif
 
-#if PWR_EXISTS
-	gpio_pin_configure_dt(&pwr, GPIO_DISCONNECTED);
-	LOG_INF("Disconnected power GPIO");
-#endif
-#if INT0_EXISTS
-	gpio_pin_configure_dt(&int0, GPIO_DISCONNECTED);
-	LOG_INF("Disconnected INT0 GPIO");
-#endif
-#if CLK_EXISTS
-	gpio_pin_configure_dt(&clk, GPIO_DISCONNECTED);
-	LOG_INF("Disconnected CLK GPIO");
-#endif
+// #if PWR_EXISTS
+// 	gpio_pin_configure_dt(&pwr, GPIO_DISCONNECTED);
+// 	LOG_INF("Disconnected power GPIO");
+// #endif
+// #if INT0_EXISTS
+// 	gpio_pin_configure_dt(&int0, GPIO_DISCONNECTED);
+// 	LOG_INF("Disconnected INT0 GPIO");
+// #endif
+// #if CLK_EXISTS
+// 	gpio_pin_configure_dt(&clk, GPIO_DISCONNECTED);
+// 	LOG_INF("Disconnected CLK GPIO");
+// #endif
 
 	LOG_INF("All sensor GPIO pins disconnected");
 #endif
