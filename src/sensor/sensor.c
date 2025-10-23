@@ -140,6 +140,7 @@ static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
 
 K_THREAD_DEFINE(sensor_init_thread_id, 256, sensor_request_scan, true, NULL, NULL, 7, 0, 0);
+//crashing on nrf54l at 256
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
@@ -767,6 +768,7 @@ void sensor_loop(void)
 			if (reconfig) // TODO: get rid of reconfig?
 			{
 				// Changing FIFO threshold here should be fine since FIFO is empty now
+				// TODO: causing warnings since packet processing and loop timing still expects previous update_time
 				switch (sensor_mode)
 				{
 				case SENSOR_SENSOR_MODE_LOW_NOISE:

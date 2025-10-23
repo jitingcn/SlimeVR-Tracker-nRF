@@ -92,6 +92,28 @@ static const struct gpio_dt_spec clk = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, clk_gp
 
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
 
+static void sys_disconnect_interface_pins(void)
+{
+	// interface pins are disconnected according to devicetree, so only need to disconnect any cs pins
+	// int pin already configured by power off
+#if DT_SPI_DEV_HAS_CS_GPIOS(DT_NODELABEL(imu_spi))
+	uint32_t imu_cs_gpios = DT_SPI_DEV_CS_GPIOS_PIN(DT_NODELABEL(imu_spi));
+	LOG_INF("IMU CS GPIO pin: %u", imu_cs_gpios);
+	nrf_gpio_cfg_default(imu_cs_gpios);
+	LOG_INF("Disconnected IMU CS GPIO");
+#endif
+#if DT_SPI_DEV_HAS_CS_GPIOS(DT_NODELABEL(mag_spi))
+	uint32_t mag_cs_gpios = DT_SPI_DEV_CS_GPIOS_PIN(DT_NODELABEL(mag_spi)));
+	LOG_INF("Magnetometer CS GPIO pin: %u", mag_cs_gpios);
+	nrf_gpio_cfg_default(mag_cs_gpios);
+	LOG_INF("Disconnected Magnetometer CS GPIO");
+#endif
+/*
+	TODO: for promicro, leaving ext_vcc on draws ~50uA, disconnect works, pulldown may be more reliable
+	what to do about boards that use ext_vcc? it is not expected to leave on during WOM
+*/
+}
+
 void sys_interface_suspend(void)
 {
 // #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
@@ -337,6 +359,15 @@ void sys_request_system_off(void) // TODO: add timeout
 //	sensor_retained_write();
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
+#if IMU_INT_EXISTS
+	// Configure interrupt pin as it is not used
+	uint32_t int0_gpios = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
+	LOG_INF("Wake up GPIO pin: %u", int0_gpios);
+	nrf_gpio_cfg(int0_gpios, NRF_GPIO_PIN_DIR_INPUT, NRF_GPIO_PIN_INPUT_DISCONNECT, NRF_GPIO_PIN_PULLDOWN, NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_NOSENSE);
+	LOG_INF("Disconnected IMU wake up GPIO");
+#endif
+	// Disconnect remaining interface pins // TODO: only an improvement during shutdown? causes higher usage in WOM
+	sys_disconnect_interface_pins();
 	LOG_INF("Powering off nRF");
 #if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
 	disconnect_sensor_pins();

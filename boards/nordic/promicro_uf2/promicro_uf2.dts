@@ -118,7 +118,7 @@
 		int0-gpios = <&gpio0 2 0>;
 		led-gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
 		clk-gpios = <&gpio1 11 GPIO_OPEN_DRAIN>; // Uncomment and set to correct pin if using an external clock (crystal oscillator)
-		vcc-gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;
+		vcc-gpios = <&gpio0 31 0>;
 	};
 
 };

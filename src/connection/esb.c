@@ -449,7 +449,9 @@ bool esb_ready(void)
 
 static void esb_thread(void)
 {
+#if CONFIG_CONNECTION_OVER_HID
 	int64_t start_time = k_uptime_get();
+#endif
 
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
