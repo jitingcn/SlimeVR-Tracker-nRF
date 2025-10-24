@@ -120,6 +120,17 @@ void apply_BAinv(float xyz[3], float BAinv[4][3]) {
 	xyz[2] = BAinv[3][0] * temp[0] + BAinv[3][1] * temp[1] + BAinv[3][2] * temp[2];
 }
 
+// using xiofusion FusionAhrsGetLinearAcceleration as reference
+void a_to_lin_a(const float *q, const float *a, float *lin_a)
+{
+	float vec_gravity[3] = {0};
+	vec_gravity[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]);
+	vec_gravity[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
+	vec_gravity[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
+	for (int i = 0; i < 3; i++)
+		lin_a[i] = (a[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
+}
+
 // http://marc-b-reynolds.github.io/quaternions/2017/05/02/QuatQuantPart1.html#fnref:pos:3
 // https://github.com/Marc-B-Reynolds/Stand-alone-junk/blob/559bd78893a3a95cdee1845834c632141b945a45/src/Posts/quatquant0.c#L898
 void q_fem(const float* q, float* out) {
