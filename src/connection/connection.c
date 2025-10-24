@@ -34,9 +34,10 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-static volatile uint8_t data_buffer[20] = {0}; // 16 bytes data + 4 bytes CRC32
+static volatile uint8_t data_buffer[21] = {0}; // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
 static atomic_t packet_generation = ATOMIC_INIT(0);
 static atomic_t last_data_time = ATOMIC_INIT(0); // 使用原子变量
+static atomic_t packet_sequence = ATOMIC_INIT(0); // 包序号计数器
 static K_MUTEX_DEFINE(data_buffer_mutex); // 添加互斥锁保护数据缓冲区
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
@@ -72,6 +73,11 @@ uint8_t connection_get_id(void)
 void connection_set_id(uint8_t id)
 {
 	tracker_id = id;
+}
+
+uint8_t connection_get_packet_sequence(void)
+{
+	return (uint8_t)atomic_get(&packet_sequence);
 }
 
 void connection_update_sensor_ids(int imu, int mag)
@@ -327,8 +333,8 @@ void connection_thread(void)
 		{
 			last_seen_generation = current_generation;
 
-			// 使用互斥锁保护数据缓冲区读取，创建带CRC的副本
-			uint8_t data_copy[20];
+			// 使用互斥锁保护数据缓冲区读取，创建带CRC和序号的副本
+			uint8_t data_copy[21];
 			k_mutex_lock(&data_buffer_mutex, K_FOREVER);
 			memcpy(data_copy, (void *)data_buffer, 16);
 			k_mutex_unlock(&data_buffer_mutex);
@@ -336,7 +342,12 @@ void connection_thread(void)
 			uint32_t crc_value = crc32_k_4_2_update(0x93a409eb, data_copy, 16);
 			memcpy(&data_copy[16], &crc_value, sizeof(uint32_t)); // 使用memcpy避免对齐问题
 
-			LOG_DBG("Sending ESB packet, generation=%d, packet_type=%d", current_generation, data_copy[0]);
+			// 添加包序号
+			uint8_t seq_num = (uint8_t)atomic_inc(&packet_sequence);
+			data_copy[20] = seq_num;
+
+			LOG_INF("Sending ESB packet, generation=%ld, packet_type=%d, sequence=%d",
+					current_generation, data_copy[0], seq_num);
 			esb_write(data_copy);
 			atomic_set(&last_data_time, 0); // 只在成功发送后才重置
 		}

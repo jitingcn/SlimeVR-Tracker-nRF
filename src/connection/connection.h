@@ -30,6 +30,7 @@ void connection_clocks_request_stop_delay_us(uint32_t delay_us);
 
 uint8_t connection_get_id(void);
 void connection_set_id(uint8_t id);
+uint8_t connection_get_packet_sequence(void);
 
 void connection_update_sensor_ids(int imu_id, int mag_id);
 void connection_update_sensor_data(float *q, float *a, int64_t data_time); // ticks
