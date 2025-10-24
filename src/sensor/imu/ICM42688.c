@@ -46,6 +46,7 @@ int icm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 		fifo_multiplier_factor = FIFO_MULT; // I2C mode
 	int err = 0;
 //	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_INT_SOURCE0, 0x00); // disable default interrupt (RESET_DONE)
+	err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_INTF_CONFIG0, 0x40, 0x40); // FIFO_COUNT and FIFO_WM use records
 	if (clock_rate > 0)
 	{
 		clock_scale = clock_rate / clock_reference;
@@ -304,11 +305,10 @@ uint16_t icm_fifo_read(uint8_t *data, uint16_t len)
 	{
 		uint8_t rawCount[2];
 		err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_COUNTH, &rawCount[0], 2);
-		uint16_t count = (uint16_t)(rawCount[0] << 8 | rawCount[1]); // Turn the 16 bits into a unsigned 16-bit value
-		packets = count	/ PACKET_SIZE;
+		packets = (uint16_t)(rawCount[0] << 8 | rawCount[1]); // Turn the 16 bits into a unsigned 16-bit value
 		float extra_read_packets = packets * fifo_multiplier;
 		packets += extra_read_packets;
-		count = packets * PACKET_SIZE;
+		uint16_t count = packets * PACKET_SIZE;
 		uint16_t limit = len / PACKET_SIZE;
 		if (packets > limit)
 		{

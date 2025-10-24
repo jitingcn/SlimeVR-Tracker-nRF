@@ -29,6 +29,7 @@
 #define ICM42688_FIFO_COUNTH               0x2E
 #define ICM42688_FIFO_DATA                 0x30
 
+#define ICM42688_INTF_CONFIG0              0x4C
 #define ICM42688_INTF_CONFIG1              0x4D
 
 #define ICM42688_PWR_MGMT0                 0x4E
