@@ -15,9 +15,9 @@ uint64_t sys_get_battery_runtime_estimate(void);
 uint64_t sys_get_battery_runtime_min_estimate(void);
 uint64_t sys_get_battery_runtime_max_estimate(void);
 uint64_t sys_get_battery_remaining_time_estimate(void);
-float sys_get_battery_cycles(void);
+uint32_t sys_get_battery_cycles(void);
 
-float sys_get_battery_calibration_coverage(void);
+uint8_t sys_get_battery_calibration_coverage(void);
 int16_t sys_get_calibrated_battery_range_min_pptt(void);
 int16_t sys_get_calibrated_battery_range_max_pptt(void);
 

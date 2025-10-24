@@ -317,14 +317,14 @@ static void print_battery_tracker(void)
 		printk("\nLast cycle: Not available\n");
 	}
 
-	float coverage = sys_get_battery_calibration_coverage();
+	uint8_t coverage = sys_get_battery_calibration_coverage() * 5;
 	int16_t min = sys_get_calibrated_battery_range_min_pptt();
 	int16_t max = sys_get_calibrated_battery_range_max_pptt();
 	if (min >= 0 && max >= 0)
-		printk("\nCalibration: %.0f%% - %.0f%% (%.0f%% coverage)\n", (double)min / 100.0, (double)max / 100.0, (double)coverage * 100.0);
+		printk("\nCalibration: %.0f%% - %.0f%% (%.0f%% coverage)\n", (double)min / 100.0, (double)max / 100.0, (double)coverage);
 	else
 		printk("\nCalibration: None\n");
-	printk("Cycle count: ~%.2f\n", (double)sys_get_battery_cycles());
+	printk("Cycle count: ~%.2f\n", (double)sys_get_battery_cycles() / 20.0);
 }
 
 static void print_meow(void)

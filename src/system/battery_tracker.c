@@ -419,7 +419,8 @@ uint64_t sys_get_battery_remaining_time_estimate(void)
 	return runtime * pptt / 10000;
 }
 
-float sys_get_battery_cycles(void)
+// LSB is 1/20 cycles
+uint32_t sys_get_battery_cycles(void)
 {
 	uint32_t cycles = 0;
 
@@ -433,10 +434,11 @@ float sys_get_battery_cycles(void)
 		cycles += interval.cycles;
 	}
 
-	return cycles / 20.0f;
+	return cycles;
 }
 
-float sys_get_battery_calibration_coverage(void)
+// LSB is 5% intervals
+uint8_t sys_get_battery_calibration_coverage(void)
 {
 	uint8_t valid_intervals = 0;
 
@@ -448,7 +450,7 @@ float sys_get_battery_calibration_coverage(void)
 			valid_intervals++;
 	}
 
-	return valid_intervals * (100 / 20) / 100.0f; // maximum coverage is 95%
+	return valid_intervals; // maximum coverage is 95%
 }
 
 int16_t sys_get_calibrated_battery_range_min_pptt(void)
