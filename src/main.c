@@ -95,7 +95,7 @@ int main(void)
 		}
 #if USER_SHUTDOWN_ENABLED
 		if (k_uptime_get() < 50 && booting_from_shutdown) // debounce
-			sys_request_system_off();
+			sys_request_system_off(false);
 #endif
 		if (k_uptime_get() <= 5000)
 			set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);

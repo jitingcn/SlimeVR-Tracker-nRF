@@ -34,7 +34,7 @@ LOG_MODULE_REGISTER(console, LOG_LEVEL_INF);
 static void console_thread(void);
 #if USB_EXISTS
 static struct k_thread console_thread_id;
-static K_THREAD_STACK_DEFINE(console_thread_id_stack, 1024); // TODO: larger stack size to handle reboot and print info
+static K_THREAD_STACK_DEFINE(console_thread_id_stack, 1024); // TODO: larger stack size to handle print info
 #else
 K_THREAD_DEFINE(console_thread_id, 1024, console_thread, NULL, NULL, NULL, 6, 0, 0);
 #endif
@@ -348,7 +348,7 @@ static void console_thread(void)
 	{
 #if ADAFRUIT_BOOTLOADER
 		NRF_POWER->GPREGRET = 0x57;
-		sys_request_system_reboot();
+		sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
@@ -460,7 +460,7 @@ static void console_thread(void)
 		}
 		else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0)
 		{
-			sys_request_system_reboot();
+			sys_request_system_reboot(false);
 		}
 		else if (memcmp(line, command_battery, sizeof(command_battery)) == 0)
 		{
@@ -579,7 +579,7 @@ static void console_thread(void)
 		{
 #if ADAFRUIT_BOOTLOADER
 			NRF_POWER->GPREGRET = 0x57;
-			sys_request_system_reboot();
+			sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER
 			gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);

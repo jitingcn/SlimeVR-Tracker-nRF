@@ -46,6 +46,12 @@ static bool device_plugged = false;
 
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
+static void sys_WOM(bool force);
+static void sys_system_off(void);
+static void sys_system_reboot(void);
+
+static int sys_power_state_request(int id);
+
 static void disable_DFU_thread(void);
 K_THREAD_DEFINE(disable_DFU_thread_id, 128, disable_DFU_thread, NULL, NULL, NULL, 6, 0, 500); // disable DFU if the system is running correctly
 
@@ -182,8 +188,11 @@ void sys_interface_resume(void)
 
 static void configure_system_off(void)
 {
-	// TODO: not calling suspend here, because sensor can call it and stop the system from shutting down since it suspended itself
-//	main_imu_suspend(); // TODO: when the thread is suspended, its possibly suspending in the middle of an i2c transaction and this is bad. Instead sensor should be suspended at a different time
+	if (get_status(SYS_STATUS_SENSOR_ERROR))
+		LOG_WRN("Entering new power state while sensor error is raised");
+	if (get_status(SYS_STATUS_SYSTEM_ERROR))
+		LOG_WRN("Entering new power state while system error is raised");
+	main_imu_suspend();
 	sensor_shutdown();
 	set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
 	float actual_clock_rate;
@@ -315,7 +324,40 @@ static void wait_for_logging(void)
 static int64_t system_off_timeout = 0;
 #endif
 
-void sys_request_WOM(bool force) // TODO: if IMU interrupt does not exist what does the system do?
+void sys_request_WOM(bool force, bool immediate)
+{
+	if (immediate)
+	{
+		sys_WOM(force);
+		return;
+	}
+	if (force)
+		sys_power_state_request(2);
+	else
+		sys_power_state_request(1);
+}
+
+void sys_request_system_off(bool immediate)
+{
+	if (immediate)
+	{
+		sys_system_off();
+		return;
+	}
+	sys_power_state_request(3);
+}
+
+void sys_request_system_reboot(bool immediate)
+{
+	if (immediate)
+	{
+		sys_system_reboot();
+		return;
+	}
+	sys_power_state_request(4);
+}
+
+static void sys_WOM(bool force) // TODO: if IMU interrupt does not exist what does the system do?
 {
 	LOG_INF("IMU wake up requested");
 #if IMU_INT_EXISTS
@@ -330,12 +372,12 @@ void sys_request_WOM(bool force) // TODO: if IMU interrupt does not exist what d
 			return; // not timed out yet, skip system off
 		}
 		LOG_INF("ESB/status ready timed out");
-		// this may mean the system never enters system off if sys_request_WOM is not called again after the timeout
+		// TODO: this may mean the system never enters system off if sys_request_WOM is not called again after the timeout
 	}
 #endif
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sensor_retained_write();
-#if WOM_USE_DCDC // In case DCDC is more efficient in the 10-100uA range
+#if WOM_USE_DCDC // In case DCDC is more efficient in the ~10-100uA range
 	set_regulator(SYS_REGULATOR_DCDC); // Make sure DCDC is selected
 #else
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
@@ -363,11 +405,9 @@ void sys_request_WOM(bool force) // TODO: if IMU interrupt does not exist what d
 #endif
 }
 
-void sys_request_system_off(void) // TODO: add timeout
+static void sys_system_off(void) // TODO: add timeout
 {
 	LOG_INF("System off requested");
-	// TODO: fails, its possible that it is getting stuck at main_imu_suspend
-	main_imu_suspend(); // TODO: should be a common shutdown step
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	// Clear sensor addresses
 	sensor_scan_clear();
@@ -397,7 +437,7 @@ void sys_request_system_off(void) // TODO: add timeout
 	sys_poweroff();
 }
 
-void sys_request_system_reboot(void) // TODO: add timeout
+static void sys_system_reboot(void) // TODO: add timeout
 {
 	LOG_INF("System reboot requested");
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
@@ -411,6 +451,27 @@ void sys_request_system_reboot(void) // TODO: add timeout
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
 #endif
 	sys_reboot(SYS_REBOOT_COLD);
+}
+
+static int sys_power_state_request(int id)
+{
+	static int requested = 0;
+	switch (id)
+	{
+	case -1:
+		requested = 0;
+		return 0;
+	case 0:
+		return requested;
+	default:
+		if (requested != 0)
+		{
+			LOG_ERR("System is already entering a new power state");
+			return -1;
+		}
+		requested = id;
+		return 0;
+	}
 }
 
 bool vin_read(void) // blocking
@@ -498,6 +559,26 @@ static void power_thread(void)
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 		pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
 #endif
+		int requested = sys_power_state_request(0);
+		switch (requested)
+		{
+		case 1:
+			sys_WOM(false);
+			break;
+		case 2:
+			sys_WOM(true);
+			break;
+		case 3:
+			sys_system_off();
+			break;
+		case 4:
+			sys_system_reboot();
+			break;
+		default:
+			break;
+		}
+		sys_power_state_request(-1); // clear request
+
 		bool docked = dock_read();
 		bool charging = chg_read();
 		bool charged = stby_read();
@@ -555,7 +636,7 @@ static void power_thread(void)
 				LOG_WRN("Discharged battery");
 				sys_update_battery_tracker(0, device_plugged);
 			}
-			sys_request_system_off();
+			sys_request_system_off(true);
 		}
 
 		// will update average_pptt, and current_battery_pptt

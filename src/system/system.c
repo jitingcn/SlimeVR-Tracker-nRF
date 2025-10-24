@@ -338,7 +338,7 @@ static void button_thread(void)
 			LOG_INF("Button was pressed %d times", num_presses);
 			last_press = 0;
 			if (num_presses == 1)
-				sys_request_system_reboot();
+				sys_request_system_reboot(false);
 #if CONFIG_USER_EXTRA_ACTIONS // TODO: extra actions are default until server can send commands to trackers
 			sys_reset_mode(num_presses - 1);
 #endif
@@ -437,9 +437,9 @@ int sys_user_shutdown(void)
 		set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
 	}
 #if USER_SHUTDOWN_ENABLED
-	sys_request_system_off();
+	sys_request_system_off(false);
 #else
-	sys_request_system_reboot();
+	sys_request_system_reboot(false);
 #endif
 	return 0;
 }
@@ -469,7 +469,7 @@ void sys_reset_mode(uint8_t mode)
 		LOG_INF("DFU requested");
 #if ADAFRUIT_BOOTLOADER
 		NRF_POWER->GPREGRET = 0x57; // DFU_MAGIC_UF2_RESET
-		sys_request_system_reboot();
+		sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
