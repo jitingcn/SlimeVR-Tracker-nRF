@@ -302,6 +302,19 @@ config RADIO_TX_POWER
         Radio output power level.
         A lower value may reduce power consumption.
 
+config RADIO_RF_CHANNEL
+    int "Radio RF channel"
+    default 2
+    help
+        Radio RF channel (0-100).
+        Must match the receiver channel.
+
+config RADIO_RETRANSMIT_DELAY
+    int "Radio retransmit delay (µs)"
+    default 600
+    help
+        Radio retransmit delay.
+
 config CONNECTION_OVER_HID
     bool "Use HID for data output"
     default n

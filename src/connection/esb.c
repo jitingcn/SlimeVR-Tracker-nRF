@@ -24,6 +24,7 @@
 #include "system/system.h"
 #include "connection.h"
 
+#include <stdlib.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #if defined(NRF54L15_XXAA)
 #include <hal/nrf_clock.h>
@@ -45,7 +46,7 @@ int64_t last_tx_success = 0;
 
 static struct esb_payload rx_payload;
 static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
-														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0,
 														  0, 0, 0, 0, 0, 0, 0, 0);
 
@@ -55,6 +56,8 @@ static bool esb_initialized = false;
 static bool esb_paired = false;
 
 #define TX_ERROR_THRESHOLD 100
+#define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
+#define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -230,6 +233,10 @@ int esb_initialize(bool tx)
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
+	// Add jitter to retransmit delay to avoid collisions
+	uint16_t jitter = (rand() % 200) - 100;  // ±100 µs
+	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
+
 	if (tx)
 	{
 		// config.protocol = ESB_PROTOCOL_ESB_DPL;
@@ -238,7 +245,7 @@ int esb_initialize(bool tx)
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		// config.retransmit_delay = 600;
+		config.retransmit_delay = retransmit_delay_with_jitter;
 		//config.retransmit_count = 0;
 		//config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
@@ -253,7 +260,7 @@ int esb_initialize(bool tx)
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		// config.retransmit_delay = 600;
+		config.retransmit_delay = retransmit_delay_with_jitter;
 		// config.retransmit_count = 3;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
@@ -262,6 +269,9 @@ int esb_initialize(bool tx)
 	}
 
 	err = esb_init(&config);
+
+	if (!err)
+		esb_set_rf_channel(RADIO_RF_CHANNEL);
 
 	if (!err)
 		esb_set_base_address_0(base_addr_0);
@@ -430,7 +440,7 @@ void esb_write(uint8_t *data)
 	if (!esb_initialized || !esb_paired)
 		return;
 	if (!clock_status)
-		clocks_start(); 
+		clocks_start();
 #if defined(NRF54L15_XXAA) // TODO: esb halts with ack and tx fail
 	tx_payload.noack = true;
 #else
