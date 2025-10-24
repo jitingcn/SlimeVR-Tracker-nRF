@@ -34,11 +34,10 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-static volatile uint8_t data_buffer[21] = {0}; // 16 bytes data + 4 bytes CRC32 + 1 byte sequence number
-static atomic_t packet_generation = ATOMIC_INIT(0);
-static atomic_t last_data_time = ATOMIC_INIT(0); // 使用原子变量
-static atomic_t packet_sequence = ATOMIC_INIT(0); // 包序号计数器
-static K_MUTEX_DEFINE(data_buffer_mutex); // 添加互斥锁保护数据缓冲区
+static uint8_t data_buffer[16] = {0};
+static volatile bool data_ready = false;
+static uint8_t packet_sequence = 0;
+static K_MUTEX_DEFINE(buffer_mutex);
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
@@ -77,7 +76,21 @@ void connection_set_id(uint8_t id)
 
 uint8_t connection_get_packet_sequence(void)
 {
-	return (uint8_t)atomic_get(&packet_sequence);
+	return packet_sequence;
+}
+
+static void write_packet_data(uint8_t *data)
+{
+    // 获取互斥锁，确保数据写入的原子性
+    if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) != 0) {
+        LOG_WRN("Failed to acquire buffer mutex, dropping packet");
+        return;
+    }
+
+    memcpy(data_buffer, data, 16);
+    data_ready = true;
+
+    k_mutex_unlock(&buffer_mutex);
 }
 
 void connection_update_sensor_ids(int imu, int mag)
@@ -179,14 +192,7 @@ void connection_write_packet_0() // device info
 	data[14] = FW_VERSION_PATCH & 255; // fw_patch
 	data[15] = 0; // rssi (supplied by receiver)
 
-	atomic_inc(&packet_generation);
-
-	// 使用互斥锁保护数据缓冲区写入
-	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
-	memcpy((void *)data_buffer, data, sizeof(data));
-	k_mutex_unlock(&data_buffer_mutex);
-
-	atomic_set(&last_data_time, k_uptime_get()); // 使用原子操作设置时间
+	write_packet_data(data);
 //	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
@@ -205,14 +211,7 @@ void connection_write_packet_1() // full precision quat and accel
 	buf[5] = TO_FIXED_7(sensor_a[1]);
 	buf[6] = TO_FIXED_7(sensor_a[2]);
 
-	atomic_inc(&packet_generation);
-
-	// 使用互斥锁保护数据缓冲区写入
-	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
-	memcpy((void *)data_buffer, data, sizeof(data));
-	k_mutex_unlock(&data_buffer_mutex);
-
-	atomic_set(&last_data_time, k_uptime_get()); // 使用原子操作设置时间
+	write_packet_data(data);
 //	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
@@ -247,14 +246,7 @@ void connection_write_packet_2() // reduced precision quat and accel with batter
 	buf[2] = TO_FIXED_7(sensor_a[2]);
 	data[15] = 0; // rssi (supplied by receiver)
 
-	atomic_inc(&packet_generation);
-
-	// 使用互斥锁保护数据缓冲区写入
-	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
-	memcpy((void *)data_buffer, data, sizeof(data));
-	k_mutex_unlock(&data_buffer_mutex);
-
-	atomic_set(&last_data_time, k_uptime_get()); // 使用原子操作设置时间
+	write_packet_data(data);
 //	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
@@ -268,14 +260,7 @@ void connection_write_packet_3() // status
 	data[3] = tracker_status;
 	data[15] = 0; // rssi (supplied by receiver)
 
-	atomic_inc(&packet_generation);
-
-	// 使用互斥锁保护数据缓冲区写入
-	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
-	memcpy((void *)data_buffer, data, sizeof(data));
-	k_mutex_unlock(&data_buffer_mutex);
-
-	atomic_set(&last_data_time, k_uptime_get()); // 使用原子操作设置时间
+	write_packet_data(data);
 //	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
@@ -294,14 +279,7 @@ void connection_write_packet_4() // full precision quat and magnetometer
 	buf[5] = TO_FIXED_10(sensor_m[1]);
 	buf[6] = TO_FIXED_10(sensor_m[2]);
 
-	atomic_inc(&packet_generation);
-
-	// 使用互斥锁保护数据缓冲区写入
-	k_mutex_lock(&data_buffer_mutex, K_FOREVER);
-	memcpy((void *)data_buffer, data, sizeof(data));
-	k_mutex_unlock(&data_buffer_mutex);
-
-	atomic_set(&last_data_time, k_uptime_get()); // 使用原子操作设置时间
+	write_packet_data(data);
 //	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
@@ -321,35 +299,27 @@ static int64_t last_status_time = 0;
 
 void connection_thread(void)
 {
-	static atomic_val_t last_seen_generation = 0;
-
 	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1)
 	{
-		atomic_val_t current_generation = atomic_get(&packet_generation);
-		int64_t current_data_time = atomic_get(&last_data_time); // 使用原子操作获取时间
+		if (data_ready) {
+			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
+				uint8_t esb_packet[21];
+				memcpy(esb_packet, data_buffer, 16);
 
-		if (current_generation != last_seen_generation && current_data_time != 0) // have valid data
-		{
-			last_seen_generation = current_generation;
+				uint32_t crc = crc32_k_4_2_update(0x93a409eb, esb_packet, 16);
+				memcpy(&esb_packet[16], &crc, sizeof(uint32_t));
 
-			// 使用互斥锁保护数据缓冲区读取，创建带CRC和序号的副本
-			uint8_t data_copy[21];
-			k_mutex_lock(&data_buffer_mutex, K_FOREVER);
-			memcpy(data_copy, (void *)data_buffer, 16);
-			k_mutex_unlock(&data_buffer_mutex);
+				esb_packet[20] = ++packet_sequence;
+				data_ready = false;
 
-			uint32_t crc_value = crc32_k_4_2_update(0x93a409eb, data_copy, 16);
-			memcpy(&data_copy[16], &crc_value, sizeof(uint32_t)); // 使用memcpy避免对齐问题
+				k_mutex_unlock(&buffer_mutex);
+				esb_write(esb_packet);
 
-			// 添加包序号
-			uint8_t seq_num = (uint8_t)atomic_inc(&packet_sequence);
-			data_copy[20] = seq_num;
-
-			LOG_INF("Sending ESB packet, generation=%ld, packet_type=%d, sequence=%d",
-					current_generation, data_copy[0], seq_num);
-			esb_write(data_copy);
-			atomic_set(&last_data_time, 0); // 只在成功发送后才重置
+				LOG_DBG("Sent ESB packet type %d, seq %d", esb_packet[0], esb_packet[20]);
+			} else {
+				LOG_WRN("Failed to acquire mutex for reading data");
+			}
 		}
 		// mag is higher priority (skip accel, quat is full precision)
 		else if (mag_update_time && k_uptime_get() - last_mag_time > 200)
