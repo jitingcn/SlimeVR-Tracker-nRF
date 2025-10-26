@@ -234,7 +234,7 @@ int esb_initialize(bool tx)
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
 	// Add jitter to retransmit delay to avoid collisions
-	uint16_t jitter = (rand() % 200) - 100;  // ±100 µs
+	uint16_t jitter = (rand() % 400) - 200;  // ±200 µs
 	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
 
 	if (tx)
@@ -444,11 +444,21 @@ void esb_write(uint8_t *data)
 #if defined(NRF54L15_XXAA) // TODO: esb halts with ack and tx fail
 	tx_payload.noack = true;
 #else
-	tx_payload.noack = false;
+	tx_payload.noack = true;
 #endif
 	memcpy(tx_payload.data, data, tx_payload.length);
-	esb_flush_tx(); // this will clear all transmissions even if they did not complete
-	esb_write_payload(&tx_payload); // Add transmission to queue
+
+	int queue_status = esb_write_payload(&tx_payload); // Add transmission to queue
+	int retry_count = 0;
+	while (queue_status != 0) // TX buffer full
+	{
+		if (retry_count >= 5) {
+			esb_flush_tx();
+		}
+		esb_pop_tx();
+		queue_status = esb_write_payload(&tx_payload);
+		retry_count++;
+	}
 	send_data = true;
 }
 

@@ -298,21 +298,18 @@ static int64_t last_status_time = 0;
 
 void connection_thread(void)
 {
+	uint8_t esb_packet[17];
 	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1)
 	{
 		if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
-				uint8_t esb_packet[17];
 				memcpy(esb_packet, data_buffer, 16);
 
-				esb_packet[16] = ++packet_sequence;
+				esb_packet[16] = packet_sequence++;
 				data_ready = false;
-
 				k_mutex_unlock(&buffer_mutex);
 				esb_write(esb_packet);
-
-				LOG_DBG("Sent ESB packet type %d, seq %d", esb_packet[0], esb_packet[16]);
 			} else {
 				LOG_WRN("Failed to acquire mutex for reading data");
 			}
