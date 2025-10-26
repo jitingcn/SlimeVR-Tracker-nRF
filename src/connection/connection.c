@@ -28,7 +28,6 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
-#include <zephyr/sys/crc.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
@@ -304,19 +303,16 @@ void connection_thread(void)
 	{
 		if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
-				uint8_t esb_packet[21];
+				uint8_t esb_packet[17];
 				memcpy(esb_packet, data_buffer, 16);
 
-				uint32_t crc = crc32_k_4_2_update(0x93a409eb, esb_packet, 16);
-				memcpy(&esb_packet[16], &crc, sizeof(uint32_t));
-
-				esb_packet[20] = ++packet_sequence;
+				esb_packet[16] = ++packet_sequence;
 				data_ready = false;
 
 				k_mutex_unlock(&buffer_mutex);
 				esb_write(esb_packet);
 
-				LOG_DBG("Sent ESB packet type %d, seq %d", esb_packet[0], esb_packet[20]);
+				LOG_DBG("Sent ESB packet type %d, seq %d", esb_packet[0], esb_packet[16]);
 			} else {
 				LOG_WRN("Failed to acquire mutex for reading data");
 			}
