@@ -858,6 +858,7 @@ void sensor_loop(void)
 			sys_interface_suspend();
 
 			// Fuse all data
+			int g_count = 0;
 			float a_sum[3] = {0};
 			int a_count = 0;
 			max_gyro_speed_square = 0;
@@ -893,6 +894,8 @@ void sensor_loop(void)
 
 					// Process fusion
 					sensor_fusion->update_gyro(g, gyro_actual_time);
+
+					g_count++;
 
 					if (mag_available && mag_enabled)
 					{
@@ -931,6 +934,9 @@ void sensor_loop(void)
 
 				processed_packets++;
 			}
+
+			// If sensors have asymmetric packets in FIFO, timesteps will not match packet count
+			int processed_timesteps = MAX(g_count, a_count);
 
 			// Free the FIFO buffer
 			k_free(rawData);
@@ -996,9 +1002,9 @@ void sensor_loop(void)
 				packet_errors = 0;
 			}
 
-			// Also check if expected number of packets when using FIFO threshold
-			if (processed_packets && processed_packets != sensor_fifo_threshold)
-				LOG_WRN("Expected %d packets, processed %d", sensor_fifo_threshold, processed_packets);
+			// Also check if expected number of timesteps when using FIFO threshold
+			if (processed_timesteps && processed_timesteps != sensor_fifo_threshold)
+				LOG_WRN("Expected %d timesteps, got %d", sensor_fifo_threshold, processed_timesteps);
 
 			// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
 //			sensor_fusion->update_gyro_sanity(g, m);
