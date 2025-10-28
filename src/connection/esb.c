@@ -42,7 +42,8 @@ uint16_t led_clock = 0;
 uint32_t led_clock_offset = 0;
 
 uint32_t tx_errors = 0;
-int64_t last_tx_success = 0;
+int64_t connection_error_start_time = 0;
+static bool shutdown_requested = false;
 
 static struct esb_payload rx_payload;
 static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
@@ -77,7 +78,7 @@ void event_handler(struct esb_evt const *event)
 		if (tx_errors < UINT32_MAX)
 			tx_errors++;
 		if (tx_errors == TX_ERROR_THRESHOLD) // consecutive failure to transmit
-			last_tx_success = k_uptime_get();
+			connection_error_start_time = k_uptime_get(); // Mark when connection errors started
 		LOG_DBG("TX FAILED");
 		if (esb_paired)
 			clocks_stop();
@@ -246,7 +247,7 @@ int esb_initialize(bool tx)
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = retransmit_delay_with_jitter;
-		config.retransmit_count = 0;
+		config.retransmit_count = 3;
 		//config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true; // TODO: while pairing, should be set to false
@@ -496,16 +497,22 @@ static void esb_thread(void)
 #endif
 				set_status(SYS_STATUS_CONNECTION_ERROR, true);
 #if USER_SHUTDOWN_ENABLED
-			if (k_uptime_get() - last_tx_success > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected // TODO: is shutdown necessary if usb is connected at the time?
+			if (!shutdown_requested && connection_error_start_time > 0 &&
+			    k_uptime_get() - connection_error_start_time > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected // TODO: is shutdown necessary if usb is connected at the time?
 			{
 				LOG_WRN("No response from receiver in %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
+				shutdown_requested = true;
 				sys_request_system_off(false);
 			}
 #endif
 		}
 		else if (tx_errors == 0 && get_status(SYS_STATUS_CONNECTION_ERROR) == true)
 		{
+			// Clear connection error when transmission is successful again
 			set_status(SYS_STATUS_CONNECTION_ERROR, false);
+			connection_error_start_time = 0; // Reset error start time when connection is restored
+			shutdown_requested = false; // Reset shutdown request flag when connection is restored
+			LOG_INF("Connection restored");
 		}
 		k_msleep(100);
 	}
