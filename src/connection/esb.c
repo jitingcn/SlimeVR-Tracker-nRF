@@ -41,22 +41,27 @@ bool send_data = false;
 uint16_t led_clock = 0;
 uint32_t led_clock_offset = 0;
 
-uint32_t tx_errors = 0;
+uint32_t heartbeat_failures = 0;  // Separate counter for heartbeat failures
 int64_t connection_error_start_time = 0;
+int64_t last_heartbeat_time = 0;
 static bool shutdown_requested = false;
+static bool heartbeat_failed = false;
+static bool heartbeat_pending = false;  // Flag to track if a heartbeat is currently being sent
 
 static struct esb_payload rx_payload;
 static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
 														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0,
 														  0, 0, 0, 0, 0, 0, 0, 0);
+static struct esb_payload tx_heartbeat = ESB_CREATE_PAYLOAD(0, 0xFF); // Heartbeat packet
 
 static uint8_t paired_addr[8] = {0};
 
 static bool esb_initialized = false;
 static bool esb_paired = false;
 
-#define TX_ERROR_THRESHOLD 100
+#define TX_ERROR_THRESHOLD 60
+#define HEARTBEAT_INTERVAL_MS 1000
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
@@ -70,15 +75,41 @@ void event_handler(struct esb_evt const *event)
 	switch (event->evt_id)
 	{
 	case ESB_EVENT_TX_SUCCESS:
-		tx_errors = 0;
+		// Reset heartbeat failures only if this was a heartbeat packet
+		if (heartbeat_pending)
+		{
+			heartbeat_failures = 0;
+			heartbeat_failed = false;
+			heartbeat_pending = false;  // Clear the pending flag
+			connection_error_start_time = 0; // Reset timeout timer on heartbeat success
+			shutdown_requested = false; // Reset shutdown request
+			if (get_status(SYS_STATUS_CONNECTION_ERROR) == true)
+			{
+				set_status(SYS_STATUS_CONNECTION_ERROR, false);
+				LOG_INF("Heartbeat success - connection restored");
+			}
+			else
+			{
+				LOG_DBG("Heartbeat success");
+			}
+		}
 		if (esb_paired)
 			clocks_stop();
 		break;
 	case ESB_EVENT_TX_FAILED:
-		if (tx_errors < UINT32_MAX)
-			tx_errors++;
-		if (tx_errors == TX_ERROR_THRESHOLD) // consecutive failure to transmit
-			connection_error_start_time = k_uptime_get(); // Mark when connection errors started
+		// Only count heartbeat failures for connection timeout
+		if (heartbeat_pending)
+		{
+			heartbeat_failed = true;
+			heartbeat_pending = false;  // Clear the pending flag
+			heartbeat_failures++;
+			LOG_DBG("Heartbeat failed, total failures: %d", heartbeat_failures);
+			if (heartbeat_failures == TX_ERROR_THRESHOLD) // consecutive heartbeat failures
+			{
+				connection_error_start_time = k_uptime_get(); // Mark when connection errors started
+				LOG_WRN("Heartbeat failure threshold reached (%d failures), starting timeout timer", TX_ERROR_THRESHOLD);
+			}
+		}
 		LOG_DBG("TX FAILED");
 		if (esb_paired)
 			clocks_stop();
@@ -289,7 +320,7 @@ int esb_initialize(bool tx)
 		set_status(SYS_STATUS_CONNECTION_ERROR, true);
 		return err;
 	}
-
+	LOG_INF("ESB initialized, %sX mode", tx ? "T" : "R");
 	esb_initialized = true;
 	return 0;
 }
@@ -354,9 +385,9 @@ void esb_set_pair(uint64_t addr)
 
 void esb_pair(void)
 {
-	if (tx_errors >= 100)
-		set_status(SYS_STATUS_CONNECTION_ERROR, false);
-	tx_errors = 0;
+	// Reset heartbeat state when starting pairing
+	heartbeat_failures = 0;
+	set_status(SYS_STATUS_CONNECTION_ERROR, false);
 	if (!paired_addr[0]) // zero, no receiver paired
 	{
 		LOG_INF("Pairing");
@@ -468,6 +499,42 @@ bool esb_ready(void)
 	return esb_initialized && esb_paired;
 }
 
+static void esb_send_heartbeat(void)
+{
+	if (!esb_initialized || !esb_paired)
+		return;
+
+	// Don't send if there's already a heartbeat pending
+	if (heartbeat_pending)
+	{
+		LOG_DBG("Heartbeat already pending, skipping");
+		return;
+	}
+
+	if (!clock_status)
+		clocks_start();
+
+	// Send heartbeat with ACK to detect connection status
+	tx_heartbeat.noack = false;
+	tx_heartbeat.length = 1;
+	tx_heartbeat.data[0] = 0xFF; // Heartbeat marker
+
+	LOG_DBG("Sending heartbeat (failures: %d/%d) noack=%d", heartbeat_failures, TX_ERROR_THRESHOLD, tx_heartbeat.noack);
+	last_heartbeat_time = k_uptime_get();
+	heartbeat_pending = true;  // Set flag to indicate heartbeat is being sent
+
+	// Flush TX queue to ensure heartbeat is sent immediately
+	esb_pop_tx();
+	int queue_status = esb_write_payload(&tx_heartbeat);
+	if (queue_status != 0) {
+		LOG_ERR("Failed to queue heartbeat: %d", queue_status);
+		heartbeat_pending = false;
+	} else {
+		// Force immediate transmission
+		esb_start_tx();
+	}
+}
+
 static void esb_thread(void)
 {
 #if CONFIG_CONNECTION_OVER_HID
@@ -488,7 +555,8 @@ static void esb_thread(void)
 			esb_pair();
 			esb_initialize(true);
 		}
-		if (tx_errors >= TX_ERROR_THRESHOLD)
+		// Check for shutdown timeout if connection errors persist
+		if (heartbeat_failures >= TX_ERROR_THRESHOLD)
 		{
 #if CONFIG_CONNECTION_OVER_HID
 			if (get_status(SYS_STATUS_CONNECTION_ERROR) == false && get_status(SYS_STATUS_USB_CONNECTED) == false) // only raise error while not potentially communicating by usb
@@ -498,7 +566,7 @@ static void esb_thread(void)
 				set_status(SYS_STATUS_CONNECTION_ERROR, true);
 #if USER_SHUTDOWN_ENABLED
 			if (!shutdown_requested && connection_error_start_time > 0 &&
-			    k_uptime_get() - connection_error_start_time > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected // TODO: is shutdown necessary if usb is connected at the time?
+			    k_uptime_get() - connection_error_start_time > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected
 			{
 				LOG_WRN("No response from receiver in %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
 				shutdown_requested = true;
@@ -506,13 +574,13 @@ static void esb_thread(void)
 			}
 #endif
 		}
-		else if (tx_errors == 0 && get_status(SYS_STATUS_CONNECTION_ERROR) == true)
+		// Send periodic heartbeat to detect connection status
+		int64_t now = k_uptime_get();
+		int64_t time_since_last_heartbeat = now - last_heartbeat_time;
+
+		if (time_since_last_heartbeat > HEARTBEAT_INTERVAL_MS)
 		{
-			// Clear connection error when transmission is successful again
-			set_status(SYS_STATUS_CONNECTION_ERROR, false);
-			connection_error_start_time = 0; // Reset error start time when connection is restored
-			shutdown_requested = false; // Reset shutdown request flag when connection is restored
-			LOG_INF("Connection restored");
+			esb_send_heartbeat();
 		}
 		k_msleep(100);
 	}
