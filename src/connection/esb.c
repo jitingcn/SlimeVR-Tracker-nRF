@@ -23,8 +23,12 @@
 #include "globals.h"
 #include "system/system.h"
 #include "connection.h"
+#include "zephyr/logging/log.h"
 
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <zephyr/kernel.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #if defined(NRF54L15_XXAA)
 #include <hal/nrf_clock.h>
@@ -47,6 +51,7 @@ int64_t last_heartbeat_time = 0;
 static bool shutdown_requested = false;
 static bool heartbeat_failed = false;
 static bool heartbeat_pending = false;  // Flag to track if a heartbeat is currently being sent
+static bool pair_ack_pending = false;   // True once step 1 is sent and we expect a receiver response
 
 static struct esb_payload rx_payload;
 static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
@@ -103,7 +108,10 @@ void event_handler(struct esb_evt const *event)
 			heartbeat_failed = true;
 			heartbeat_pending = false;  // Clear the pending flag
 			heartbeat_failures++;
-			LOG_DBG("Heartbeat failed, total failures: %d", heartbeat_failures);
+			if (heartbeat_failures % 10 == 0)  // Log every 10 failures
+			{
+				LOG_WRN("Heartbeat failed, total failures: %d", heartbeat_failures);
+			}
 			if (heartbeat_failures == TX_ERROR_THRESHOLD) // consecutive heartbeat failures
 			{
 				connection_error_start_time = k_uptime_get(); // Mark when connection errors started
@@ -121,8 +129,32 @@ void event_handler(struct esb_evt const *event)
 			if (!paired_addr[0]) // zero, not paired
 			{
 				LOG_DBG("tx: %16llX rx: %16llX", *(uint64_t *)tx_payload_pair.data, *(uint64_t *)rx_payload.data);
-				if (rx_payload.length == 8 && tx_payload_pair.data[1] == 1) // ack to second packet in pairing burst
+				if (rx_payload.length == 8)
+				{
+					if (!pair_ack_pending)
+					{
+						LOG_DBG("Ignoring unsolicited pairing response");
+						break;
+					}
+					if (rx_payload.data[0] != tx_payload_pair.data[0])
+					{
+						LOG_DBG("Ignoring pairing response with mismatched checksum %02X", rx_payload.data[0]);
+						pair_ack_pending = false;
+						break;
+					}
+					uint64_t responder_addr = 0;
+					memcpy(&responder_addr, &rx_payload.data[2], 6);
+					responder_addr &= 0xFFFFFFFFFFFFULL;
+					uint64_t local_addr = (*(uint64_t *)NRF_FICR->DEVICEADDR) & 0xFFFFFFFFFFFFULL;
+					if (responder_addr == local_addr)
+					{
+						LOG_WRN("Ignoring pairing response sourced from local device address");
+						pair_ack_pending = false;
+						break;
+					}
 					memcpy(paired_addr, rx_payload.data, sizeof(paired_addr));
+					pair_ack_pending = false;
+				}
 			}
 			else
 			{
@@ -145,6 +177,7 @@ void event_handler(struct esb_evt const *event)
 					led_clock = (rx_payload.data[0] << 8) + rx_payload.data[1]; // sync led flashes :)
 					led_clock_offset = 0;
 					LOG_DBG("RX, timer reset");
+					pair_ack_pending = false;
 				}
 			}
 		}
@@ -161,6 +194,7 @@ static int clocks_init(void)
 {
 	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
 	if (!clk_mgr)
+						pair_ack_pending = false;
 	{
 		LOG_ERR("Unable to get the Clock manager");
 		return -ENOTSUP;
@@ -173,6 +207,7 @@ SYS_INIT(clocks_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 int clocks_start(void)
 {
+						pair_ack_pending = true;
 	if (clock_status)
 		return 0;
 	int err;
@@ -265,8 +300,7 @@ int esb_initialize(bool tx)
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
-	// Add jitter to retransmit delay to avoid collisions
-	uint16_t jitter = (rand() % 400) - 200;  // ±200 µs
+	uint16_t jitter = (rand() % 200) - 100;  // ±100 µs
 	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
 
 	if (tx)
@@ -282,7 +316,7 @@ int esb_initialize(bool tx)
 		//config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true; // TODO: while pairing, should be set to false
-//		config.use_fast_ramp_up = true;
+		config.use_fast_ramp_up = true;
 	}
 	else
 	{
@@ -297,7 +331,7 @@ int esb_initialize(bool tx)
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-//		config.use_fast_ramp_up = true;
+		config.use_fast_ramp_up = true;
 	}
 
 	err = esb_init(&config);
@@ -364,6 +398,33 @@ inline void esb_set_addr_paired(void)
 	memcpy(addr_prefix, addr_buffer + 8, sizeof(addr_prefix));
 }
 
+static int esb_send_pair_step(uint8_t step)
+{
+	tx_payload_pair.data[1] = step;
+	int err = esb_write_payload(&tx_payload_pair);
+	if (err == -ENOSPC)
+	{
+		esb_flush_tx();
+		err = esb_write_payload(&tx_payload_pair);
+	}
+	if (err)
+	{
+		LOG_ERR("Failed to queue pairing burst step %u: %d", step, err);
+		return err;
+	}
+	err = esb_start_tx();
+	if (err == -EBUSY)
+	{
+		LOG_DBG("Pairing burst step %u already pending", step);
+		err = 0;
+	}
+	else if (err)
+	{
+		LOG_ERR("Failed to start pairing burst step %u: %d", step, err);
+	}
+	return err;
+}
+
 void esb_set_pair(uint64_t addr)
 {
 	uint64_t *device_addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is not actually guaranteed, see datasheet)
@@ -420,17 +481,19 @@ void esb_pair(void)
 			}
 			esb_flush_rx();
 			esb_flush_tx();
-			tx_payload_pair.data[1] = 0; // send pairing request
-			esb_write_payload(&tx_payload_pair);
-			esb_start_tx();
+			if (esb_send_pair_step(0))
+			{
+				k_msleep(100);
+				continue;
+			}
 			k_msleep(2);
-			tx_payload_pair.data[1] = 1; // receive ack data
-			esb_write_payload(&tx_payload_pair);
-			esb_start_tx();
+			if (esb_send_pair_step(1))
+			{
+				k_msleep(100);
+				continue;
+			}
 			k_msleep(2);
-			tx_payload_pair.data[1] = 2; // "acknowledge" pairing from receiver
-			esb_write_payload(&tx_payload_pair);
-			esb_start_tx();
+			esb_send_pair_step(2); // "acknowledge" pairing from receiver
 			k_msleep(996);
 		}
 		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_CONNECTION);
