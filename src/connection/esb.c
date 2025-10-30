@@ -194,7 +194,6 @@ static int clocks_init(void)
 {
 	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
 	if (!clk_mgr)
-						pair_ack_pending = false;
 	{
 		LOG_ERR("Unable to get the Clock manager");
 		return -ENOTSUP;
@@ -207,7 +206,6 @@ SYS_INIT(clocks_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 int clocks_start(void)
 {
-						pair_ack_pending = true;
 	if (clock_status)
 		return 0;
 	int err;
@@ -244,7 +242,6 @@ int clocks_start(void)
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
 #endif /* defined(NRF54L15_XXAA) */
 
-	LOG_DBG("HF clock started");
 	clock_status = true;
 	return 0;
 }
@@ -449,6 +446,10 @@ void esb_pair(void)
 	// Reset heartbeat state when starting pairing
 	heartbeat_failures = 0;
 	set_status(SYS_STATUS_CONNECTION_ERROR, false);
+	connection_error_start_time = 0;
+	shutdown_requested = false;
+	heartbeat_failed = false;
+	heartbeat_pending = false;
 	if (!paired_addr[0]) // zero, no receiver paired
 	{
 		LOG_INF("Pairing");
@@ -465,6 +466,7 @@ void esb_pair(void)
 		LOG_INF("Checksum: %02X", checksum);
 		tx_payload_pair.data[0] = checksum; // Use checksum to make sure packet is for this device
 		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
+		int64_t pair_start_time = k_uptime_get();
 		while (paired_addr[0] != checksum)
 		{
 			if (!esb_initialized)
@@ -474,6 +476,16 @@ void esb_pair(void)
 			}
 			if (!clock_status)
 				clocks_start();
+
+#if USER_SHUTDOWN_ENABLED
+			// During pairing, only use connection timeout to decide shutdown
+			if (!shutdown_requested && (k_uptime_get() - pair_start_time) > CONFIG_CONNECTION_TIMEOUT_DELAY)
+			{
+				LOG_WRN("Pairing timeout after %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
+				shutdown_requested = true;
+				sys_request_system_off(false);
+			}
+#endif
 			if (paired_addr[0])
 			{
 				LOG_INF("Incorrect checksum: %02X", paired_addr[0]);
@@ -481,14 +493,17 @@ void esb_pair(void)
 			}
 			esb_flush_rx();
 			esb_flush_tx();
+			pair_ack_pending = false;  // Reset before sending
 			if (esb_send_pair_step(0))
 			{
 				k_msleep(100);
 				continue;
 			}
 			k_msleep(2);
+			pair_ack_pending = true;  // Set before step 1 which expects receiver response
 			if (esb_send_pair_step(1))
 			{
+				pair_ack_pending = false;
 				k_msleep(100);
 				continue;
 			}
@@ -564,38 +579,8 @@ bool esb_ready(void)
 
 static void esb_send_heartbeat(void)
 {
-	if (!esb_initialized || !esb_paired)
-		return;
-
-	// Don't send if there's already a heartbeat pending
-	if (heartbeat_pending)
-	{
-		LOG_DBG("Heartbeat already pending, skipping");
-		return;
-	}
-
-	if (!clock_status)
-		clocks_start();
-
-	// Send heartbeat with ACK to detect connection status
-	tx_heartbeat.noack = false;
-	tx_heartbeat.length = 1;
-	tx_heartbeat.data[0] = 0xFF; // Heartbeat marker
-
-	LOG_DBG("Sending heartbeat (failures: %d/%d) noack=%d", heartbeat_failures, TX_ERROR_THRESHOLD, tx_heartbeat.noack);
-	last_heartbeat_time = k_uptime_get();
-	heartbeat_pending = true;  // Set flag to indicate heartbeat is being sent
-
-	// Flush TX queue to ensure heartbeat is sent immediately
-	esb_pop_tx();
-	int queue_status = esb_write_payload(&tx_heartbeat);
-	if (queue_status != 0) {
-		LOG_ERR("Failed to queue heartbeat: %d", queue_status);
-		heartbeat_pending = false;
-	} else {
-		// Force immediate transmission
-		esb_start_tx();
-	}
+    // Heartbeat is integrated into esb_write by toggling ACK on data packets.
+    // This function is intentionally left empty.
 }
 
 static void esb_thread(void)
@@ -637,13 +622,11 @@ static void esb_thread(void)
 			}
 #endif
 		}
-		// Send periodic heartbeat to detect connection status
-		int64_t now = k_uptime_get();
-		int64_t time_since_last_heartbeat = now - last_heartbeat_time;
-
-		if (time_since_last_heartbeat > HEARTBEAT_INTERVAL_MS)
-		{
-			esb_send_heartbeat();
+		// If idle (no recent TX), send an ACK probe to detect link status
+		int64_t now_idle = k_uptime_get();
+		if (esb_initialized && esb_paired && !heartbeat_pending &&
+		    (now_idle - last_tx_time) > HEARTBEAT_INTERVAL_MS) {
+			esb_send_idle_probe();
 		}
 		k_msleep(100);
 	}
