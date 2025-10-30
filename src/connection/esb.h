@@ -57,6 +57,14 @@ void esb_clear_pair(void);
 
 void esb_write(uint8_t* data);  // TODO: give packets some names
 
+// Ping/Pong types for ACK payload validation
+#define ESB_PING_TYPE 0xF0
+#define ESB_PONG_TYPE 0xF1
+
+// Ping/Pong packet sizes
+#define ESB_PING_LEN 13  // with CRC-8
+#define ESB_PONG_LEN 13  // with CRC-8
+
 bool esb_ready(void);
 
 #endif
