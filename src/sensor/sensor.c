@@ -543,6 +543,11 @@ static void sensor_interrupt_handler(const struct device *dev, struct gpio_callb
 		main_wfi = false;
 		k_wakeup(&sensor_thread_id);
 	}
+	else
+	{
+		// need to signal to catch up thread
+		main_wfi = true;
+	}
 }
 
 static struct gpio_callback sensor_cb_data;
@@ -1004,7 +1009,7 @@ void sensor_loop(void)
 
 			// Also check if expected number of timesteps when using FIFO threshold
 			if (processed_timesteps && processed_timesteps != sensor_fifo_threshold)
-				LOG_WRN("Expected %d timesteps, got %d", sensor_fifo_threshold, processed_timesteps);
+				LOG_WRN("Expected %d timestep%s, got %d", sensor_fifo_threshold, sensor_fifo_threshold == 1 ? "" : "s", processed_timesteps);
 
 			// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
 //			sensor_fusion->update_gyro_sanity(g, m);
@@ -1106,11 +1111,20 @@ void sensor_loop(void)
 
 #if IMU_INT_EXISTS
 		sensor_data_time = 0; // reset data time
-		main_wfi = true; // TODO: this is terrible
-		k_msleep(sensor_update_time_ms + 10); // will be resumed by interrupt // TODO: dont use hard timeout
-		if (main_wfi) // timeout
+		if (!main_wfi)
 		{
-			LOG_WRN("Sensor interrupt timeout");
+			main_wfi = true; // TODO: this is terrible
+			k_msleep(sensor_update_time_ms + 10); // will be resumed by interrupt // TODO: dont use hard timeout
+			if (main_wfi) // timeout
+			{
+				LOG_WRN("Sensor interrupt timeout");
+				main_wfi = false;
+			}
+		}
+		else // if signal was sent during processing, loop immediately to catch up
+		{
+			LOG_INF("FIFO THS/WM/WTM triggered during loop");
+			k_yield();
 			main_wfi = false;
 		}
 #else
