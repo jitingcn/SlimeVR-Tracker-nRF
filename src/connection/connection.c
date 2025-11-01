@@ -329,7 +329,10 @@ void connection_thread(void)
 			ping[12] = 0;
 			esb_write(ping, false);
 			last_ping_time = now;
-			// Don't continue here - allow data packets to be sent in same iteration
+			last_tx_time = now;  // Update last_tx_time to prevent immediate data packet
+			// Give PING time to be transmitted before sending data packets
+			k_msleep(2);
+			continue;  // Skip data packets this iteration to ensure PING goes out first
 		} else if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
 				memcpy(esb_packet, data_buffer, 16);

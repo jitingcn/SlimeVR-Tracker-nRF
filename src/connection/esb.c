@@ -91,6 +91,14 @@ static uint8_t ping_counter = 0;
 static int64_t ping_send_time = 0;
 static uint32_t ping_send_cycles = 0;
 
+static atomic_t esb_tx_busy = ATOMIC_INIT(0);  // Track if TX is in progress
+static int64_t esb_tx_start_time = 0;  // Track when TX started
+#define ESB_TX_TIMEOUT_MS 50  // TX should complete within 50ms
+
+static atomic_t esb_needs_reinit = ATOMIC_INIT(0);  // Flag for safe reinitialization
+static int64_t last_reinit_time = 0;
+#define ESB_REINIT_COOLDOWN_MS 5000  // Don't reinit more than once per 5 seconds
+
 static uint8_t tracker_id = 0;
 static void set_tracker_id(uint8_t id)
 {
@@ -101,6 +109,8 @@ static void set_tracker_id(uint8_t id)
 static uint32_t esb_write_calls = 0;
 static uint32_t esb_write_queued = 0;
 static int64_t esb_rate_last_ts = 0;
+static uint32_t esb_enomem_count = 0;  // Track -ENOMEM errors
+static int64_t last_enomem_log = 0;
 
 void esb_write_rate_tick(void) {
     int64_t now = k_uptime_get();
@@ -119,11 +129,15 @@ void esb_write_rate_tick(void) {
 void event_handler(struct esb_evt const* event) {
 	switch (event->evt_id) {
 		case ESB_EVENT_TX_SUCCESS:
+			atomic_clear(&esb_tx_busy);  // Clear busy flag
+			esb_tx_start_time = 0;  // Reset timer
 			if (esb_paired) {
 				clocks_stop();
 			}
 			break;
 		case ESB_EVENT_TX_FAILED:
+			atomic_clear(&esb_tx_busy);  // Clear busy flag
+			esb_tx_start_time = 0;  // Reset timer
 			// Only count ping failures for connection timeout
 			if (ping_pending) {
 				ping_failed = true;
@@ -763,19 +777,88 @@ void esb_write(uint8_t* data, bool no_ack) {
 	}
 	memcpy(tx_payload.data, data, tx_payload.length);
 
-	esb_flush_tx();
-	int queue_status = esb_write_payload(&tx_payload);  // queue normal data first
-	// int retry_count = 0;
-	// while (queue_status != 0)  // TX buffer full
-	// {
-	// 	if (retry_count >= 2) {
-	// 		break;  // drop packet after 2 retries
-	// 	}
-	// 	// Drop one oldest packet instead of flushing all
-	// 	esb_pop_tx();
-	// 	queue_status = esb_write_payload(&tx_payload);
-	// 	retry_count++;
-	// }
+	// Check if TX is busy (in manual mode, can't queue while transmitting)
+	if (atomic_test_bit(&esb_tx_busy, 0)) {
+		// Check for TX timeout
+		int64_t now_check = k_uptime_get();
+		if (now_check - esb_tx_start_time > ESB_TX_TIMEOUT_MS) {
+			// TX timeout - force recovery
+			LOG_ERR("TX timeout (%lld ms), clearing busy flag", now_check - esb_tx_start_time);
+			atomic_clear(&esb_tx_busy);
+			esb_tx_start_time = 0;
+
+			// Try lightweight recovery
+			esb_flush_tx();
+
+			// Don't reinitialize here - too risky
+			// Just clear the flag and try to send this packet
+		} else {
+			// TX is busy but not timed out, drop this packet
+			static uint32_t tx_busy_count = 0;
+			tx_busy_count++;
+			if (tx_busy_count % 100 == 0) {
+				LOG_WRN("TX busy, dropped %u packets (busy for %lld ms)",
+						tx_busy_count, now_check - esb_tx_start_time);
+			}
+			return;  // Drop this packet
+		}
+	}
+
+	// Try to queue the packet
+	int queue_status = esb_write_payload(&tx_payload);
+
+	// If FIFO is full, retry with backoff instead of flushing
+	// This prevents discarding important packets like PING
+	int retry_count = 0;
+	while (queue_status == -ENOSPC && retry_count < 3) {
+		// Wait a bit for TX to drain
+		k_usleep(100);  // 100 microseconds
+		queue_status = esb_write_payload(&tx_payload);
+		retry_count++;
+		if (queue_status == -ENOSPC && retry_count == 3) {
+			// Last resort: pop oldest packet and retry once more
+			esb_pop_tx();
+			queue_status = esb_write_payload(&tx_payload);
+			if (queue_status == 0) {
+				LOG_WRN("TX FIFO full, dropped oldest packet to make room");
+			} else {
+				LOG_ERR("Failed to queue packet after retries: %d", queue_status);
+			}
+		}
+	}
+
+	// Handle -ENOMEM error (ESB in bad state)
+	if (queue_status == -ENOMEM) {
+		int64_t now_err = k_uptime_get();
+
+		esb_enomem_count++;
+
+		// Log every second to avoid spam
+		if (now_err - last_enomem_log >= 1000) {
+			LOG_ERR("ESB -ENOMEM error (count=%u), attempting recovery", esb_enomem_count);
+			last_enomem_log = now_err;
+
+			// Try to recover ESB by restarting TX (lightweight recovery)
+			esb_flush_tx();
+			int tx_err = esb_start_tx();
+			if (tx_err && tx_err != -ENOENT) {
+				LOG_ERR("esb_start_tx recovery failed: %d", tx_err);
+			}
+
+			// If still failing after many attempts, mark for reinitialization
+			// but DON'T do it here - let esb_thread handle it
+			if (esb_enomem_count >= 10) {
+				LOG_WRN("ESB stuck in -ENOMEM state, marking for reinit");
+				// Just clear the busy flag and let normal flow recover
+				atomic_clear(&esb_tx_busy);
+				esb_tx_start_time = 0;
+				esb_enomem_count = 0;
+			}
+		}
+	} else if (queue_status == 0) {
+		// Reset error counter on success
+		esb_enomem_count = 0;
+	}
 
 	// Record last TX time for idle probe scheduling
 	if (queue_status == 0) {
@@ -795,16 +878,29 @@ void esb_write(uint8_t* data, bool no_ack) {
 			"PING sent (ctr=%u)",
 			(unsigned)tx_payload.data[2]
 		);
+	} else if (!no_ack && tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
+		// PING failed to queue - this is critical!
+		const char* err_str = "unknown";
+		if (queue_status == -ENOMEM) err_str = "ENOMEM (ESB not ready)";
+		else if (queue_status == -ENOSPC) err_str = "ENOSPC (FIFO full)";
+		else if (queue_status == -EACCES) err_str = "EACCES (access denied)";
+
+		LOG_ERR("esb_write: PING failed to queue (ctr=%u, err=%d %s)",
+				tx_payload.data[2], queue_status, err_str);
 	}
 
 	// Ensure TX progresses (manual mode) only if we queued something
 	if (queue_status == 0) {
+		atomic_set_bit(&esb_tx_busy, 0);  // Set busy flag before starting TX
+		esb_tx_start_time = k_uptime_get();  // Record start time
 		int tx_err = esb_start_tx();
 		if (tx_err == -EBUSY) {
 			// Radio is already transmitting; not an error in manual mode
 			LOG_DBG("esb_start_tx busy");
 		} else if (tx_err) {
 			LOG_WRN("esb_start_tx error: %d", tx_err);
+			atomic_clear(&esb_tx_busy);  // Clear on error
+			esb_tx_start_time = 0;
 		} else {
 			LOG_DBG("esb_start_tx ok");
 		}
@@ -873,6 +969,47 @@ static void esb_thread(void) {
 		}
 		// Check PING timeout and schedule idle PINGs
 		int64_t now_idle = k_uptime_get();
+
+		// Watchdog: Check for stuck TX
+		if (atomic_test_bit(&esb_tx_busy, 0) && esb_tx_start_time > 0) {
+			if (now_idle - esb_tx_start_time > ESB_TX_TIMEOUT_MS * 2) {  // 100ms timeout for watchdog
+				LOG_ERR("ESB TX watchdog: stuck for %lld ms, clearing busy flag",
+						now_idle - esb_tx_start_time);
+				atomic_clear(&esb_tx_busy);
+				esb_tx_start_time = 0;
+				esb_flush_tx();
+				// Mark for reinitialization if really stuck
+				atomic_set_bit(&esb_needs_reinit, 0);
+			}
+		}
+
+		// Safe reinitialization check (only in esb_thread context)
+		if (atomic_test_and_clear_bit(&esb_needs_reinit, 0)) {
+			// Check cooldown to avoid reinit storm
+			if (now_idle - last_reinit_time > ESB_REINIT_COOLDOWN_MS) {
+				LOG_WRN("ESB reinitialization requested, performing safe reinit");
+				last_reinit_time = now_idle;
+
+				// Safe reinitialization sequence
+				esb_flush_tx();
+				esb_disable();
+				k_msleep(20);  // Give time for cleanup
+
+				// Only reinitialize if still paired
+				if (esb_paired) {
+					int init_err = esb_initialize(true);
+					if (init_err) {
+						LOG_ERR("ESB reinit failed: %d", init_err);
+					} else {
+						LOG_INF("ESB reinitialized successfully");
+					}
+				}
+			} else {
+				LOG_WRN("ESB reinit skipped (cooldown: %lld ms remaining)",
+						ESB_REINIT_COOLDOWN_MS - (now_idle - last_reinit_time));
+			}
+		}
+
 		if (ping_pending && (now_idle - ping_send_time) > PING_TIMEOUT_MS) {
 			// Consider missing PONG a failure, clear pending
 			ping_failed = true;
