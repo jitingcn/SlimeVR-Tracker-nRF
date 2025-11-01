@@ -37,8 +37,14 @@ static uint8_t data_buffer[16] = {0};
 static volatile bool data_ready = false;
 static uint8_t packet_sequence = 0;
 static K_MUTEX_DEFINE(buffer_mutex);
+static int64_t last_ping_time = 0;
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
+
+#ifndef CONFIG_CONNECTION_MIN_TX_INTERVAL_MS
+// Enforce a minimum interval between ESB transmissions to cap TPS
+#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 5
+#endif
 
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 8, 0, 0);
@@ -299,57 +305,94 @@ static int64_t last_status_time = 0;
 void connection_thread(void)
 {
 	uint8_t esb_packet[17];
+	// Global TX limiter
+	static int64_t last_tx_time = 0;
 	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1)
 	{
-		if (data_ready) {
+		int64_t	now = k_uptime_get();
+		// PING has highest priority - always send when interval elapsed
+		// This ensures connection recovery attempts continue even during errors
+		if (esb_ready() && now - last_ping_time >= PING_INTERVAL_MS)
+		{
+			uint8_t ping[ESB_PING_LEN] = {0};
+			ping[0] = ESB_PING_TYPE;
+			ping[1] = connection_get_id();
+			ping[2] = 0; // ping counter, set in esb_write
+			uint32_t now32 = (uint32_t)now;
+			ping[3] = (now32 >> 24) & 0xFF;
+			ping[4] = (now32 >> 16) & 0xFF;
+			ping[5] = (now32 >> 8) & 0xFF;
+			ping[6] = (now32) & 0xFF;
+			ping[7] = 0x00; // flags
+			memset(&ping[8], 0x00, 4); // reserved
+			ping[12] = 0;
+			esb_write(ping, false);
+			last_ping_time = now;
+			// Don't continue here - allow data packets to be sent in same iteration
+		} else if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
 				memcpy(esb_packet, data_buffer, 16);
 
 				esb_packet[16] = packet_sequence++;
-				data_ready = false;
 				k_mutex_unlock(&buffer_mutex);
-				esb_write(esb_packet);
+
+				// Enforce minimum TX interval across all packet types (no PING)
+				if (last_tx_time && (now - last_tx_time) < CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
+					// Keep data_ready true to retry the latest packet next iteration
+					data_ready = true;
+				} else {
+					data_ready = false;
+					esb_write(esb_packet, true); // normal data: no ACK
+					last_tx_time = now;
+				}
 			} else {
 				LOG_WRN("Failed to acquire mutex for reading data");
 			}
 		}
 		// mag is higher priority (skip accel, quat is full precision)
-		else if (mag_update_time && k_uptime_get() - last_mag_time > 200)
+		else if (mag_update_time && now - last_mag_time > 200)
 		{
 			mag_update_time = 0; // data has been sent
-			last_mag_time = k_uptime_get();
+			last_mag_time = now;
 			connection_write_packet_4();
 			continue;
 		}
 		// if time for info and precise quat not needed
-		else if (quat_update_time && !send_precise_quat && k_uptime_get() - last_info_time > 100)
+		else if (quat_update_time && !send_precise_quat && now - last_info_time > 100)
 		{
 			quat_update_time = 0;
-			last_quat_time = k_uptime_get();
-			last_info_time = k_uptime_get();
+			last_quat_time = now;
+			last_info_time = now;
 			connection_write_packet_2();
 			continue;
 		}
 		// send quat otherwise
 		else if (quat_update_time)
 		{
-			quat_update_time = 0;
-			last_quat_time = k_uptime_get();
-			connection_write_packet_1();
-			continue;
+			// Respect TX limiter: only convert to buffer when interval allows
+			if (!last_tx_time || (now - last_tx_time) >= CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
+				quat_update_time = 0;
+				last_quat_time = now;
+				connection_write_packet_1();
+				continue;
+			}
 		}
-		else if (k_uptime_get() - last_info_time > 100)
+		else if (now - last_info_time > 100)
 		{
-			last_info_time = k_uptime_get();
-			connection_write_packet_0();
-			continue;
+			if (!last_tx_time || (now - last_tx_time) >= CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
+				last_info_time = now;
+				connection_write_packet_0();
+				continue;
+			}
 		}
-		else if (k_uptime_get() - last_status_time > 1000)
+		else if (now - last_status_time > 1000)
 		{
-			last_status_time = k_uptime_get();
-			connection_write_packet_3();
-			continue;
+			if (!last_tx_time || (now - last_tx_time) >= CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
+				last_status_time = now;
+				connection_write_packet_3();
+				continue;
+			}
 		}
 		else
 		{

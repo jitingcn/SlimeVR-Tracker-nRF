@@ -55,8 +55,9 @@ void esb_pair(void);
 void esb_reset_pair(void);
 void esb_clear_pair(void);
 
-void esb_write(uint8_t* data);  // TODO: give packets some names
+void esb_write(uint8_t* data, bool no_ack);  // TODO: give packets some names
 
+#define PING_INTERVAL_MS 1000
 // Ping/Pong types for ACK payload validation
 #define ESB_PING_TYPE 0xF0
 #define ESB_PONG_TYPE 0xF1
@@ -66,5 +67,8 @@ void esb_write(uint8_t* data);  // TODO: give packets some names
 #define ESB_PONG_LEN 13  // with CRC-8
 
 bool esb_ready(void);
+
+// Helper: log esb_write call frequency
+void esb_write_rate_tick(void);
 
 #endif
