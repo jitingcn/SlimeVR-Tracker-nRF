@@ -111,6 +111,8 @@ static uint32_t esb_write_queued = 0;
 static int64_t esb_rate_last_ts = 0;
 static uint32_t esb_enomem_count = 0;  // Track -ENOMEM errors
 static int64_t last_enomem_log = 0;
+static int64_t last_enomem_time = 0;  // Track when last ENOMEM occurred
+#define ENOMEM_WINDOW_MS 1500  // Count errors within window
 
 void esb_write_rate_tick(void) {
     int64_t now = k_uptime_get();
@@ -163,11 +165,22 @@ void event_handler(struct esb_evt const* event) {
 			if (esb_paired) {
 				clocks_stop();
 			}
-			// esb_pop_tx();
+			esb_pop_tx();
 			break;
 		case ESB_EVENT_RX_RECEIVED:
-			if (!esb_read_rx_payload(&rx_payload))  // zero, rx success
+			int err = 0;
+			while (!err) // zero, rx success
 			{
+				err = esb_read_rx_payload(&rx_payload);
+				if (err == -ENODATA)
+				{
+					return;
+				}
+				else if (err)
+				{
+					LOG_ERR("Error while reading rx packet: %d", err);
+					return;
+				}
 				// Hex dump first up to 13 bytes for visibility
 				char hexbuf[3 * 13 + 1] = {0};
 				int dump_len = rx_payload.length < 13 ? rx_payload.length : 13;
@@ -831,33 +844,39 @@ void esb_write(uint8_t* data, bool no_ack) {
 	if (queue_status == -ENOMEM) {
 		int64_t now_err = k_uptime_get();
 
+		// Reset counter if outside the time window
+		if (last_enomem_time > 0 && (now_err - last_enomem_time) > ENOMEM_WINDOW_MS) {
+			esb_enomem_count = 0;  // Reset if more than 1 second since last error
+		}
+
 		esb_enomem_count++;
+		last_enomem_time = now_err;
 
 		// Log more frequently for faster detection
-		if (now_err - last_enomem_log >= 100) {  // Log every 100ms instead of 1s
-			LOG_ERR("ESB -ENOMEM error (count=%u), attempting recovery", esb_enomem_count);
+		if (now_err - last_enomem_log >= 100) {  // Log every 100ms
+			LOG_ERR("ESB -ENOMEM error (count=%u in last %lld ms)",
+					esb_enomem_count,
+					last_enomem_time > 0 ? (now_err - (last_enomem_time - ENOMEM_WINDOW_MS)) : 0);
 			last_enomem_log = now_err;
 
-			// Try to recover ESB by restarting TX (lightweight recovery)
+			// Try to recover ESB by flushing TX
 			esb_flush_tx();
-			int tx_err = esb_start_tx();
-			if (tx_err && tx_err != -ENOENT) {
-				LOG_ERR("esb_start_tx recovery failed: %d", tx_err);
-			}
 
-			// If failing quickly, mark for reinitialization faster
-			// 3 errors = ~300ms, much faster than before
-			if (esb_enomem_count >= 3) {  // Reduced from 10 to 3
-				LOG_WRN("ESB stuck in -ENOMEM state (%u errors), marking for reinit", esb_enomem_count);
+			// If failing quickly within the window, mark for reinitialization
+			// 3 errors within 1 second = persistent problem
+			if (esb_enomem_count >= 3) {
+				LOG_WRN("ESB stuck in -ENOMEM state (%u errors in %lld ms), marking for reinit",
+						esb_enomem_count, now_err - (last_enomem_time - ENOMEM_WINDOW_MS));
 				atomic_set_bit(&esb_needs_reinit, 0);
 				atomic_clear(&esb_tx_busy);
 				esb_tx_start_time = 0;
 				esb_enomem_count = 0;
+				last_enomem_time = 0;
 			}
 		}
 	} else if (queue_status == 0) {
-		// Reset error counter on success
-		esb_enomem_count = 0;
+		// Don't reset counter immediately - let time window handle it
+		// This prevents PING success from hiding persistent data packet failures
 	}
 
 	// Record last TX time for idle probe scheduling
@@ -884,6 +903,7 @@ void esb_write(uint8_t* data, bool no_ack) {
 		if (queue_status == -ENOMEM) err_str = "ENOMEM (ESB not ready)";
 		else if (queue_status == -ENOSPC) err_str = "ENOSPC (FIFO full)";
 		else if (queue_status == -EACCES) err_str = "EACCES (access denied)";
+		else if (queue_status == -ENODATA) err_str = "ENODATA (no data available)";
 
 		LOG_ERR("esb_write: PING failed to queue (ctr=%u, err=%d %s)",
 				tx_payload.data[2], queue_status, err_str);
@@ -905,13 +925,17 @@ void esb_write(uint8_t* data, bool no_ack) {
 			LOG_DBG("esb_start_tx ok");
 		}
 	} else {
-		// We failed to queue this packet (FIFO full), but there are already
-		// packets in the FIFO. Ensure TX is started to drain the queue.
+		// We failed to queue this packet (FIFO full or other error)
+		// Try to start TX to drain the queue if there's data
 		int tx_err = esb_start_tx();
 		if (tx_err == -EBUSY) {
 			LOG_DBG("esb_start_tx busy");
-		} else if (tx_err && tx_err != -ENOENT) {
-			// -ENOENT would indicate no payload pending; ignore others
+		} else if (tx_err == -ENODATA || tx_err == -ENOENT) {
+			// No data in FIFO - this is normal, not an error
+			// -ENODATA (61): No data available
+			// -ENOENT (2): No entry/payload pending
+			LOG_DBG("esb_start_tx: no data in FIFO");
+		} else if (tx_err) {
 			LOG_WRN("esb_start_tx (drain) error: %d", tx_err);
 		}
 	}
