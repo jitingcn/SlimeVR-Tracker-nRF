@@ -93,11 +93,11 @@ static uint32_t ping_send_cycles = 0;
 
 static atomic_t esb_tx_busy = ATOMIC_INIT(0);  // Track if TX is in progress
 static int64_t esb_tx_start_time = 0;  // Track when TX started
-#define ESB_TX_TIMEOUT_MS 50  // TX should complete within 50ms
+#define ESB_TX_TIMEOUT_MS 30  // TX should complete within 30ms (reduced from 50ms)
 
 static atomic_t esb_needs_reinit = ATOMIC_INIT(0);  // Flag for safe reinitialization
 static int64_t last_reinit_time = 0;
-#define ESB_REINIT_COOLDOWN_MS 5000  // Don't reinit more than once per 5 seconds
+#define ESB_REINIT_COOLDOWN_MS 500  // Don't reinit more than once per 500ms
 
 static uint8_t tracker_id = 0;
 static void set_tracker_id(uint8_t id)
@@ -779,24 +779,24 @@ void esb_write(uint8_t* data, bool no_ack) {
 
 	// Check if TX is busy (in manual mode, can't queue while transmitting)
 	if (atomic_test_bit(&esb_tx_busy, 0)) {
-		// Check for TX timeout
+		// Check for TX timeout (faster detection)
 		int64_t now_check = k_uptime_get();
 		if (now_check - esb_tx_start_time > ESB_TX_TIMEOUT_MS) {
-			// TX timeout - force recovery
-			LOG_ERR("TX timeout (%lld ms), clearing busy flag", now_check - esb_tx_start_time);
+			// TX timeout - force recovery immediately
+			LOG_ERR("TX timeout (%lld ms), forcing immediate recovery", now_check - esb_tx_start_time);
 			atomic_clear(&esb_tx_busy);
 			esb_tx_start_time = 0;
 
-			// Try lightweight recovery
+			// Aggressive recovery: flush and mark for reinit
 			esb_flush_tx();
+			atomic_set_bit(&esb_needs_reinit, 0);
 
-			// Don't reinitialize here - too risky
-			// Just clear the flag and try to send this packet
+			// Don't return, try to send this packet after clearing busy flag
 		} else {
 			// TX is busy but not timed out, drop this packet
 			static uint32_t tx_busy_count = 0;
 			tx_busy_count++;
-			if (tx_busy_count % 100 == 0) {
+			if (tx_busy_count % 50 == 0) {  // Log every 50 packets instead of 100
 				LOG_WRN("TX busy, dropped %u packets (busy for %lld ms)",
 						tx_busy_count, now_check - esb_tx_start_time);
 			}
@@ -833,8 +833,8 @@ void esb_write(uint8_t* data, bool no_ack) {
 
 		esb_enomem_count++;
 
-		// Log every second to avoid spam
-		if (now_err - last_enomem_log >= 1000) {
+		// Log more frequently for faster detection
+		if (now_err - last_enomem_log >= 100) {  // Log every 100ms instead of 1s
 			LOG_ERR("ESB -ENOMEM error (count=%u), attempting recovery", esb_enomem_count);
 			last_enomem_log = now_err;
 
@@ -845,11 +845,11 @@ void esb_write(uint8_t* data, bool no_ack) {
 				LOG_ERR("esb_start_tx recovery failed: %d", tx_err);
 			}
 
-			// If still failing after many attempts, mark for reinitialization
-			// but DON'T do it here - let esb_thread handle it
-			if (esb_enomem_count >= 10) {
-				LOG_WRN("ESB stuck in -ENOMEM state, marking for reinit");
-				// Just clear the busy flag and let normal flow recover
+			// If failing quickly, mark for reinitialization faster
+			// 3 errors = ~300ms, much faster than before
+			if (esb_enomem_count >= 3) {  // Reduced from 10 to 3
+				LOG_WRN("ESB stuck in -ENOMEM state (%u errors), marking for reinit", esb_enomem_count);
+				atomic_set_bit(&esb_needs_reinit, 0);
 				atomic_clear(&esb_tx_busy);
 				esb_tx_start_time = 0;
 				esb_enomem_count = 0;
@@ -970,15 +970,15 @@ static void esb_thread(void) {
 		// Check PING timeout and schedule idle PINGs
 		int64_t now_idle = k_uptime_get();
 
-		// Watchdog: Check for stuck TX
+		// Watchdog: Check for stuck TX (faster detection)
 		if (atomic_test_bit(&esb_tx_busy, 0) && esb_tx_start_time > 0) {
-			if (now_idle - esb_tx_start_time > ESB_TX_TIMEOUT_MS * 2) {  // 100ms timeout for watchdog
-				LOG_ERR("ESB TX watchdog: stuck for %lld ms, clearing busy flag",
+			if (now_idle - esb_tx_start_time > ESB_TX_TIMEOUT_MS) {  // 30ms timeout
+				LOG_ERR("ESB TX watchdog: stuck for %lld ms, forcing recovery",
 						now_idle - esb_tx_start_time);
 				atomic_clear(&esb_tx_busy);
 				esb_tx_start_time = 0;
 				esb_flush_tx();
-				// Mark for reinitialization if really stuck
+				// Mark for reinitialization immediately
 				atomic_set_bit(&esb_needs_reinit, 0);
 			}
 		}
@@ -990,10 +990,10 @@ static void esb_thread(void) {
 				LOG_WRN("ESB reinitialization requested, performing safe reinit");
 				last_reinit_time = now_idle;
 
-				// Safe reinitialization sequence
+				// Fast reinitialization sequence
 				esb_flush_tx();
 				esb_disable();
-				k_msleep(20);  // Give time for cleanup
+				k_msleep(10);  // Reduced from 20ms to 10ms
 
 				// Only reinitialize if still paired
 				if (esb_paired) {
