@@ -598,6 +598,7 @@ static void console_thread(void)
 		{
 #if ADAFRUIT_BOOTLOADER
 			NRF_POWER->GPREGRET = 0x57;
+			k_msleep(100); // Wait for register to be written
 			sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER
