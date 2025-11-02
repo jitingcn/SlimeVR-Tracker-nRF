@@ -341,6 +341,56 @@ static void print_meow(void)
 	printk("%s%s%s\n", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
 
+static void print_help(void)
+{
+	printk("\n=== Available Commands ===\n\n");
+	printk("Device Information:\n");
+	printk("  info                       Get device information\n");
+	printk("  uptime                     Get device uptime\n");
+	printk("  battery                    Get battery information\n");
+	printk("\n");
+	printk("Sensor Management:\n");
+	printk("  scan                       Restart sensor scan\n");
+	printk("  calibrate                  Calibrate sensor ZRO\n");
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	printk("  6-side                     Calibrate 6-side accelerometer\n");
+#endif
+#if SENSOR_MAG_EXISTS
+	printk("  mag                        Clear magnetometer calibration\n");
+#endif
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+	printk("  sens <x>,<y>,<z>           Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
+	printk("  sens reset                 Reset gyro sensitivity calibration\n");
+#endif
+	printk("\n");
+	printk("Connection:\n");
+	printk("  set <address>              Manually set receiver\n");
+	printk("  pair                       Enter pairing mode\n");
+	printk("  clear                      Clear pairing data\n");
+	printk("\n");
+	printk("System:\n");
+	printk("  reboot                     Soft reset the device\n");
+#if DFU_EXISTS
+	printk("  dfu                        Enter DFU bootloader\n");
+#endif
+	printk("\n");
+	printk("Other:\n");
+	printk("  meow                       Meow!\n");
+	printk("  help                       Show this help message\n");
+	printk("\n");
+	printk("Debug Commands:\n");
+	printk("  reset zro                  Reset ZRO calibration\n");
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	printk("  reset acc                  Reset accelerometer calibration\n");
+#endif
+#if SENSOR_MAG_EXISTS
+	printk("  reset mag                  Reset magnetometer calibration\n");
+#endif
+	printk("  reset bat                  Reset battery tracker\n");
+	printk("  reset all                  Clear all settings\n");
+	printk("\n");
+}
+
 static void console_thread(void)
 {
 #if !defined(CONFIG_BOARD_STYRIA_MINI_UF2)
@@ -384,16 +434,9 @@ static void console_thread(void)
 	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
 #endif
 	printk(FW_STRING);
-	printk("info                         Get device information\n");
-	printk("uptime                       Get device uptime\n");
-	printk("reboot                       Soft reset the device\n");
-	printk("battery                      Get battery information\n");
-	printk("scan                         Restart sensor scan\n");
-	printk("calibrate                    Calibrate sensor ZRO\n");
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	printk("sens <x>,<y>,<z>             Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
-	printk("sens reset                   Reset gyro sensitivity calibration\n");
-#endif
+
+	// Print help on startup
+	print_help();
 
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
@@ -401,36 +444,26 @@ static void console_thread(void)
 	uint8_t command_battery[] = "battery";
 	uint8_t command_scan[] = "scan";
 	uint8_t command_calibrate[] = "calibrate";
+	uint8_t command_help[] = "help";
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	printk("6-side                       Calibrate 6-side accelerometer\n");
-
 	uint8_t command_6_side[] = "6-side";
 #endif
 
 #if SENSOR_MAG_EXISTS
-	printk("mag                          Clear magnetometer calibration\n");
-
 	uint8_t command_mag[] = "mag";
 #endif
-
-	printk("set <address>                Manually set receiver\n");
-	printk("pair                         Enter pairing mode\n");
-	printk("clear                        Clear pairing data\n");
 
 	uint8_t command_set[] = "set";
 	uint8_t command_pair[] = "pair";
 	uint8_t command_clear[] = "clear";
 
 #if DFU_EXISTS
-	printk("dfu                          Enter DFU bootloader\n");
-
 	uint8_t command_dfu[] = "dfu";
 #endif
 
-	printk("meow                         Meow!\n");
-
 	uint8_t command_meow[] = "meow";
+
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	uint8_t command_sens[] = "sens";
 #endif
@@ -467,7 +500,11 @@ static void console_thread(void)
 			}
 		}
 
-		if (memcmp(line, command_info, sizeof(command_info)) == 0)
+		if (memcmp(line, command_help, sizeof(command_help)) == 0)
+		{
+			print_help();
+		}
+		else if (memcmp(line, command_info, sizeof(command_info)) == 0)
 		{
 			print_info();
 		}
