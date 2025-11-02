@@ -43,7 +43,7 @@ LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
 #ifndef CONFIG_CONNECTION_MIN_TX_INTERVAL_MS
 // Enforce a minimum interval between ESB transmissions to cap TPS
-#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 5
+#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 4
 #endif
 
 static void connection_thread(void);
@@ -198,7 +198,6 @@ void connection_write_packet_0() // device info
 	data[15] = 0; // rssi (supplied by receiver)
 
 	write_packet_data(data);
-//	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -217,7 +216,6 @@ void connection_write_packet_1() // full precision quat and accel
 	buf[6] = TO_FIXED_7(sensor_a[2]);
 
 	write_packet_data(data);
-//	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -252,7 +250,6 @@ void connection_write_packet_2() // reduced precision quat and accel with batter
 	data[15] = 0; // rssi (supplied by receiver)
 
 	write_packet_data(data);
-//	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -266,7 +263,6 @@ void connection_write_packet_3() // status
 	data[15] = 0; // rssi (supplied by receiver)
 
 	write_packet_data(data);
-//	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -285,7 +281,6 @@ void connection_write_packet_4() // full precision quat and magnetometer
 	buf[6] = TO_FIXED_10(sensor_m[2]);
 
 	write_packet_data(data);
-//	esb_write(data); // TODO: schedule in thread
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -327,12 +322,10 @@ void connection_thread(void)
 			ping[7] = 0x00; // flags
 			memset(&ping[8], 0x00, 4); // reserved
 			ping[12] = 0;
-			esb_write(ping, false);
+			esb_write(ping, false, ESB_PING_LEN); // PING: requires ACK
 			last_ping_time = now;
-			last_tx_time = now;  // Update last_tx_time to prevent immediate data packet
-			// Give PING time to be transmitted before sending data packets
-			k_msleep(2);
-			continue;  // Skip data packets this iteration to ensure PING goes out first
+			last_tx_time = now;
+			continue;
 		} else if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
 				memcpy(esb_packet, data_buffer, 16);
@@ -346,7 +339,7 @@ void connection_thread(void)
 					data_ready = true;
 				} else {
 					data_ready = false;
-					esb_write(esb_packet, true); // normal data: no ACK
+					esb_write(esb_packet, true, sizeof(esb_packet)); // normal data: no ACK
 					last_tx_time = now;
 				}
 			} else {

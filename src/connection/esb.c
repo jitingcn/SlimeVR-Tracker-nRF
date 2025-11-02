@@ -834,12 +834,16 @@ void esb_clear_pair(void) {
 	LOG_INF("Pairing data reset");
 }
 
-void esb_write(uint8_t* data, bool no_ack) {
+void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	if (!esb_initialized || !esb_paired) {
 		return;
 	}
 	if (!clock_status) {
 		clocks_start();
+	}
+	if (data_length < 1) {
+		LOG_ERR("Invalid data length %u", data_length);
+		return;
 	}
 
 	int64_t now = k_uptime_get();
@@ -849,24 +853,17 @@ void esb_write(uint8_t* data, bool no_ack) {
 	tx_payload.noack = no_ack;
 	// Send on a unique ESB pipe per tracker (0–7)
 	tx_payload.pipe = tracker_id % 8;
+	tx_payload.length = data_length;
 
-	// Determine payload length from packet type
-	// Normal data packets are 16 bytes + 1 sequence = 17 total
-	// PING packets use ESB_PING_LEN (13)
 	if (data[0] == ESB_PING_TYPE) {
-		// Ping packet
-		tx_payload.length = ESB_PING_LEN;
 		// Set sequence number
 		data[2] = ping_counter;
 		// Calculate crc8 checksum over first 12 bytes
 		uint8_t crc_calc = crc8_ccitt(0x07, data, ESB_PING_LEN - 1);
 		data[ESB_PING_LEN - 1] = crc_calc;
 		ping_counter++;
-	} else {
-		// Normal tracker data
-		tx_payload.length = 17;
 	}
-	memcpy(tx_payload.data, data, tx_payload.length);
+	memcpy(tx_payload.data, data, data_length);
 
 	// Check if TX is busy (in manual mode, can't queue while transmitting)
 	if (atomic_test_bit(&esb_tx_busy, 0)) {
