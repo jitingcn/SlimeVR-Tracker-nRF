@@ -78,6 +78,9 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length);  // TODO: give p
 
 bool esb_ready(void);
 
+// Get remote command flag to echo back in PING
+uint8_t esb_get_ping_ack_flag(void);
+
 // Helper: log esb_write call frequency
 void esb_write_rate_tick(void);
 

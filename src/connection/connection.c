@@ -319,7 +319,7 @@ void connection_thread(void)
 			ping[4] = (now32 >> 16) & 0xFF;
 			ping[5] = (now32 >> 8) & 0xFF;
 			ping[6] = (now32) & 0xFF;
-			ping[7] = 0x00; // flags
+			ping[7] = esb_get_ping_ack_flag();
 			memset(&ping[8], 0x00, 4); // reserved
 			ping[12] = 0;
 			esb_write(ping, false, ESB_PING_LEN); // PING: requires ACK

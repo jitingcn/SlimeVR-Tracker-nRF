@@ -93,6 +93,11 @@ static uint8_t ping_counter = 0;
 static int64_t ping_send_time = 0;
 static uint32_t ping_send_cycles = 0;
 
+static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
+static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
+static int64_t remote_command_receive_time = 0;
+#define REMOTE_COMMAND_DELAY_MS 2300
+
 static atomic_t esb_tx_busy = ATOMIC_INIT(0);  // Track if TX is in progress
 static int64_t esb_tx_start_time = 0;  // Track when TX started
 #define ESB_TX_TIMEOUT_MS 30  // TX should complete within 30ms (reduced from 50ms)
@@ -188,257 +193,243 @@ void event_handler(struct esb_evt const* event) {
 			if (esb_paired) {
 				clocks_stop();
 			}
-			esb_pop_tx();
 			break;
 		case ESB_EVENT_RX_RECEIVED:
 			int err = 0;
-			while (!err) // zero, rx success
+			err = esb_read_rx_payload(&rx_payload);
+			if (err == -ENODATA)
 			{
-				err = esb_read_rx_payload(&rx_payload);
-				if (err == -ENODATA)
-				{
-					return;
-				}
-				else if (err)
-				{
-					LOG_ERR("Error while reading rx packet: %d", err);
-					return;
-				}
-				// Hex dump first up to 13 bytes for visibility
-				char hexbuf[3 * 13 + 1] = {0};
-				int dump_len = rx_payload.length < 13 ? rx_payload.length : 13;
-				for (int i = 0; i < dump_len; i++) {
-					snprintk(&hexbuf[i * 3], 4, "%02X ", rx_payload.data[i]);
-				}
+				return;
+			}
+			else if (err)
+			{
+				LOG_ERR("Error while reading rx packet: %d", err);
+				return;
+			}
+			// Hex dump first up to 13 bytes for visibility
+			char hexbuf[3 * 13 + 1] = {0};
+			int dump_len = rx_payload.length < 13 ? rx_payload.length : 13;
+			for (int i = 0; i < dump_len; i++) {
+				snprintk(&hexbuf[i * 3], 4, "%02X ", rx_payload.data[i]);
+			}
+			LOG_INF(
+				"RX len=%u pipe=%u data=%s",
+				rx_payload.length,
+				rx_payload.pipe,
+				hexbuf
+			);
+			LOG_INF(
+				"RX payload len=%u type=%u pipe=%u",
+				rx_payload.length,
+				rx_payload.data[0],
+				rx_payload.pipe
+			);
+			if (!paired_addr[0])  // zero, not paired
+			{
 				LOG_DBG(
-					"RX len=%u pipe=%u data=%s",
-					rx_payload.length,
-					rx_payload.pipe,
-					hexbuf
+					"tx: %16llX rx: %16llX",
+					*(uint64_t*)tx_payload_pair.data,
+					*(uint64_t*)rx_payload.data
 				);
-				LOG_INF(
-					"RX payload len=%u type=%u pipe=%u",
-					rx_payload.length,
-					rx_payload.data[0],
-					rx_payload.pipe
-				);
-				if (!paired_addr[0])  // zero, not paired
-				{
-					LOG_DBG(
-						"tx: %16llX rx: %16llX",
-						*(uint64_t*)tx_payload_pair.data,
-						*(uint64_t*)rx_payload.data
-					);
-					if (rx_payload.length == 8) {
-						if (!pair_ack_pending) {
-							LOG_DBG("Ignoring unsolicited pairing response");
-							break;
-						}
-						if (rx_payload.data[0] != tx_payload_pair.data[0]) {
-							LOG_DBG(
-								"Ignoring pairing response with mismatched checksum "
-								"%02X",
-								rx_payload.data[0]
-							);
-							pair_ack_pending = false;
-							break;
-						}
-						uint64_t responder_addr = 0;
-						memcpy(&responder_addr, &rx_payload.data[2], 6);
-						responder_addr &= 0xFFFFFFFFFFFFULL;
-						uint64_t local_addr
-							= (*(uint64_t*)NRF_FICR->DEVICEADDR) & 0xFFFFFFFFFFFFULL;
-						if (responder_addr == local_addr) {
-							LOG_WRN(
-								"Ignoring pairing response sourced from local device "
-								"address"
-							);
-							pair_ack_pending = false;
-							break;
-						}
-						memcpy(paired_addr, rx_payload.data, sizeof(paired_addr));
-						pair_ack_pending = false;
+				if (rx_payload.length == 8) {
+					if (!pair_ack_pending) {
+						LOG_DBG("Ignoring unsolicited pairing response");
+						break;
 					}
-				} else {
-					switch (rx_payload.length) {
-						case 4:
+					if (rx_payload.data[0] != tx_payload_pair.data[0]) {
+						LOG_DBG(
+							"Ignoring pairing response with mismatched checksum "
+							"%02X",
+							rx_payload.data[0]
+						);
+						pair_ack_pending = false;
+						break;
+					}
+					uint64_t responder_addr = 0;
+					memcpy(&responder_addr, &rx_payload.data[2], 6);
+					responder_addr &= 0xFFFFFFFFFFFFULL;
+					uint64_t local_addr
+						= (*(uint64_t*)NRF_FICR->DEVICEADDR) & 0xFFFFFFFFFFFFULL;
+					if (responder_addr == local_addr) {
+						LOG_WRN(
+							"Ignoring pairing response sourced from local device "
+							"address"
+						);
+						pair_ack_pending = false;
+						break;
+					}
+					memcpy(paired_addr, rx_payload.data, sizeof(paired_addr));
+					pair_ack_pending = false;
+				}
+			} else {
+				switch (rx_payload.length) {
+					case 4:
+					{
+						// TODO: Device should never receive packets if it is already
+						// paired, why is this packet received? This may be part of
+						// acknowledge
+						//					if (!nrfx_timer_init_check(&m_timer))
 						{
-							// TODO: Device should never receive packets if it is already
-							// paired, why is this packet received? This may be part of
-							// acknowledge
-							//					if (!nrfx_timer_init_check(&m_timer))
-							{
-								LOG_WRN("Timer not initialized");
+							LOG_WRN("Timer not initialized");
+							break;
+						}
+						if (timer_state == false) {
+							//						nrfx_timer_resume(&m_timer);
+							timer_state = true;
+						}
+						//					nrfx_timer_clear(&m_timer);
+						last_reset = 0;
+						led_clock = (rx_payload.data[0] << 8)
+									+ rx_payload.data[1];  // sync led flashes :)
+						led_clock_offset = 0;
+						LOG_DBG("RX, timer reset");
+						pair_ack_pending = false;
+					}	break;
+					case ESB_PONG_LEN:
+					{
+						if (rx_payload.data[0] == ESB_PONG_TYPE) {
+							// check CRC first
+							uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PONG_LEN - 1);
+							if (rx_payload.data[ESB_PONG_LEN - 1] != crc_calc) {
+								LOG_WRN("PONG CRC mismatch");
 								break;
 							}
-							if (timer_state == false) {
-								//						nrfx_timer_resume(&m_timer);
-								timer_state = true;
+							uint8_t rx_id = rx_payload.data[1];
+							if (rx_id != tracker_id) {
+								LOG_WRN(
+									"Ignoring PONG for different tracker ID %u (expected %u)",
+									rx_id,
+									tracker_id
+								);
+								break;
 							}
-							//					nrfx_timer_clear(&m_timer);
-							last_reset = 0;
-							led_clock = (rx_payload.data[0] << 8)
-										+ rx_payload.data[1];  // sync led flashes :)
-							led_clock_offset = 0;
-							LOG_DBG("RX, timer reset");
-							pair_ack_pending = false;
-						}	break;
-						case ESB_PONG_LEN:
-						{
-							if (rx_payload.data[0] == ESB_PONG_TYPE) {
-								// check CRC first
-								uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PONG_LEN - 1);
-								if (rx_payload.data[ESB_PONG_LEN - 1] != crc_calc) {
-									LOG_WRN("PONG CRC mismatch");
-									break;
-								}
-								uint8_t rx_id = rx_payload.data[1];
-								if (rx_id != tracker_id) {
-									LOG_WRN(
-										"Ignoring PONG for different tracker ID %u (expected %u)",
-										rx_id,
-										tracker_id
-									);
-									break;
-								}
 
-								uint8_t rx_ctr = rx_payload.data[2];
-								// Reset ping counter if unsynced
-								bool match_ctr = abs(rx_ctr - ping_counter) <= 3 ||
-												 abs(rx_ctr + 256 - ping_counter) <= 3 ||
-												 abs(rx_ctr - 256 - ping_counter) <= 3;
-								if (!match_ctr) {
-									LOG_WRN(
-										"unsynced counter %u (expected ~%u)",
-										rx_ctr,
-										ping_counter
-									);
-									break;
-								}
-								// calcul ping send time
-								uint32_t ping_send_time = ((uint32_t)rx_payload.data[3] << 24)
-														 | ((uint32_t)rx_payload.data[4] << 16)
-														 | ((uint32_t)rx_payload.data[5] << 8)
-														 | ((uint32_t)rx_payload.data[6]);
-								uint32_t now32 = (uint32_t)k_uptime_get();
-								uint32_t now_cyc = k_cycle_get_32();
-								uint32_t rtt = (now32 - ping_send_time);
-								uint32_t rtt_us = k_cyc_to_us_near32(now_cyc - ping_send_cycles);
-								// Capture receiver time from PONG param (bytes 8..11)
-								uint32_t pong_rx_time = ((uint32_t)rx_payload.data[8] << 24)
-														| ((uint32_t)rx_payload.data[9] << 16)
-														| ((uint32_t)rx_payload.data[10] << 8)
-														| ((uint32_t)rx_payload.data[11]);
+							uint8_t rx_ctr = rx_payload.data[2];
+							// Reset ping counter if unsynced
+							bool match_ctr = abs(rx_ctr - ping_counter) <= 2 ||
+												abs(rx_ctr + 256 - ping_counter) <= 2 ||
+												abs(rx_ctr - 256 - ping_counter) <= 2;
+							if (!match_ctr) {
+								LOG_WRN(
+									"unsynced counter %u (expected ~%u)",
+									rx_ctr,
+									ping_counter
+								);
+								break;
+							}
+							// calcul ping send time
+							uint32_t ping_send_time = ((uint32_t)rx_payload.data[3] << 24)
+														| ((uint32_t)rx_payload.data[4] << 16)
+														| ((uint32_t)rx_payload.data[5] << 8)
+														| ((uint32_t)rx_payload.data[6]);
+							uint32_t now32 = (uint32_t)k_uptime_get();
+							uint32_t now_cyc = k_cycle_get_32();
+							uint32_t rtt = (now32 - ping_send_time);
+							uint32_t rtt_us = k_cyc_to_us_near32(now_cyc - ping_send_cycles);
+							// Capture receiver time from PONG param (bytes 8..11)
+							uint32_t pong_rx_time = ((uint32_t)rx_payload.data[8] << 24)
+													| ((uint32_t)rx_payload.data[9] << 16)
+													| ((uint32_t)rx_payload.data[10] << 8)
+													| ((uint32_t)rx_payload.data[11]);
 
-								// Check flags field (byte 7)
-								uint8_t pong_flags = rx_payload.data[7];
+						// Check flags field (byte 7)
+						uint8_t pong_flags = rx_payload.data[7];
 
-								// Handle remote commands
-								if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-									switch (pong_flags) {
-										case ESB_PONG_FLAG_SHUTDOWN:
-											LOG_WRN("Remote command: SHUTDOWN");
-											sys_request_system_off(false);
-											break;
+						// Handle remote commands - 记录新命令但不立即执行
+						if (pong_flags != ESB_PONG_FLAG_NORMAL) {
+							if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
+								// 首次收到新命令
+								received_remote_command = pong_flags;
+								remote_command_receive_time = k_uptime_get();
 
-										case ESB_PONG_FLAG_CALIBRATE:
-											LOG_INF("Remote command: CALIBRATE");
-											sensor_request_calibration();
-											break;
-
-										case ESB_PONG_FLAG_SIX_SIDE_CAL:
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-											LOG_INF("Remote command: SIX_SIDE_CAL");
-											sensor_request_calibration_6_side();
-#else
-											LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
-#endif
-											break;
-
-										case ESB_PONG_FLAG_MEOW:
-											LOG_INF("Remote command: MEOW");
-											remote_print_meow();
-											break;
-
-										case ESB_PONG_FLAG_SCAN:
-											LOG_INF("Remote command: SCAN");
-											sensor_request_scan(true);
-											break;
-
-										case ESB_PONG_FLAG_MAG_CLEAR:
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
-											LOG_INF("Remote command: MAG_CLEAR");
-											sensor_calibration_clear_mag(NULL, true);
-#else
-											LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
-#endif
-											break;
-
-										default:
-											LOG_WRN("Unknown remote command: 0x%02X", pong_flags);
-											break;
-									}
-
-									// For shutdown, don't continue processing
-									if (pong_flags == ESB_PONG_FLAG_SHUTDOWN) {
+								const char* cmd_name = "UNKNOWN";
+								switch (pong_flags) {
+									case ESB_PONG_FLAG_SHUTDOWN:
+										cmd_name = "SHUTDOWN";
 										break;
-									}
+									case ESB_PONG_FLAG_CALIBRATE:
+										cmd_name = "CALIBRATE";
+										break;
+									case ESB_PONG_FLAG_SIX_SIDE_CAL:
+										cmd_name = "SIX_SIDE_CAL";
+										break;
+									case ESB_PONG_FLAG_MEOW:
+										cmd_name = "MEOW";
+										break;
+									case ESB_PONG_FLAG_SCAN:
+										cmd_name = "SCAN";
+										break;
+									case ESB_PONG_FLAG_MAG_CLEAR:
+										cmd_name = "MAG_CLEAR";
+										break;
 								}
+								LOG_INF("Remote command %s (0x%02X) received, will execute in %dms",
+									cmd_name, pong_flags, REMOTE_COMMAND_DELAY_MS);
+							}
+						} else {
+							// 收到 NORMAL flag，说明接收器已确认我们的回显
+							if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
+								LOG_DBG("Receiver confirmed command 0x%02X, resetting state",
+									acked_remote_command);
+								received_remote_command = ESB_PONG_FLAG_NORMAL;
+								acked_remote_command = ESB_PONG_FLAG_NORMAL;
+								remote_command_receive_time = 0;
+							}
+						}
 
-								// set ping valid
-								ping_pending = false;
-								ping_failed = false;
-								ping_failures = 0;
-								if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
-									ping_success_streak++;
-									if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
-										set_status(SYS_STATUS_CONNECTION_ERROR, false);
-										connection_error_start_time = 0;
-										shutdown_requested = false;
+						// set ping valid
+						ping_pending = false;
+						ping_failed = false;
+						ping_failures = 0;
+							if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
+								ping_success_streak++;
+								if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
+									set_status(SYS_STATUS_CONNECTION_ERROR, false);
+									connection_error_start_time = 0;
+									shutdown_requested = false;
 
-										if (rtt_us < 1000) {
-											LOG_INF(
-												"PONG ok - link restored after %u probes, "
-												"rtt=%u us",
-												ping_success_streak,
-												(unsigned)rtt_us
-											);
-										} else {
-											LOG_INF(
-												"PONG ok - link restored after %u probes, "
-												"rtt=%u.%03u ms",
-												ping_success_streak,
-												(unsigned)(rtt_us / 1000),
-												(unsigned)(rtt_us % 1000)
-											);
-										}
-										ping_success_streak = 0;
-									}
-								} else {
-									ping_success_streak = 0;
 									if (rtt_us < 1000) {
 										LOG_INF(
-											"PONG ok, rtt=%u us (ctr=%u)",
-											(unsigned)rtt_us,
-											rx_ctr
+											"PONG ok - link restored after %u probes, "
+											"rtt=%u us",
+											ping_success_streak,
+											(unsigned)rtt_us
 										);
 									} else {
 										LOG_INF(
-											"PONG ok, rtt=%u.%03u ms (ctr=%u)",
+											"PONG ok - link restored after %u probes, "
+											"rtt=%u.%03u ms",
+											ping_success_streak,
 											(unsigned)(rtt_us / 1000),
-											(unsigned)(rtt_us % 1000),
-											rx_ctr
+											(unsigned)(rtt_us % 1000)
 										);
 									}
+									ping_success_streak = 0;
+								}
+							} else {
+								ping_success_streak = 0;
+								if (rtt_us < 1000) {
+									LOG_INF(
+										"PONG ok, rtt=%u us (ctr=%u)",
+										(unsigned)rtt_us,
+										rx_ctr
+									);
+								} else {
+									LOG_INF(
+										"PONG ok, rtt=%u.%03u ms (ctr=%u)",
+										(unsigned)(rtt_us / 1000),
+										(unsigned)(rtt_us % 1000),
+										rx_ctr
+									);
 								}
 							}
-						} break;
-						default:
-							LOG_WRN(
-								"Ignoring invalid payload length %u",
-								rx_payload.length
-							);
-					}
+						}
+					} break;
+					default:
+						LOG_WRN(
+							"Ignoring invalid payload length %u",
+							rx_payload.length
+						);
 				}
 			}
 			break;
@@ -587,7 +578,7 @@ int esb_initialize(bool tx) {
 		config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		config.use_fast_ramp_up = true;
+		// config.use_fast_ramp_up = true;
 	} else {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
@@ -1018,6 +1009,19 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 
 bool esb_ready(void) { return esb_initialized && esb_paired; }
 
+// 获取要在 PING 中回显的命令 flag
+uint8_t esb_get_ping_ack_flag(void) {
+	// 如果已执行命令，继续回显直到接收器确认
+	if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
+		return acked_remote_command;
+	}
+	// 如果刚收到命令还没执行，也回显（表示已收到）
+	if (received_remote_command != ESB_PONG_FLAG_NORMAL) {
+		return received_remote_command;
+	}
+	return ESB_PONG_FLAG_NORMAL;
+}
+
 
 static void esb_thread(void) {
 #if CONFIG_CONNECTION_OVER_HID
@@ -1069,6 +1073,66 @@ static void esb_thread(void) {
 		// Check PING timeout and schedule idle PINGs
 		int64_t now_idle = k_uptime_get();
 
+		// 检查是否需要延迟执行远程命令
+		if (received_remote_command != ESB_PONG_FLAG_NORMAL
+			&& received_remote_command != acked_remote_command
+			&& remote_command_receive_time > 0) {
+			if (now_idle - remote_command_receive_time >= REMOTE_COMMAND_DELAY_MS) {
+				// 延迟时间已到，执行命令
+				switch (received_remote_command) {
+					case ESB_PONG_FLAG_SHUTDOWN:
+						LOG_WRN("Executing remote command: SHUTDOWN");
+						sys_request_system_off(false);
+						break;
+
+					case ESB_PONG_FLAG_CALIBRATE:
+						LOG_INF("Executing remote command: CALIBRATE");
+						sensor_request_calibration();
+						break;
+
+					case ESB_PONG_FLAG_SIX_SIDE_CAL:
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+						LOG_INF("Executing remote command: SIX_SIDE_CAL");
+						sensor_request_calibration_6_side();
+#else
+						LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
+#endif
+						break;
+
+					case ESB_PONG_FLAG_MEOW:
+						LOG_INF("Executing remote command: MEOW");
+						remote_print_meow();
+						break;
+
+					case ESB_PONG_FLAG_SCAN:
+						LOG_INF("Executing remote command: SCAN");
+						sensor_request_scan(true);
+						break;
+
+					case ESB_PONG_FLAG_MAG_CLEAR:
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
+						LOG_INF("Executing remote command: MAG_CLEAR");
+						sensor_calibration_clear_mag(NULL, true);
+#else
+						LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
+#endif
+						break;
+
+					default:
+						LOG_WRN("Unknown remote command: 0x%02X", received_remote_command);
+						break;
+				}
+
+				// 标记命令已执行
+				acked_remote_command = received_remote_command;
+
+				// 对于shutdown命令，不再继续
+				if (received_remote_command == ESB_PONG_FLAG_SHUTDOWN) {
+					return;
+				}
+			}
+		}
+
 		// Watchdog: Check for stuck TX (faster detection)
 		if (atomic_test_bit(&esb_tx_busy, 0) && esb_tx_start_time > 0) {
 			if (now_idle - esb_tx_start_time > ESB_TX_TIMEOUT_MS) {  // 30ms timeout
@@ -1089,12 +1153,10 @@ static void esb_thread(void) {
 				LOG_WRN("ESB reinitialization requested, performing safe reinit");
 				last_reinit_time = now_idle;
 
-				// Fast reinitialization sequence
 				esb_flush_tx();
 				esb_disable();
-				k_msleep(10);  // Reduced from 20ms to 10ms
+				k_msleep(10);
 
-				// Only reinitialize if still paired
 				if (esb_paired) {
 					int init_err = esb_initialize(true);
 					if (init_err) {
