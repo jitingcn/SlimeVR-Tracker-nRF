@@ -66,6 +66,16 @@ void esb_write(uint8_t* data, bool no_ack);  // TODO: give packets some names
 #define ESB_PING_LEN 13  // with CRC-8
 #define ESB_PONG_LEN 13  // with CRC-8
 
+// Remote command flags for PONG data[7] (shared with receiver)
+#define ESB_PONG_FLAG_NORMAL 0x00
+#define ESB_PONG_FLAG_SHUTDOWN 0x01
+#define ESB_PONG_FLAG_CALIBRATE 0x02        // Trigger gyro/accel ZRO calibration
+#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03     // Trigger 6-point accelerometer calibration
+#define ESB_PONG_FLAG_MEOW 0x04             // Trigger meow output
+#define ESB_PONG_FLAG_SCAN 0x05             // Trigger sensor scan
+#define ESB_PONG_FLAG_MAG_CLEAR 0x06        // Clear magnetometer calibration
+// Reserved for future use: 0x07-0xFF
+
 bool esb_ready(void);
 
 // Helper: log esb_write call frequency

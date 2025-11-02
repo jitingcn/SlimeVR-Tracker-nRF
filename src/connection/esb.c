@@ -29,6 +29,8 @@
 #include "connection.h"
 #include "globals.h"
 #include "system/system.h"
+#include "sensor/sensor.h"
+#include "sensor/calibration.h"
 #include "zephyr/logging/log.h"
 #if defined(NRF54L15_XXAA)
 #include <hal/nrf_clock.h>
@@ -98,6 +100,27 @@ static int64_t esb_tx_start_time = 0;  // Track when TX started
 static atomic_t esb_needs_reinit = ATOMIC_INIT(0);  // Flag for safe reinitialization
 static int64_t last_reinit_time = 0;
 #define ESB_REINIT_COOLDOWN_MS 500  // Don't reinit more than once per 500ms
+
+// Meow arrays for remote meow command
+static const char *meows[] = {
+	"Mew", "Meww", "Meow", "Meow meow", "Mrrrp", "Mrrf", "Mreow", "Mrrrow", "Mrrr", "Purr",
+	"mew", "meww", "meow", "meow meow", "mrrrp", "mrrf", "mreow", "mrrrow", "mrrr", "purr",
+};
+static const char *meow_punctuations[] = {".", "?", "!", "-", "~", ""};
+static const char *meow_suffixes[] = {
+	" :3", " :3c", " ;3", " ;3c", " x3", " x3c", " X3", " X3c",
+	" >:3", " >:3c", " >;3", " >;3c", ""
+};
+
+static void remote_print_meow(void) {
+	int64_t ticks = k_uptime_ticks();
+	ticks %= ARRAY_SIZE(meows) * ARRAY_SIZE(meow_punctuations) * ARRAY_SIZE(meow_suffixes);
+	uint8_t meow = ticks / (ARRAY_SIZE(meow_punctuations) * ARRAY_SIZE(meow_suffixes));
+	ticks %= (ARRAY_SIZE(meow_punctuations) * ARRAY_SIZE(meow_suffixes));
+	uint8_t punctuation = ticks / ARRAY_SIZE(meow_suffixes);
+	uint8_t suffix = ticks % ARRAY_SIZE(meow_suffixes);
+	LOG_INF("%s%s%s", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
+}
 
 static uint8_t tracker_id = 0;
 static void set_tracker_id(uint8_t id)
@@ -306,6 +329,61 @@ void event_handler(struct esb_evt const* event) {
 														| ((uint32_t)rx_payload.data[9] << 16)
 														| ((uint32_t)rx_payload.data[10] << 8)
 														| ((uint32_t)rx_payload.data[11]);
+
+								// Check flags field (byte 7)
+								uint8_t pong_flags = rx_payload.data[7];
+
+								// Handle remote commands
+								if (pong_flags != ESB_PONG_FLAG_NORMAL) {
+									switch (pong_flags) {
+										case ESB_PONG_FLAG_SHUTDOWN:
+											LOG_WRN("Remote command: SHUTDOWN");
+											sys_request_system_off(false);
+											break;
+
+										case ESB_PONG_FLAG_CALIBRATE:
+											LOG_INF("Remote command: CALIBRATE");
+											sensor_request_calibration();
+											break;
+
+										case ESB_PONG_FLAG_SIX_SIDE_CAL:
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+											LOG_INF("Remote command: SIX_SIDE_CAL");
+											sensor_request_calibration_6_side();
+#else
+											LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
+#endif
+											break;
+
+										case ESB_PONG_FLAG_MEOW:
+											LOG_INF("Remote command: MEOW");
+											remote_print_meow();
+											break;
+
+										case ESB_PONG_FLAG_SCAN:
+											LOG_INF("Remote command: SCAN");
+											sensor_request_scan(true);
+											break;
+
+										case ESB_PONG_FLAG_MAG_CLEAR:
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
+											LOG_INF("Remote command: MAG_CLEAR");
+											sensor_calibration_clear_mag(NULL, true);
+#else
+											LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
+#endif
+											break;
+
+										default:
+											LOG_WRN("Unknown remote command: 0x%02X", pong_flags);
+											break;
+									}
+
+									// For shutdown, don't continue processing
+									if (pong_flags == ESB_PONG_FLAG_SHUTDOWN) {
+										break;
+									}
+								}
 
 								// set ping valid
 								ping_pending = false;
