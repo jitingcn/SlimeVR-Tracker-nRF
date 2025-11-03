@@ -47,9 +47,9 @@ LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 #define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 4
 #endif
 #ifndef CONFIG_CONNECTION_ENABLE_ACK
-static bool no_ack = false;
-#else
 static bool no_ack = true;
+#else
+static bool no_ack = false;
 #endif
 
 static void connection_thread(void);

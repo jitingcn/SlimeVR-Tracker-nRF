@@ -57,6 +57,7 @@ static struct esb_payload rx_payload;
 static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0);
 static struct esb_payload tx_payload_pair
 	= ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
+static struct esb_payload ack_payload = ESB_CREATE_PAYLOAD(0);
 
 static uint8_t paired_addr[8] = {0};
 
@@ -67,10 +68,10 @@ static bool esb_paired = false;
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
-#ifndef CONFIG_CONNECTION_ENABLE_ACK
-#define CONNECTION_ENABLE_ACK false
-#else
+#if defined(CONFIG_CONNECTION_ENABLE_ACK)
 #define CONNECTION_ENABLE_ACK true
+#else
+#define CONNECTION_ENABLE_ACK false
 #endif
 
 // Require N consecutive successful ACK probes before clearing connection error
@@ -103,6 +104,17 @@ static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
 #define REMOTE_COMMAND_DELAY_MS 2300
+
+// Track last sent packet for TX_FAILED diagnostics
+struct last_tx_info {
+	uint8_t type;        // First byte of payload (packet type)
+	bool is_ping;        // Is this a PING packet
+	bool is_ack_payload; // Is this the small ack_payload after PING
+	bool noack;          // noack flag
+	uint8_t length;      // Packet length
+	int64_t timestamp;   // When it was sent
+};
+static struct last_tx_info last_tx = {0};
 
 // Meow arrays for remote meow command
 static const char *meows[] = {
@@ -151,13 +163,60 @@ void esb_write_rate_tick(void) {
 }
 
 void event_handler(struct esb_evt const* event) {
+	static uint32_t tx_success_count = 0;
+	static uint32_t tx_failed_count = 0;
+	static uint32_t last_log_time = 0;
+
 	switch (event->evt_id) {
 		case ESB_EVENT_TX_SUCCESS:
+			tx_success_count++;
 			if (esb_paired) {
 				clocks_stop();
 			}
 			break;
 		case ESB_EVENT_TX_FAILED:
+			tx_failed_count++;
+
+			// Detailed packet type diagnostics for TX_FAILED
+			const char *pkt_desc = "UNKNOWN";
+			if (last_tx.is_ack_payload) {
+				pkt_desc = "ACK_PAYLOAD";
+			} else if (last_tx.is_ping) {
+				pkt_desc = "PING";
+			} else if (last_tx.type == 0x00) {
+				pkt_desc = "ROTATION_DATA";
+			} else if (last_tx.type == 0x01) {
+				pkt_desc = "GYRO_DATA";
+			} else if (last_tx.type == 0x02) {
+				pkt_desc = "HANDSHAKE";
+			} else if (last_tx.type == 0x03) {
+				pkt_desc = "ACCEL_DATA";
+			} else if (last_tx.type == 0x04) {
+				pkt_desc = "MAG_DATA";
+			} else if (last_tx.type == 0x10) {
+				pkt_desc = "BATTERY_LEVEL";
+			} else if (last_tx.type == 0x11) {
+				pkt_desc = "TAP";
+			} else if (last_tx.type == 0x12) {
+				pkt_desc = "RESET";
+			} else {
+				pkt_desc = "OTHER";
+			}
+
+			LOG_WRN("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
+				pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
+				k_uptime_get() - last_tx.timestamp, event->tx_attempts);
+
+			// Log TX statistics every 20 failures for debugging
+			uint32_t now = k_uptime_get_32();
+			if (tx_failed_count % 20 == 0 || (now - last_log_time > 5000)) {
+				last_log_time = now;
+				uint32_t total = tx_success_count + tx_failed_count;
+				uint32_t fail_rate = total > 0 ? (tx_failed_count * 100 / total) : 0;
+				LOG_WRN("TX Stats: success=%u failed=%u rate=%u%%",
+					tx_success_count, tx_failed_count, fail_rate);
+			}
+
 			// Only count ping failures for connection timeout
 			if (ping_pending) {
 				ping_failed = true;
@@ -179,7 +238,7 @@ void event_handler(struct esb_evt const* event) {
 					);
 				}
 			}
-			LOG_DBG("TX FAILED");
+			esb_pop_tx();
 			if (esb_paired) {
 				clocks_stop();
 			}
@@ -581,7 +640,7 @@ int esb_initialize(bool tx) {
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = retransmit_delay_with_jitter;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 3 : 0;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 1;
 		// config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
@@ -852,6 +911,21 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	// Tick rate counter
 	esb_write_rate_tick();
 
+	// Track last packet type to detect noack→ack transitions
+	static bool last_was_noack = true;
+	bool is_ack_packet = !no_ack;
+
+	// CRITICAL: When switching from noack to ack mode, add delay
+	// This allows hardware (Radio, Timer, PPI) to fully settle after noack packet
+	// Prevents race conditions that cause false TX_FAILED events
+	if (last_was_noack && is_ack_packet) {
+		// Wait for previous noack packet to fully complete hardware pipeline
+		// Typical noack packet transmission: ~100-200µs
+		// Add safety margin for event processing and state cleanup
+		k_usleep(260);
+	}
+	last_was_noack = no_ack;
+
 	if (data[0] == ESB_PING_TYPE) {
 		// Set sequence number
 		data[2] = ping_counter;
@@ -862,24 +936,49 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	}
 	memcpy(tx_payload.data, data, data_length);
 
+	// Record this packet for TX_FAILED diagnostics
+	last_tx.type = data[0];
+	last_tx.is_ping = (data[0] == ESB_PING_TYPE);
+	last_tx.is_ack_payload = false;
+	last_tx.noack = no_ack;
+	last_tx.length = data_length;
+	last_tx.timestamp = now;
+
 	// Try to queue the packet
 	int queue_status = esb_write_payload(&tx_payload);
 
-  // if sending ping packet, we need send another small packet to get ack result asap
-	if (data[0] == ESB_PING_TYPE && queue_status == 0) {
-		// small packet with no data, just to get ack result
-		struct esb_payload ack_payload = {
-			.pipe = tracker_id % 8,
-			.noack = false,
-			.length = 1,
-			.data = {0}
-		};
-		int ack_status = esb_write_payload(&ack_payload);
-		if (ack_status != 0) {
-			LOG_ERR(
-				"esb_write: failed to queue PING ack packet, err=%d",
-				ack_status
-			);
+	// if sending ping packet, we need send another small packet to get ack result asap
+	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
+		// CRITICAL: Extended delay between PING and ack_payload
+		// PING is ack packet, ack_payload is also ack packet
+		// Rapid ack→ack transitions can cause false TX_FAILED
+		// This delay ensures first packet fully enters TX pipeline
+		k_usleep(400);
+
+		// Double check ESB TX FIFO is not full before adding second packet
+		if (!esb_tx_full()) {
+			// small packet with no data, just to get ack result
+			ack_payload.pipe = tracker_id % 8;
+			ack_payload.noack = false;
+			ack_payload.length = 1;
+
+			// Record ack_payload for diagnostics
+			last_tx.type = 0; // ack_payload has no specific type
+			last_tx.is_ping = false;
+			last_tx.is_ack_payload = true;
+			last_tx.noack = false;
+			last_tx.length = 1;
+			last_tx.timestamp = k_uptime_get();
+
+			int ack_status = esb_write_payload(&ack_payload);
+			if (ack_status != 0) {
+				LOG_ERR(
+					"esb_write: failed to queue PING ack packet, err=%d",
+					ack_status
+				);
+			}
+		} else {
+			LOG_WRN("esb_write: TX FIFO full, skipping PING ack packet");
 		}
 	}
 
@@ -890,6 +989,7 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 			queue_status
 		);
 		esb_flush_tx();
+		k_msleep(2);
 	}
 
 	// Log error if queue failed
@@ -907,7 +1007,7 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	}
 
 	// If we sent a heartbeat (ACK requested), mark pending and record timing
-	if (!no_ack && tx_payload.data[0] == ESB_PING_TYPE && queue_status == 0) {
+	if (!no_ack && tx_payload.data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
 		uint32_t now32 = (uint32_t)now;
 		ping_pending = true;
 		ping_ctr_sent = tx_payload.data[2];
