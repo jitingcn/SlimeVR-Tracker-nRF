@@ -47,6 +47,8 @@ LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 #define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 4
 #endif
 
+static bool no_ack = CONFIG_CONNECTION_ENABLE_ACK ? false : true;
+
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 8, 0, 0);
 
@@ -340,7 +342,7 @@ void connection_thread(void)
 					data_ready = true;
 				} else {
 					data_ready = false;
-					esb_write(esb_packet, true, sizeof(esb_packet)); // normal data: no ACK
+					esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
 					last_tx_time = now;
 				}
 			} else {

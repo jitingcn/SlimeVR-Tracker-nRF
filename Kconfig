@@ -315,6 +315,12 @@ config RADIO_RETRANSMIT_DELAY
     help
         Radio retransmit delay.
 
+config CONNECTION_ENABLE_ACK
+    bool "Enable connection ACK"
+    default y
+    help
+        Enable connection ACK for reliable data transfer.
+
 config CONNECTION_OVER_HID
     bool "Use HID for data output"
     default n
