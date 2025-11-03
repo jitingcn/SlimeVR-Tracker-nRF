@@ -76,11 +76,11 @@ static bool esb_paired = false;
 
 // Require N consecutive successful ACK probes before clearing connection error
 #ifndef PING_RECOVERY_THRESHOLD
-#define PING_RECOVERY_THRESHOLD 3
+#define PING_RECOVERY_THRESHOLD 1
 #endif
 // Allow longer wait before declaring PING timeout
 #ifndef PING_TIMEOUT_MS
-#define PING_TIMEOUT_MS 500
+#define PING_TIMEOUT_MS 800
 #endif
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
