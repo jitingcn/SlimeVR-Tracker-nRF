@@ -26,6 +26,7 @@
 #include "build_defines.h"
 #include "hid.h"
 
+#include <stdbool.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 
@@ -43,7 +44,7 @@ LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
 #ifndef CONFIG_CONNECTION_MIN_TX_INTERVAL_MS
 // Enforce a minimum interval between ESB transmissions to cap TPS
-#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 5
+#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 4
 #endif
 
 static void connection_thread(void);

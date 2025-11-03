@@ -393,7 +393,6 @@ static void print_help(void)
 
 static void console_thread(void)
 {
-#if !defined(CONFIG_BOARD_STYRIA_MINI_UF2)
 #if USB_EXISTS && DFU_EXISTS
 	if (button_read()) // button held on usb connect, enter DFU
 	{
@@ -405,7 +404,6 @@ static void console_thread(void)
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
 #endif
 	}
-#endif
 #endif
 
 #if USB_EXISTS

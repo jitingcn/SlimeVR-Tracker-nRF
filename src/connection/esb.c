@@ -98,14 +98,6 @@ static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
 #define REMOTE_COMMAND_DELAY_MS 2300
 
-static atomic_t esb_tx_busy = ATOMIC_INIT(0);  // Track if TX is in progress
-static int64_t esb_tx_start_time = 0;  // Track when TX started
-#define ESB_TX_TIMEOUT_MS 30  // TX should complete within 30ms (reduced from 50ms)
-
-static atomic_t esb_needs_reinit = ATOMIC_INIT(0);  // Flag for safe reinitialization
-static int64_t last_reinit_time = 0;
-#define ESB_REINIT_COOLDOWN_MS 500  // Don't reinit more than once per 500ms
-
 // Meow arrays for remote meow command
 static const char *meows[] = {
 	"Mew", "Meww", "Meow", "Meow meow", "Mrrrp", "Mrrf", "Mreow", "Mrrrow", "Mrrr", "Purr",
@@ -137,10 +129,6 @@ static void set_tracker_id(uint8_t id)
 static uint32_t esb_write_calls = 0;
 static uint32_t esb_write_queued = 0;
 static int64_t esb_rate_last_ts = 0;
-static uint32_t esb_enomem_count = 0;  // Track -ENOMEM errors
-static int64_t last_enomem_log = 0;
-static int64_t last_enomem_time = 0;  // Track when last ENOMEM occurred
-#define ENOMEM_WINDOW_MS 1500  // Count errors within window
 
 void esb_write_rate_tick(void) {
     int64_t now = k_uptime_get();
@@ -159,15 +147,11 @@ void esb_write_rate_tick(void) {
 void event_handler(struct esb_evt const* event) {
 	switch (event->evt_id) {
 		case ESB_EVENT_TX_SUCCESS:
-			atomic_clear(&esb_tx_busy);  // Clear busy flag
-			esb_tx_start_time = 0;  // Reset timer
 			if (esb_paired) {
 				clocks_stop();
 			}
 			break;
 		case ESB_EVENT_TX_FAILED:
-			atomic_clear(&esb_tx_busy);  // Clear busy flag
-			esb_tx_start_time = 0;  // Reset timer
 			// Only count ping failures for connection timeout
 			if (ping_pending) {
 				ping_failed = true;
@@ -212,13 +196,13 @@ void event_handler(struct esb_evt const* event) {
 			for (int i = 0; i < dump_len; i++) {
 				snprintk(&hexbuf[i * 3], 4, "%02X ", rx_payload.data[i]);
 			}
-			LOG_INF(
+			LOG_DBG(
 				"RX len=%u pipe=%u data=%s",
 				rx_payload.length,
 				rx_payload.pipe,
 				hexbuf
 			);
-			LOG_INF(
+			LOG_DBG(
 				"RX payload len=%u type=%u pipe=%u",
 				rx_payload.length,
 				rx_payload.data[0],
@@ -317,28 +301,44 @@ void event_handler(struct esb_evt const* event) {
 								);
 								break;
 							}
-							// calcul ping send time
+
 							uint32_t ping_send_time = ((uint32_t)rx_payload.data[3] << 24)
 														| ((uint32_t)rx_payload.data[4] << 16)
 														| ((uint32_t)rx_payload.data[5] << 8)
 														| ((uint32_t)rx_payload.data[6]);
-							uint32_t now32 = (uint32_t)k_uptime_get();
-							uint32_t now_cyc = k_cycle_get_32();
-							uint32_t rtt = (now32 - ping_send_time);
-							uint32_t rtt_us = k_cyc_to_us_near32(now_cyc - ping_send_cycles);
 							// Capture receiver time from PONG param (bytes 8..11)
-							uint32_t pong_rx_time = ((uint32_t)rx_payload.data[8] << 24)
+							uint32_t pong_tx_time = ((uint32_t)rx_payload.data[8] << 24)
 													| ((uint32_t)rx_payload.data[9] << 16)
 													| ((uint32_t)rx_payload.data[10] << 8)
 													| ((uint32_t)rx_payload.data[11]);
 
+							uint32_t now32 = (uint32_t)k_uptime_get();
+							uint32_t now_cyc = k_cycle_get_32();
+							uint32_t rtt = (now32 - ping_send_time) / 2;
+							uint32_t rtt_us = k_cyc_to_us_near32(now_cyc - ping_send_cycles) / 2;
+							// log ping to pong rtt and pong to now rtt
+							LOG_INF("PONG RTT: %u ms", rtt);
+							uint32_t server_time = pong_tx_time + rtt;
+							// print server time on human readable format (hh:mm:ss.ms,us)
+							uint32_t server_ms = server_time % 1000;
+							uint32_t server_s = (server_time / 1000) % 60;
+							uint32_t server_m = (server_time / 60000) % 60;
+							uint32_t server_h = (server_time / 3600000) % 24;
+							LOG_INF(
+								"Server time: %02u:%02u:%02u.%03u",
+								server_h,
+								server_m,
+								server_s,
+								server_ms
+							);
+
 						// Check flags field (byte 7)
 						uint8_t pong_flags = rx_payload.data[7];
 
-						// Handle remote commands - 记录新命令但不立即执行
+						// handle remote commands and delayed execution
 						if (pong_flags != ESB_PONG_FLAG_NORMAL) {
 							if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
-								// 首次收到新命令
+								// new command received
 								received_remote_command = pong_flags;
 								remote_command_receive_time = k_uptime_get();
 
@@ -367,7 +367,7 @@ void event_handler(struct esb_evt const* event) {
 									cmd_name, pong_flags, REMOTE_COMMAND_DELAY_MS);
 							}
 						} else {
-							// 收到 NORMAL flag，说明接收器已确认我们的回显
+							// received NORMAL flag, indicates the receiver has confirmed our echo
 							if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
 								LOG_DBG("Receiver confirmed command 0x%02X, resetting state",
 									acked_remote_command);
@@ -391,14 +391,14 @@ void event_handler(struct esb_evt const* event) {
 									if (rtt_us < 1000) {
 										LOG_INF(
 											"PONG ok - link restored after %u probes, "
-											"rtt=%u us",
+											"rtt=%u us by cycles",
 											ping_success_streak,
 											(unsigned)rtt_us
 										);
 									} else {
 										LOG_INF(
 											"PONG ok - link restored after %u probes, "
-											"rtt=%u.%03u ms",
+											"rtt=%u.%03u ms by cycles",
 											ping_success_streak,
 											(unsigned)(rtt_us / 1000),
 											(unsigned)(rtt_us % 1000)
@@ -410,13 +410,13 @@ void event_handler(struct esb_evt const* event) {
 								ping_success_streak = 0;
 								if (rtt_us < 1000) {
 									LOG_INF(
-										"PONG ok, rtt=%u us (ctr=%u)",
+										"PONG ok, rtt=%u us (ctr=%u) by cycles",
 										(unsigned)rtt_us,
 										rx_ctr
 									);
 								} else {
 									LOG_INF(
-										"PONG ok, rtt=%u.%03u ms (ctr=%u)",
+										"PONG ok, rtt=%u.%03u ms (ctr=%u) by cycles",
 										(unsigned)(rtt_us / 1000),
 										(unsigned)(rtt_us % 1000),
 										rx_ctr
@@ -575,7 +575,7 @@ int esb_initialize(bool tx) {
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = retransmit_delay_with_jitter;
 		config.retransmit_count = 2;
-		config.tx_mode = ESB_TXMODE_MANUAL;
+		// config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
 		// config.use_fast_ramp_up = true;
@@ -837,14 +837,13 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 		return;
 	}
 
+	tx_payload.pipe = tracker_id % 8;
+	tx_payload.noack = no_ack;
+	tx_payload.length = data_length;
+
 	int64_t now = k_uptime_get();
 	// Tick rate counter
 	esb_write_rate_tick();
-	// Set ACK behavior per call
-	tx_payload.noack = no_ack;
-	// Send on a unique ESB pipe per tracker (0–7)
-	tx_payload.pipe = tracker_id % 8;
-	tx_payload.length = data_length;
 
 	if (data[0] == ESB_PING_TYPE) {
 		// Set sequence number
@@ -856,93 +855,42 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	}
 	memcpy(tx_payload.data, data, data_length);
 
-	// Check if TX is busy (in manual mode, can't queue while transmitting)
-	if (atomic_test_bit(&esb_tx_busy, 0)) {
-		// Check for TX timeout (faster detection)
-		int64_t now_check = k_uptime_get();
-		if (now_check - esb_tx_start_time > ESB_TX_TIMEOUT_MS) {
-			// TX timeout - force recovery immediately
-			LOG_ERR("TX timeout (%lld ms), forcing immediate recovery", now_check - esb_tx_start_time);
-			atomic_clear(&esb_tx_busy);
-			esb_tx_start_time = 0;
-
-			// Aggressive recovery: flush and mark for reinit
-			esb_flush_tx();
-			atomic_set_bit(&esb_needs_reinit, 0);
-
-			// Don't return, try to send this packet after clearing busy flag
-		} else {
-			// TX is busy but not timed out, drop this packet
-			static uint32_t tx_busy_count = 0;
-			tx_busy_count++;
-			if (tx_busy_count % 50 == 0) {  // Log every 50 packets instead of 100
-				LOG_WRN("TX busy, dropped %u packets (busy for %lld ms)",
-						tx_busy_count, now_check - esb_tx_start_time);
-			}
-			return;  // Drop this packet
-		}
-	}
-
 	// Try to queue the packet
 	int queue_status = esb_write_payload(&tx_payload);
 
-	// If FIFO is full, retry with backoff instead of flushing
-	// This prevents discarding important packets like PING
-	int retry_count = 0;
-	while (queue_status == -ENOSPC && retry_count < 3) {
-		// Wait a bit for TX to drain
-		k_usleep(100);  // 100 microseconds
-		queue_status = esb_write_payload(&tx_payload);
-		retry_count++;
-		if (queue_status == -ENOSPC && retry_count == 3) {
-			// Last resort: pop oldest packet and retry once more
-			esb_pop_tx();
-			queue_status = esb_write_payload(&tx_payload);
-			if (queue_status == 0) {
-				LOG_WRN("TX FIFO full, dropped oldest packet to make room");
-			} else {
-				LOG_ERR("Failed to queue packet after retries: %d", queue_status);
-			}
+  // if sending ping packet, we need send another small packet to get ack result asap
+	if (data[0] == ESB_PING_TYPE && queue_status == 0) {
+		// small packet with no data, just to get ack result
+		struct esb_payload ack_payload = {
+			.pipe = tracker_id % 8,
+			.noack = false,
+			.length = 1,
+			.data = {0}
+		};
+		int ack_status = esb_write_payload(&ack_payload);
+		if (ack_status != 0) {
+			LOG_ERR(
+				"esb_write: failed to queue PING ack packet, err=%d",
+				ack_status
+			);
 		}
 	}
 
 	// Handle -ENOMEM error (ESB in bad state)
-	if (queue_status == -ENOMEM) {
-		int64_t now_err = k_uptime_get();
+	if (queue_status == -ENOMEM || queue_status == -ENOSPC) {
+		LOG_WRN(
+			"esb_write: TX FIFO full or ESB not ready (err=%d), flushing TX",
+			queue_status
+		);
+		esb_flush_tx();
+	}
 
-		// Reset counter if outside the time window
-		if (last_enomem_time > 0 && (now_err - last_enomem_time) > ENOMEM_WINDOW_MS) {
-			esb_enomem_count = 0;  // Reset if more than 1 second since last error
-		}
-
-		esb_enomem_count++;
-		last_enomem_time = now_err;
-
-		// Log more frequently for faster detection
-		if (now_err - last_enomem_log >= 100) {  // Log every 100ms
-			LOG_ERR("ESB -ENOMEM error (count=%u in last %lld ms)",
-					esb_enomem_count,
-					last_enomem_time > 0 ? (now_err - (last_enomem_time - ENOMEM_WINDOW_MS)) : 0);
-			last_enomem_log = now_err;
-
-			// Try to recover ESB by flushing TX
-			esb_flush_tx();
-
-			// If failing quickly within the window, mark for reinitialization
-			// 3 errors within 1 second = persistent problem
-			if (esb_enomem_count >= 3) {
-				LOG_WRN("ESB stuck in -ENOMEM state (%u errors in %lld ms), marking for reinit",
-						esb_enomem_count, now_err - (last_enomem_time - ENOMEM_WINDOW_MS));
-				atomic_set_bit(&esb_needs_reinit, 0);
-				atomic_clear(&esb_tx_busy);
-				esb_tx_start_time = 0;
-				esb_enomem_count = 0;
-				last_enomem_time = 0;
-			}
-		}
-	} else if (queue_status == 0) {
-		// Don't reset counter immediately - let time window handle it
-		// This prevents PING success from hiding persistent data packet failures
+	// Log error if queue failed
+	if (queue_status != 0) {
+		LOG_ERR(
+			"esb_write: failed to queue packet, err=%d",
+			queue_status
+		);
 	}
 
 	// Record last TX time for idle probe scheduling
@@ -975,47 +923,16 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 				tx_payload.data[2], queue_status, err_str);
 	}
 
-	// Ensure TX progresses (manual mode) only if we queued something
-	if (queue_status == 0) {
-		atomic_set_bit(&esb_tx_busy, 0);  // Set busy flag before starting TX
-		esb_tx_start_time = k_uptime_get();  // Record start time
-		int tx_err = esb_start_tx();
-		if (tx_err == -EBUSY) {
-			// Radio is already transmitting; not an error in manual mode
-			LOG_DBG("esb_start_tx busy");
-		} else if (tx_err) {
-			LOG_WRN("esb_start_tx error: %d", tx_err);
-			atomic_clear(&esb_tx_busy);  // Clear on error
-			esb_tx_start_time = 0;
-		} else {
-			LOG_DBG("esb_start_tx ok");
-		}
-	} else {
-		// We failed to queue this packet (FIFO full or other error)
-		// Try to start TX to drain the queue if there's data
-		int tx_err = esb_start_tx();
-		if (tx_err == -EBUSY) {
-			LOG_DBG("esb_start_tx busy");
-		} else if (tx_err == -ENODATA || tx_err == -ENOENT) {
-			// No data in FIFO - this is normal, not an error
-			// -ENODATA (61): No data available
-			// -ENOENT (2): No entry/payload pending
-			LOG_DBG("esb_start_tx: no data in FIFO");
-		} else if (tx_err) {
-			LOG_WRN("esb_start_tx (drain) error: %d", tx_err);
-		}
-	}
+	// esb_start_tx();
+	send_data = true;
 }
 
 bool esb_ready(void) { return esb_initialized && esb_paired; }
 
-// 获取要在 PING 中回显的命令 flag
 uint8_t esb_get_ping_ack_flag(void) {
-	// 如果已执行命令，继续回显直到接收器确认
 	if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
 		return acked_remote_command;
 	}
-	// 如果刚收到命令还没执行，也回显（表示已收到）
 	if (received_remote_command != ESB_PONG_FLAG_NORMAL) {
 		return received_remote_command;
 	}
@@ -1130,44 +1047,6 @@ static void esb_thread(void) {
 				if (received_remote_command == ESB_PONG_FLAG_SHUTDOWN) {
 					return;
 				}
-			}
-		}
-
-		// Watchdog: Check for stuck TX (faster detection)
-		if (atomic_test_bit(&esb_tx_busy, 0) && esb_tx_start_time > 0) {
-			if (now_idle - esb_tx_start_time > ESB_TX_TIMEOUT_MS) {  // 30ms timeout
-				LOG_ERR("ESB TX watchdog: stuck for %lld ms, forcing recovery",
-						now_idle - esb_tx_start_time);
-				atomic_clear(&esb_tx_busy);
-				esb_tx_start_time = 0;
-				esb_flush_tx();
-				// Mark for reinitialization immediately
-				atomic_set_bit(&esb_needs_reinit, 0);
-			}
-		}
-
-		// Safe reinitialization check (only in esb_thread context)
-		if (atomic_test_and_clear_bit(&esb_needs_reinit, 0)) {
-			// Check cooldown to avoid reinit storm
-			if (now_idle - last_reinit_time > ESB_REINIT_COOLDOWN_MS) {
-				LOG_WRN("ESB reinitialization requested, performing safe reinit");
-				last_reinit_time = now_idle;
-
-				esb_flush_tx();
-				esb_disable();
-				k_msleep(10);
-
-				if (esb_paired) {
-					int init_err = esb_initialize(true);
-					if (init_err) {
-						LOG_ERR("ESB reinit failed: %d", init_err);
-					} else {
-						LOG_INF("ESB reinitialized successfully");
-					}
-				}
-			} else {
-				LOG_WRN("ESB reinit skipped (cooldown: %lld ms remaining)",
-						ESB_REINIT_COOLDOWN_MS - (now_idle - last_reinit_time));
 			}
 		}
 
