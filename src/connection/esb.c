@@ -911,21 +911,6 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	// Tick rate counter
 	esb_write_rate_tick();
 
-	// Track last packet type to detect noack→ack transitions
-	static bool last_was_noack = true;
-	bool is_ack_packet = !no_ack;
-
-	// CRITICAL: When switching from noack to ack mode, add delay
-	// This allows hardware (Radio, Timer, PPI) to fully settle after noack packet
-	// Prevents race conditions that cause false TX_FAILED events
-	if (last_was_noack && is_ack_packet) {
-		// Wait for previous noack packet to fully complete hardware pipeline
-		// Typical noack packet transmission: ~100-200µs
-		// Add safety margin for event processing and state cleanup
-		k_usleep(260);
-	}
-	last_was_noack = no_ack;
-
 	if (data[0] == ESB_PING_TYPE) {
 		// Set sequence number
 		data[2] = ping_counter;
@@ -949,11 +934,7 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 
 	// if sending ping packet, we need send another small packet to get ack result asap
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
-		// CRITICAL: Extended delay between PING and ack_payload
-		// PING is ack packet, ack_payload is also ack packet
-		// Rapid ack→ack transitions can cause false TX_FAILED
-		// This delay ensures first packet fully enters TX pipeline
-		k_usleep(400);
+		k_msleep(1);
 
 		// Double check ESB TX FIFO is not full before adding second packet
 		if (!esb_tx_full()) {
