@@ -46,8 +46,11 @@ LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 // Enforce a minimum interval between ESB transmissions to cap TPS
 #define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 4
 #endif
-
-static bool no_ack = CONFIG_CONNECTION_ENABLE_ACK ? false : true;
+#ifndef CONFIG_CONNECTION_ENABLE_ACK
+static bool no_ack = false;
+#else
+static bool no_ack = true;
+#endif
 
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 8, 0, 0);
@@ -331,16 +334,17 @@ void connection_thread(void)
 			continue;
 		} else if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
-				memcpy(esb_packet, data_buffer, 16);
-
-				esb_packet[16] = packet_sequence++;
-				k_mutex_unlock(&buffer_mutex);
-
 				// Enforce minimum TX interval across all packet types (no PING)
 				if (last_tx_time && (now - last_tx_time) < CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
 					// Keep data_ready true to retry the latest packet next iteration
+					k_mutex_unlock(&buffer_mutex);
 					data_ready = true;
 				} else {
+					// Only increment sequence number when actually sending
+					memcpy(esb_packet, data_buffer, 16);
+					esb_packet[16] = packet_sequence++;
+					k_mutex_unlock(&buffer_mutex);
+
 					data_ready = false;
 					esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
 					last_tx_time = now;
@@ -369,29 +373,22 @@ void connection_thread(void)
 		// send quat otherwise
 		else if (quat_update_time)
 		{
-			// Respect TX limiter: only convert to buffer when interval allows
-			if (!last_tx_time || (now - last_tx_time) >= CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
-				quat_update_time = 0;
-				last_quat_time = now;
-				connection_write_packet_1();
-				continue;
-			}
+			quat_update_time = 0;
+			last_quat_time = now;
+			connection_write_packet_1();
+			continue;
 		}
 		else if (now - last_info_time > 100)
 		{
-			if (!last_tx_time || (now - last_tx_time) >= CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
-				last_info_time = now;
-				connection_write_packet_0();
-				continue;
-			}
+			last_info_time = now;
+			connection_write_packet_0();
+			continue;
 		}
 		else if (now - last_status_time > 1000)
 		{
-			if (!last_tx_time || (now - last_tx_time) >= CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
-				last_status_time = now;
-				connection_write_packet_3();
-				continue;
-			}
+			last_status_time = now;
+			connection_write_packet_3();
+			continue;
 		}
 		else
 		{
