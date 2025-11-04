@@ -331,6 +331,7 @@ void connection_thread(void)
 			esb_write(ping, false, ESB_PING_LEN); // PING: requires ACK
 			last_ping_time = now;
 			last_tx_time = now;
+			k_yield();
 			continue;
 		} else if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
