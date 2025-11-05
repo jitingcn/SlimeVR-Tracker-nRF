@@ -370,10 +370,6 @@ void connection_thread(void)
 
 					data_ready = false;
 					esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
-					if (esb_packet[0] == 3) {
-						// status packet, require ACK for testing
-						esb_write_ack(esb_packet[0]);
-					}
 					last_tx_time = now;
 				}
 			} else {

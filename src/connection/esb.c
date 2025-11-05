@@ -202,6 +202,7 @@ void event_handler(struct esb_evt const* event) {
 			}
 			break;
 		case ESB_EVENT_TX_FAILED:
+			esb_pop_tx();
 			tx_failed_count++;
 
 			// Detailed packet type diagnostics for TX_FAILED
@@ -953,7 +954,6 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	last_tx.length = data_length;
 	last_tx.timestamp = now;
 
-	esb_flush_tx();
 	// Try to queue the packet
 	int queue_status = esb_write_payload(&tx_payload);
 
