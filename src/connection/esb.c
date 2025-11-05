@@ -218,13 +218,15 @@ void event_handler(struct esb_evt const* event) {
 				pkt_desc = "packet 4";
 			} else if (last_tx.type == ESB_PING_TYPE) {
 				pkt_desc = "PING";
+			} else if (last_tx.type == 0xFF) {
+				pkt_desc = "PING_ACK_RETRY";
 			} else {
 				pkt_desc = "OTHER";
 			}
 
 			// if failed packet is ack_payload, force to resent that ack
 			if (last_tx.is_ack_payload && last_tx.type == ESB_PING_TYPE) {
-				esb_write_ack(ESB_PING_TYPE);
+				esb_write_ack(0xFF);
 			} else {
 				LOG_WRN("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
 					pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
