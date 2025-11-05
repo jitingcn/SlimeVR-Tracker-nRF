@@ -36,7 +36,7 @@ enum sys_led_pattern {
 
 	SYS_LED_PATTERN_OFF, // yield to lower priority patterns
 	SYS_LED_PATTERN_ON,																// Default | indicates busy
-	SYS_LED_PATTERN_SHORT, // 100ms on 900ms off									// Default | indicates waiting (pairing)
+	SYS_LED_PATTERN_SHORT, // 100ms on 900ms off									// Pairing | indicates waiting (pairing)
 	SYS_LED_PATTERN_LONG, // 500ms on 500ms off										// Default | indicates waiting
 	SYS_LED_PATTERN_FLASH, // 200ms on 200ms off									// Default | indicates readiness
 
@@ -61,6 +61,7 @@ enum sys_led_color {
 	SYS_LED_COLOR_SUCCESS,
 	SYS_LED_COLOR_ERROR,
 	SYS_LED_COLOR_CHARGING,
+	SYS_LED_COLOR_PAIRING,
 };
 
 void set_led(enum sys_led_pattern led_pattern, int priority);

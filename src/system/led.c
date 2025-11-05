@@ -180,6 +180,7 @@ static int led_pwm_period[4][3] = {
 	{0, 10000, 0}, // Success
 	{10000, 0, 0}, // Error
 	{8000, 2000, 0}, // Charging
+	{0, 0, 10000}, // Pairing
 };
 #elif defined(LED_TRI_COLOR)
 static int led_pwm_period[4][3] = {
@@ -187,6 +188,7 @@ static int led_pwm_period[4][3] = {
 	{0, 10000, 0}, // Success
 	{10000, 0, 0}, // Error
 	{6000, 4000, 0}, // Charging
+	{0, 0, 10000}, // Pairing
 };
 #elif defined(LED_RG_COLOR)
 static int led_pwm_period[4][2] = {
@@ -194,6 +196,7 @@ static int led_pwm_period[4][2] = {
 	{0, 10000}, // Success
 	{10000, 0}, // Error
 	{8000, 2000}, // Charging
+	{4000, 6000}, // Pairing
 };
 #elif defined(LED_DUAL_COLOR)
 static int led_pwm_period[4][2] = {
@@ -201,6 +204,7 @@ static int led_pwm_period[4][2] = {
 	{0, 10000}, // Success
 	{10000, 0}, // Error
 	{6000, 4000}, // Charging
+	{0, 10000}, // Pairing
 };
 #else
 static int led_pwm_period[4][1] = {
@@ -208,6 +212,7 @@ static int led_pwm_period[4][1] = {
 	{10000}, // Success
 	{10000}, // Error
 	{10000}, // Charging
+	{10000}, // Pairing
 };
 #endif
 
@@ -303,7 +308,7 @@ static void led_thread(void)
 			break;
 		case SYS_LED_PATTERN_SHORT:
 			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
+			led_pin_set(SYS_LED_COLOR_PAIRING, 10000, led_pattern_state * 10000);
 			k_msleep(led_pattern_state == 1 ? 100 : 900);
 			break;
 		case SYS_LED_PATTERN_LONG:
