@@ -44,7 +44,7 @@ LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
 #ifndef CONFIG_CONNECTION_MIN_TX_INTERVAL_MS
 // Enforce a minimum interval between ESB transmissions to cap TPS
-#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 4
+#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 3
 #endif
 #ifndef CONFIG_CONNECTION_ENABLE_ACK
 static bool no_ack = true;
@@ -308,13 +308,30 @@ void connection_thread(void)
 	uint8_t esb_packet[17];
 	// Global TX limiter
 	static int64_t last_tx_time = 0;
+	// Adaptive PING interval based on connection state
+	static uint32_t ping_interval_ms = PING_INTERVAL_MS;
 	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1)
 	{
 		int64_t	now = k_uptime_get();
+
+		// Adjust PING interval based on connection health
+		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
+			// During connection errors, slow down PING to every 5 seconds
+			// This reduces radio congestion and gives ESB time to recover
+			ping_interval_ms = 5000;
+		} else {
+			// Normal operation - default interval
+			ping_interval_ms = PING_INTERVAL_MS;
+		}
+
+		if (!esb_ready()) {
+			k_msleep(10);
+			continue;
+		}
 		// PING has highest priority - always send when interval elapsed
 		// This ensures connection recovery attempts continue even during errors
-		if (esb_ready() && now - last_ping_time >= PING_INTERVAL_MS)
+		if (now - last_ping_time >= ping_interval_ms)
 		{
 			uint8_t ping[ESB_PING_LEN] = {0};
 			ping[0] = ESB_PING_TYPE;
@@ -332,7 +349,13 @@ void connection_thread(void)
 			last_ping_time = now;
 			last_tx_time = now;
 			continue;
-		} else if (data_ready) {
+		}
+		// skip sensor data if connection error
+		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
+			k_msleep(100);
+			continue;
+		}
+		if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
 				// Enforce minimum TX interval across all packet types (no PING)
 				if (last_tx_time && (now - last_tx_time) < CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
