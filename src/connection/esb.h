@@ -38,6 +38,7 @@ extern bool send_data;
 extern uint16_t led_clock;
 extern uint32_t led_clock_offset;
 
+void esb_write_ack(uint8_t type);
 void event_handler(struct esb_evt const* event);
 int clocks_start(void);
 void clocks_stop(void);

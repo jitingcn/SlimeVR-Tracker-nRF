@@ -328,10 +328,9 @@ void connection_thread(void)
 			ping[7] = esb_get_ping_ack_flag();
 			memset(&ping[8], 0x00, 4); // reserved
 			ping[12] = 0;
-			esb_write(ping, false, ESB_PING_LEN); // PING: requires ACK
+			esb_write(ping, true, ESB_PING_LEN);
 			last_ping_time = now;
 			last_tx_time = now;
-			k_yield();
 			continue;
 		} else if (data_ready) {
 			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
@@ -348,6 +347,10 @@ void connection_thread(void)
 
 					data_ready = false;
 					esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
+					if (esb_packet[0] == 3) {
+						// status packet, require ACK for testing
+						esb_write_ack(esb_packet[0]);
+					}
 					last_tx_time = now;
 				}
 			} else {

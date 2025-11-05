@@ -108,7 +108,6 @@ static int64_t remote_command_receive_time = 0;
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
 	uint8_t type;        // First byte of payload (packet type)
-	bool is_ping;        // Is this a PING packet
 	bool is_ack_payload; // Is this the small ack_payload after PING
 	bool noack;          // noack flag
 	uint8_t length;      // Packet length
@@ -162,6 +161,34 @@ void esb_write_rate_tick(void) {
     }
 }
 
+void esb_write_ack(uint8_t type) {
+	// Double check ESB TX FIFO is not full before adding second packet
+	if (esb_tx_full()) {
+		esb_flush_tx();
+		k_msleep(1);
+	}
+
+	// small packet with no data, just to get ack result
+	ack_payload.pipe = tracker_id % 8;
+	ack_payload.noack = false;
+	ack_payload.length = 1;
+
+	// Record ack_payload for diagnostics
+	last_tx.type = type;  // ack for last sent packet type
+	last_tx.is_ack_payload = true;
+	last_tx.noack = false;
+	last_tx.length = 1;
+	last_tx.timestamp = k_uptime_get();
+
+	int ack_status = esb_write_payload(&ack_payload);
+	if (ack_status != 0) {
+		LOG_ERR(
+			"esb_write: failed to queue PING ack packet, err=%d",
+			ack_status
+		);
+	}
+}
+
 void event_handler(struct esb_evt const* event) {
 	static uint32_t tx_success_count = 0;
 	static uint32_t tx_failed_count = 0;
@@ -179,33 +206,30 @@ void event_handler(struct esb_evt const* event) {
 
 			// Detailed packet type diagnostics for TX_FAILED
 			const char *pkt_desc = "UNKNOWN";
-			if (last_tx.is_ack_payload) {
-				pkt_desc = "ACK_PAYLOAD";
-			} else if (last_tx.is_ping) {
-				pkt_desc = "PING";
-			} else if (last_tx.type == 0x00) {
-				pkt_desc = "ROTATION_DATA";
+			if (last_tx.type == 0x00) {
+				pkt_desc = "device info";
 			} else if (last_tx.type == 0x01) {
-				pkt_desc = "GYRO_DATA";
+				pkt_desc = "packet 1";
 			} else if (last_tx.type == 0x02) {
-				pkt_desc = "HANDSHAKE";
+				pkt_desc = "packet 2";
 			} else if (last_tx.type == 0x03) {
-				pkt_desc = "ACCEL_DATA";
+				pkt_desc = "status";
 			} else if (last_tx.type == 0x04) {
-				pkt_desc = "MAG_DATA";
-			} else if (last_tx.type == 0x10) {
-				pkt_desc = "BATTERY_LEVEL";
-			} else if (last_tx.type == 0x11) {
-				pkt_desc = "TAP";
-			} else if (last_tx.type == 0x12) {
-				pkt_desc = "RESET";
+				pkt_desc = "packet 4";
+			} else if (last_tx.type == ESB_PING_TYPE) {
+				pkt_desc = "PING";
 			} else {
 				pkt_desc = "OTHER";
 			}
 
-			LOG_WRN("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
-				pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
-				k_uptime_get() - last_tx.timestamp, event->tx_attempts);
+			// if failed packet is ack_payload, force to resent that ack
+			if (last_tx.is_ack_payload && last_tx.type == ESB_PING_TYPE) {
+				esb_write_ack(ESB_PING_TYPE);
+			} else {
+				LOG_WRN("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
+					pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
+					k_uptime_get() - last_tx.timestamp, event->tx_attempts);
+			}
 
 			// Log TX statistics every 20 failures for debugging
 			uint32_t now = k_uptime_get_32();
@@ -218,27 +242,28 @@ void event_handler(struct esb_evt const* event) {
 			}
 
 			// Only count ping failures for connection timeout
-			if (ping_pending) {
+			if (ping_pending && k_uptime_get() - last_tx.timestamp > PING_TIMEOUT_MS) {
 				ping_failed = true;
 				ping_pending = false;  // Clear the pending flag
 				ping_success_streak = 0;  // Reset recovery streak on any failure
 				ping_failures++;
-				if (ping_failures % 10 == 0)  // Log every 10 failures
-				{
-					LOG_WRN("Ping failed, total failures: %d", ping_failures);
-				}
-				if (ping_failures == TX_ERROR_THRESHOLD)  // consecutive ping failures
-				{
-					connection_error_start_time
-						= k_uptime_get();  // Mark when connection errors started
-					LOG_WRN(
-						"Ping failure threshold reached (%d failures), starting "
-						"timeout timer",
-						TX_ERROR_THRESHOLD
-					);
-				}
 			}
-			esb_pop_tx();
+
+			if (ping_failures > 0 && ping_failures % 10 == 0)  // Log every 10 failures
+			{
+				LOG_WRN("Ping failed, total failures: %d", ping_failures);
+			}
+			if (ping_failures == TX_ERROR_THRESHOLD)  // consecutive ping failures
+			{
+				connection_error_start_time
+					= k_uptime_get();  // Mark when connection errors started
+				LOG_WRN(
+					"Ping failure threshold reached (%d failures), starting "
+					"timeout timer",
+					TX_ERROR_THRESHOLD
+				);
+			}
+
 			if (esb_paired) {
 				clocks_stop();
 			}
@@ -638,7 +663,7 @@ int esb_initialize(bool tx) {
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = retransmit_delay_with_jitter;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 1;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 0;
 		// config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
@@ -921,7 +946,6 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 
 	// Record this packet for TX_FAILED diagnostics
 	last_tx.type = data[0];
-	last_tx.is_ping = (data[0] == ESB_PING_TYPE);
 	last_tx.is_ack_payload = false;
 	last_tx.noack = no_ack;
 	last_tx.length = data_length;
@@ -932,33 +956,28 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 
 	// if sending ping packet, we need send another small packet to get ack result asap
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
-		k_msleep(1);
+		uint32_t now32 = (uint32_t)now;
+		ping_pending = true;
+		ping_ctr_sent = tx_payload.data[2];
+		ping_send_time = now32;
+		ping_send_cycles = k_cycle_get_32();
+		last_tx_time = now;
+		LOG_INF(
+			"PING sent (ctr=%u)",
+			(unsigned)tx_payload.data[2]
+		);
 
-		// Double check ESB TX FIFO is not full before adding second packet
-		if (!esb_tx_full()) {
-			// small packet with no data, just to get ack result
-			ack_payload.pipe = tracker_id % 8;
-			ack_payload.noack = false;
-			ack_payload.length = 1;
+		esb_write_ack(ESB_PING_TYPE);
+	} else if (tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
+		// PING failed to queue - this is critical!
+		const char* err_str = "unknown";
+		if (queue_status == -ENOMEM) err_str = "ENOMEM (ESB not ready)";
+		else if (queue_status == -ENOSPC) err_str = "ENOSPC (FIFO full)";
+		else if (queue_status == -EACCES) err_str = "EACCES (access denied)";
+		else if (queue_status == -ENODATA) err_str = "ENODATA (no data available)";
 
-			// Record ack_payload for diagnostics
-			last_tx.type = 0; // ack_payload has no specific type
-			last_tx.is_ping = false;
-			last_tx.is_ack_payload = true;
-			last_tx.noack = false;
-			last_tx.length = 1;
-			last_tx.timestamp = k_uptime_get();
-
-			int ack_status = esb_write_payload(&ack_payload);
-			if (ack_status != 0) {
-				LOG_ERR(
-					"esb_write: failed to queue PING ack packet, err=%d",
-					ack_status
-				);
-			}
-		} else {
-			LOG_WRN("esb_write: TX FIFO full, skipping PING ack packet");
-		}
+		LOG_ERR("esb_write: PING failed to queue (ctr=%u, err=%d %s)",
+				tx_payload.data[2], queue_status, err_str);
 	}
 
 	// Handle -ENOMEM error (ESB in bad state)
@@ -983,30 +1002,6 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	if (queue_status == 0) {
 		last_tx_time = now;
 		esb_write_queued++;
-	}
-
-	// If we sent a heartbeat (ACK requested), mark pending and record timing
-	if (!no_ack && tx_payload.data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
-		uint32_t now32 = (uint32_t)now;
-		ping_pending = true;
-		ping_ctr_sent = tx_payload.data[2];
-		ping_send_time = now32;
-		ping_send_cycles = k_cycle_get_32();
-		last_tx_time = now;
-		LOG_INF(
-			"PING sent (ctr=%u)",
-			(unsigned)tx_payload.data[2]
-		);
-	} else if (!no_ack && tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
-		// PING failed to queue - this is critical!
-		const char* err_str = "unknown";
-		if (queue_status == -ENOMEM) err_str = "ENOMEM (ESB not ready)";
-		else if (queue_status == -ENOSPC) err_str = "ENOSPC (FIFO full)";
-		else if (queue_status == -EACCES) err_str = "EACCES (access denied)";
-		else if (queue_status == -ENODATA) err_str = "ENODATA (no data available)";
-
-		LOG_ERR("esb_write: PING failed to queue (ctr=%u, err=%d %s)",
-				tx_payload.data[2], queue_status, err_str);
 	}
 
 	// esb_start_tx();
