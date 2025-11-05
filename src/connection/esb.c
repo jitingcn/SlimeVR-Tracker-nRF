@@ -64,7 +64,7 @@ static uint8_t paired_addr[8] = {0};
 static bool esb_initialized = false;
 static bool esb_paired = false;
 
-#define TX_ERROR_THRESHOLD 30
+#define TX_ERROR_THRESHOLD 100
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
@@ -80,7 +80,7 @@ static bool esb_paired = false;
 #endif
 // Allow longer wait before declaring PING timeout
 #ifndef PING_TIMEOUT_MS
-#define PING_TIMEOUT_MS 800
+#define PING_TIMEOUT_MS 1200
 #endif
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);

@@ -317,9 +317,9 @@ void connection_thread(void)
 
 		// Adjust PING interval based on connection health
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-			// During connection errors, slow down PING to every 5 seconds
+			// During connection errors, slow down PING to every 2.5 seconds
 			// This reduces radio congestion and gives ESB time to recover
-			ping_interval_ms = 5000;
+			ping_interval_ms = 2500;
 		} else {
 			// Normal operation - default interval
 			ping_interval_ms = PING_INTERVAL_MS;
