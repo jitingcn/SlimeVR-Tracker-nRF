@@ -175,7 +175,7 @@ static void led_resume(void)
 #endif
 
 #ifdef LED_RGB_COLOR
-static int led_pwm_period[4][3] = {
+static int led_pwm_period[5][3] = {
 	{CONFIG_LED_DEFAULT_COLOR_R, CONFIG_LED_DEFAULT_COLOR_G, CONFIG_LED_DEFAULT_COLOR_B}, // Default
 	{0, 10000, 0}, // Success
 	{10000, 0, 0}, // Error
@@ -183,7 +183,7 @@ static int led_pwm_period[4][3] = {
 	{0, 0, 10000}, // Pairing
 };
 #elif defined(LED_TRI_COLOR)
-static int led_pwm_period[4][3] = {
+static int led_pwm_period[5][3] = {
 	{0, 0, 10000}, // Default
 	{0, 10000, 0}, // Success
 	{10000, 0, 0}, // Error
@@ -191,7 +191,7 @@ static int led_pwm_period[4][3] = {
 	{0, 0, 10000}, // Pairing
 };
 #elif defined(LED_RG_COLOR)
-static int led_pwm_period[4][2] = {
+static int led_pwm_period[5][2] = {
 	{CONFIG_LED_DEFAULT_COLOR_R, CONFIG_LED_DEFAULT_COLOR_G}, // Default
 	{0, 10000}, // Success
 	{10000, 0}, // Error
@@ -199,7 +199,7 @@ static int led_pwm_period[4][2] = {
 	{4000, 6000}, // Pairing
 };
 #elif defined(LED_DUAL_COLOR)
-static int led_pwm_period[4][2] = {
+static int led_pwm_period[5][2] = {
 	{0, 10000}, // Default
 	{0, 10000}, // Success
 	{10000, 0}, // Error
@@ -207,7 +207,7 @@ static int led_pwm_period[4][2] = {
 	{0, 10000}, // Pairing
 };
 #else
-static int led_pwm_period[4][1] = {
+static int led_pwm_period[5][1] = {
 	{10000}, // Default
 	{10000}, // Success
 	{10000}, // Error
