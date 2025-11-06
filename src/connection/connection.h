@@ -23,6 +23,7 @@
 #ifndef SLIMENRF_CONNECTION
 #define SLIMENRF_CONNECTION
 
+uint32_t get_ping_interval_ms(void);
 void connection_clocks_request_start(void);
 void connection_clocks_request_start_delay_us(uint32_t delay_us);
 void connection_clocks_request_stop(void);

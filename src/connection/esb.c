@@ -78,16 +78,11 @@ static bool esb_paired = false;
 #ifndef PING_RECOVERY_THRESHOLD
 #define PING_RECOVERY_THRESHOLD 1
 #endif
-// Allow longer wait before declaring PING timeout
-#ifndef PING_TIMEOUT_MS
-#define PING_TIMEOUT_MS 1200
-#endif
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 6, 0, 0);
-static K_MUTEX_DEFINE(esb_tx_mutex);
+K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 5, 0, 0);
 static int64_t last_tx_time = 0;
 
 static uint32_t ping_success_streak = 0;  // consecutive success counter
@@ -229,14 +224,14 @@ void event_handler(struct esb_evt const* event) {
 			if (last_tx.is_ack_payload && last_tx.type == ESB_PING_TYPE) {
 				esb_write_ack(0xFF);
 			} else {
-				LOG_WRN("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
+				LOG_DBG("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
 					pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
 					k_uptime_get() - last_tx.timestamp, event->tx_attempts);
 			}
 
 			// Log TX statistics every 20 failures for debugging
 			uint32_t now = k_uptime_get_32();
-			if (tx_failed_count % 20 == 0 || (now - last_log_time > 5000)) {
+			if (tx_failed_count % 20 == 0 || (now - last_log_time > get_ping_interval_ms() / 2)) {
 				last_log_time = now;
 				uint32_t total = tx_success_count + tx_failed_count;
 				uint32_t fail_rate = total > 0 ? (tx_failed_count * 100 / total) : 0;
@@ -245,7 +240,7 @@ void event_handler(struct esb_evt const* event) {
 			}
 
 			// Only count ping failures for connection timeout
-			if (ping_pending && k_uptime_get() - last_tx.timestamp > PING_TIMEOUT_MS) {
+			if (ping_pending && k_uptime_get() - ping_send_time > get_ping_interval_ms() / 2) {
 				ping_failed = true;
 				ping_pending = false;  // Clear the pending flag
 				ping_success_streak = 0;  // Reset recovery streak on any failure
@@ -395,7 +390,7 @@ void event_handler(struct esb_evt const* event) {
 								break;
 							}
 
-							uint32_t ping_send_time = ((uint32_t)rx_payload.data[3] << 24)
+							uint32_t ping_send_time_32 = ((uint32_t)rx_payload.data[3] << 24)
 														| ((uint32_t)rx_payload.data[4] << 16)
 														| ((uint32_t)rx_payload.data[5] << 8)
 														| ((uint32_t)rx_payload.data[6]);
@@ -407,7 +402,7 @@ void event_handler(struct esb_evt const* event) {
 
 							uint32_t now32 = (uint32_t)k_uptime_get();
 							uint32_t now_cyc = k_cycle_get_32();
-							uint32_t rtt = (now32 - ping_send_time) / 2;
+							uint32_t rtt = (now32 - ping_send_time_32) / 2;
 							uint32_t rtt_us = k_cyc_to_us_near32(now_cyc - ping_send_cycles) / 2;
 							// log ping to pong rtt and pong to now rtt
 							LOG_INF("PONG RTT: %u ms", rtt);
@@ -933,7 +928,7 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	tx_payload.noack = no_ack;
 	tx_payload.length = data_length;
 
-	int64_t now = k_uptime_get();
+	// int64_t now = k_uptime_get();
 	// Tick rate counter
 	esb_write_rate_tick();
 
@@ -952,19 +947,19 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	last_tx.is_ack_payload = false;
 	last_tx.noack = no_ack;
 	last_tx.length = data_length;
-	last_tx.timestamp = now;
+	last_tx.timestamp = k_uptime_get();
 
 	// Try to queue the packet
 	int queue_status = esb_write_payload(&tx_payload);
 
 	// if sending ping packet, we need send another small packet to get ack result asap
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
-		uint32_t now32 = (uint32_t)now;
+		// uint32_t now32 = (uint32_t)now;
 		ping_pending = true;
 		ping_ctr_sent = tx_payload.data[2];
-		ping_send_time = now32;
+		ping_send_time = k_uptime_get();
 		ping_send_cycles = k_cycle_get_32();
-		last_tx_time = now;
+		last_tx_time = k_uptime_get();
 		LOG_INF(
 			"PING sent (ctr=%u)",
 			(unsigned)tx_payload.data[2]
@@ -1003,7 +998,7 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 
 	// Record last TX time for idle probe scheduling
 	if (queue_status == 0) {
-		last_tx_time = now;
+		last_tx_time = k_uptime_get();
 		esb_write_queued++;
 	}
 
@@ -1134,7 +1129,7 @@ static void esb_thread(void) {
 			}
 		}
 
-		if (ping_pending && (now_idle - ping_send_time) > PING_TIMEOUT_MS) {
+		if (ping_pending && (now_idle - ping_send_time) > get_ping_interval_ms() / 2) {
 			// Consider missing PONG a failure, clear pending
 			ping_failed = true;
 			ping_pending = false;

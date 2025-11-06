@@ -39,6 +39,7 @@ static volatile bool data_ready = false;
 static uint8_t packet_sequence = 0;
 static K_MUTEX_DEFINE(buffer_mutex);
 static int64_t last_ping_time = 0;
+static uint32_t ping_interval_ms = PING_INTERVAL_MS;
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
@@ -51,6 +52,11 @@ static bool no_ack = true;
 #else
 static bool no_ack = false;
 #endif
+
+uint32_t get_ping_interval_ms(void)
+{
+	return ping_interval_ms;
+}
 
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 8, 0, 0);
@@ -309,7 +315,6 @@ void connection_thread(void)
 	// Global TX limiter
 	static int64_t last_tx_time = 0;
 	// Adaptive PING interval based on connection state
-	static uint32_t ping_interval_ms = PING_INTERVAL_MS;
 	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1)
 	{
@@ -345,7 +350,7 @@ void connection_thread(void)
 			ping[7] = esb_get_ping_ack_flag();
 			memset(&ping[8], 0x00, 4); // reserved
 			ping[12] = 0;
-			esb_write(ping, true, ESB_PING_LEN);
+			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
 			last_tx_time = now;
 			continue;
