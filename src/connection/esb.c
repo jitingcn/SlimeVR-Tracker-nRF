@@ -229,9 +229,9 @@ void event_handler(struct esb_evt const* event) {
 					k_uptime_get() - last_tx.timestamp, event->tx_attempts);
 			}
 
-			// Log TX statistics every 20 failures for debugging
+			// Log TX statistics every 100 failures for debugging
 			uint32_t now = k_uptime_get_32();
-			if (tx_failed_count % 20 == 0 || (now - last_log_time > get_ping_interval_ms() / 2)) {
+			if (tx_failed_count % 100 == 0 || (now - last_log_time > get_ping_interval_ms())) {
 				last_log_time = now;
 				uint32_t total = tx_success_count + tx_failed_count;
 				uint32_t fail_rate = total > 0 ? (tx_failed_count * 100 / total) : 0;
@@ -650,9 +650,6 @@ int esb_initialize(bool tx) {
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
 
-	uint16_t jitter = (rand() % 160) - 80;  // ±80 µs
-	uint16_t retransmit_delay_with_jitter = RADIO_RETRANSMIT_DELAY + jitter;
-
 	if (tx) {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		// config.mode = ESB_MODE_PTX;
@@ -660,9 +657,9 @@ int esb_initialize(bool tx) {
 		config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = retransmit_delay_with_jitter;
+		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 0;
-		// config.tx_mode = ESB_TXMODE_MANUAL;
+		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
 		// config.use_fast_ramp_up = true;
@@ -673,7 +670,7 @@ int esb_initialize(bool tx) {
 		// config.bitrate = ESB_BITRATE_2MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
-		config.retransmit_delay = retransmit_delay_with_jitter;
+		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		// config.retransmit_count = 3;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
