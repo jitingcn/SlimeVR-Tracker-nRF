@@ -98,7 +98,7 @@ static uint32_t ping_send_cycles = 0;
 static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
-#define REMOTE_COMMAND_DELAY_MS 2300
+#define REMOTE_COMMAND_DELAY_MS 3000
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -449,6 +449,15 @@ void event_handler(struct esb_evt const* event) {
 										break;
 									case ESB_PONG_FLAG_MAG_CLEAR:
 										cmd_name = "MAG_CLEAR";
+										break;
+									case ESB_PONG_FLAG_REBOOT:
+										cmd_name = "REBOOT";
+										break;
+									case ESB_PONG_FLAG_CLEAR:
+										cmd_name = "CLEAR";
+										break;
+									case ESB_PONG_FLAG_DFU:
+										cmd_name = "DFU";
 										break;
 								}
 								LOG_INF("Remote command %s (0x%02X) received, will execute in %dms",
@@ -1108,6 +1117,29 @@ static void esb_thread(void) {
 						sensor_calibration_clear_mag(NULL, true);
 #else
 						LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
+#endif
+						break;
+
+					case ESB_PONG_FLAG_REBOOT:
+						LOG_WRN("Executing remote command: REBOOT");
+						sys_request_system_reboot(false);
+						break;
+
+					case ESB_PONG_FLAG_CLEAR:
+						LOG_WRN("Executing remote command: CLEAR (clear pairing)");
+						esb_clear_pair();
+						break;
+
+					case ESB_PONG_FLAG_DFU:
+#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+						LOG_WRN("Executing remote command: DFU (enter bootloader)");
+#if CONFIG_BUILD_OUTPUT_UF2
+						NRF_POWER->GPREGRET = 0x57; // DFU_MAGIC_UF2_RESET
+						k_msleep(100); // Wait for register to be written
+#endif
+						sys_request_system_reboot(false);
+#else
+						LOG_WRN("Remote command: DFU not supported (no bootloader)");
 #endif
 						break;
 

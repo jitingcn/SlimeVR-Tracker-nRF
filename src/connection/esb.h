@@ -75,7 +75,10 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length);  // TODO: give p
 #define ESB_PONG_FLAG_MEOW 0x04             // Trigger meow output
 #define ESB_PONG_FLAG_SCAN 0x05             // Trigger sensor scan
 #define ESB_PONG_FLAG_MAG_CLEAR 0x06        // Clear magnetometer calibration
-// Reserved for future use: 0x07-0xFF
+#define ESB_PONG_FLAG_REBOOT 0x07           // Reboot tracker
+#define ESB_PONG_FLAG_CLEAR 0x08            // Clear pairing data
+#define ESB_PONG_FLAG_DFU 0x09              // Enter DFU bootloader
+// Reserved for future use: 0x0A-0xFF
 
 bool esb_ready(void);
 
