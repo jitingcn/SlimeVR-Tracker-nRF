@@ -98,6 +98,7 @@ static uint32_t ping_send_cycles = 0;
 static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
+static uint32_t received_channel_value = 0;  // Store channel value from PONG data[8-11]
 #define REMOTE_COMMAND_DELAY_MS 3000
 
 // Track last sent packet for TX_FAILED diagnostics
@@ -394,34 +395,42 @@ void event_handler(struct esb_evt const* event) {
 														| ((uint32_t)rx_payload.data[4] << 16)
 														| ((uint32_t)rx_payload.data[5] << 8)
 														| ((uint32_t)rx_payload.data[6]);
-							// Capture receiver time from PONG param (bytes 8..11)
-							uint32_t pong_tx_time = ((uint32_t)rx_payload.data[8] << 24)
-													| ((uint32_t)rx_payload.data[9] << 16)
-													| ((uint32_t)rx_payload.data[10] << 8)
-													| ((uint32_t)rx_payload.data[11]);
 
 							uint32_t now32 = (uint32_t)k_uptime_get();
 							uint32_t now_cyc = k_cycle_get_32();
 							uint32_t rtt = (now32 - ping_send_time_32) / 2;
 							uint32_t rtt_us = k_cyc_to_us_near32(now_cyc - ping_send_cycles) / 2;
-							// log ping to pong rtt and pong to now rtt
-							LOG_INF("PONG RTT: %u ms", rtt);
-							uint32_t server_time = pong_tx_time + rtt;
-							// print server time on human readable format (hh:mm:ss.ms,us)
-							uint32_t server_ms = server_time % 1000;
-							uint32_t server_s = (server_time / 1000) % 60;
-							uint32_t server_m = (server_time / 60000) % 60;
-							uint32_t server_h = (server_time / 3600000) % 24;
-							LOG_INF(
-								"Server time: %02u:%02u:%02u.%03u",
-								server_h,
-								server_m,
-								server_s,
-								server_ms
-							);
 
-						// Check flags field (byte 7)
-						uint8_t pong_flags = rx_payload.data[7];
+							// Check flags field (byte 7)
+							uint8_t pong_flags = rx_payload.data[7];
+
+							// Only parse server time if this is a normal heartbeat (flags == 0)
+							if (pong_flags == ESB_PONG_FLAG_NORMAL) {
+								// Capture receiver time from PONG param (bytes 8..11)
+								uint32_t pong_tx_time = ((uint32_t)rx_payload.data[8] << 24)
+														| ((uint32_t)rx_payload.data[9] << 16)
+														| ((uint32_t)rx_payload.data[10] << 8)
+														| ((uint32_t)rx_payload.data[11]);
+
+								// log ping to pong rtt and pong to now rtt
+								LOG_INF("PONG RTT: %u ms", rtt);
+								uint32_t server_time = pong_tx_time + rtt;
+								// print server time on human readable format (hh:mm:ss.ms,us)
+								uint32_t server_ms = server_time % 1000;
+								uint32_t server_s = (server_time / 1000) % 60;
+								uint32_t server_m = (server_time / 60000) % 60;
+								uint32_t server_h = (server_time / 3600000) % 24;
+								LOG_INF(
+									"Server time: %02u:%02u:%02u.%03u",
+									server_h,
+									server_m,
+									server_s,
+									server_ms
+								);
+							} else {
+								// Command packet, log RTT only
+								LOG_INF("PONG RTT: %u ms (command packet)", rtt);
+							}
 
 						// handle remote commands and delayed execution
 						if (pong_flags != ESB_PONG_FLAG_NORMAL) {
@@ -429,6 +438,14 @@ void event_handler(struct esb_evt const* event) {
 								// new command received
 								received_remote_command = pong_flags;
 								remote_command_receive_time = k_uptime_get();
+
+								// For SET_CHANNEL command, extract channel value from data[8-11]
+								if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
+									received_channel_value = ((uint32_t)rx_payload.data[8] << 24)
+															| ((uint32_t)rx_payload.data[9] << 16)
+															| ((uint32_t)rx_payload.data[10] << 8)
+															| ((uint32_t)rx_payload.data[11]);
+								}
 
 								const char* cmd_name = "UNKNOWN";
 								switch (pong_flags) {
@@ -459,9 +476,17 @@ void event_handler(struct esb_evt const* event) {
 									case ESB_PONG_FLAG_DFU:
 										cmd_name = "DFU";
 										break;
+									case ESB_PONG_FLAG_SET_CHANNEL:
+										cmd_name = "SET_CHANNEL";
+										break;
 								}
-								LOG_INF("Remote command %s (0x%02X) received, will execute in %dms",
-									cmd_name, pong_flags, REMOTE_COMMAND_DELAY_MS);
+								if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
+									LOG_INF("Remote command %s (0x%02X) received, channel=%u, will execute in %dms",
+										cmd_name, pong_flags, received_channel_value, REMOTE_COMMAND_DELAY_MS);
+								} else {
+									LOG_INF("Remote command %s (0x%02X) received, will execute in %dms",
+										cmd_name, pong_flags, REMOTE_COMMAND_DELAY_MS);
+								}
 							}
 						} else {
 							// received NORMAL flag, indicates the receiver has confirmed our echo
@@ -690,7 +715,20 @@ int esb_initialize(bool tx) {
 	err = esb_init(&config);
 
 	if (!err) {
-		esb_set_rf_channel(RADIO_RF_CHANNEL);
+		// Read and apply RF channel from retained/NVS
+		// 0xFF and 0 both indicate "use default"
+		if (retained->rf_channel != 0xFF && retained->rf_channel != 0 && retained->rf_channel <= 100) {
+			LOG_INF("Restoring RF channel from NVS: %u", retained->rf_channel);
+			esb_set_rf_channel(retained->rf_channel);
+		} else {
+			LOG_INF("Using default RF channel: %u", RADIO_RF_CHANNEL);
+			esb_set_rf_channel(RADIO_RF_CHANNEL);
+			// Initialize with 0xFF to indicate default is being used
+			if (retained->rf_channel != 0xFF) {
+				retained->rf_channel = 0xFF;
+				retained_update();
+			}
+		}
 	}
 
 	if (!err) {
@@ -1141,6 +1179,42 @@ static void esb_thread(void) {
 #else
 						LOG_WRN("Remote command: DFU not supported (no bootloader)");
 #endif
+						break;
+
+					case ESB_PONG_FLAG_SET_CHANNEL:
+					{
+						// Validate channel value (0-100)
+						if (received_channel_value <= 100) {
+							LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
+							// Save to retained memory
+							retained->rf_channel = (uint8_t)received_channel_value;
+							retained_update();
+							// Save to NVS
+							sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+							LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
+							// Reinitialize ESB with new channel
+							esb_deinitialize();
+							k_msleep(10);
+							esb_initialize(true);  // Channel will be applied inside esb_initialize
+							LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
+						} else {
+							LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
+						}
+					}
+						break;
+
+					case ESB_PONG_FLAG_CLEAR_CHANNEL:
+						LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
+						// Clear saved channel (set to 0xFF = use default)
+						retained->rf_channel = 0xFF;
+						retained_update();
+						sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+						LOG_INF("RF channel cleared, will use default on next boot");
+						// Reinitialize ESB with default channel
+						esb_deinitialize();
+						k_msleep(10);
+						esb_initialize(true);  // Will use default channel since rf_channel is 0xFF
+						LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
 						break;
 
 					default:

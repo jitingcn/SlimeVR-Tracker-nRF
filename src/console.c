@@ -368,6 +368,11 @@ static void print_help(void)
 	printk("  pair                       Enter pairing mode\n");
 	printk("  clear                      Clear pairing data\n");
 	printk("\n");
+	printk("RF Channel:\n");
+	printk("  channel <0-100>            Set RF channel (saved to NVS)\n");
+	printk("    Example: channel 25       Set RF channel to 25\n");
+	printk("  clearchannel               Clear RF channel (use default)\n");
+	printk("\n");
 	printk("System:\n");
 	printk("  reboot                     Soft reset the device\n");
 #if DFU_EXISTS
@@ -455,6 +460,8 @@ static void console_thread(void)
 	uint8_t command_set[] = "set";
 	uint8_t command_pair[] = "pair";
 	uint8_t command_clear[] = "clear";
+	uint8_t command_channel[] = "channel";
+	uint8_t command_clearchannel[] = "clearchannel";
 
 #if DFU_EXISTS
 	uint8_t command_dfu[] = "dfu";
@@ -627,6 +634,53 @@ static void console_thread(void)
 		else if (memcmp(line, command_clear, sizeof(command_clear)) == 0)
 		{
 			esb_clear_pair();
+		}
+		else if (memcmp(line, command_channel, sizeof(command_channel)) == 0)
+		{
+			if (!arg)
+			{
+				printk("Usage: channel <0-100>\n");
+				printk("Example: channel 25 - Set RF channel to 25\n");
+			}
+			else
+			{
+				char *endptr;
+				long channel = strtol(arg, &endptr, 10);
+
+				if (*endptr != '\0' || channel < 0 || channel > 100)
+				{
+					printk("Invalid channel. Must be a number between 0 and 100.\n");
+				}
+				else
+				{
+					printk("Setting RF channel to %d\n", (int)channel);
+					// Save to retained memory
+					retained->rf_channel = (uint8_t)channel;
+					retained_update();
+					// Save to NVS
+					sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+					printk("RF channel saved to NVS: %u\n", retained->rf_channel);
+					// Reinitialize ESB with new channel
+					esb_deinitialize();
+					k_msleep(10);
+					esb_initialize(true);  // Channel will be applied inside esb_initialize
+					printk("ESB reinitialized with channel %u\n", retained->rf_channel);
+				}
+			}
+		}
+		else if (memcmp(line, command_clearchannel, sizeof(command_clearchannel)) == 0)
+		{
+			printk("Clearing RF channel setting (restore default)\n");
+			// Clear saved channel (set to 0xFF = use default)
+			retained->rf_channel = 0xFF;
+			retained_update();
+			sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+			printk("RF channel cleared, will use default on next boot\n");
+			// Reinitialize ESB with default channel
+			esb_deinitialize();
+			k_msleep(10);
+			esb_initialize(true);  // Will use default channel since rf_channel is 0xFF
+			printk("ESB reinitialized with default channel\n");
 		}
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0)

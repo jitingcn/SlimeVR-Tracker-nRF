@@ -78,7 +78,9 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length);  // TODO: give p
 #define ESB_PONG_FLAG_REBOOT 0x07           // Reboot tracker
 #define ESB_PONG_FLAG_CLEAR 0x08            // Clear pairing data
 #define ESB_PONG_FLAG_DFU 0x09              // Enter DFU bootloader
-// Reserved for future use: 0x0A-0xFF
+#define ESB_PONG_FLAG_SET_CHANNEL 0x0A      // Set RF channel (data[8-11] contains channel value)
+#define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B    // Clear RF channel setting (restore default)
+// Reserved for future use: 0x0C-0xFF
 
 bool esb_ready(void);
 
