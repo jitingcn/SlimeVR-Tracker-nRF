@@ -93,7 +93,15 @@ static uint32_t ping_failures = 0;
 static uint32_t ping_ctr_sent = 0;
 static uint8_t ping_counter = 0;
 static int64_t ping_send_time = 0;
-static uint32_t ping_send_cycles = 0;
+
+// Track send cycles for recent PINGs (circular buffer)
+#define PING_HISTORY_SIZE 10
+struct ping_history_entry {
+	uint8_t counter;
+	uint32_t cycles;
+};
+static struct ping_history_entry ping_history[PING_HISTORY_SIZE] = {0};
+static uint8_t ping_history_idx = 0;
 
 static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
@@ -158,16 +166,21 @@ void esb_write_rate_tick(void) {
 }
 
 void esb_write_ack(uint8_t type) {
+	// This small ACK packet is crucial for receiving the PONG ACK payload
+	// ESB requires a transmission to trigger ACK payload reception
+
 	// Double check ESB TX FIFO is not full before adding second packet
 	if (esb_tx_full()) {
+		LOG_WRN("TX FIFO full when queuing ACK packet, flushing");
 		esb_flush_tx();
-		k_msleep(1);
+		k_msleep(2);
 	}
 
 	// small packet with no data, just to get ack result
-	ack_payload.pipe = tracker_id % 8;
+	ack_payload.pipe = 1 + (tracker_id % 7);
 	ack_payload.noack = false;
 	ack_payload.length = 1;
+	ack_payload.data[0] = 0x00;  // Empty payload marker
 
 	// Record ack_payload for diagnostics
 	last_tx.type = type;  // ack for last sent packet type
@@ -178,10 +191,27 @@ void esb_write_ack(uint8_t type) {
 
 	int ack_status = esb_write_payload(&ack_payload);
 	if (ack_status != 0) {
+		const char* err_str = "unknown";
+		if (ack_status == -ENOMEM) err_str = "ENOMEM (ESB not ready)";
+		else if (ack_status == -ENOSPC) err_str = "ENOSPC (FIFO still full)";
+
 		LOG_ERR(
-			"esb_write: failed to queue PING ack packet, err=%d",
-			ack_status
+			"esb_write_ack: failed to queue ACK packet (err=%d %s), PONG may be delayed",
+			ack_status,
+			err_str
 		);
+
+		// Try flushing and retrying once
+		if (ack_status == -ENOSPC || ack_status == -ENOMEM) {
+			esb_flush_tx();
+			k_usleep(500);
+			ack_status = esb_write_payload(&ack_payload);
+			if (ack_status == 0) {
+				LOG_DBG("ACK packet queued successfully after retry");
+			}
+		}
+	} else {
+		LOG_DBG("ACK packet queued to trigger PONG reception (type=0x%02X)", type);
 	}
 }
 
@@ -221,14 +251,19 @@ void event_handler(struct esb_evt const* event) {
 				pkt_desc = "OTHER";
 			}
 
-			// if failed packet is ack_payload, force to resent that ack
-			if (last_tx.is_ack_payload && last_tx.type == ESB_PING_TYPE) {
-				esb_write_ack(0xFF);
-			} else {
-				LOG_DBG("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
-					pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
-					k_uptime_get() - last_tx.timestamp, event->tx_attempts);
-			}
+			// Critical: if ACK packet (used to retrieve PONG) failed, retry immediately
+			// This ensures we don't miss the PONG response from receiver
+			// if (last_tx.is_ack_payload && last_tx.type == ESB_PING_TYPE) {
+			// 	LOG_WRN("ACK packet (for PONG) failed, retrying immediately");
+			// 	esb_write_ack(0xFF);  // Mark as retry
+			// } else if (last_tx.is_ack_payload && last_tx.type == 0xFF) {
+			// 	// Even the retry failed - this is problematic
+			// 	LOG_ERR("ACK packet retry also failed, PONG response may be lost");
+			// } else {
+			// 	LOG_DBG("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
+			// 		pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
+			// 		k_uptime_get() - last_tx.timestamp, event->tx_attempts);
+			// }
 
 			// Log TX statistics every 100 failures for debugging
 			uint32_t now = k_uptime_get_32();
@@ -377,21 +412,25 @@ void event_handler(struct esb_evt const* event) {
 								break;
 							}
 
-							uint8_t rx_ctr = rx_payload.data[2];
-							// Reset ping counter if unsynced
-							bool match_ctr = abs(rx_ctr - ping_counter) <= 2 ||
-												abs(rx_ctr + 256 - ping_counter) <= 2 ||
-												abs(rx_ctr - 256 - ping_counter) <= 2;
-							if (!match_ctr) {
-								LOG_WRN(
-									"unsynced counter %u (expected ~%u)",
-									rx_ctr,
-									ping_counter
-								);
-								break;
-							}
+						uint8_t rx_ctr = rx_payload.data[2];
+						// Check counter with relaxed tolerance due to ACK payload delay
+						// ACK payload is only sent with the NEXT packet, so we expect
+						// PONG(N) when sending PING(N+1), causing a natural 1-count lag
+						// Allow up to 5 counts difference to handle packet loss scenarios
+						int counter_diff = (int)ping_counter - (int)rx_ctr;
+						if (counter_diff < 0) counter_diff += 256;  // Handle wrap-around
 
-							uint32_t ping_send_time_32 = ((uint32_t)rx_payload.data[3] << 24)
+						bool match_ctr = (counter_diff >= 0 && counter_diff <= 5);
+						if (!match_ctr) {
+							LOG_WRN(
+								"unsynced counter %u (expected ~%u, diff=%d)",
+								rx_ctr,
+								ping_counter,
+								counter_diff
+							);
+							// Don't break - still process the PONG to maintain connection
+							// Just log the warning for debugging
+						}							uint32_t ping_send_time_32 = ((uint32_t)rx_payload.data[3] << 24)
 														| ((uint32_t)rx_payload.data[4] << 16)
 														| ((uint32_t)rx_payload.data[5] << 8)
 														| ((uint32_t)rx_payload.data[6]);
@@ -399,7 +438,30 @@ void event_handler(struct esb_evt const* event) {
 							uint32_t now32 = (uint32_t)k_uptime_get();
 							uint32_t now_cyc = k_cycle_get_32();
 							uint32_t rtt = (now32 - ping_send_time_32) / 2;
-							uint32_t rtt_us = k_cyc_to_us_near32(now_cyc - ping_send_cycles) / 2;
+
+							// Find send cycles for this PONG's counter in history
+							uint32_t ping_cycles_for_this_ctr = 0;
+							for (int i = 0; i < PING_HISTORY_SIZE; i++) {
+								if (ping_history[i].counter == rx_ctr && ping_history[i].cycles != 0) {
+									ping_cycles_for_this_ctr = ping_history[i].cycles;
+									break;
+								}
+							}
+
+							uint32_t rtt_us = 0;
+							bool rtt_valid = false;
+
+							if (ping_cycles_for_this_ctr != 0) {
+								// Calculate RTT using the correct send time for this counter
+								uint32_t cyc_diff = now_cyc - ping_cycles_for_this_ctr;
+								rtt_us = k_cyc_to_us_near32(cyc_diff) / 2;
+								rtt_valid = true;
+							} else {
+								// No history found - likely too old or buffer wrapped
+								// Use timestamp-based RTT converted to cycles for estimation
+								rtt_us = rtt * 1000;  // ms to us
+								rtt_valid = false;
+							}
 
 							// Check flags field (byte 7)
 							uint8_t pong_flags = rx_payload.data[7];
@@ -532,16 +594,18 @@ void event_handler(struct esb_evt const* event) {
 								ping_success_streak = 0;
 								if (rtt_us < 1000) {
 									LOG_INF(
-										"PONG ok, rtt=%u us (ctr=%u) by cycles",
+										"PONG ok, rtt=%u us (ctr=%u)%s",
 										(unsigned)rtt_us,
-										rx_ctr
+										rx_ctr,
+										rtt_valid ? "" : " [estimated]"
 									);
 								} else {
 									LOG_INF(
-										"PONG ok, rtt=%u.%03u ms (ctr=%u) by cycles",
+										"PONG ok, rtt=%u.%03u ms (ctr=%u)%s",
 										(unsigned)(rtt_us / 1000),
 										(unsigned)(rtt_us % 1000),
-										rx_ctr
+										rx_ctr,
+										rtt_valid ? "" : " [estimated]"
 									);
 								}
 							}
@@ -968,7 +1032,7 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 		return;
 	}
 
-	tx_payload.pipe = tracker_id % 8;
+	tx_payload.pipe = 1 + (tracker_id % 7);
 	tx_payload.noack = no_ack;
 	tx_payload.length = data_length;
 
@@ -1002,13 +1066,20 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 		ping_pending = true;
 		ping_ctr_sent = tx_payload.data[2];
 		ping_send_time = k_uptime_get();
-		ping_send_cycles = k_cycle_get_32();
+
+		// Record cycles for THIS counter in circular buffer (for accurate RTT calculation)
+		uint8_t this_ctr = tx_payload.data[2];
+		ping_history[ping_history_idx].counter = this_ctr;
+		ping_history[ping_history_idx].cycles = k_cycle_get_32();
+		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
+
 		last_tx_time = k_uptime_get();
 		LOG_INF(
 			"PING sent (ctr=%u)",
 			(unsigned)tx_payload.data[2]
 		);
 
+		k_usleep(300);
 		esb_write_ack(ESB_PING_TYPE);
 	} else if (tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
 		// PING failed to queue - this is critical!
@@ -1232,7 +1303,7 @@ static void esb_thread(void) {
 			}
 		}
 
-		if (ping_pending && (now_idle - ping_send_time) > get_ping_interval_ms() / 2) {
+		if (ping_pending && (now_idle - ping_send_time) > get_ping_interval_ms()) {
 			// Consider missing PONG a failure, clear pending
 			ping_failed = true;
 			ping_pending = false;

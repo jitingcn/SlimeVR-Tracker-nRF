@@ -34,19 +34,19 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-static uint8_t data_buffer[16] = {0};
-static volatile bool data_ready = false;
+// 循环缓冲区替代互斥锁
+#define PACKET_BUFFER_SIZE 5
+static uint8_t packet_buffer[PACKET_BUFFER_SIZE][16] = {0};
+static atomic_t write_idx = ATOMIC_INIT(0);
+static atomic_t read_idx = ATOMIC_INIT(0);
 static uint8_t packet_sequence = 0;
-static K_MUTEX_DEFINE(buffer_mutex);
 static int64_t last_ping_time = 0;
+static int64_t last_ack_time = 0;
 static uint32_t ping_interval_ms = PING_INTERVAL_MS;
+#define ACK_INTERVAL_MS 300
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
-#ifndef CONFIG_CONNECTION_MIN_TX_INTERVAL_MS
-// Enforce a minimum interval between ESB transmissions to cap TPS
-#define CONFIG_CONNECTION_MIN_TX_INTERVAL_MS 3
-#endif
 #ifndef CONFIG_CONNECTION_ENABLE_ACK
 static bool no_ack = true;
 #else
@@ -96,18 +96,24 @@ uint8_t connection_get_packet_sequence(void)
 	return packet_sequence;
 }
 
-static void write_packet_data(uint8_t *data)
+static void write_packet_data(const uint8_t *data)
 {
-    // 获取互斥锁，确保数据写入的原子性
-    if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) != 0) {
-        LOG_WRN("Failed to acquire buffer mutex, dropping packet");
-        return;
-    }
+	// 使用原子操作的循环缓冲区
+	atomic_val_t current_write = atomic_get(&write_idx);
+	atomic_val_t current_read = atomic_get(&read_idx);
 
-    memcpy(data_buffer, data, 16);
-    data_ready = true;
+	// 检查缓冲区是否已满
+	atomic_val_t next_write = (current_write + 1) % PACKET_BUFFER_SIZE;
+	if (next_write == current_read) {
+		LOG_WRN("Packet buffer full, dropping packet");
+		return;
+	}
 
-    k_mutex_unlock(&buffer_mutex);
+	// 写入数据到当前写索引位置
+	memcpy(packet_buffer[current_write], data, 16);
+
+	// 使用内存屏障确保写入完成后再更新索引
+	atomic_set(&write_idx, next_write);
 }
 
 void connection_update_sensor_ids(int imu, int mag)
@@ -331,7 +337,7 @@ void connection_thread(void)
 		}
 
 		if (!esb_ready()) {
-			k_msleep(10);
+			k_msleep(100);
 			continue;
 		}
 		// PING has highest priority - always send when interval elapsed
@@ -355,31 +361,38 @@ void connection_thread(void)
 			last_tx_time = now;
 			continue;
 		}
-		// skip sensor data if connection error
+
+
+		// ACK包 - 每秒发送3次 (每333ms)
+		// 发送小的ACK包来触发接收器的PONG响应
+		if (now - last_ack_time >= ACK_INTERVAL_MS)
+		{
+			esb_write_ack(0xAC);  // 使用0xAC标识这是定期ACK请求
+			last_ack_time = now;
+			last_tx_time = now;
+			continue;
+		}
+
+		// skip sensor data if connection error		// skip sensor data if connection error
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 			k_msleep(100);
 			continue;
 		}
-		if (data_ready) {
-			if (k_mutex_lock(&buffer_mutex, K_MSEC(1)) == 0) {
-				// Enforce minimum TX interval across all packet types (no PING)
-				if (last_tx_time && (now - last_tx_time) < CONFIG_CONNECTION_MIN_TX_INTERVAL_MS) {
-					// Keep data_ready true to retry the latest packet next iteration
-					k_mutex_unlock(&buffer_mutex);
-					data_ready = true;
-				} else {
-					// Only increment sequence number when actually sending
-					memcpy(esb_packet, data_buffer, 16);
-					esb_packet[16] = packet_sequence++;
-					k_mutex_unlock(&buffer_mutex);
 
-					data_ready = false;
-					esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
-					last_tx_time = now;
-				}
-			} else {
-				LOG_WRN("Failed to acquire mutex for reading data");
-			}
+		// 检查循环缓冲区中是否有数据
+		atomic_val_t current_read = atomic_get(&read_idx);
+		atomic_val_t current_write = atomic_get(&write_idx);
+
+		if (current_read != current_write) {
+			// 有数据可读
+			memcpy(esb_packet, packet_buffer[current_read], 16);
+			esb_packet[16] = packet_sequence++;
+
+			// 更新读索引
+			atomic_set(&read_idx, (current_read + 1) % PACKET_BUFFER_SIZE);
+
+			esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
+			last_tx_time = now;
 		}
 		// mag is higher priority (skip accel, quat is full precision)
 		else if (mag_update_time && now - last_mag_time > 200)
