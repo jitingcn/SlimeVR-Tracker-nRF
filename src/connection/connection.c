@@ -34,8 +34,7 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-// 循环缓冲区替代互斥锁
-#define PACKET_BUFFER_SIZE 5
+#define PACKET_BUFFER_SIZE 4
 static uint8_t packet_buffer[PACKET_BUFFER_SIZE][16] = {0};
 static atomic_t write_idx = ATOMIC_INIT(0);
 static atomic_t read_idx = ATOMIC_INIT(0);
@@ -43,7 +42,7 @@ static uint8_t packet_sequence = 0;
 static int64_t last_ping_time = 0;
 static int64_t last_ack_time = 0;
 static uint32_t ping_interval_ms = PING_INTERVAL_MS;
-#define ACK_INTERVAL_MS 300
+#define ACK_INTERVAL_MS 400
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
@@ -137,7 +136,9 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 }
 
 static int64_t mag_update_time = 0;
+#ifdef CONFIG_SENSOR_USE_MAG
 static int64_t last_mag_time = 0;
+#endif
 
 void connection_update_sensor_mag(float *m)
 {
@@ -315,6 +316,9 @@ void connection_write_packet_4() // full precision quat and magnetometer
 static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 
+static int64_t last_sensor_quat_time = 0;
+#define SENSOR_QUAT_INTERVAL_MS 9
+
 void connection_thread(void)
 {
 	uint8_t esb_packet[17];
@@ -395,6 +399,8 @@ void connection_thread(void)
 			last_tx_time = now;
 		}
 		// mag is higher priority (skip accel, quat is full precision)
+		// 仅在启用磁力计配置时发送磁力计数据包
+#ifdef CONFIG_SENSOR_USE_MAG
 		else if (mag_update_time && now - last_mag_time > 200)
 		{
 			mag_update_time = 0; // data has been sent
@@ -402,22 +408,29 @@ void connection_thread(void)
 			connection_write_packet_4();
 			continue;
 		}
+#endif
 		// if time for info and precise quat not needed
 		else if (quat_update_time && !send_precise_quat && now - last_info_time > 100)
 		{
-			quat_update_time = 0;
-			last_quat_time = now;
-			last_info_time = now;
-			connection_write_packet_2();
-			continue;
+			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
+				quat_update_time = 0;
+				last_quat_time = now;
+				last_sensor_quat_time = now;
+				last_info_time = now;
+				connection_write_packet_2();
+				continue;
+			}
 		}
 		// send quat otherwise
 		else if (quat_update_time)
 		{
-			quat_update_time = 0;
-			last_quat_time = now;
-			connection_write_packet_1();
-			continue;
+			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
+				quat_update_time = 0;
+				last_quat_time = now;
+				last_sensor_quat_time = now;
+				connection_write_packet_1();
+				continue;
+			}
 		}
 		else if (now - last_info_time > 100)
 		{
@@ -435,6 +448,6 @@ void connection_thread(void)
 		{
 			connection_clocks_request_stop();
 		}
-		k_msleep(1); // TODO: should be getting timing from receiver, for now just send asap
+		k_usleep(600); // TODO: should be getting timing from receiver, for now just send asap
 	}
 }
