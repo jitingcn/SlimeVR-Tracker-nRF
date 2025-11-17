@@ -317,7 +317,7 @@ static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 
 static int64_t last_sensor_quat_time = 0;
-#define SENSOR_QUAT_INTERVAL_MS 9
+#define SENSOR_QUAT_INTERVAL_MS 7
 
 void connection_thread(void)
 {
