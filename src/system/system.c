@@ -162,6 +162,7 @@ static int sys_retained_init(void)
 		sys_read(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, sizeof(retained->accBAinv));
 		sys_read(BATT_STATS_CURVE_ID, &retained->battery_pptt_curve, sizeof(retained->battery_pptt_curve));
 		nvs_read(&fs, MAIN_GYRO_SENS_ID, &retained->gyroSensScale, sizeof(retained->gyroSensScale));
+		sys_read(RF_CHANNEL_ID, &retained->rf_channel, sizeof(retained->rf_channel));
 		retained_update();
 	}
 	else

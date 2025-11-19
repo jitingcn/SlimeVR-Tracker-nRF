@@ -183,6 +183,13 @@ static void print_connection(void)
 		}
 #endif
 	printk(paired ? "Receiver address: %012llX\n" : "Receiver address: None\n", (*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
+
+	// Display RF channel info
+	if (retained->rf_channel != 0xFF && retained->rf_channel <= 100) {
+		printk("RF Channel: %u (custom)\n", retained->rf_channel);
+	} else {
+		printk("RF Channel: %u (default)\n", CONFIG_RADIO_RF_CHANNEL);
+	}
 }
 
 static void print_battery(void)
@@ -658,7 +665,7 @@ static void console_thread(void)
 					retained->rf_channel = (uint8_t)channel;
 					retained_update();
 					// Save to NVS
-					sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+					sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
 					printk("RF channel saved to NVS: %u\n", retained->rf_channel);
 					// Reinitialize ESB with new channel
 					esb_deinitialize();
@@ -674,7 +681,7 @@ static void console_thread(void)
 			// Clear saved channel (set to 0xFF = use default)
 			retained->rf_channel = 0xFF;
 			retained_update();
-			sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+			sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
 			printk("RF channel cleared, will use default on next boot\n");
 			// Reinitialize ESB with default channel
 			esb_deinitialize();

@@ -13,11 +13,12 @@
 #define MAIN_MAG_BIAS_ID 5
 #define MAIN_GYRO_SENS_ID 6
 #define MAIN_ACC_6_BIAS_ID 7
-#define RF_CHANNEL 30  // RF channel storage
 
 #define BATT_STATS_LAST_RUN_ID 8
 #define BATT_STATS_INTERVAL_0 9 // ID 9 to 28
 #define BATT_STATS_CURVE_ID 29
+
+#define RF_CHANNEL_ID 100  // RF channel storage (changed from 30 to avoid conflicts)
 
 void configure_sense_pins(void);
 

@@ -1292,7 +1292,7 @@ static void esb_thread(void) {
 							retained->rf_channel = (uint8_t)received_channel_value;
 							retained_update();
 							// Save to NVS
-							sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+							sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
 							LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
 							// Reinitialize ESB with new channel
 							esb_deinitialize();
@@ -1310,7 +1310,7 @@ static void esb_thread(void) {
 						// Clear saved channel (set to 0xFF = use default)
 						retained->rf_channel = 0xFF;
 						retained_update();
-						sys_write(RF_CHANNEL, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+						sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
 						LOG_INF("RF channel cleared, will use default on next boot");
 						// Reinitialize ESB with default channel
 						esb_deinitialize();
