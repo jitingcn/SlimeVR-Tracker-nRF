@@ -40,7 +40,6 @@ static atomic_t write_idx = ATOMIC_INIT(0);
 static atomic_t read_idx = ATOMIC_INIT(0);
 static uint8_t packet_sequence = 0;
 static int64_t last_ping_time = 0;
-static int64_t last_ack_time = 0;
 static uint32_t ping_interval_ms = PING_INTERVAL_MS;
 #define ACK_INTERVAL_MS 400
 
@@ -344,9 +343,33 @@ void connection_thread(void)
 			k_msleep(100);
 			continue;
 		}
-		// PING has highest priority - always send when interval elapsed
+
+		// PING has highest priority - use TDMA scheduling based on server time
 		// This ensures connection recovery attempts continue even during errors
-		if (now - last_ping_time >= ping_interval_ms)
+		bool should_send_ping = false;
+		uint32_t server_time = esb_get_server_time();
+
+		if (server_time > 0) {
+			// TDMA scheduling: 10 trackers, 100ms slot each in 1000ms period
+			uint32_t slot_offset = (tracker_id % 10) * 100; // ms
+			uint32_t current_slot = server_time % 1000;
+
+			// Calculate slot difference with wrap-around handling
+			int32_t slot_diff = (int32_t)current_slot - (int32_t)slot_offset;
+			if (slot_diff < 0) slot_diff += 1000;
+
+			// Send if within slot window (±20ms) and minimum interval elapsed
+			if (slot_diff >= 0 && slot_diff <= 20 && now - last_ping_time >= (ping_interval_ms - 100)) {
+				should_send_ping = true;
+			}
+		} else {
+			// Fallback: not synced yet, use original time-based scheduling
+			if (now - last_ping_time >= ping_interval_ms) {
+				should_send_ping = true;
+			}
+		}
+
+		if (should_send_ping)
 		{
 			uint8_t ping[ESB_PING_LEN] = {0};
 			ping[0] = ESB_PING_TYPE;
@@ -362,17 +385,6 @@ void connection_thread(void)
 			ping[12] = 0;
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
-			last_tx_time = now;
-			continue;
-		}
-
-
-		// ACK包 - 每秒发送3次 (每333ms)
-		// 发送小的ACK包来触发接收器的PONG响应
-		if (now - last_ack_time >= ACK_INTERVAL_MS)
-		{
-			esb_write_ack(0xAC);  // 使用0xAC标识这是定期ACK请求
-			last_ack_time = now;
 			last_tx_time = now;
 			continue;
 		}
@@ -448,6 +460,6 @@ void connection_thread(void)
 		{
 			connection_clocks_request_stop();
 		}
-		k_usleep(600); // TODO: should be getting timing from receiver, for now just send asap
+		k_usleep(800); // TODO: should be getting timing from receiver, for now just send asap
 	}
 }

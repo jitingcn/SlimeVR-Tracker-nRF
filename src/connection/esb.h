@@ -87,6 +87,9 @@ bool esb_ready(void);
 // Get remote command flag to echo back in PING
 uint8_t esb_get_ping_ack_flag(void);
 
+// Get estimated current server time (0 if not synced)
+uint32_t esb_get_server_time(void);
+
 // Helper: log esb_write call frequency
 void esb_write_rate_tick(void);
 
