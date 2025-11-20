@@ -64,7 +64,7 @@ static uint8_t paired_addr[8] = {0};
 static bool esb_initialized = false;
 static bool esb_paired = false;
 
-#define TX_ERROR_THRESHOLD 150
+#define TX_ERROR_THRESHOLD 100
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
@@ -174,11 +174,11 @@ void esb_write_ack(uint8_t type) {
 	// This small ACK packet is crucial for receiving the PONG ACK payload
 	// ESB requires a transmission to trigger ACK payload reception
 
-	// Double check ESB TX FIFO is not full before adding second packet
+	// Check ESB TX FIFO before adding packet
 	if (esb_tx_full()) {
-		LOG_WRN("TX FIFO full when queuing ACK packet, flushing");
+		LOG_WRN("TX FIFO full when queuing ACK packet, skipping");
 		esb_flush_tx();
-		k_msleep(2);
+		return;
 	}
 
 	// small packet with no data, just to get ack result
@@ -198,14 +198,13 @@ void esb_write_ack(uint8_t type) {
 	if (ack_status != 0) {
 		const char* err_str = "unknown";
 		if (ack_status == -ENOMEM) err_str = "ENOMEM (ESB not ready)";
-		else if (ack_status == -ENOSPC) err_str = "ENOSPC (FIFO still full)";
+		else if (ack_status == -ENOSPC) err_str = "ENOSPC (FIFO full)";
 
-		LOG_ERR(
-			"esb_write_ack: failed to queue ACK packet (err=%d %s), PONG may be delayed",
+		LOG_DBG(
+			"esb_write_ack: failed to queue ACK packet (err=%d %s)",
 			ack_status,
 			err_str
 		);
-
 		// Try flushing and retrying once
 		if (ack_status == -ENOSPC || ack_status == -ENOMEM) {
 			esb_flush_tx();
@@ -256,23 +255,22 @@ void event_handler(struct esb_evt const* event) {
 				pkt_desc = "OTHER";
 			}
 
-			// Critical: if ACK packet (used to retrieve PONG) failed, retry immediately
-			// This ensures we don't miss the PONG response from receiver
+			// Critical: if ACK packet (used to retrieve PONG) failed
 			if (last_tx.is_ack_payload && last_tx.type == ESB_PING_TYPE) {
-				LOG_DBG("ACK packet (for PONG) failed, retrying immediately");
-				esb_write_ack(0xFF);  // Mark as retry
+				LOG_DBG("ACK packet (for PONG) failed");
+				esb_write_ack(0xFF);	// Mark as retry
 			} else if (last_tx.is_ack_payload && last_tx.type == 0xFF) {
-				// Even the retry failed - this is problematic
-				LOG_WRN("ACK packet retry also failed");
+				// Retry also failed
+				LOG_DBG("ACK packet retry also failed");
 			} else {
 				LOG_DBG("TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
 					pkt_desc, last_tx.type, last_tx.length, last_tx.noack,
 					k_uptime_get() - last_tx.timestamp, event->tx_attempts);
 			}
 
-			// Log TX statistics every 100 failures for debugging
+			// Log TX statistics every 20 failures for debugging
 			uint32_t now = k_uptime_get_32();
-			if (tx_failed_count % 100 == 0 || (now - last_log_time > get_ping_interval_ms())) {
+			if (tx_failed_count % 20 == 0 || (now - last_log_time > get_ping_interval_ms())) {
 				last_log_time = now;
 				uint32_t total = tx_success_count + tx_failed_count;
 				uint32_t fail_rate = total > 0 ? (tx_failed_count * 100 / total) : 0;
@@ -281,14 +279,14 @@ void event_handler(struct esb_evt const* event) {
 			}
 
 			// Only count ping failures for connection timeout
-			if (ping_pending && k_uptime_get() - ping_send_time > get_ping_interval_ms() / 2) {
+			if (ping_pending && k_uptime_get() - ping_send_time > (get_ping_interval_ms() - 100)) {
 				ping_failed = true;
 				ping_pending = false;  // Clear the pending flag
 				ping_success_streak = 0;  // Reset recovery streak on any failure
 				ping_failures++;
 			}
 
-			if (ping_failures > 0 && ping_failures % 10 == 0)  // Log every 10 failures
+			if (ping_failures > 0 && ping_failures % 10 == 0 && last_tx.type == ESB_PING_TYPE)  // Log every 10 failures
 			{
 				LOG_WRN("Ping failed, total failures: %d", ping_failures);
 			}
@@ -953,7 +951,7 @@ void esb_pair(void) {
 			= checksum;  // Use checksum to make sure packet is for this device
 		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 		int64_t pair_start_time = k_uptime_get();
-		while (paired_addr[0] != checksum) {
+		while (paired_addr[0] != checksum && ((*(uint64_t *)&paired_addr[0] >> 16) & 0xFFFFFFFFFFFF) != *addr) {
 			if (!esb_initialized) {
 				esb_set_addr_discovery();
 				esb_initialize(true);
@@ -1334,7 +1332,7 @@ static void esb_thread(void) {
 			}
 		}
 
-		if (ping_pending && (now_idle - ping_send_time) > get_ping_interval_ms()) {
+		if (ping_pending && (now_idle - ping_send_time) > (get_ping_interval_ms() - 100)) {
 			// Consider missing PONG a failure, clear pending
 			ping_failed = true;
 			ping_pending = false;
