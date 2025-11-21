@@ -36,6 +36,8 @@
 #include <hal/nrf_clock.h>
 #endif /* defined(NRF54L15_XXAA) */
 #include <zephyr/sys/crc.h>
+#include <nrfx_timer.h>
+#include <hal/nrf_timer.h>
 
 #include "esb.h"
 
@@ -82,7 +84,7 @@ static bool esb_paired = false;
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 7, 0, 0);
 static int64_t last_tx_time = 0;
 
 static uint32_t ping_success_streak = 0;  // consecutive success counter
@@ -109,10 +111,35 @@ static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0;  // Store channel value from PONG data[8-11]
 #define REMOTE_COMMAND_DELAY_MS 3000
 
-// Server time synchronization for TDMA scheduling
-static uint32_t last_server_time = 0;
-static int64_t last_server_time_local = 0;
+// Server time synchronization for TDMA scheduling (using cycles for μs precision)
+static uint32_t last_server_time_cycles = 0;  // Server time in cycles
 static bool server_time_synced = false;
+
+// TDMA scheduling with hardware timer
+// Target: 100 TPS per tracker for ALL non-PING packets (data, mag, quat, info, status)
+// 100 TPS = 10ms interval between packets
+// 10 trackers share each 5ms period with 1000μs slot per tracker
+// Each packet transmission takes ~300μs radio time
+#define TDMA_NUM_TRACKERS 10
+#define TDMA_PACKETS_PER_SECOND 176 // Target TPS per tracker (all non-PING packets)
+#define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
+#define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
+#define TDMA_TX_TIME_US 200 // Actual radio transmission time per packet
+#define TDMA_GUARD_TIME_US 170 // Guard time to wake up before slot starts
+// 将 TDMA 参数转换为 Cycles (假设 64MHz, 1us = 64 cycles)
+static uint32_t INTERVAL_CYCLES = k_us_to_cyc_ceil32(TDMA_PACKET_INTERVAL_US);
+static uint64_t g_server_virtual_cycles = 0; // 虚拟的64位单调递增时间
+static uint32_t g_last_rx_raw_cycles = 0;    // 上一次收到的原始32位时间
+static uint32_t g_last_sync_local_cycles = 0; // 上一次同步时的本地时间
+static bool     g_time_initialized = false;
+
+
+static const nrfx_timer_t tdma_timer = NRFX_TIMER_INSTANCE(1);
+static bool tdma_initialized = false;
+static uint8_t tdma_tracker_id = 0;
+static volatile bool tdma_in_tx_slot = false;
+static uint32_t tdma_slot_counter = 0;
+static K_SEM_DEFINE(tdma_slot_sem, 0, 1);
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -145,6 +172,37 @@ static void remote_print_meow(void) {
 	LOG_INF("%s%s%s", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
 
+void esb_update_server_time(uint32_t server_raw_cycles, uint32_t rtt_cycles) {
+	uint32_t now_local = k_cycle_get_32();
+
+	if (!g_time_initialized) {
+		// 第一次初始化
+		g_server_virtual_cycles = server_raw_cycles;
+		g_last_rx_raw_cycles = server_raw_cycles;
+		g_time_initialized = true;
+	} else {
+		// 核心魔法：计算差值 (利用 int32_t 处理 32位回绕)
+		// 即使 server_raw_cycles 溢出，diff 仍然是正确的正数增量
+		int32_t diff = (int32_t)(server_raw_cycles - g_last_rx_raw_cycles);
+
+		// 只有当 diff 为正值或极小的负值(乱序)时才更新，避免巨大跳变
+		// 正常情况下 diff 应该是正的 (例如 1000ms 对应的 cycles)
+		if (diff > 0) {
+			g_server_virtual_cycles += diff;
+			g_last_rx_raw_cycles = server_raw_cycles;
+		}
+	}
+
+	// 补偿 RTT (RTT/2)
+	// 注意：我们保存的是"不含RTT补偿的基准时间"，在获取时再算，或者这里直接加
+	// 这里为了逻辑清晰，我们维护"收到包那一刻的服务器虚拟时间"
+	// 修正：g_server_virtual_cycles 代表的是"服务器在发送这个包时的虚拟时间"
+
+	// 记录同步时刻的本地时间
+	g_last_sync_local_cycles = now_local;
+	server_time_synced = true;
+}
+
 static uint8_t tracker_id = 0;
 static void set_tracker_id(uint8_t id)
 {
@@ -170,14 +228,21 @@ void esb_write_rate_tick(void) {
     }
 }
 
+// ESB recovery mechanism for persistent ENOMEM errors
+static uint32_t consecutive_enomem_errors = 0;
+static int64_t last_enomem_time = 0;
+#define ENOMEM_ERROR_THRESHOLD 10  // Force recovery after N consecutive errors (increased from 5)
+#define ENOMEM_ERROR_WINDOW_MS 2000  // Reset counter if no error for this duration (increased from 1s)
+
 void esb_write_ack(uint8_t type) {
 	// This small ACK packet is crucial for receiving the PONG ACK payload
 	// ESB requires a transmission to trigger ACK payload reception
 
 	// Check ESB TX FIFO before adding packet
 	if (esb_tx_full()) {
-		LOG_WRN("TX FIFO full when queuing ACK packet, skipping");
-		esb_flush_tx();
+		LOG_WRN("TX FIFO full when queuing ACK packet, skipping this ACK");
+		// Don't try to recover here - let the main error handler deal with it
+		// Forcing recovery for every ACK is too aggressive
 		return;
 	}
 
@@ -227,6 +292,8 @@ void event_handler(struct esb_evt const* event) {
 	switch (event->evt_id) {
 		case ESB_EVENT_TX_SUCCESS:
 			tx_success_count++;
+			// Reset ENOMEM error counter on successful transmission
+			consecutive_enomem_errors = 0;
 			if (esb_paired) {
 				clocks_stop();
 			}
@@ -483,32 +550,36 @@ void event_handler(struct esb_evt const* event) {
 
 								// Only parse server time if this is a normal heartbeat (flags == 0)
 								if (pong_flags == ESB_PONG_FLAG_NORMAL) {
-									// Capture receiver time from PONG param (bytes 8..11)
-									uint32_t pong_tx_time = ((uint32_t)rx_payload.data[8] << 24)
+									// Capture receiver cycle timestamp from PONG param (bytes 8..11)
+									uint32_t pong_tx_cycles = ((uint32_t)rx_payload.data[8] << 24)
 															| ((uint32_t)rx_payload.data[9] << 16)
 															| ((uint32_t)rx_payload.data[10] << 8)
 															| ((uint32_t)rx_payload.data[11]);
 
 									// log ping to pong rtt and pong to now rtt
 									LOG_INF("PONG RTT: %u ms", rtt);
-									uint32_t server_time = pong_tx_time + rtt;
+
+									// Calculate server cycles compensated with RTT (in cycles)
+									uint32_t rtt_cycles = rtt * sys_clock_hw_cycles_per_sec() / 1000;
+									uint32_t server_cycles = pong_tx_cycles + (rtt_cycles / 2);
 
 									// Store server time for TDMA scheduling
-									last_server_time = server_time;
-									last_server_time_local = k_uptime_get();
-									server_time_synced = true;
+									last_server_time_cycles = server_cycles;
+									esb_update_server_time(server_cycles, rtt_cycles);
 
-									// print server time on human readable format (hh:mm:ss.ms,us)
-									uint32_t server_ms = server_time % 1000;
-									uint32_t server_s = (server_time / 1000) % 60;
-									uint32_t server_m = (server_time / 60000) % 60;
-									uint32_t server_h = (server_time / 3600000) % 24;
+									// Convert to ms for human-readable display
+									uint32_t server_time_ms = k_cyc_to_ms_near32(server_cycles);
+									uint32_t server_ms = server_time_ms % 1000;
+									uint32_t server_s = (server_time_ms / 1000) % 60;
+									uint32_t server_m = (server_time_ms / 60000) % 60;
+									uint32_t server_h = (server_time_ms / 3600000) % 24;
 									LOG_INF(
-										"Server time: %02u:%02u:%02u.%03u",
+										"Server time: %02u:%02u:%02u.%03u (cycles=%u)",
 										server_h,
 										server_m,
 										server_s,
-										server_ms
+										server_ms,
+										server_cycles
 									);
 								} else {
 									// Command packet, log RTT only
@@ -777,7 +848,7 @@ int esb_initialize(bool tx) {
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 3;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 1 : 2;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
@@ -1110,24 +1181,76 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 		else if (queue_status == -EACCES) err_str = "EACCES (access denied)";
 		else if (queue_status == -ENODATA) err_str = "ENODATA (no data available)";
 
-		LOG_ERR("esb_write: PING failed to queue (ctr=%u, err=%d %s)",
-				tx_payload.data[2], queue_status, err_str);
+		// Only log if this is the first failure or every 10th failure
+		if (consecutive_enomem_errors == 1 || consecutive_enomem_errors % 10 == 0) {
+			LOG_ERR("esb_write: PING failed to queue (ctr=%u, err=%d %s, consecutive=%u)",
+					tx_payload.data[2], queue_status, err_str, consecutive_enomem_errors);
+		}
 	}
 
-	// Handle -ENOMEM error (ESB in bad state)
+	// Handle -ENOMEM error (ESB in bad state) with recovery mechanism
 	if (queue_status == -ENOMEM || queue_status == -ENOSPC) {
-		LOG_DBG(
-			"esb_write: TX FIFO full or ESB not ready (err=%d), flushing TX",
-			queue_status
-		);
-		esb_flush_tx();
-		k_msleep(3);
+		int64_t now = k_uptime_get();
+
+		// Reset counter if this is the first error in a while
+		if (now - last_enomem_time > ENOMEM_ERROR_WINDOW_MS) {
+			consecutive_enomem_errors = 0;
+		}
+
+		consecutive_enomem_errors++;
+		last_enomem_time = now;
+
+		// Try simple flush first (only if ESB is idle)
+		int flush_result = esb_flush_tx();
+
+		if (flush_result == 0) {
+			// Flush succeeded
+			LOG_DBG("TX FIFO flushed successfully, err_count=%u", consecutive_enomem_errors);
+			consecutive_enomem_errors = 0;  // Reset after successful flush
+		} else if (flush_result == -EBUSY) {
+			// ESB is busy transmitting, this is normal - just wait
+			if (consecutive_enomem_errors >= ENOMEM_ERROR_THRESHOLD) {
+				// Only log warning if we've hit threshold
+				LOG_WRN(
+					"ESB TX FIFO full for %u consecutive attempts (ESB busy)",
+					consecutive_enomem_errors
+				);
+
+				// Only use suspend as last resort after many failures
+				if (consecutive_enomem_errors >= ENOMEM_ERROR_THRESHOLD * 2) {
+					LOG_ERR("Forcing recovery after %u errors", consecutive_enomem_errors);
+
+					// Suspend and flush
+					int suspend_result = esb_suspend();
+					if (suspend_result == 0 || suspend_result == -EALREADY) {
+						flush_result = esb_flush_tx();
+						if (flush_result == 0) {
+							LOG_INF("Recovered via suspend+flush");
+							consecutive_enomem_errors = 0;
+						} else {
+							// Complete reinitialization
+							LOG_ERR("Reinitializing ESB");
+							esb_deinitialize();
+							k_msleep(10);
+							esb_initialize(true);
+							consecutive_enomem_errors = 0;
+						}
+					}
+				}
+			}
+			// Wait for hardware to finish current transmission
+			k_msleep(1);
+		}
+	} else if (queue_status == 0) {
+		// Success - reset error counter
+		consecutive_enomem_errors = 0;
 	}
 
 	// Log error if queue failed
-	if (queue_status != 0) {
+	if (queue_status != 0 && consecutive_enomem_errors % 10 == 1) {
+		// Only log every 10th error to reduce noise
 		LOG_ERR(
-			"esb_write: failed to queue packet, err=%d",
+			"esb_write: failed to queue packet, err=%d (logged every 10 errors)",
 			queue_status
 		);
 	}
@@ -1154,15 +1277,240 @@ uint8_t esb_get_ping_ack_flag(void) {
 	return ESB_PONG_FLAG_NORMAL;
 }
 
-uint32_t esb_get_server_time(void) {
+
+uint64_t esb_get_server_time_cycles_64(void) {
 	if (!server_time_synced) {
 		return 0;
 	}
-	int64_t elapsed = k_uptime_get() - last_server_time_local;
-	return last_server_time + (uint32_t)elapsed;
+
+	uint32_t current_local = k_cycle_get_32();
+	// 计算自上次同步以来经过的本地时间
+	// 这里也要处理本地时钟的回绕
+	uint32_t elapsed = current_local - g_last_sync_local_cycles;
+
+	return g_server_virtual_cycles + elapsed;
 }
 
+uint64_t esb_get_server_time_us_64(void) {
+		uint64_t cycles = esb_get_server_time_cycles_64(); // 调用之前定义的64位Cycle函数
 
+		// 手动转换以支持 64 位，防止 k_cyc_to_us_near32 截断数据
+		// 公式: (cycles * 1000000) / frequency
+		return (cycles * 1000000ULL) / sys_clock_hw_cycles_per_sec();
+}
+
+// Legacy function for backward compatibility (returns milliseconds)
+uint32_t esb_get_server_time(void) {
+	uint64_t cycles = esb_get_server_time_cycles_64();
+	if (cycles == 0) {
+		return 0;
+	}
+	uint64_t time_us = esb_get_server_time_us_64();
+	return (uint32_t)(time_us / 1000ULL);
+}
+
+// TDMA timer interrupt handler
+// Note: This timer-based approach is simplified. The actual slot checking
+// is done in tdma_wait_for_slot() for better precision.
+static void tdma_timer_handler(nrf_timer_event_t event_type, void *p_context) {
+	// Timer is used for time capture in tdma_wait_for_slot()
+	// No interrupt-based slot detection needed
+}
+
+void tdma_init(uint8_t tracker_id) {
+	if (tdma_initialized) {
+		return;
+	}
+
+	tdma_tracker_id = tracker_id;
+
+	// Configure timer at 1MHz (1μs resolution)
+	nrfx_timer_config_t timer_cfg = NRFX_TIMER_DEFAULT_CONFIG(1000000);
+	timer_cfg.bit_width = NRF_TIMER_BIT_WIDTH_32;
+	timer_cfg.frequency = NRF_TIMER_FREQ_1MHz;
+	timer_cfg.mode = NRF_TIMER_MODE_TIMER;
+
+	nrfx_err_t err = nrfx_timer_init(&tdma_timer, &timer_cfg, tdma_timer_handler);
+	if (err != NRFX_SUCCESS) {
+		LOG_ERR("TDMA timer init failed: %d", err);
+		return;
+	}
+
+	// No interrupt needed, just enable timer for time capture
+	nrfx_timer_enable(&tdma_timer);
+	tdma_initialized = true;
+
+	LOG_INF("TDMA initialized: tracker_id=%d, slot=%dus, interval=%dus, slot_window=%dus",
+		tracker_id,
+		(tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US,
+		TDMA_PACKET_INTERVAL_US,
+		TDMA_TX_TIME_US + 100);
+}
+
+void tdma_deinit(void) {
+	if (!tdma_initialized) {
+		return;
+	}
+
+	nrfx_timer_disable(&tdma_timer);
+	nrfx_timer_uninit(&tdma_timer);
+	tdma_initialized = false;
+	LOG_INF("TDMA deinitialized");
+}
+
+bool tdma_is_in_tx_slot(void) {
+	if (!server_time_synced) return false;
+
+	// 获取 64 位时间
+	uint64_t server_cycles_64 = esb_get_server_time_cycles_64();
+
+	// 核心修复：在 64位 域进行取模，消除了 32位 溢出导致的相位跳变
+	// 只要 INTERVAL_CYCLES 不是极大的数，结果就是准确的
+	uint32_t pos_in_interval = server_cycles_64 % INTERVAL_CYCLES;
+
+	uint32_t slot_start_cycles = k_us_to_cyc_ceil32((tdma_tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US);
+
+	int64_t diff = (int64_t)pos_in_interval - (int64_t)slot_start_cycles;
+
+	// 处理循环边界 (例如我在 0ms, 当前是 9.9ms)
+	if (diff < -((int64_t)INTERVAL_CYCLES / 2)) diff += INTERVAL_CYCLES;
+	if (diff > ((int64_t)INTERVAL_CYCLES / 2)) diff -= INTERVAL_CYCLES;
+
+	// 转换回微秒进行窗口判断 (或者直接用 cycles 判断更准)
+	int32_t diff_us = k_cyc_to_us_near32((uint32_t)llabs(diff));
+	if (diff < 0) diff_us = -diff_us;
+
+	return (diff_us >= -100 && diff_us < (TDMA_TX_TIME_US + 20));
+}
+
+bool tdma_is_synced(void) {
+	return server_time_synced && tdma_initialized;
+}
+
+// Get current slot number (0 to max) based on server time
+// Used to prevent sending multiple packets in the same slot
+uint32_t tdma_get_current_slot(void) {
+	if (!server_time_synced) {
+		return 0;
+	}
+
+	// 【关键修改】使用 64 位微秒时间
+	uint64_t server_time_us = esb_get_server_time_us_64();
+
+	// Calculate which packet interval we're in
+	// 注意：这里 interval_count 会非常大，但只要 server_time_us 是连续的，
+	// interval_count 就是连续的，不会发生跳变。
+	// 强转为 uint32_t 会发生自然的溢出回绕，但这对于"相等性判断"是安全的。
+	uint32_t interval_count = (uint32_t)(server_time_us / TDMA_PACKET_INTERVAL_US);
+
+	// Calculate which slot within the interval
+	uint32_t pos_in_interval = (uint32_t)(server_time_us % TDMA_PACKET_INTERVAL_US);
+	uint32_t slot_in_interval = pos_in_interval / TDMA_SLOT_DURATION_US;
+
+	// Combine to get unique slot identifier
+	return (interval_count * TDMA_NUM_TRACKERS) + slot_in_interval;
+}
+
+// Check if we're in PING guard zone (±2ms around any tracker's PING slot)
+bool tdma_is_in_ping_guard_zone(uint8_t tracker_id) {
+	if (!server_time_synced) {
+		return false;
+	}
+
+	uint32_t server_time = esb_get_server_time();
+	uint32_t current_ms_in_second = server_time % 1000;
+
+	// Check all 10 tracker PING slots with smart allocation:
+	// T0-T6: 0, 100, 200, 300, 400, 500, 600ms
+	uint32_t ping_slots[10];
+	for (int i = 0; i < 10; i++) {
+		ping_slots[i] = i * 100;
+	}
+
+	for (int i = 0; i < 10; i++) {
+		uint32_t ping_slot_ms = ping_slots[i];
+
+		// Calculate shortest distance to this PING slot (handle wrap-around)
+		int32_t diff = (int32_t)current_ms_in_second - (int32_t)ping_slot_ms;
+
+		// Normalize to -500 to +500 range
+		if (diff > 500) {
+			diff -= 1000;
+		} else if (diff < -500) {
+			diff += 1000;
+		}
+
+		int32_t abs_diff = (diff < 0) ? -diff : diff;
+
+		// Guard zone: ±2ms around PING slot
+		// PING packets need ACK, which takes additional time
+		if (abs_diff <= 2) {
+			return true;
+		}
+	}	return false;
+}
+
+// Calculate microseconds until next transmission slot
+uint32_t tdma_get_next_slot_us(void) {
+	if (!server_time_synced) {
+		return 0;
+	}
+
+	uint64_t server_time_us = esb_get_server_time_us_64();
+
+	// Our slot offset within each packet interval
+	uint32_t our_slot_offset_us
+		= (tdma_tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US;
+
+	// Current position within the packet interval
+	uint32_t pos_in_interval = (uint32_t)(server_time_us % TDMA_PACKET_INTERVAL_US);
+
+	// Calculate time until our slot
+	uint32_t time_until_slot;
+	if (pos_in_interval <= our_slot_offset_us) {
+		// Our slot is ahead in this interval
+		time_until_slot = our_slot_offset_us - pos_in_interval;
+	} else {
+		// Our slot is in the next interval
+		time_until_slot
+			= (TDMA_PACKET_INTERVAL_US - pos_in_interval) + our_slot_offset_us;
+	}
+
+	return time_until_slot;
+}
+
+// Wait for next transmission slot (only if not already in slot)
+void tdma_wait_for_slot(void) {
+	if (!tdma_is_synced()) {
+		return;
+	}
+
+	// If we're already in our slot, don't wait
+	if (tdma_is_in_tx_slot()) {
+		return;
+	}
+
+	uint32_t wait_us = tdma_get_next_slot_us();
+
+	// Only wait if the next slot is reasonably soon (within 1 packet interval)
+	// Otherwise just skip and try next time
+	if (wait_us > TDMA_PACKET_INTERVAL_US) {
+		return; // Too far away, skip this cycle
+	}
+
+	// Apply guard time - wake up slightly before slot
+	if (wait_us > TDMA_GUARD_TIME_US) {
+		wait_us -= TDMA_GUARD_TIME_US;
+	}
+
+	// For waits longer than 1ms, use sleep
+	if (wait_us > 1000) {
+		k_usleep(wait_us);
+	} else {
+		// For very short waits (<100us)
+		k_busy_wait(wait_us);
+	}
+}
 static void esb_thread(void) {
 #if CONFIG_CONNECTION_OVER_HID
 	int64_t start_time = k_uptime_get();
