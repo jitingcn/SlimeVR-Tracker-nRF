@@ -119,10 +119,10 @@ static bool server_time_synced = false;
 // Target: n TPS per tracker for ALL non-PING packets (data, mag, quat, info, status)
 // 10 trackers share each n ms period with 1000μs slot per tracker
 #define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 170 // Target TPS per tracker (all non-PING packets)
+#define TDMA_PACKETS_PER_SECOND 160 // Target TPS per tracker (all non-PING packets)
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
 #define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
-#define TDMA_GUARD_TIME_US 50 // Guard time to wake up before slot starts
+#define TDMA_GUARD_TIME_US 30 // Guard time to wake up before slot starts
 
 // Server time synchronization for TDMA (using 64-bit virtual cycles)
 static uint64_t g_server_virtual_cycles = 0; // 虚拟的64位单调递增时间
@@ -835,11 +835,11 @@ int esb_initialize(bool tx) {
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 1 : 3;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 3;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		config.use_fast_ramp_up = true;
+		// config.use_fast_ramp_up = true;
 	} else {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
