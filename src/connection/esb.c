@@ -84,7 +84,7 @@ static bool esb_paired = false;
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 6, 0, 0);
 static int64_t last_tx_time = 0;
 
 static uint32_t ping_success_streak = 0;  // consecutive success counter
@@ -116,30 +116,26 @@ static uint32_t last_server_time_cycles = 0;  // Server time in cycles
 static bool server_time_synced = false;
 
 // TDMA scheduling with hardware timer
-// Target: 100 TPS per tracker for ALL non-PING packets (data, mag, quat, info, status)
-// 100 TPS = 10ms interval between packets
-// 10 trackers share each 5ms period with 1000μs slot per tracker
-// Each packet transmission takes ~300μs radio time
+// Target: n TPS per tracker for ALL non-PING packets (data, mag, quat, info, status)
+// 10 trackers share each n ms period with 1000μs slot per tracker
 #define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 176 // Target TPS per tracker (all non-PING packets)
+#define TDMA_PACKETS_PER_SECOND 170 // Target TPS per tracker (all non-PING packets)
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
 #define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
-#define TDMA_TX_TIME_US 200 // Actual radio transmission time per packet
-#define TDMA_GUARD_TIME_US 170 // Guard time to wake up before slot starts
-// 将 TDMA 参数转换为 Cycles (假设 64MHz, 1us = 64 cycles)
-static uint32_t INTERVAL_CYCLES = k_us_to_cyc_ceil32(TDMA_PACKET_INTERVAL_US);
+#define TDMA_GUARD_TIME_US 50 // Guard time to wake up before slot starts
+
+// Server time synchronization for TDMA (using 64-bit virtual cycles)
 static uint64_t g_server_virtual_cycles = 0; // 虚拟的64位单调递增时间
 static uint32_t g_last_rx_raw_cycles = 0;    // 上一次收到的原始32位时间
 static uint32_t g_last_sync_local_cycles = 0; // 上一次同步时的本地时间
 static bool     g_time_initialized = false;
+static int64_t  g_last_sync_timestamp = 0;
+static uint32_t last_sent_slot_id = 0;
+#define TIME_SYNC_TIMEOUT_MS 5000
 
-
-static const nrfx_timer_t tdma_timer = NRFX_TIMER_INSTANCE(1);
+// TDMA state (simplified - no hardware timer needed)
 static bool tdma_initialized = false;
 static uint8_t tdma_tracker_id = 0;
-static volatile bool tdma_in_tx_slot = false;
-static uint32_t tdma_slot_counter = 0;
-static K_SEM_DEFINE(tdma_slot_sem, 0, 1);
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -176,30 +172,21 @@ void esb_update_server_time(uint32_t server_raw_cycles, uint32_t rtt_cycles) {
 	uint32_t now_local = k_cycle_get_32();
 
 	if (!g_time_initialized) {
-		// 第一次初始化
 		g_server_virtual_cycles = server_raw_cycles;
 		g_last_rx_raw_cycles = server_raw_cycles;
 		g_time_initialized = true;
 	} else {
-		// 核心魔法：计算差值 (利用 int32_t 处理 32位回绕)
-		// 即使 server_raw_cycles 溢出，diff 仍然是正确的正数增量
 		int32_t diff = (int32_t)(server_raw_cycles - g_last_rx_raw_cycles);
 
-		// 只有当 diff 为正值或极小的负值(乱序)时才更新，避免巨大跳变
-		// 正常情况下 diff 应该是正的 (例如 1000ms 对应的 cycles)
 		if (diff > 0) {
 			g_server_virtual_cycles += diff;
 			g_last_rx_raw_cycles = server_raw_cycles;
 		}
 	}
 
-	// 补偿 RTT (RTT/2)
-	// 注意：我们保存的是"不含RTT补偿的基准时间"，在获取时再算，或者这里直接加
-	// 这里为了逻辑清晰，我们维护"收到包那一刻的服务器虚拟时间"
-	// 修正：g_server_virtual_cycles 代表的是"服务器在发送这个包时的虚拟时间"
 
-	// 记录同步时刻的本地时间
 	g_last_sync_local_cycles = now_local;
+	g_last_sync_timestamp = k_uptime_get();
 	server_time_synced = true;
 }
 
@@ -231,8 +218,8 @@ void esb_write_rate_tick(void) {
 // ESB recovery mechanism for persistent ENOMEM errors
 static uint32_t consecutive_enomem_errors = 0;
 static int64_t last_enomem_time = 0;
-#define ENOMEM_ERROR_THRESHOLD 10  // Force recovery after N consecutive errors (increased from 5)
-#define ENOMEM_ERROR_WINDOW_MS 2000  // Reset counter if no error for this duration (increased from 1s)
+#define ENOMEM_ERROR_THRESHOLD 3  // Force recovery after N consecutive errors
+#define ENOMEM_ERROR_WINDOW_MS 1000  // Reset counter if no error for this duration
 
 void esb_write_ack(uint8_t type) {
 	// This small ACK packet is crucial for receiving the PONG ACK payload
@@ -848,11 +835,11 @@ int esb_initialize(bool tx) {
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 1 : 2;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 1 : 3;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		// config.use_fast_ramp_up = true;
+		config.use_fast_ramp_up = true;
 	} else {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
@@ -1000,6 +987,10 @@ void esb_pair(void) {
 	shutdown_requested = false;
 	ping_failed = false;
 	ping_pending = false;
+	// Reset time sync state
+	server_time_synced = false;
+	g_time_initialized = false;
+	g_last_sync_timestamp = 0;
 	if (!paired_addr[0])  // zero, no receiver paired
 	{
 		LOG_INF("Pairing");
@@ -1133,6 +1124,12 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	esb_write_rate_tick();
 
 	if (data[0] == ESB_PING_TYPE) {
+		if (!server_time_synced) {
+			LOG_DBG("Sending PING while time not synced - attempting to re-sync");
+		}
+		ping_send_time = k_uptime_get();
+		ping_pending = true;
+		ping_failed = false;
 		// Set sequence number
 		data[2] = ping_counter;
 		// Calculate crc8 checksum over first 12 bytes
@@ -1150,6 +1147,7 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 	last_tx.timestamp = k_uptime_get();
 
 	// Try to queue the packet
+	esb_flush_tx();
 	int queue_status = esb_write_payload(&tx_payload);
 
 	// if sending ping packet, we need send another small packet to get ack result asap
@@ -1267,6 +1265,10 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length) {
 
 bool esb_ready(void) { return esb_initialized && esb_paired; }
 
+bool esb_is_time_synced(void) { return server_time_synced; }
+
+bool esb_is_server_time_synced(void) { return server_time_synced; }
+
 uint8_t esb_get_ping_ack_flag(void) {
 	if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
 		return acked_remote_command;
@@ -1280,6 +1282,16 @@ uint8_t esb_get_ping_ack_flag(void) {
 
 uint64_t esb_get_server_time_cycles_64(void) {
 	if (!server_time_synced) {
+		return 0;
+	}
+
+	// 检查时间同步是否超时
+	int64_t now = k_uptime_get();
+	if (now - g_last_sync_timestamp > TIME_SYNC_TIMEOUT_MS) {
+		LOG_WRN("Time sync timeout: %lld ms since last sync, clearing sync state",
+			now - g_last_sync_timestamp);
+		server_time_synced = false;
+		g_time_initialized = false;
 		return 0;
 	}
 
@@ -1309,42 +1321,20 @@ uint32_t esb_get_server_time(void) {
 	return (uint32_t)(time_us / 1000ULL);
 }
 
-// TDMA timer interrupt handler
-// Note: This timer-based approach is simplified. The actual slot checking
-// is done in tdma_wait_for_slot() for better precision.
-static void tdma_timer_handler(nrf_timer_event_t event_type, void *p_context) {
-	// Timer is used for time capture in tdma_wait_for_slot()
-	// No interrupt-based slot detection needed
-}
-
+// Simplified TDMA initialization (no hardware timer needed)
 void tdma_init(uint8_t tracker_id) {
 	if (tdma_initialized) {
+		LOG_WRN("TDMA already initialized, skipping");
 		return;
 	}
 
 	tdma_tracker_id = tracker_id;
-
-	// Configure timer at 1MHz (1μs resolution)
-	nrfx_timer_config_t timer_cfg = NRFX_TIMER_DEFAULT_CONFIG(1000000);
-	timer_cfg.bit_width = NRF_TIMER_BIT_WIDTH_32;
-	timer_cfg.frequency = NRF_TIMER_FREQ_1MHz;
-	timer_cfg.mode = NRF_TIMER_MODE_TIMER;
-
-	nrfx_err_t err = nrfx_timer_init(&tdma_timer, &timer_cfg, tdma_timer_handler);
-	if (err != NRFX_SUCCESS) {
-		LOG_ERR("TDMA timer init failed: %d", err);
-		return;
-	}
-
-	// No interrupt needed, just enable timer for time capture
-	nrfx_timer_enable(&tdma_timer);
 	tdma_initialized = true;
 
-	LOG_INF("TDMA initialized: tracker_id=%d, slot=%dus, interval=%dus, slot_window=%dus",
+	LOG_INF("TDMA initialized: tracker_id=%d, slot=%dus, interval=%dus",
 		tracker_id,
 		(tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US,
-		TDMA_PACKET_INTERVAL_US,
-		TDMA_TX_TIME_US + 100);
+		TDMA_PACKET_INTERVAL_US);
 }
 
 void tdma_deinit(void) {
@@ -1352,165 +1342,161 @@ void tdma_deinit(void) {
 		return;
 	}
 
-	nrfx_timer_disable(&tdma_timer);
-	nrfx_timer_uninit(&tdma_timer);
 	tdma_initialized = false;
 	LOG_INF("TDMA deinitialized");
 }
 
-bool tdma_is_in_tx_slot(void) {
-	if (!server_time_synced) return false;
 
-	// 获取 64 位时间
-	uint64_t server_cycles_64 = esb_get_server_time_cycles_64();
+// Simplified TDMA: sleep until our next transmission slot
+// Returns the wait time in microseconds (for debugging)
+// IMPORTANT: Also checks for upcoming PING slots and exits early to avoid blocking PING
+uint32_t tdma_sleep_until_next_slot(void) {
+	if (!server_time_synced) {
+		return 0;
+	}
 
-	// 核心修复：在 64位 域进行取模，消除了 32位 溢出导致的相位跳变
-	// 只要 INTERVAL_CYCLES 不是极大的数，结果就是准确的
-	uint32_t pos_in_interval = server_cycles_64 % INTERVAL_CYCLES;
+	uint64_t server_time_us = esb_get_server_time_us_64();
 
-	uint32_t slot_start_cycles = k_us_to_cyc_ceil32((tdma_tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US);
+	// Calculate current slot ID (which interval we're in)
+	uint64_t current_slot_id = server_time_us / TDMA_PACKET_INTERVAL_US;
 
-	int64_t diff = (int64_t)pos_in_interval - (int64_t)slot_start_cycles;
+	// If we already sent in this slot, force wait to next slot
+	// Only enforce if we actually marked the slot as used recently (within 2 intervals)
+	if (current_slot_id == last_sent_slot_id) {
+		// Calculate time remaining in current interval
+		uint32_t pos_in_interval = (uint32_t)(server_time_us % TDMA_PACKET_INTERVAL_US);
 
-	// 处理循环边界 (例如我在 0ms, 当前是 9.9ms)
-	if (diff < -((int64_t)INTERVAL_CYCLES / 2)) diff += INTERVAL_CYCLES;
-	if (diff > ((int64_t)INTERVAL_CYCLES / 2)) diff -= INTERVAL_CYCLES;
+		// If we're very early in the interval (<100us), might be timing jitter - allow it
+		if (pos_in_interval < 100) {
+			return 0;  // No wait, proceed immediately
+		}
 
-	// 转换回微秒进行窗口判断 (或者直接用 cycles 判断更准)
-	int32_t diff_us = k_cyc_to_us_near32((uint32_t)llabs(diff));
-	if (diff < 0) diff_us = -diff_us;
+		uint32_t time_to_next_interval = TDMA_PACKET_INTERVAL_US - pos_in_interval;
+		// Add our slot offset in the next interval
+		uint32_t our_slot_start = (tdma_tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US;
+		uint32_t wait_us = time_to_next_interval + our_slot_start;
 
-	return (diff_us >= -100 && diff_us < (TDMA_TX_TIME_US + 20));
+
+		uint32_t us_in_second = (uint32_t)(server_time_us % 1000000);
+
+		for (int i = 0; i < 10; i++) {
+			uint32_t ping_slot_us = i * 100000;
+			int32_t dist_to_ping;
+			if (ping_slot_us >= us_in_second) {
+				dist_to_ping = ping_slot_us - us_in_second;
+			} else {
+				dist_to_ping = 1000000 - us_in_second + ping_slot_us;
+			}
+
+			if (dist_to_ping > 0 && (uint32_t)dist_to_ping < wait_us) {
+				uint32_t wake_before_ping = (dist_to_ping > 2000) ? dist_to_ping - 2000 : 0;
+				if (wake_before_ping < wait_us) {
+					wait_us = wake_before_ping;
+				}
+			}
+		}
+
+		if (wait_us > TDMA_GUARD_TIME_US) {
+			wait_us -= TDMA_GUARD_TIME_US;
+		} else if (wait_us > 0) {
+			wait_us = 0;
+		}
+
+		if (wait_us > 0) {
+			if (wait_us > 1000) {
+				k_msleep(wait_us / 1000);
+				uint32_t remaining_us = wait_us % 1000;
+				// if (remaining_us > 50) {
+				// 	k_usleep(remaining_us);
+				// }
+			} else {
+				k_usleep(wait_us);
+			}
+		}
+
+		return wait_us;
+	}
+
+	// Calculate position within the packet interval
+	uint32_t pos_in_interval = (uint32_t)(server_time_us % TDMA_PACKET_INTERVAL_US);
+
+	// Our slot start position within the interval
+	uint32_t our_slot_start = (tdma_tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US;
+
+	// Calculate wait time
+	uint32_t wait_us;
+	if (pos_in_interval < our_slot_start) {
+		// Haven't reached our slot yet in this interval
+		wait_us = our_slot_start - pos_in_interval;
+	} else if (pos_in_interval < our_slot_start + TDMA_SLOT_DURATION_US) {
+		// Already in our slot window, no wait needed
+		wait_us = 0;
+	} else {
+		// Passed our slot, wait for next interval
+		wait_us = TDMA_PACKET_INTERVAL_US - pos_in_interval + our_slot_start;
+	}
+
+	// Check if we would sleep past a PING slot - only for longer waits to reduce overhead
+	// PING slots occur every 100ms (100000us) in the 1-second cycle
+	uint32_t us_in_second = (uint32_t)(server_time_us % 1000000);
+
+	for (int i = 0; i < 10; i++) {
+		uint32_t ping_slot_us = i * 100000; // 0us, 100ms, 200ms, etc.
+		// Calculate distance to this PING slot
+		int32_t dist_to_ping;
+		if (ping_slot_us >= us_in_second) {
+			dist_to_ping = ping_slot_us - us_in_second;
+		} else {
+			// Wrap around to next second
+			dist_to_ping = 1000000 - us_in_second + ping_slot_us;
+		}
+		// If PING slot is within our wait window, limit sleep
+		if (dist_to_ping > 0 && (uint32_t)dist_to_ping < wait_us) {
+			// Wake up before PING slot (leave 2ms margin)
+			uint32_t wake_before_ping = (dist_to_ping > 2000) ? dist_to_ping - 2000 : 0;
+			if (wake_before_ping < wait_us) {
+				wait_us = wake_before_ping;
+			}
+		}
+	}
+
+	// Apply guard time - wake up slightly before slot
+	if (wait_us > TDMA_GUARD_TIME_US) {
+		wait_us -= TDMA_GUARD_TIME_US;
+	} else if (wait_us > 0) {
+		wait_us = 0;
+	}
+
+	// Sleep if needed
+	if (wait_us > 0) {
+		if (wait_us > 1000) {
+			// For longer waits, use millisecond sleep
+			k_msleep(wait_us / 1000);
+			uint32_t remaining_us = wait_us % 1000;
+			if (remaining_us > 50) {
+				k_usleep(remaining_us);
+			}
+		} else {
+			k_usleep(wait_us);
+		}
+	}
+
+	return wait_us;
 }
 
 bool tdma_is_synced(void) {
 	return server_time_synced && tdma_initialized;
 }
 
-// Get current slot number (0 to max) based on server time
-// Used to prevent sending multiple packets in the same slot
-uint32_t tdma_get_current_slot(void) {
+// Mark current slot as used (called after sending a packet)
+void tdma_mark_slot_used(void) {
 	if (!server_time_synced) {
-		return 0;
-	}
-
-	// 【关键修改】使用 64 位微秒时间
-	uint64_t server_time_us = esb_get_server_time_us_64();
-
-	// Calculate which packet interval we're in
-	// 注意：这里 interval_count 会非常大，但只要 server_time_us 是连续的，
-	// interval_count 就是连续的，不会发生跳变。
-	// 强转为 uint32_t 会发生自然的溢出回绕，但这对于"相等性判断"是安全的。
-	uint32_t interval_count = (uint32_t)(server_time_us / TDMA_PACKET_INTERVAL_US);
-
-	// Calculate which slot within the interval
-	uint32_t pos_in_interval = (uint32_t)(server_time_us % TDMA_PACKET_INTERVAL_US);
-	uint32_t slot_in_interval = pos_in_interval / TDMA_SLOT_DURATION_US;
-
-	// Combine to get unique slot identifier
-	return (interval_count * TDMA_NUM_TRACKERS) + slot_in_interval;
-}
-
-// Check if we're in PING guard zone (±2ms around any tracker's PING slot)
-bool tdma_is_in_ping_guard_zone(uint8_t tracker_id) {
-	if (!server_time_synced) {
-		return false;
-	}
-
-	uint32_t server_time = esb_get_server_time();
-	uint32_t current_ms_in_second = server_time % 1000;
-
-	// Check all 10 tracker PING slots with smart allocation:
-	// T0-T6: 0, 100, 200, 300, 400, 500, 600ms
-	uint32_t ping_slots[10];
-	for (int i = 0; i < 10; i++) {
-		ping_slots[i] = i * 100;
-	}
-
-	for (int i = 0; i < 10; i++) {
-		uint32_t ping_slot_ms = ping_slots[i];
-
-		// Calculate shortest distance to this PING slot (handle wrap-around)
-		int32_t diff = (int32_t)current_ms_in_second - (int32_t)ping_slot_ms;
-
-		// Normalize to -500 to +500 range
-		if (diff > 500) {
-			diff -= 1000;
-		} else if (diff < -500) {
-			diff += 1000;
-		}
-
-		int32_t abs_diff = (diff < 0) ? -diff : diff;
-
-		// Guard zone: ±2ms around PING slot
-		// PING packets need ACK, which takes additional time
-		if (abs_diff <= 2) {
-			return true;
-		}
-	}	return false;
-}
-
-// Calculate microseconds until next transmission slot
-uint32_t tdma_get_next_slot_us(void) {
-	if (!server_time_synced) {
-		return 0;
-	}
-
-	uint64_t server_time_us = esb_get_server_time_us_64();
-
-	// Our slot offset within each packet interval
-	uint32_t our_slot_offset_us
-		= (tdma_tracker_id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US;
-
-	// Current position within the packet interval
-	uint32_t pos_in_interval = (uint32_t)(server_time_us % TDMA_PACKET_INTERVAL_US);
-
-	// Calculate time until our slot
-	uint32_t time_until_slot;
-	if (pos_in_interval <= our_slot_offset_us) {
-		// Our slot is ahead in this interval
-		time_until_slot = our_slot_offset_us - pos_in_interval;
-	} else {
-		// Our slot is in the next interval
-		time_until_slot
-			= (TDMA_PACKET_INTERVAL_US - pos_in_interval) + our_slot_offset_us;
-	}
-
-	return time_until_slot;
-}
-
-// Wait for next transmission slot (only if not already in slot)
-void tdma_wait_for_slot(void) {
-	if (!tdma_is_synced()) {
 		return;
 	}
-
-	// If we're already in our slot, don't wait
-	if (tdma_is_in_tx_slot()) {
-		return;
-	}
-
-	uint32_t wait_us = tdma_get_next_slot_us();
-
-	// Only wait if the next slot is reasonably soon (within 1 packet interval)
-	// Otherwise just skip and try next time
-	if (wait_us > TDMA_PACKET_INTERVAL_US) {
-		return; // Too far away, skip this cycle
-	}
-
-	// Apply guard time - wake up slightly before slot
-	if (wait_us > TDMA_GUARD_TIME_US) {
-		wait_us -= TDMA_GUARD_TIME_US;
-	}
-
-	// For waits longer than 1ms, use sleep
-	if (wait_us > 1000) {
-		k_usleep(wait_us);
-	} else {
-		// For very short waits (<100us)
-		k_busy_wait(wait_us);
-	}
+	uint64_t server_time_us = esb_get_server_time_us_64();
+	last_sent_slot_id = server_time_us / TDMA_PACKET_INTERVAL_US;
 }
+
 static void esb_thread(void) {
 #if CONFIG_CONNECTION_OVER_HID
 	int64_t start_time = k_uptime_get();

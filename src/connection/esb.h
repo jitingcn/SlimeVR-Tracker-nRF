@@ -84,13 +84,22 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length);  // TODO: give p
 
 bool esb_ready(void);
 
+// Check if server time is synchronized (for TDMA)
+bool esb_is_time_synced(void);
+
+// Check if server time is synced (alias for compatibility)
+bool esb_is_server_time_synced(void);
+
 // Get remote command flag to echo back in PING
 uint8_t esb_get_ping_ack_flag(void);
 
 // Get estimated current server time in cycles (0 if not synced) - high precision
-uint64_t esb_get_server_time_cycles(void);
+uint64_t esb_get_server_time_cycles_64(void);
 
-// Get estimated current server time in milliseconds (0 if not synced)
+// Get estimated current server time in microseconds (0 if not synced) - high precision
+uint64_t esb_get_server_time_us_64(void);
+
+// Get estimated current server time in milliseconds (0 if not synced) - legacy
 uint32_t esb_get_server_time(void);
 
 // Helper: log esb_write call frequency
@@ -99,11 +108,10 @@ void esb_write_rate_tick(void);
 // TDMA scheduling functions
 void tdma_init(uint8_t tracker_id);
 void tdma_deinit(void);
-bool tdma_is_in_tx_slot(void);
-uint32_t tdma_get_next_slot_us(void);
-void tdma_wait_for_slot(void);
 bool tdma_is_synced(void);
-bool tdma_is_in_ping_guard_zone(uint8_t tracker_id);
-uint32_t tdma_get_current_slot(void);
+// Sleep until our next transmission slot (returns wait time in us for debugging)
+uint32_t tdma_sleep_until_next_slot(void);
+// Mark current slot as used (call after sending a packet to prevent multiple sends per slot)
+void tdma_mark_slot_used(void);
 
 #endif

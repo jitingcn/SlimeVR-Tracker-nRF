@@ -34,10 +34,6 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-#define PACKET_BUFFER_SIZE 4
-static uint8_t packet_buffer[PACKET_BUFFER_SIZE][16] = {0};
-static atomic_t write_idx = ATOMIC_INIT(0);
-static atomic_t read_idx = ATOMIC_INIT(0);
 static uint8_t packet_sequence = 0;
 static int64_t last_ping_time = 0;
 static uint32_t ping_interval_ms = PING_INTERVAL_MS;
@@ -56,7 +52,7 @@ uint32_t get_ping_interval_ms(void)
 }
 
 static void connection_thread(void);
-K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 6, 0, 0);
 
 void connection_clocks_request_start(void)
 {
@@ -93,27 +89,19 @@ uint8_t connection_get_packet_sequence(void)
 	return packet_sequence;
 }
 
-// Prepare packet data into the next available buffer slot
-// Returns true if packet was prepared, false if buffer full
-static bool prepare_packet_data(const uint8_t *data)
-{
-	// 使用原子操作的循环缓冲区
-	atomic_val_t current_write = atomic_get(&write_idx);
-	atomic_val_t current_read = atomic_get(&read_idx);
-
-	// 检查缓冲区是否已满
-	atomic_val_t next_write = (current_write + 1) % PACKET_BUFFER_SIZE;
-	if (next_write == current_read) {
-		// Buffer full - this is normal under TDMA rate limiting
-		return false;
+// Helper to send packet (TDMA scheduling done in main loop)
+static void send_packet(const uint8_t *data, size_t len) {
+	if (!esb_ready()) {
+		return;
 	}
 
-	// 写入数据到当前写索引位置
-	memcpy(packet_buffer[current_write], data, 16);
+	// Prepare ESB packet with sequence number
+	uint8_t esb_packet[17];
+	memcpy(esb_packet, data, len);
+	esb_packet[16] = packet_sequence++;
 
-	// 使用内存屏障确保写入完成后再更新索引
-	atomic_set(&write_idx, next_write);
-	return true;
+	// Send immediately
+	esb_write(esb_packet, no_ack, sizeof(esb_packet));
 }
 
 void connection_update_sensor_ids(int imu, int mag)
@@ -217,7 +205,7 @@ void connection_write_packet_0() // device info
 	data[14] = FW_VERSION_PATCH & 255; // fw_patch
 	data[15] = 0; // rssi (supplied by receiver)
 
-	prepare_packet_data(data);
+	send_packet(data, 16);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -235,7 +223,7 @@ void connection_write_packet_1() // full precision quat and accel
 	buf[5] = TO_FIXED_7(sensor_a[1]);
 	buf[6] = TO_FIXED_7(sensor_a[2]);
 
-	prepare_packet_data(data);
+	send_packet(data, 16);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -269,7 +257,7 @@ void connection_write_packet_2() // reduced precision quat and accel with batter
 	buf[2] = TO_FIXED_7(sensor_a[2]);
 	data[15] = 0; // rssi (supplied by receiver)
 
-	prepare_packet_data(data);
+	send_packet(data, 16);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -282,7 +270,7 @@ void connection_write_packet_3() // status
 	data[3] = tracker_status;
 	data[15] = 0; // rssi (supplied by receiver)
 
-	prepare_packet_data(data);
+	send_packet(data, 16);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -300,7 +288,7 @@ void connection_write_packet_4() // full precision quat and magnetometer
 	buf[5] = TO_FIXED_10(sensor_m[1]);
 	buf[6] = TO_FIXED_10(sensor_m[2]);
 
-	prepare_packet_data(data);
+	send_packet(data, 16);
 	hid_write_packet_n(data); // TODO:
 }
 
@@ -320,22 +308,39 @@ static int64_t last_status_time = 0;
 static int64_t last_sensor_quat_time = 0;
 #define SENSOR_QUAT_INTERVAL_MS 6
 
-// TDMA enforcement: track slot usage to ensure only ONE packet per slot
-static uint32_t last_tdma_slot_used = 0;
+// TDMA statistics
 static int64_t last_data_tx_time = 0;
-#define MIN_TX_INTERVAL_US 200  // Minimum 400μs between packets (radio TX time)
 
 void connection_thread(void)
 {
-	uint8_t esb_packet[17];
 	// Global TX limiter
 	static int64_t last_tx_time = 0;
 	static bool tdma_init_done = false;
+	static int64_t last_sync_check_time = 0;
 
 	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1)
 	{
 		int64_t	now = k_uptime_get();
+
+		// Periodic sync status check (every 5 seconds)
+		if (now - last_sync_check_time > 5000) {
+			bool is_synced = tdma_is_synced();
+			bool time_synced = esb_is_time_synced();
+			if (!is_synced) {
+				LOG_WRN("TDMA not synced: tdma_init_done=%d, time_synced=%d, tdma_is_synced=%d",
+					tdma_init_done, time_synced, is_synced);
+				if (tdma_init_done && time_synced && !is_synced) {
+					LOG_ERR("CRITICAL: tdma_init_done=1 but tdma not synced - init likely failed!");
+					// Try to reinitialize
+					tdma_init_done = false;
+				}
+				// Log recovery stats
+				uint32_t ping_interval = get_ping_interval_ms();
+				LOG_INF("Recovery mode: ping_interval=%ums, using basic rate limiting", ping_interval);
+			}
+			last_sync_check_time = now;
+		}
 
 		// Adjust PING interval based on connection health
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
@@ -352,39 +357,52 @@ void connection_thread(void)
 			continue;
 		}
 
-		// Initialize TDMA once we're ready and synced
-		if (!tdma_init_done && tdma_is_synced()) {
+		// Initialize TDMA once server time is synced (don't check tdma_is_synced - circular dependency!)
+		if (!tdma_init_done && esb_is_time_synced()) {
+			LOG_INF("Attempting TDMA initialization for tracker %u...", tracker_id);
 			tdma_init(tracker_id);
-			tdma_init_done = true;
+			// Verify initialization succeeded
+			if (tdma_is_synced()) {
+				tdma_init_done = true;
+				LOG_INF("TDMA initialization successful");
+			} else {
+				LOG_ERR("TDMA initialization failed - tdma_initialized not set");
+			}
 		}
 
 		// PING has highest priority - send every second, using TDMA slot to avoid collision
 		// With smart slot allocation to minimize pipe conflicts (trackers sharing same pipe
 		// are separated by maximum time to reduce ACK payload collisions)
 		bool should_send_ping = false;
-		uint32_t server_time = esb_get_server_time();
+		uint64_t server_time_us = esb_get_server_time_us_64();
+		bool time_synced = esb_is_server_time_synced();
 
 		// Check if it's time to send PING (every ping_interval_ms, typically 1000ms)
-		if (now - last_ping_time >= (ping_interval_ms - 100)) {
-			if (server_time > 0) {
-				// Some trackers sharing same pipe (e.g., T0 & T7 both use pipe 1)
-				// Slot mapping: T0=0ms, T1=100ms, T2=200ms, T3=300ms, T4=400ms, etc
-				uint32_t slot_offset_ms;
-				slot_offset_ms = tracker_id * 100;
-				uint32_t current_ms_in_second = server_time % 1000; // Position in 1s cycle
+		if (now - last_ping_time >= (ping_interval_ms - 10)) {
+			if (time_synced && server_time_us > 0) {
+				// Slot mapping: T0=0ms, T1=100ms, T2=200ms, etc
+				uint32_t slot_offset_us = tracker_id * 100000; // 100ms in microseconds
+				uint32_t current_us_in_second = server_time_us % 1000000; // Position in 1s cycle
 
-				// Calculate if we're in our slot window (±10ms tolerance)
-				int32_t slot_diff_ms = (int32_t)current_ms_in_second - (int32_t)slot_offset_ms;
-				if (slot_diff_ms < 0) slot_diff_ms += 1000;
+				// Calculate shortest distance to our slot (handle wrap-around)
+				int32_t slot_diff_us = (int32_t)current_us_in_second - (int32_t)slot_offset_us;
+				// Normalize to -500ms to +500ms range
+				if (slot_diff_us > 500000) {
+					slot_diff_us -= 1000000;
+				} else if (slot_diff_us < -500000) {
+					slot_diff_us += 1000000;
+				}
 
-				// Send if within our slot window (±3ms)
-				if (slot_diff_ms >= -3 && slot_diff_ms <= 3) {
+				// Send if within our slot window (4ms tolerance for better reliability)
+				if (slot_diff_us >= -1000 && slot_diff_us <= 1000) {
 					should_send_ping = true;
 				}
-				// If we missed our slot in this second, wait for next second
 			} else {
-				// Fallback: not synced yet, use original time-based scheduling
+				// Not synced: send immediately to re-establish sync
 				should_send_ping = true;
+				if (!time_synced) {
+					LOG_WRN("Time sync lost, sending PING to re-sync");
+				}
 			}
 		}
 
@@ -402,6 +420,18 @@ void connection_thread(void)
 			ping[7] = esb_get_ping_ack_flag();
 			memset(&ping[8], 0x00, 4); // reserved
 			ping[12] = 0;
+
+			// Debug: log slot offset for diagnosis
+			if (server_time_us > 0) {
+				uint32_t slot_offset_us = tracker_id * 100000;
+				uint32_t current_us = server_time_us % 1000000;
+				int32_t diff = (int32_t)current_us - (int32_t)slot_offset_us;
+				if (diff > 500000) diff -= 1000000;
+				else if (diff < -500000) diff += 1000000;
+				LOG_DBG("PING slot: target=%uus, current=%uus, diff=%dus",
+					slot_offset_us, current_us, diff);
+			}
+
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
 			last_tx_time = now;
@@ -414,72 +444,40 @@ void connection_thread(void)
 			continue;
 		}
 
-		// Skip data transmission if we're near any PING slot (±2ms guard zone)
-		if (tdma_is_synced() && tdma_is_in_ping_guard_zone(tracker_id)) {
-			k_usleep(500);
-			continue;
-		}
-
-		// ========== TDMA SLOT ENFORCEMENT ==========
-		// CRITICAL: Each slot can send ONLY ONE packet to maintain 100 TPS limit
-		// We must wait for our slot AND ensure we haven't sent in current slot
-
+		// ========== TDMA SLOT WAIT ==========
+		// Wait for our transmission slot before selecting packet
+		// This ensures we only send ONE packet per slot
 		if (tdma_is_synced()) {
-			// Wait for our transmission slot
-			tdma_wait_for_slot();
-
-			// Verify we're actually in our slot now
-			if (!tdma_is_in_tx_slot()) {
-				k_busy_wait(50);
-				continue;
-			}
-
-			// Get current slot number to prevent double-sending in same slot
-			uint32_t current_slot = tdma_get_current_slot();
-			if (current_slot == last_tdma_slot_used) {
-				// Already sent a packet in this slot, wait for next slot
-				k_msleep(1);
-				continue;
-			}
-
-			// Enforce minimum interval between packets (hardware TX time)
-			int64_t time_since_last_tx_us = (now - last_data_tx_time) * 1000;
-			if (time_since_last_tx_us < MIN_TX_INTERVAL_US) {
-				// Too soon since last TX, skip this slot
-				k_msleep(1);
+			tdma_sleep_until_next_slot();
+		} else {
+			// When TDMA not synced, use basic rate limiting to avoid FIFO congestion
+			// This allows PING ACK payloads (with time sync) to be received
+			int64_t elapsed = now - last_data_tx_time;
+			if (elapsed < 8) {  // Limit to ~125 TPS total
+				k_msleep((int32_t)(8 - elapsed));
 				continue;
 			}
 		}
 
 		// ========== PACKET PRIORITY QUEUE ==========
-		// Priority order: buffered packets > mag > quat > info > status
-		// Select ONLY ONE packet to send per slot
+		// Select highest priority packet to send
+		// Priority order: mag > quat > info > status
 
-		bool packet_sent = false;
-
-		// Priority 1: Buffered packets from sensor loop (highest priority)
-		atomic_val_t current_read = atomic_get(&read_idx);
-		atomic_val_t current_write = atomic_get(&write_idx);
-
-		if (current_read != current_write) {
-			// Send buffered packet
-			memcpy(esb_packet, packet_buffer[current_read], 16);
-			esb_packet[16] = packet_sequence++;
-			atomic_set(&read_idx, (current_read + 1) % PACKET_BUFFER_SIZE);
-
-			esb_write(esb_packet, no_ack, sizeof(esb_packet));
-			packet_sent = true;
-		}
-		// Priority 2: Magnetometer data (if enabled and ready)
+		// Priority 1: Magnetometer data (if enabled and ready)
 #ifdef CONFIG_SENSOR_USE_MAG
-		else if (mag_update_time && now - last_mag_time > 200) {
+		if (mag_update_time && now - last_mag_time > 200) {
 			mag_update_time = 0;
 			last_mag_time = now;
 			connection_write_packet_4();
+			last_data_tx_time = now;
+			last_tx_time = now;
+			if (tdma_is_synced()) tdma_mark_slot_used();
+			continue;
 		}
 #endif
-		// Priority 3: Quaternion data (main tracking data)
-		else if (quat_update_time && now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
+
+		// Priority 2: Quaternion data (main tracking data)
+		if (quat_update_time && now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
 			quat_update_time = 0;
 			last_quat_time = now;
 			last_sensor_quat_time = now;
@@ -491,29 +489,39 @@ void connection_thread(void)
 			} else {
 				connection_write_packet_1();
 			}
-		}
-		// Priority 4: Device info
-		else if (now - last_info_time > 100) {
-			last_info_time = now;
-			connection_write_packet_0();
-		}
-		// Priority 5: Status (lowest priority)
-		else if (now - last_status_time > 1000) {
-			last_status_time = now;
-			connection_write_packet_3();
-		}
-
-		// Update last TX tracking if packet was sent
-		if (packet_sent) {
-			if (tdma_is_synced()) {
-				last_tdma_slot_used = tdma_get_current_slot();
-			}
 			last_data_tx_time = now;
 			last_tx_time = now;
-		} else {
-			// No packet to send, can stop clocks
-			connection_clocks_request_stop();
+			if (tdma_is_synced()) tdma_mark_slot_used();
+			continue;
 		}
-		k_msleep(1);
+
+		// Priority 3: Device info
+		if (now - last_info_time > 100) {
+			last_info_time = now;
+			connection_write_packet_0();
+			last_data_tx_time = now;
+			last_tx_time = now;
+			if (tdma_is_synced()) tdma_mark_slot_used();
+			continue;
+		}
+
+		// Priority 4: Status (lowest priority)
+		if (now - last_status_time > 1000) {
+			last_status_time = now;
+			connection_write_packet_3();
+			last_data_tx_time = now;
+			last_tx_time = now;
+			if (tdma_is_synced()) tdma_mark_slot_used();
+			continue;
+		}
+
+		// No packet to send, can stop clocks
+		connection_clocks_request_stop();
+		if (tdma_is_synced()) {
+			k_usleep(300);  // Sleep when idle with TDMA
+		} else {
+			// When not synced, sleep longer to reduce CPU usage and allow PING recovery
+			k_msleep(3);
+		}
 	}
 }
