@@ -115,7 +115,6 @@ static uint32_t received_channel_value = 0;  // Store channel value from PONG da
 static uint32_t last_server_time_cycles = 0;  // Server time in cycles
 static bool server_time_synced = false;
 
-// TDMA scheduling with hardware timer
 // Target: n TPS per tracker for ALL non-PING packets (data, mag, quat, info, status)
 // 10 trackers share each n ms period with 1000μs slot per tracker
 #define TDMA_NUM_TRACKERS 10

@@ -449,14 +449,6 @@ void connection_thread(void)
 		// This ensures we only send ONE packet per slot
 		if (tdma_is_synced()) {
 			tdma_sleep_until_next_slot();
-		} else {
-			// When TDMA not synced, use basic rate limiting to avoid FIFO congestion
-			// This allows PING ACK payloads (with time sync) to be received
-			int64_t elapsed = now - last_data_tx_time;
-			if (elapsed < 8) {  // Limit to ~125 TPS total
-				k_msleep((int32_t)(8 - elapsed));
-				continue;
-			}
 		}
 
 		// ========== PACKET PRIORITY QUEUE ==========
