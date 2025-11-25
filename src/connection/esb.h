@@ -39,7 +39,7 @@ extern uint16_t led_clock;
 extern uint32_t led_clock_offset;
 
 void esb_write_ack(uint8_t type);
-void event_handler(struct esb_evt const* event);
+void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 void clocks_stop(void);
 void clocks_request_start(uint32_t delay_us);
@@ -56,7 +56,7 @@ void esb_pair(void);
 void esb_reset_pair(void);
 void esb_clear_pair(void);
 
-void esb_write(uint8_t* data, bool no_ack, size_t data_length);  // TODO: give packets some names
+void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give packets some names
 
 #define PING_INTERVAL_MS 1000
 // Ping/Pong types for ACK payload validation
@@ -64,31 +64,25 @@ void esb_write(uint8_t* data, bool no_ack, size_t data_length);  // TODO: give p
 #define ESB_PONG_TYPE 0xF1
 
 // Ping/Pong packet sizes
-#define ESB_PING_LEN 13  // with CRC-8
-#define ESB_PONG_LEN 13  // with CRC-8
+#define ESB_PING_LEN 13 // with CRC-8
+#define ESB_PONG_LEN 13 // with CRC-8
 
 // Remote command flags for PONG data[7] (shared with receiver)
 #define ESB_PONG_FLAG_NORMAL 0x00
 #define ESB_PONG_FLAG_SHUTDOWN 0x01
-#define ESB_PONG_FLAG_CALIBRATE 0x02        // Trigger gyro/accel ZRO calibration
-#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03     // Trigger 6-point accelerometer calibration
-#define ESB_PONG_FLAG_MEOW 0x04             // Trigger meow output
-#define ESB_PONG_FLAG_SCAN 0x05             // Trigger sensor scan
-#define ESB_PONG_FLAG_MAG_CLEAR 0x06        // Clear magnetometer calibration
-#define ESB_PONG_FLAG_REBOOT 0x07           // Reboot tracker
-#define ESB_PONG_FLAG_CLEAR 0x08            // Clear pairing data
-#define ESB_PONG_FLAG_DFU 0x09              // Enter DFU bootloader
-#define ESB_PONG_FLAG_SET_CHANNEL 0x0A      // Set RF channel (data[8-11] contains channel value)
-#define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B    // Clear RF channel setting (restore default)
+#define ESB_PONG_FLAG_CALIBRATE 0x02     // Trigger gyro/accel ZRO calibration
+#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03  // Trigger 6-point accelerometer calibration
+#define ESB_PONG_FLAG_MEOW 0x04          // Trigger meow output
+#define ESB_PONG_FLAG_SCAN 0x05          // Trigger sensor scan
+#define ESB_PONG_FLAG_MAG_CLEAR 0x06     // Clear magnetometer calibration
+#define ESB_PONG_FLAG_REBOOT 0x07        // Reboot tracker
+#define ESB_PONG_FLAG_CLEAR 0x08         // Clear pairing data
+#define ESB_PONG_FLAG_DFU 0x09           // Enter DFU bootloader
+#define ESB_PONG_FLAG_SET_CHANNEL 0x0A   // Set RF channel (data[8-11] contains channel value)
+#define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B // Clear RF channel setting (restore default)
 // Reserved for future use: 0x0C-0xFF
 
 bool esb_ready(void);
-
-// Check if server time is synchronized (for TDMA)
-bool esb_is_time_synced(void);
-
-// Check if server time is synced (alias for compatibility)
-bool esb_is_server_time_synced(void);
 
 // Get remote command flag to echo back in PING
 uint8_t esb_get_ping_ack_flag(void);

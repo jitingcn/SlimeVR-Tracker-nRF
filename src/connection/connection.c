@@ -166,7 +166,7 @@ void connection_update_battery(bool battery_available, bool plugged, uint32_t ba
 	batt = battery_pptt;
 	batt |= 0x80; // battery_available, server will show a battery indicator
 
-	if (plugged) { // Charging
+	if (plugged) {                          // Charging
 		battery_mV = MAX(battery_mV, 4310); // server will show a charging indicator
 	}
 
@@ -203,16 +203,16 @@ void connection_write_packet_0() // device info
 	data[2] = batt;
 	data[3] = batt_v;
 	data[4] = sensor_temp; // temp
-	data[5] = FW_BOARD; // brd_id
-	data[6] = FW_MCU; // mcu_id
-	data[7] = 0; // resv
-	data[8] = imu_id; // imu_id
-	data[9] = mag_id; // mag_id
+	data[5] = FW_BOARD;    // brd_id
+	data[6] = FW_MCU;      // mcu_id
+	data[7] = 0;           // resv
+	data[8] = imu_id;      // imu_id
+	data[9] = mag_id;      // mag_id
 	uint16_t *buf = (uint16_t *)&data[10];
 	buf[0] = ((BUILD_YEAR - 2020) & 127) << 9 | (BUILD_MONTH & 15) << 5 | (BUILD_DAY & 31); // fw_date
-	data[12] = FW_VERSION_MAJOR & 255; // fw_major
-	data[13] = FW_VERSION_MINOR & 255; // fw_minor
-	data[14] = FW_VERSION_PATCH & 255; // fw_patch
+	data[12] = FW_VERSION_MAJOR & 255;                                                      // fw_major
+	data[13] = FW_VERSION_MINOR & 255;                                                      // fw_minor
+	data[14] = FW_VERSION_PATCH & 255;                                                      // fw_patch
 	data[15] = 0; // rssi (supplied by receiver)
 
 	write_packet_data(data);
@@ -390,8 +390,7 @@ void connection_thread(void)
 			continue;
 		}
 
-		// skip sensor data if connection error		// skip sensor data if connection
-		// error
+		// skip sensor data if connection error
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 			k_msleep(100);
 			continue;

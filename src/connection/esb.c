@@ -82,7 +82,7 @@ static bool esb_paired = false;
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 7, 0, 0);
 static int64_t last_tx_time = 0;
 
 static uint32_t ping_success_streak = 0; // consecutive success counter
@@ -130,11 +130,11 @@ static int64_t g_last_sync_timestamp = 0;
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
-	uint8_t type; // First byte of payload (packet type)
+	uint8_t type;        // First byte of payload (packet type)
 	bool is_ack_payload; // Is this the small ack_payload after PING
-	bool noack; // noack flag
-	uint8_t length; // Packet length
-	int64_t timestamp; // When it was sent
+	bool noack;          // noack flag
+	uint8_t length;      // Packet length
+	int64_t timestamp;   // When it was sent
 };
 static struct last_tx_info last_tx = {0};
 
@@ -209,7 +209,7 @@ void esb_write_rate_tick(void)
 // ESB recovery mechanism for persistent ENOMEM errors
 static uint32_t consecutive_enomem_errors = 0;
 static int64_t last_enomem_time = 0;
-#define ENOMEM_ERROR_THRESHOLD 3 // Force recovery after N consecutive errors
+#define ENOMEM_ERROR_THRESHOLD 3    // Force recovery after N consecutive errors
 #define ENOMEM_ERROR_WINDOW_MS 1000 // Reset counter if no error for this duration
 
 void esb_write_ack(uint8_t type)
@@ -332,7 +332,7 @@ void event_handler(struct esb_evt const *event)
 		// Only count ping failures for connection timeout
 		if (ping_pending && k_uptime_get() - ping_send_time > (get_ping_interval_ms() - 100)) {
 			ping_failed = true;
-			ping_pending = false; // Clear the pending flag
+			ping_pending = false;    // Clear the pending flag
 			ping_success_streak = 0; // Reset recovery streak on any failure
 			ping_failures++;
 		}
