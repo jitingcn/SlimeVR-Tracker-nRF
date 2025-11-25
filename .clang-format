@@ -1,5 +1,5 @@
 ---
-BasedOnStyle: Google
+BasedOnStyle: LLVM
 AccessModifierOffset: -4
 AlignAfterOpenBracket: BlockIndent
 AlignOperands: AlignAfterOperator
@@ -8,13 +8,14 @@ AllowAllArgumentsOnNextLine: false
 AllowAllConstructorInitializersOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortIfStatementsOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
 AllowShortLoopsOnASingleLine: false
 BinPackArguments: false
 BinPackParameters: false
 BreakBeforeBinaryOperators: All
 BreakConstructorInitializers: BeforeComma
 BreakInheritanceList: BeforeComma
-ColumnLimit: 88
+ColumnLimit: 120
 DerivePointerAlignment: false
 IndentWidth: 4
 InsertBraces: true
@@ -22,3 +23,8 @@ InsertTrailingCommas: Wrapped
 PackConstructorInitializers: Never
 TabWidth: 4
 UseTab: ForContinuationAndIndentation
+PointerAlignment: Right
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterControlStatement: false
