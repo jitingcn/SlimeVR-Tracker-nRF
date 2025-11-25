@@ -105,13 +105,4 @@ uint32_t esb_get_server_time(void);
 // Helper: log esb_write call frequency
 void esb_write_rate_tick(void);
 
-// TDMA scheduling functions
-void tdma_init(uint8_t tracker_id);
-void tdma_deinit(void);
-bool tdma_is_synced(void);
-// Sleep until our next transmission slot (returns wait time in us for debugging)
-uint32_t tdma_sleep_until_next_slot(void);
-// Mark current slot as used (call after sending a packet to prevent multiple sends per slot)
-void tdma_mark_slot_used(void);
-
 #endif
