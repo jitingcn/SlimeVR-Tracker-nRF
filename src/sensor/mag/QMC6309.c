@@ -159,35 +159,51 @@ void qmc_mag_oneshot(void)
 void qmc_mag_read(float m[3])
 {
 	int err = 0;
-	uint8_t status = 0; // Always check DRDY
-	int64_t timeout = (oneshot_trigger_time ? oneshot_trigger_time : k_uptime_get()) + 2; // 2ms timeout
-	while ((status & STAT_DATA_RDY_MASK) == 0) // wait for data ready flag
-	{
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
-		if(k_uptime_get() > timeout)
-		{
-			LOG_WRN("Data ready status timeout!");
-			break;
-		}
+	uint8_t status = 0;
+
+	err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
+	if (err) {
+		LOG_ERR("Status read error");
+		return;
 	}
-	oneshot_trigger_time = 0;
-	if (status & STAT_OVERFLOW_MASK) // check overflow flag
+
+	if ((status & STAT_DATA_RDY_MASK) == 0)
 	{
-		if (lastOvfl == 0)
+		// Key point: If there's no data, don't wait indefinitely!
+		// In continuous mode, it's normal for the main loop to run faster than the magnetometer ODR.
+		// If in oneshot mode, the main loop will check again next time.
+
+		// Only report a timeout if oneshot trigger time has passed too long without data.
+		if (oneshot_trigger_time > 0 && k_uptime_get() > oneshot_trigger_time + 50)
 		{
-			// TODO should we skip the reading to not confuse fusion?
-			LOG_INF("Magnetometer overflow");
-			lastOvfl = 1;
+			LOG_WRN("Magnetometer oneshot timeout");
+			oneshot_trigger_time = 0; // Reset
 		}
+
+		return;
+	}
+
+	oneshot_trigger_time = 0;
+
+	if (status & STAT_OVERFLOW_MASK)
+	{
+		if (!lastOvfl) {
+			LOG_INF("Magnetometer overflow");
+			lastOvfl = true;
+		}
+		return;
 	}
 	else
 	{
-		lastOvfl = 0;
+		lastOvfl = false;
 	}
+
 	uint8_t rawData[6];
-	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
-	if (err)
-		LOG_ERR("Communication error");
+	err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
+	if (err) {
+		LOG_ERR("Data read error");
+		return;
+	}
 	qmc_mag_process(rawData, m);
 }
 

@@ -48,10 +48,41 @@
 #define ICM45686_IPREG_BAR_REG_58          0x3A
 #define ICM45686_IPREG_BAR_REG_59          0x3B
 #define ICM45686_IPREG_BAR_REG_60          0x3C
+
+#define ICM45686_BIT_AUX1_SCLK_PULL_EN   (1 << 6) // Bit 6: Enables internal pull resistor
+#define ICM45686_BIT_AUX1_SCLK_PULL_UP   (1 << 5) // Bit 5: 1=Up, 0=Down
+#define ICM45686_BIT_AUX1_I2CM_MODE      (1 << 4) // Bit 4: Must be 1 for I2C Master Mode
+#define ICM45686_BIT_AUX1_CS_PULL_EN     (1 << 3) // Bit 3: CS pin pull enable (Default 1)
+#define ICM45686_BIT_AUX1_CS_PULL_UP     (1 << 2) // Bit 2: CS pin pull up (Default 1)
+
 #define ICM45686_IPREG_BAR_REG_61          0x3D
+
+#define ICM45686_BIT_AUX1_SDO_PULL_UP    (1 << 4) // Bit 4: 1=Up, 0=Down
+#define ICM45686_BIT_AUX1_SDO_PULL_EN    (1 << 3) // Bit 3: Enables internal pull resistor
+#define ICM45686_BIT_AUX1_SDI_PULL_EN    (1 << 1) // Bit 1: Enables internal pull resistor
+#define ICM45686_BIT_AUX1_SDI_PULL_UP    (1 << 0) // Bit 0: 1=Up, 0=Down
 
 // User Bank IPREG_TOP1
 #define ICM45686_IPREG_TOP1                0xA2 // MSB
+
+#define ICM45686_I2CM_COMMAND_0            0x06
+#define ICM45686_DEV_PROFILE_0             0x0e
+#define ICM45686_DEV_PROFILE_1             0x0f
+#define ICM45686_I2CM_CONTROL              0x16
+#define ICM45686_I2CM_STATUS               0x18
+#define ICM45686_I2CM_EXT_DEV_STATUS       0x1a
+#define ICM45686_I2CM_RD_DATA_0            0x1b
+#define ICM45686_I2CM_WR_DATA_0            0x33
+
+#define ICM45686_I2CM_CONTROL_GO           0x01
+#define ICM45686_I2CM_CONTROL_RESTART_EN   0x40
+
+#define ICM45686_BIT_I2CM_STATUS_SDA_ERR     (1 << 5)
+#define ICM45686_BIT_I2CM_STATUS_SCL_ERR     (1 << 4)
+#define ICM45686_BIT_I2CM_STATUS_SRST_ERR    (1 << 3)
+#define ICM45686_BIT_I2CM_STATUS_TIMEOUT_ERR (1 << 2)
+#define ICM45686_BIT_I2CM_STATUS_DONE        (1 << 1)
+#define ICM45686_BIT_I2CM_STATUS_BUSY        (1 << 0)
 
 #define ICM45686_SMC_CONTROL_0             0x58
 

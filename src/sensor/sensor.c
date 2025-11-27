@@ -675,8 +675,12 @@ int sensor_init(void)
 // 55-66ms to wait, get chip ids, and setup icm (50ms spent waiting for accel and gyro to start)
 	if (mag_available && mag_enabled)
 	{
-		// TODO: need to flag passthrough enabled
-		sensor_imu->ext_passthrough(true); // reenable passthrough
+		if (sensor_mag_dev.addr & 0x80) {
+			sensor_imu->ext_setup();
+		} else{
+			// TODO: need to flag passthrough enabled
+			sensor_imu->ext_passthrough(true); // reenable passthrough
+		}
 		err = sensor_mag->init(mag_initial_time, &mag_actual_time); // configure with ~200Hz ODR
 #if SENSOR_MAG_SPI_EXISTS
 		LOG_INF("Requested SPI frequency: %.2fMHz", (double)sensor_mag_spi_dev.config.frequency / 1000000.0);
@@ -834,9 +838,20 @@ void sensor_loop(void)
 #endif
 
 			// Read magnetometer
+			// static uint8_t mag_poll_counter = 0;
 			float raw_m[3];
 			if (mag_available && mag_enabled)
-				sensor_mag->mag_read(raw_m); // reading mag last, and it will be processed last
+			{
+				// mag_poll_counter++;
+				// int poll_time = (CONFIG_SENSOR_GYRO_ODR / (int)(mag_actual_time*1000));
+				// if (poll_time < 1) poll_time = 1;
+				// if (mag_poll_counter >= poll_time)
+				// {
+					// reading mag last, and it will be processed last
+					sensor_mag->mag_read(raw_m);
+					// mag_poll_counter = 0;
+				// }
+			}
 
 			if (reconfig) // TODO: get rid of reconfig?
 			{
@@ -1078,7 +1093,7 @@ void sensor_loop(void)
 			// Handle magnetometer calibration
 			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
 				sensor_request_calibration_mag();
-				
+
 #if DEBUG
 			if (valid_acquisition)
 			{
@@ -1123,7 +1138,7 @@ void sensor_loop(void)
 		}
 		else // if signal was sent during processing, loop immediately to catch up
 		{
-			LOG_INF("FIFO THS/WM/WTM triggered during loop");
+			LOG_DBG("FIFO THS/WM/WTM triggered during loop");
 			k_yield();
 			main_wfi = false;
 		}
