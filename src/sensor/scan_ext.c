@@ -30,10 +30,20 @@
 
 LOG_MODULE_REGISTER(sensor_scan_ext, LOG_LEVEL_DBG);
 
-int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uint8_t *ext_dev_reg, int dev_addr_count, const uint8_t dev_addr[], const uint8_t dev_reg[], const uint8_t dev_id[], const int dev_ids[])
+int sensor_scan_ext(
+	const sensor_ext_ssi_t *ext_ssi,
+	uint16_t *ext_dev_addr,
+	uint8_t *ext_dev_reg,
+	int dev_addr_count,
+	const uint8_t dev_addr[],
+	const uint8_t dev_reg[],
+	const uint8_t dev_id[],
+	const int dev_ids[]
+)
 {
-	if (*ext_dev_addr >= 0x7F) // ignoring device
+	if (*ext_dev_addr >= 0x7F) { // ignoring device
 		return -1;
+	}
 
 	uint16_t addr = 0;
 
@@ -42,50 +52,56 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 	int id_index = 0;
 	int found_id = 0;
 
-	for (int i = 0; i < dev_addr_count; i++)
-	{
+	for (int i = 0; i < dev_addr_count; i++) {
 		int addr_count = dev_addr[addr_index];
 		int reg_count = dev_reg[reg_index];
 		int id_count = dev_id[id_index];
 		addr_index++;
 		reg_index++;
 		id_index++;
-		for (int j = 0; j < addr_count; j++)
-		{
+		for (int j = 0; j < addr_count; j++) {
 			addr = dev_addr[addr_index + j];
-			if (*ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP && addr != *ext_dev_addr)
+			if (*ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP && addr != *ext_dev_addr) {
 				continue; // if an address was provided try to scan it first
+			}
 			LOG_DBG("Scanning address: 0x%02X", addr);
 
 			int id_cnt = id_count;
 			int id_ind = id_index;
 			int fnd_id = found_id;
-			for (int k = 0; k < reg_count; k++)
-			{
+			for (int k = 0; k < reg_count; k++) {
 				uint8_t reg = dev_reg[reg_index + k];
-				if (*ext_dev_reg == 0xFF || *ext_dev_reg == reg)
-				{
+				if (*ext_dev_reg == 0xFF || *ext_dev_reg == reg) {
 					uint8_t id;
 					LOG_DBG("Scanning register: 0x%02X", reg);
 					if (reg == 0x40 && addr >= 0x10 && addr <= 0x13) // edge case for BMM150
 					{
-						int err = ext_ssi->ext_write(addr, (const uint8_t[]){0x4B, 0x01}, 2); // BMM150 cannot read chip id without power control enabled
-						if (err)
+						int err = ext_ssi->ext_write(
+							addr,
+							(const uint8_t[]){0x4B, 0x01},
+							2
+						); // BMM150 cannot read chip id without power control enabled
+						if (err) {
 							break;
+						}
 						LOG_DBG("Power up BMM150");
 						k_msleep(2); // BMM150 start-up
 					}
 					int err = ext_ssi->ext_write_read(addr, &reg, 1, &id, 1);
-					LOG_DBG("Read value: 0x%02X", id);
-					if (err)
+					LOG_INF("Read value at 0x%02X reg 0x%02X: 0x%02X (err: %d)", addr, reg, id, err);
+					if (err) {
 						break;
-					for (int l = 0; l < id_cnt; l++)
-					{
-						if (id == dev_id[id_ind + l])
-						{
+					}
+					for (int l = 0; l < id_cnt; l++) {
+						if (id == dev_id[id_ind + l]) {
 							*ext_dev_addr = addr;
 							*ext_dev_reg = reg;
-							LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)", addr, reg, id);
+							LOG_INF(
+								"Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)",
+								addr,
+								reg,
+								id
+							);
 							return dev_ids[fnd_id + l];
 						}
 					}
@@ -100,8 +116,7 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 		reg_index += reg_count;
 		id_index += id_count;
 		found_id += id_count;
-		for (int j = 1; j < reg_count; j++)
-		{
+		for (int j = 1; j < reg_count; j++) {
 			id_count = dev_id[id_index];
 			id_index++;
 			id_index += id_count;
@@ -109,7 +124,8 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 		}
 	}
 
-	if ((*ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP) || *ext_dev_reg != 0xFF) // preferred address or register failed, try again with full scan
+	if ((*ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP)
+		|| *ext_dev_reg != 0xFF) // preferred address or register failed, try again with full scan
 	{
 		LOG_WRN("No device found at address: 0x%02X", *ext_dev_addr);
 		*ext_dev_addr = 0;

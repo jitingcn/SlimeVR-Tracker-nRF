@@ -505,11 +505,11 @@ int icm45_bank_write(const uint8_t bank, const uint8_t reg, const uint8_t *buf, 
 	ireg_buf[1] = reg;
 	ireg_buf[2] = buf[0];
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
-	// k_busy_wait(4);
+	k_busy_wait(4);
 
 	for (uint32_t i = 1; i < num_bytes; i++) {
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, buf[i]);
-		// k_busy_wait(4);
+		k_busy_wait(4);
 	}
 
 	return err;
@@ -532,11 +532,11 @@ int icm45_bank_read(const uint8_t bank, const uint8_t reg, uint8_t *buf, uint32_
 	ireg_buf[0] = bank;
 	ireg_buf[1] = reg;
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 2);
-	// k_busy_wait(4);
+	k_busy_wait(4);
 
 	for (uint32_t i = 0; i < num_bytes; i++) {
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, &buf[i]);
-		// k_busy_wait(4);
+		k_busy_wait(4);
 	}
 	return err;
 }
@@ -560,10 +560,13 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	err |= icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_I2CM_WR_DATA_0, buf, num_bytes);
 	// Last transaction, channel 0, write num_bytes bytes
 	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_COMMAND_0, 0x80 + num_bytes);
-	// No restarts, fast mode, start transaction
-	// err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL, 0x01);
 	// 0x41 = 0100 0001 (Restart Enable | GO)
 	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL, 0x41);
+
+	// Wait for I2C transaction to complete
+	// Fast mode I2C @ 400kHz: ~25us per byte + overhead
+	// Write transaction: START + addr + reg + num_bytes + STOP
+	k_busy_wait(30 * (num_bytes + 2));
 
 	uint8_t last_status = 0;
 	int timeout = 1000;
@@ -581,7 +584,7 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	}
 
 	if (last_status != ICM45686_BIT_I2CM_STATUS_DONE) {
-		LOG_ERR("I2CM write failed status: 0x%02x", last_status);
+		LOG_ERR("I2CM write failed status: 0x%02x, addr: 0x%02x", last_status, addr);
 		return -1;
 	}
 
@@ -592,6 +595,7 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 		return -1;
 	}
 
+	LOG_DBG("I2CM write OK: addr=0x%02x, len=%d", addr, num_bytes);
 	return err;
 }
 
@@ -608,20 +612,25 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 	err |= icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile_data, 2);
 	// Last transaction, channel 0, read num_read bytes with register specified
 	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_COMMAND_0, 0x90 + num_read);
-	// No restarts, fast mode, start transaction
-	// err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL, 0x01);
 	// 0x41 = 0100 0001 (Restart Enable | GO)
 	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL, 0x41);
 
-	// if (num_read > 0) {
-	// 	k_busy_wait(20 * (num_read + 2));
-	// }
+	// Wait for I2C transaction to complete
+	// Fast mode I2C @ 400kHz: ~25us per byte + overhead
+	// Read transaction: START + addr_w + reg + RESTART + addr_r + num_read + STOP
+	k_busy_wait(30 * (num_read + 3));
 
 	uint8_t last_status = 0;
 	err |= icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &last_status);
-	while (last_status & ICM45686_BIT_I2CM_STATUS_BUSY) // I2CM busy
-	{
+
+	// Check once for completion, add one retry if still busy
+	if (last_status & ICM45686_BIT_I2CM_STATUS_BUSY) {
+		k_busy_wait(50); // Small additional delay
 		err |= icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &last_status);
+		if (last_status & ICM45686_BIT_I2CM_STATUS_BUSY) {
+			LOG_ERR("I2CM timeout on read from 0x%02x reg 0x%02x", addr, ((const uint8_t *)write_buf)[0]);
+			return -1;
+		}
 	}
 
 	if (last_status & (ICM45686_BIT_I2CM_STATUS_SDA_ERR | ICM45686_BIT_I2CM_STATUS_SCL_ERR)) {
@@ -630,7 +639,12 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 	}
 
 	if (last_status != ICM45686_BIT_I2CM_STATUS_DONE) {
-		LOG_ERR("I2CM write failed status: 0x%02x", last_status);
+		LOG_ERR(
+			"I2CM read failed status: 0x%02x, addr: 0x%02x, reg: 0x%02x",
+			last_status,
+			addr,
+			((const uint8_t *)write_buf)[0]
+		);
 		return -1;
 	}
 
@@ -638,12 +652,13 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 	err |= icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status);
 
 	if (dev_status & 0x01) {
-		// Maybe log the nack?
+		LOG_ERR("I2CM NACK on read from addr 0x%02x reg 0x%02x", addr, ((const uint8_t *)write_buf)[0]);
 		return -1;
 	}
 
 	err |= icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read);
 
+	LOG_DBG("I2CM read OK: addr=0x%02x, reg=0x%02x, len=%d", addr, ((const uint8_t *)write_buf)[0], num_read);
 	return err;
 }
 

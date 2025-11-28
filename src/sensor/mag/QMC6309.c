@@ -19,8 +19,8 @@
 #define QMC6309_CTRL_REG_1 0x0A
 
 #define MD_SUSPEND 0b00
-#define MD_NORMAL  0b01
-#define MD_SINGLE  0b10
+#define MD_NORMAL 0b01
+#define MD_SINGLE 0b10
 #define MD_CONTINUOUS 0b11
 #define MD_MASK 0b11
 
@@ -49,9 +49,11 @@
 #define RNG_8G 0b10
 #define RNG_MASK(rng) ((rng) << 2)
 
-#define ODR_1Hz  0b000
-#define ODR_10Hz  0b001
-#define ODR_50Hz  0b010
+#define CURRENT_RNG RNG_8G
+
+#define ODR_1Hz 0b000
+#define ODR_10Hz 0b001
+#define ODR_50Hz 0b010
 #define ODR_100Hz 0b011
 #define ODR_200Hz 0b100
 #define ODR_MASK(odr) ((odr) << 4)
@@ -59,7 +61,9 @@
 #define SOFT_RESET_MASK 0x80
 #define SOFT_RESET_CLEAR 0x00
 
-static const float sensitivity = 1 / 4000.0f; // ~0.25 mgauss/LSB @ 8G range -> ~0.00025 G/LSB
+// QMC6309 Sensitivity (LSB/Gauss)
+// @ 8G range, sensitivity is typically 3000-4000 LSB/Gauss depending on specific QST chip version.
+static const float sensitivity = 1.0f / 4000.0f;
 
 static uint8_t last_state = 0xff;
 static bool lastOvfl = false;
@@ -73,15 +77,19 @@ int qmc_init(float time, float *actual_time)
 	lastOvfl = false;
 	oneshot_trigger_time = 0;
 	int err = qmc_update_odr(time, actual_time);
+	LOG_INF("QMC6309 init: err=%d, time=%.4f", err, (double)*actual_time);
 	return (err < 0 ? err : 0);
 }
 
 void qmc_shutdown(void)
 {
+	// Soft Reset
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_MASK);
+	k_msleep(1); // Give it a moment to reset
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_CLEAR);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 int qmc_update_odr(float time, float *actual_time)
@@ -92,68 +100,71 @@ int qmc_update_odr(float time, float *actual_time)
 
 	if (time <= 0 || time == INFINITY) // power down mode or single measurement mode
 	{
-		MD = MD_SUSPEND; // oneshot will set SINGLE after
+		MD = MD_SUSPEND;
 		ODR = 0;
-	}
-	else
-	{
+	} else {
 		MD = MD_CONTINUOUS;
-		ODR = 1 / time;
+		ODR = (int)(1.0f / time);
 	}
 
-	if (MD == MD_SUSPEND)
-	{
+	if (MD == MD_SUSPEND) {
 		MODR = ODR_200Hz; // for oneshot
-		time = 0; // off
-	}
-	else if (ODR > 100)
-	{
+		time = 0;         // off
+	} else if (ODR > 100) {
 		MODR = ODR_200Hz;
 		time = 1.f / 200;
-	}
-	else if (ODR > 50)
-	{
+	} else if (ODR > 50) {
 		MODR = ODR_100Hz;
 		time = 1.f / 100;
-	}
-	else if (ODR > 25)
-	{
+	} else if (ODR > 25) {
 		MODR = ODR_50Hz;
 		time = 1.f / 50;
-	}
-	else if (ODR > 5)
-	{
+	} else if (ODR > 5) {
 		MODR = ODR_10Hz;
 		time = 1.f / 10;
-	}
-	else
-	{
+	} else {
 		MODR = ODR_1Hz;
 		time = 1.f;
 	}
 
 	uint8_t STAT = ODR_MASK(MODR) | MD;
-	if (last_state == STAT)
-		return 1;
+
+	if (last_state == STAT) {
+		*actual_time = time;
+		return 0;
+	}
 	last_state = STAT;
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, ODR_MASK(MODR) | RNG_MASK(RNG_8G) | SET_RESET_ON);
+	// Write Config
+	// Use CURRENT_RNG macro ensuring consistency
+	int err = ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_MAG,
+		QMC6309_CTRL_REG_2,
+		ODR_MASK(MODR) | RNG_MASK(CURRENT_RNG) | SET_RESET_ON
+	);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_2) | OSR_MASK(OSR_8) | MD);
-	if (err)
+
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 
 	oneshot_trigger_time = 0;
-
 	*actual_time = time;
 	return err;
 }
 
 void qmc_mag_oneshot(void)
 {
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_2) | OSR_MASK(OSR_8) | MD_SINGLE);
+	// Trigger a single measurement
+	int err = ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_MAG,
+		QMC6309_CTRL_REG_1,
+		LPF_MASK(LPF_2) | OSR_MASK(OSR_8) | MD_SINGLE
+	);
 	oneshot_trigger_time = k_uptime_get();
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 void qmc_mag_read(float m[3])
@@ -161,71 +172,69 @@ void qmc_mag_read(float m[3])
 	int err = 0;
 	uint8_t status = 0;
 
+	// 1. Read Status
 	err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
 	if (err) {
-		LOG_ERR("Status read error");
+		LOG_ERR("Status read error: %d", err);
 		return;
 	}
+	// LOG_INF("QMC Status: 0x%02X", status); // Uncomment if needed, spammy
 
-	if ((status & STAT_DATA_RDY_MASK) == 0)
-	{
-		// Key point: If there's no data, don't wait indefinitely!
-		// In continuous mode, it's normal for the main loop to run faster than the magnetometer ODR.
-		// If in oneshot mode, the main loop will check again next time.
-
-		// Only report a timeout if oneshot trigger time has passed too long without data.
-		if (oneshot_trigger_time > 0 && k_uptime_get() > oneshot_trigger_time + 50)
-		{
+	// 2. Check Data Ready
+	if ((status & STAT_DATA_RDY_MASK) == 0) {
+		if (oneshot_trigger_time > 0 && k_uptime_get() > oneshot_trigger_time + 50) {
 			LOG_WRN("Magnetometer oneshot timeout");
-			oneshot_trigger_time = 0; // Reset
+			oneshot_trigger_time = 0;
 		}
-
-		return;
+		return; // Data not ready
 	}
 
-	oneshot_trigger_time = 0;
+	oneshot_trigger_time = 0; // Clear timeout check
 
-	if (status & STAT_OVERFLOW_MASK)
-	{
+	// 3. Check Overflow
+	if (status & STAT_OVERFLOW_MASK) {
 		if (!lastOvfl) {
-			LOG_INF("Magnetometer overflow");
+			LOG_WRN("Magnetometer magnetic sensor overflow");
 			lastOvfl = true;
 		}
-		return;
-	}
-	else
-	{
+		// QST recommendation: Usually reading the data clears the logic even if overflowed
+		// But the data might be clipped. Let's proceed to read to clear registers.
+	} else {
 		lastOvfl = false;
 	}
 
+	// 4. Read Data (6 bytes: X_L, X_H, Y_L, Y_H, Z_L, Z_H)
 	uint8_t rawData[6];
 	err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
 	if (err) {
-		LOG_ERR("Data read error");
 		return;
 	}
+
+	// Process data (convert to float)
 	qmc_mag_process(rawData, m);
 }
 
 void qmc_mag_process(uint8_t *raw_m, float m[3])
 {
-	for (int i = 0; i < 3; i++) // x, y, z
-	{
-		m[i] = ((int16_t*)raw_m)[i];
-		m[i] *= sensitivity; // Gauss
-	}
+	int16_t x = (int16_t)((raw_m[1] << 8) | raw_m[0]);
+	int16_t y = (int16_t)((raw_m[3] << 8) | raw_m[2]);
+	int16_t z = (int16_t)((raw_m[5] << 8) | raw_m[4]);
+
+	// LOG_DBG("Mag raw: %d %d %d", x, y, z);
+
+	// Apply sensitivity
+	m[0] = x * sensitivity;
+	m[1] = y * sensitivity;
+	m[2] = z * sensitivity;
 }
 
-const sensor_mag_t sensor_mag_qmc6309 = {
-	*qmc_init,
-	*qmc_shutdown,
-
-	*qmc_update_odr,
-
-	*qmc_mag_oneshot,
-	*qmc_mag_read,
-	*mag_none_temp_read,
-
-	*qmc_mag_process,
-	6, 6
-};
+const sensor_mag_t sensor_mag_qmc6309
+	= {.init = qmc_init,
+	   .shutdown = qmc_shutdown,
+	   .update_odr = qmc_update_odr,
+	   .mag_oneshot = qmc_mag_oneshot,
+	   .mag_read = qmc_mag_read,
+	   .temp_read = mag_none_temp_read,
+	   .mag_process = qmc_mag_process,
+	   .ext_min_burst = 6,
+	   .ext_burst = 6};

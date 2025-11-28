@@ -20,6 +20,7 @@ DerivePointerAlignment: false
 IndentWidth: 4
 InsertBraces: true
 InsertTrailingCommas: Wrapped
+SortIncludes: false
 PackConstructorInitializers: Never
 TabWidth: 4
 UseTab: ForContinuationAndIndentation
