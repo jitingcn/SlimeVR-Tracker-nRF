@@ -22,6 +22,7 @@ InsertBraces: true
 InsertTrailingCommas: Wrapped
 PackConstructorInitializers: Never
 TabWidth: 4
+SortIncludes: false
 UseTab: ForContinuationAndIndentation
 PointerAlignment: Right
 BreakBeforeBraces: Custom
