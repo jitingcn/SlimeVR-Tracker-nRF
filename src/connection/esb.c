@@ -20,24 +20,20 @@
 	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 	THE SOFTWARE.
 */
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <zephyr/drivers/clock_control/nrf_clock_control.h>
-#include <zephyr/kernel.h>
-
-#include "connection.h"
 #include "globals.h"
 #include "sensor/calibration.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
-#include "zephyr/logging/log.h"
+#include "connection.h"
+
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #if defined(NRF54L15_XXAA)
 #include <hal/nrf_clock.h>
 #endif /* defined(NRF54L15_XXAA) */
 #include <hal/nrf_timer.h>
 #include <nrfx_timer.h>
 #include <zephyr/sys/crc.h>
+#include <zephyr/kernel.h>
 
 #include "esb.h"
 
@@ -64,7 +60,7 @@ static uint8_t paired_addr[8] = {0};
 static bool esb_initialized = false;
 static bool esb_paired = false;
 
-#define TX_ERROR_THRESHOLD 100
+#define TX_ERROR_THRESHOLD 270
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
@@ -107,7 +103,7 @@ static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
-#define REMOTE_COMMAND_DELAY_MS 3000
+#define REMOTE_COMMAND_DELAY_MS 5000
 
 // Server time synchronization for TDMA scheduling (using cycles for μs precision)
 static uint32_t last_server_time_cycles = 0; // Server time in cycles
@@ -212,11 +208,125 @@ static int64_t last_enomem_time = 0;
 #define ENOMEM_ERROR_THRESHOLD 3    // Force recovery after N consecutive errors
 #define ENOMEM_ERROR_WINDOW_MS 1000 // Reset counter if no error for this duration
 
+bool clock_status = false;
+
+#if defined(CONFIG_CLOCK_CONTROL_NRF)
+static struct onoff_manager *clk_mgr;
+
+static int clocks_init(void)
+{
+	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	if (!clk_mgr) {
+		LOG_ERR("Unable to get the Clock manager");
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
+SYS_INIT(clocks_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
+int clocks_start(void)
+{
+	if (clock_status) {
+		return 0;
+	}
+	int err;
+	int res;
+	struct onoff_client clk_cli;
+	int fetch_attempts = 0;
+
+	sys_notify_init_spinwait(&clk_cli.notify);
+
+	err = onoff_request(clk_mgr, &clk_cli);
+	if (err < 0) {
+		LOG_ERR("Clock request failed: %d", err);
+		return err;
+	}
+
+	do {
+		k_usleep(100);
+		err = sys_notify_fetch_result(&clk_cli.notify, &res);
+		if (!err && res) {
+			LOG_ERR("Clock could not be started: %d", res);
+			return res;
+		}
+		if (err && ++fetch_attempts > 10) {
+			LOG_WRN_ONCE("Unable to fetch Clock request result: %d", err);
+			return err;
+		}
+	} while (err);
+
+#if defined(NRF54L15_XXAA)
+	/* MLTPAN-20 */
+	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
+#endif /* defined(NRF54L15_XXAA) */
+
+	clock_status = true;
+	return 0;
+}
+
+void clocks_stop(void)
+{
+	if (!clock_status) {
+		return;
+	}
+	clock_status = false;
+
+	onoff_release(clk_mgr);
+
+	LOG_DBG("HF clock stop request");
+}
+
+#else
+BUILD_ASSERT(false, "No Clock Control driver");
+#endif
+
+static struct k_thread clocks_thread_id;
+static K_THREAD_STACK_DEFINE(clocks_thread_id_stack, 128);
+
+void clocks_request_start(uint32_t delay_us)
+{
+	k_thread_create(
+		&clocks_thread_id,
+		clocks_thread_id_stack,
+		K_THREAD_STACK_SIZEOF(clocks_thread_id_stack),
+		(k_thread_entry_t)clocks_start,
+		NULL,
+		NULL,
+		NULL,
+		5,
+		0,
+		K_USEC(delay_us)
+	);
+}
+
+static struct k_thread clocks_stop_thread_id;
+static K_THREAD_STACK_DEFINE(clocks_stop_thread_id_stack, 128);
+
+void clocks_request_stop(uint32_t delay_us)
+{
+	k_thread_create(
+		&clocks_stop_thread_id,
+		clocks_stop_thread_id_stack,
+		K_THREAD_STACK_SIZEOF(clocks_stop_thread_id),
+		(k_thread_entry_t)clocks_stop,
+		NULL,
+		NULL,
+		NULL,
+		5,
+		0,
+		K_USEC(delay_us)
+	);
+}
+
 void esb_write_ack(uint8_t type)
 {
 	// This small ACK packet is crucial for receiving the PONG ACK payload
 	// ESB requires a transmission to trigger ACK payload reception
-
+	if (!esb_initialized || !esb_paired) {
+		return;
+	}
 	// Check ESB TX FIFO before adding packet
 	if (esb_tx_full()) {
 		LOG_WRN("TX FIFO full when queuing ACK packet, skipping this ACK");
@@ -259,6 +369,7 @@ void esb_write_ack(uint8_t type)
 		}
 	} else {
 		LOG_DBG("ACK packet queued to trigger PONG reception (type=0x%02X)", type);
+		esb_start_tx();
 	}
 }
 
@@ -273,7 +384,7 @@ void event_handler(struct esb_evt const *event)
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
-		if (esb_paired) {
+		if (esb_paired && last_tx.type != ESB_PING_TYPE) {
 			clocks_stop();
 		}
 		break;
@@ -295,30 +406,19 @@ void event_handler(struct esb_evt const *event)
 			pkt_desc = "packet 4";
 		} else if (last_tx.type == ESB_PING_TYPE) {
 			pkt_desc = "PING";
-		} else if (last_tx.type == 0xFF) {
-			pkt_desc = "PING_ACK_RETRY";
 		} else {
 			pkt_desc = "OTHER";
 		}
 
-		// Critical: if ACK packet (used to retrieve PONG) failed
-		if (last_tx.is_ack_payload && last_tx.type == ESB_PING_TYPE) {
-			LOG_DBG("ACK packet (for PONG) failed");
-			esb_write_ack(0xFF); // Mark as retry
-		} else if (last_tx.is_ack_payload && last_tx.type == 0xFF) {
-			// Retry also failed
-			LOG_DBG("ACK packet retry also failed");
-		} else {
-			LOG_DBG(
-				"TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
-				pkt_desc,
-				last_tx.type,
-				last_tx.length,
-				last_tx.noack,
-				k_uptime_get() - last_tx.timestamp,
-				event->tx_attempts
-			);
-		}
+		LOG_DBG(
+			"TX FAILED: type=%s(0x%02X) len=%u noack=%d age=%lldms attempts=%u",
+			pkt_desc,
+			last_tx.type,
+			last_tx.length,
+			last_tx.noack,
+			k_uptime_get() - last_tx.timestamp,
+			event->tx_attempts
+		);
 
 		// Log TX statistics every 20 failures for debugging
 		uint32_t now = k_uptime_get_32();
@@ -351,7 +451,7 @@ void event_handler(struct esb_evt const *event)
 			);
 		}
 
-		if (esb_paired) {
+		if (esb_paired && last_tx.type != ESB_PING_TYPE) {
 			clocks_stop();
 		}
 		break;
@@ -670,118 +770,6 @@ void event_handler(struct esb_evt const *event)
 		}
 		break;
 	}
-}
-
-bool clock_status = false;
-
-#if defined(CONFIG_CLOCK_CONTROL_NRF)
-static struct onoff_manager *clk_mgr;
-
-static int clocks_init(void)
-{
-	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
-	if (!clk_mgr) {
-		LOG_ERR("Unable to get the Clock manager");
-		return -ENOTSUP;
-	}
-
-	return 0;
-}
-
-SYS_INIT(clocks_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
-
-int clocks_start(void)
-{
-	if (clock_status) {
-		return 0;
-	}
-	int err;
-	int res;
-	struct onoff_client clk_cli;
-	int fetch_attempts = 0;
-
-	sys_notify_init_spinwait(&clk_cli.notify);
-
-	err = onoff_request(clk_mgr, &clk_cli);
-	if (err < 0) {
-		LOG_ERR("Clock request failed: %d", err);
-		return err;
-	}
-
-	do {
-		k_usleep(100);
-		err = sys_notify_fetch_result(&clk_cli.notify, &res);
-		if (!err && res) {
-			LOG_ERR("Clock could not be started: %d", res);
-			return res;
-		}
-		if (err && ++fetch_attempts > 10) {
-			LOG_WRN_ONCE("Unable to fetch Clock request result: %d", err);
-			return err;
-		}
-	} while (err);
-
-#if defined(NRF54L15_XXAA)
-	/* MLTPAN-20 */
-	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
-#endif /* defined(NRF54L15_XXAA) */
-
-	clock_status = true;
-	return 0;
-}
-
-void clocks_stop(void)
-{
-	if (!clock_status) {
-		return;
-	}
-	clock_status = false;
-
-	onoff_release(clk_mgr);
-
-	LOG_DBG("HF clock stop request");
-}
-
-#else
-BUILD_ASSERT(false, "No Clock Control driver");
-#endif
-
-static struct k_thread clocks_thread_id;
-static K_THREAD_STACK_DEFINE(clocks_thread_id_stack, 128);
-
-void clocks_request_start(uint32_t delay_us)
-{
-	k_thread_create(
-		&clocks_thread_id,
-		clocks_thread_id_stack,
-		K_THREAD_STACK_SIZEOF(clocks_thread_id_stack),
-		(k_thread_entry_t)clocks_start,
-		NULL,
-		NULL,
-		NULL,
-		5,
-		0,
-		K_USEC(delay_us)
-	);
-}
-
-static struct k_thread clocks_stop_thread_id;
-static K_THREAD_STACK_DEFINE(clocks_stop_thread_id_stack, 128);
-
-void clocks_request_stop(uint32_t delay_us)
-{
-	k_thread_create(
-		&clocks_stop_thread_id,
-		clocks_stop_thread_id_stack,
-		K_THREAD_STACK_SIZEOF(clocks_stop_thread_id),
-		(k_thread_entry_t)clocks_stop,
-		NULL,
-		NULL,
-		NULL,
-		5,
-		0,
-		K_USEC(delay_us)
-	);
 }
 
 // this was randomly generated
@@ -1111,11 +1099,12 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	last_tx.timestamp = k_uptime_get();
 
 	// Try to queue the packet
+	esb_flush_tx();
 	int queue_status = esb_write_payload(&tx_payload);
 
 	// if sending ping packet, we need send another small packet to get ack result asap
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
-		k_usleep(300);
+		esb_start_tx();
 		// uint32_t now32 = (uint32_t)now;
 		ping_pending = true;
 		ping_ctr_sent = tx_payload.data[2];
