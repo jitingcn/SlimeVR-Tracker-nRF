@@ -361,7 +361,6 @@ void esb_write_ack(uint8_t type)
 		// Try flushing and retrying once
 		if (ack_status == -ENOSPC || ack_status == -ENOMEM) {
 			esb_flush_tx();
-			k_msleep(1);
 			ack_status = esb_write_payload(&ack_payload);
 			if (ack_status == 0) {
 				LOG_DBG("ACK packet queued successfully after retry");
@@ -389,7 +388,6 @@ void event_handler(struct esb_evt const *event)
 		}
 		break;
 	case ESB_EVENT_TX_FAILED:
-		esb_pop_tx();
 		tx_failed_count++;
 
 		// Detailed packet type diagnostics for TX_FAILED
@@ -1206,7 +1204,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		LOG_ERR("esb_write: failed to queue packet, err=%d (logged every 10 errors)", queue_status);
 	}
 
-	// Record last TX time for idle probe scheduling
+	// Record last TX time
 	if (queue_status == 0) {
 		last_tx_time = k_uptime_get();
 		esb_write_queued++;
