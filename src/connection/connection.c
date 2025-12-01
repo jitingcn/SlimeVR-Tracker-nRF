@@ -360,8 +360,8 @@ void connection_thread(void)
 				slot_diff += 1000;
 			}
 
-			// Send if within slot window (+5ms) and minimum interval elapsed
-			if (slot_diff >= 0 && slot_diff <= 5 && now - last_ping_time >= (ping_interval_ms - 100)) {
+			// Send if within slot window (+10ms) and minimum interval elapsed
+			if (slot_diff >= 0 && slot_diff <= 10 && now - last_ping_time >= (ping_interval_ms - 100)) {
 				should_send_ping = true;
 			}
 		} else {
@@ -375,15 +375,11 @@ void connection_thread(void)
 			uint8_t ping[ESB_PING_LEN] = {0};
 			ping[0] = ESB_PING_TYPE;
 			ping[1] = connection_get_id();
-			ping[2] = 0; // ping counter, set in esb_write
-			uint32_t now32 = (uint32_t)now;
-			ping[3] = (now32 >> 24) & 0xFF;
-			ping[4] = (now32 >> 16) & 0xFF;
-			ping[5] = (now32 >> 8) & 0xFF;
-			ping[6] = (now32) & 0xFF;
+			ping[2] = 0;               // ping counter, set in esb_write
+			memset(&ping[3], 0x00, 4); // reserved, should set to server time after sync
 			ping[7] = esb_get_ping_ack_flag();
-			memset(&ping[8], 0x00, 4); // reserved
-			ping[12] = 0;
+			memset(&ping[8], 0x00, 4);  // reserved
+			ping[ESB_PING_LEN - 1] = 0; // crc bit, set in esb_write
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
 			k_usleep(300);
@@ -449,6 +445,6 @@ void connection_thread(void)
 		} else {
 			connection_clocks_request_stop();
 		}
-		k_usleep(800);
+		k_usleep(600);
 	}
 }

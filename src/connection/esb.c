@@ -94,7 +94,8 @@ static int64_t ping_send_time = 0;
 #define PING_HISTORY_SIZE 10
 struct ping_history_entry {
 	uint8_t counter;
-	uint32_t cycles;
+	// ticks at ping send time
+	uint32_t ping_ticks;
 };
 static struct ping_history_entry ping_history[PING_HISTORY_SIZE] = {0};
 static uint8_t ping_history_idx = 0;
@@ -105,24 +106,16 @@ static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
 #define REMOTE_COMMAND_DELAY_MS 5000
 
-// Server time synchronization for TDMA scheduling (using cycles for μs precision)
-static uint32_t last_server_time_cycles = 0; // Server time in cycles
+// Server time synchronization for TDMA scheduling (using ticks)
 static bool server_time_synced = false;
 
-// Target: n TPS per tracker for ALL non-PING packets (data, mag, quat, info, status)
-#define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 170 // Target TPS per tracker (all non-PING packets)
-#define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
-#define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
-#define TDMA_GUARD_TIME_US 50 // Guard time to wake up before slot starts
-
-// Server time synchronization for TDMA (using 64-bit virtual cycles)
-static uint64_t g_server_virtual_cycles = 0;
-static uint32_t g_last_rx_raw_cycles = 0;
-static uint32_t g_last_sync_local_cycles = 0;
+// Server time synchronization
+static uint32_t g_server_ticks_offset = 0;
+static uint32_t g_last_rx_raw_ticks = 0;
+static uint32_t g_last_sync_local_ticks = 0;
 static bool g_time_initialized = false;
 static int64_t g_last_sync_timestamp = 0;
-#define TIME_SYNC_TIMEOUT_MS 10000
+#define TIME_SYNC_TIMEOUT_MS 60000
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -152,28 +145,6 @@ static void remote_print_meow(void)
 	uint8_t punctuation = ticks / ARRAY_SIZE(meow_suffixes);
 	uint8_t suffix = ticks % ARRAY_SIZE(meow_suffixes);
 	LOG_INF("%s%s%s", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
-}
-
-void esb_update_server_time(uint32_t server_raw_cycles, uint32_t rtt_cycles)
-{
-	uint32_t now_local = k_cycle_get_32();
-
-	if (!g_time_initialized) {
-		g_server_virtual_cycles = server_raw_cycles;
-		g_last_rx_raw_cycles = server_raw_cycles;
-		g_time_initialized = true;
-	} else {
-		int32_t diff = (int32_t)(server_raw_cycles - g_last_rx_raw_cycles);
-
-		if (diff > 0) {
-			g_server_virtual_cycles += diff;
-			g_last_rx_raw_cycles = server_raw_cycles;
-		}
-	}
-
-	g_last_sync_local_cycles = now_local;
-	g_last_sync_timestamp = k_uptime_get();
-	server_time_synced = true;
 }
 
 static uint8_t tracker_id = 0;
@@ -353,22 +324,13 @@ void esb_write_ack(uint8_t type)
 		const char *err_str = "unknown";
 		if (ack_status == -ENOMEM) {
 			err_str = "ENOMEM (ESB not ready)";
+			consecutive_enomem_errors++;
 		} else if (ack_status == -ENOSPC) {
 			err_str = "ENOSPC (FIFO full)";
 		}
-
-		LOG_DBG("esb_write_ack: failed to queue ACK packet (err=%d %s)", ack_status, err_str);
-		// Try flushing and retrying once
-		if (ack_status == -ENOSPC || ack_status == -ENOMEM) {
-			esb_flush_tx();
-			ack_status = esb_write_payload(&ack_payload);
-			if (ack_status == 0) {
-				LOG_DBG("ACK packet queued successfully after retry");
-			}
-		}
+		LOG_ERR("esb_write_ack: failed to queue ACK packet (err=%d %s)", ack_status, err_str);
 	} else {
 		LOG_DBG("ACK packet queued to trigger PONG reception (type=0x%02X)", type);
-		esb_start_tx();
 	}
 }
 
@@ -453,7 +415,8 @@ void event_handler(struct esb_evt const *event)
 			clocks_stop();
 		}
 		break;
-	case ESB_EVENT_RX_RECEIVED:
+	case ESB_EVENT_RX_RECEIVED: {
+		uint32_t current_rx_ticks = sys_clock_tick_get_32();
 		int err = 0;
 		err = esb_read_rx_payload(&rx_payload);
 		if (err == -ENODATA) {
@@ -462,14 +425,6 @@ void event_handler(struct esb_evt const *event)
 			LOG_ERR("Error while reading rx packet: %d", err);
 			return;
 		}
-		// Hex dump first up to 13 bytes for visibility
-		char hexbuf[3 * 13 + 1] = {0};
-		int dump_len = rx_payload.length < 13 ? rx_payload.length : 13;
-		for (int i = 0; i < dump_len; i++) {
-			snprintk(&hexbuf[i * 3], 4, "%02X ", rx_payload.data[i]);
-		}
-		LOG_DBG("RX len=%u pipe=%u data=%s", rx_payload.length, rx_payload.pipe, hexbuf);
-		LOG_DBG("RX payload len=%u type=%u pipe=%u", rx_payload.length, rx_payload.data[0], rx_payload.pipe);
 		if (!paired_addr[0]) // zero, not paired
 		{
 			LOG_DBG("tx: %16llX rx: %16llX", *(uint64_t *)tx_payload_pair.data, *(uint64_t *)rx_payload.data);
@@ -551,168 +506,12 @@ void event_handler(struct esb_evt const *event)
 						break;
 					}
 					uint8_t rx_ctr = rx_payload.data[2];
-					// Check counter with relaxed tolerance due to ACK payload delay
-					// ACK payload is only sent with the NEXT packet, so we expect
-					// PONG(N) when sending PING(N+1), causing a natural 1-count lag
-					// Allow up to 5 counts difference to handle packet loss scenarios
 					int counter_diff = (int)ping_counter - (int)rx_ctr;
 					if (counter_diff < 0) {
 						counter_diff += 256; // Handle wrap-around
 					}
 
-					bool match_ctr = (counter_diff >= 0 && counter_diff <= 5);
-					if (!match_ctr) {
-						LOG_WRN("unsynced counter %u (expected ~%u, diff=%d)", rx_ctr, ping_counter, counter_diff);
-						// Don't break - still process the PONG to maintain connection
-						// Just log the warning for debugging
-					}
-					uint32_t ping_send_time_32 = ((uint32_t)rx_payload.data[3] << 24)
-											   | ((uint32_t)rx_payload.data[4] << 16)
-											   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
-
-					uint32_t now32 = (uint32_t)k_uptime_get();
-					uint32_t now_cyc = k_cycle_get_32();
-					uint32_t rtt = (now32 - ping_send_time_32) / 2;
-
-					// Find send cycles for this PONG's counter in history
-					uint32_t ping_cycles_for_this_ctr = 0;
-					for (int i = 0; i < PING_HISTORY_SIZE; i++) {
-						if (ping_history[i].counter == rx_ctr && ping_history[i].cycles != 0) {
-							ping_cycles_for_this_ctr = ping_history[i].cycles;
-							break;
-						}
-					}
-
-					uint32_t rtt_us = 0;
-					bool rtt_valid = false;
-
-					if (ping_cycles_for_this_ctr != 0) {
-						// Calculate RTT using the correct send time for this counter
-						uint32_t cyc_diff = now_cyc - ping_cycles_for_this_ctr;
-						rtt_us = k_cyc_to_us_near32(cyc_diff) / 2;
-						rtt_valid = true;
-					} else {
-						// No history found - likely too old or buffer wrapped
-						// Use timestamp-based RTT converted to cycles for estimation
-						rtt_us = rtt * 1000; // ms to us
-						rtt_valid = false;
-					}
-
-					// Check flags field (byte 7)
-					uint8_t pong_flags = rx_payload.data[7];
-
-					// Only parse server time if this is a normal heartbeat (flags == 0)
-					if (pong_flags == ESB_PONG_FLAG_NORMAL) {
-						// Capture receiver cycle timestamp from PONG param (bytes 8..11)
-						uint32_t pong_tx_cycles
-							= ((uint32_t)rx_payload.data[8] << 24) | ((uint32_t)rx_payload.data[9] << 16)
-							| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
-
-						// log ping to pong rtt and pong to now rtt
-						LOG_INF("PONG RTT: %u ms", rtt);
-
-						// Calculate server cycles compensated with RTT (in cycles)
-						uint32_t rtt_cycles = rtt * sys_clock_hw_cycles_per_sec() / 1000;
-						uint32_t server_cycles = pong_tx_cycles + (rtt_cycles / 2);
-
-						// Store server time for TDMA scheduling
-						last_server_time_cycles = server_cycles;
-						esb_update_server_time(server_cycles, rtt_cycles);
-
-						// Convert to ms for human-readable display
-						uint32_t server_time_ms = k_cyc_to_ms_near32(server_cycles);
-						uint32_t server_ms = server_time_ms % 1000;
-						uint32_t server_s = (server_time_ms / 1000) % 60;
-						uint32_t server_m = (server_time_ms / 60000) % 60;
-						uint32_t server_h = (server_time_ms / 3600000) % 24;
-						LOG_INF(
-							"Server time: %02u:%02u:%02u.%03u (cycles=%u)",
-							server_h,
-							server_m,
-							server_s,
-							server_ms,
-							server_cycles
-						);
-					} else {
-						// Command packet, log RTT only
-						LOG_INF("PONG RTT: %u ms (command packet)", rtt);
-					}
-
-					// handle remote commands and delayed execution
-					if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-						if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
-							// new command received
-							received_remote_command = pong_flags;
-							remote_command_receive_time = k_uptime_get();
-
-							// For SET_CHANNEL command, extract channel value from data[8-11]
-							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
-								received_channel_value
-									= ((uint32_t)rx_payload.data[8] << 24) | ((uint32_t)rx_payload.data[9] << 16)
-									| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
-							}
-
-							const char *cmd_name = "UNKNOWN";
-							switch (pong_flags) {
-							case ESB_PONG_FLAG_SHUTDOWN:
-								cmd_name = "SHUTDOWN";
-								break;
-							case ESB_PONG_FLAG_CALIBRATE:
-								cmd_name = "CALIBRATE";
-								break;
-							case ESB_PONG_FLAG_SIX_SIDE_CAL:
-								cmd_name = "SIX_SIDE_CAL";
-								break;
-							case ESB_PONG_FLAG_MEOW:
-								cmd_name = "MEOW";
-								break;
-							case ESB_PONG_FLAG_SCAN:
-								cmd_name = "SCAN";
-								break;
-							case ESB_PONG_FLAG_MAG_CLEAR:
-								cmd_name = "MAG_CLEAR";
-								break;
-							case ESB_PONG_FLAG_REBOOT:
-								cmd_name = "REBOOT";
-								break;
-							case ESB_PONG_FLAG_CLEAR:
-								cmd_name = "CLEAR";
-								break;
-							case ESB_PONG_FLAG_DFU:
-								cmd_name = "DFU";
-								break;
-							case ESB_PONG_FLAG_SET_CHANNEL:
-								cmd_name = "SET_CHANNEL";
-								break;
-							}
-							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
-								LOG_INF(
-									"Remote command %s (0x%02X) received, channel=%u, will execute in %dms",
-									cmd_name,
-									pong_flags,
-									received_channel_value,
-									REMOTE_COMMAND_DELAY_MS
-								);
-							} else {
-								LOG_INF(
-									"Remote command %s (0x%02X) received, will execute in %dms",
-									cmd_name,
-									pong_flags,
-									REMOTE_COMMAND_DELAY_MS
-								);
-							}
-						}
-					} else {
-						// received NORMAL flag, indicates the receiver has confirmed our echo
-						if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
-							LOG_DBG("Receiver confirmed command 0x%02X, resetting state", acked_remote_command);
-							received_remote_command = ESB_PONG_FLAG_NORMAL;
-							acked_remote_command = ESB_PONG_FLAG_NORMAL;
-							remote_command_receive_time = 0;
-						}
-					}
-
-					// set ping valid
+					// set ping valid first
 					ping_pending = false;
 					ping_failed = false;
 					ping_failures = 0;
@@ -722,52 +521,180 @@ void event_handler(struct esb_evt const *event)
 							set_status(SYS_STATUS_CONNECTION_ERROR, false);
 							connection_error_start_time = 0;
 							shutdown_requested = false;
-
-							if (rtt_us < 1000) {
-								LOG_INF(
-									"PONG ok - link restored after %u probes, "
-									"rtt=%u us by cycles",
-									ping_success_streak,
-									(unsigned)rtt_us
-								);
-							} else {
-								LOG_INF(
-									"PONG ok - link restored after %u probes, "
-									"rtt=%u.%03u ms by cycles",
-									ping_success_streak,
-									(unsigned)(rtt_us / 1000),
-									(unsigned)(rtt_us % 1000)
-								);
-							}
 							ping_success_streak = 0;
 						}
 					} else {
 						ping_success_streak = 0;
-						if (rtt_us < 1000) {
+					}
+
+					bool match_ctr = (counter_diff >= 0 && counter_diff <= 5);
+					if (!match_ctr) {
+						LOG_WRN("unsynced counter %u (expected ~%u, diff=%d)", rx_ctr, ping_counter, counter_diff);
+						// Don't break - still process the PONG to maintain connection
+						// Just log the warning for debugging
+					}
+
+					uint32_t ping_rx_ticks = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
+										   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
+
+					// Find send ticks for this PONG's counter in history
+					uint32_t ping_ticks_for_this_ctr = 0;
+					for (int i = 0; i < PING_HISTORY_SIZE; i++) {
+						if (ping_history[i].counter == rx_ctr && ping_history[i].ping_ticks != 0) {
+							ping_ticks_for_this_ctr = ping_history[i].ping_ticks;
+							break;
+						}
+					}
+
+					uint32_t rtt_us = 0;
+
+					if (ping_ticks_for_this_ctr != 0) {
+						// Calculate RTT: from PING send to PONG receive
+						// Note: current_rx_ticks - ping_ticks_for_this_ctr is the full RTT
+						uint32_t ticks_diff = current_rx_ticks - ping_ticks_for_this_ctr;
+						rtt_us = k_ticks_to_us_floor32(ticks_diff);
+
+						// log ping and rtt
+						if (rtt_us > 1000) {
 							LOG_INF(
-								"PONG ok, rtt=%u us (ctr=%u)%s",
-								(unsigned)rtt_us,
-								rx_ctr,
-								rtt_valid ? "" : " [estimated]"
-							);
-						} else {
-							LOG_INF(
-								"PONG ok, rtt=%u.%03u ms (ctr=%u)%s",
+								"PONG ok, ack rtt=%u.%03u ms (ctr=%u)",
 								(unsigned)(rtt_us / 1000),
 								(unsigned)(rtt_us % 1000),
-								rx_ctr,
-								rtt_valid ? "" : " [estimated]"
+								rx_ctr
+							);
+						} else if (rtt_us < 1000) {
+							LOG_INF("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
+						}
+
+						if (rtt_us < 3000) {
+							int32_t server_offset_ticks = (int32_t)(ping_rx_ticks - (ping_ticks_for_this_ctr));
+							int32_t estimated_server_ticks = (int32_t)(server_offset_ticks + sys_clock_tick_get_32());
+
+							LOG_INF(
+								"update server offset, old offset: %d, new offset: %d, diff: %d",
+								g_server_ticks_offset,
+								server_offset_ticks,
+								server_offset_ticks - g_server_ticks_offset
+							);
+							g_last_rx_raw_ticks = ping_rx_ticks;
+							g_last_sync_local_ticks = ping_ticks_for_this_ctr;
+							g_last_sync_timestamp = k_uptime_get();
+							g_server_ticks_offset = server_offset_ticks;
+							server_time_synced = true;
+
+							if (!g_time_initialized) {
+								g_time_initialized = true;
+							}
+
+							// Convert to ms for human-readable display
+							uint32_t server_time_ms = k_ticks_to_ms_near32(estimated_server_ticks);
+							uint32_t server_ms = server_time_ms % 1000;
+							uint32_t server_s = (server_time_ms / 1000) % 60;
+							uint32_t server_m = (server_time_ms / 60000) % 60;
+							uint32_t server_h = (server_time_ms / 3600000) % 24;
+							LOG_INF(
+								"estimated server time: %02u:%02u:%02u.%03u (ticks=%u)",
+								server_h,
+								server_m,
+								server_s,
+								server_ms,
+								estimated_server_ticks
 							);
 						}
 					}
+				} else {
+					// No history found - likely too old or buffer wrapped
 				}
-			} break;
-			default:
-				LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
+
+				// Check flags field (byte 7)
+				uint8_t pong_flags = rx_payload.data[7];
+
+				// TODO: update offset
+				if (pong_flags == ESB_PONG_FLAG_NORMAL) {
+				}
+
+				// handle remote commands and delayed execution
+				if (pong_flags != ESB_PONG_FLAG_NORMAL) {
+					if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
+						// new command received
+						received_remote_command = pong_flags;
+						remote_command_receive_time = k_uptime_get();
+
+						// For SET_CHANNEL command, extract channel value from data[8-11]
+						if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
+							received_channel_value
+								= ((uint32_t)rx_payload.data[8] << 24) | ((uint32_t)rx_payload.data[9] << 16)
+								| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
+						}
+
+						const char *cmd_name = "UNKNOWN";
+						switch (pong_flags) {
+						case ESB_PONG_FLAG_SHUTDOWN:
+							cmd_name = "SHUTDOWN";
+							break;
+						case ESB_PONG_FLAG_CALIBRATE:
+							cmd_name = "CALIBRATE";
+							break;
+						case ESB_PONG_FLAG_SIX_SIDE_CAL:
+							cmd_name = "SIX_SIDE_CAL";
+							break;
+						case ESB_PONG_FLAG_MEOW:
+							cmd_name = "MEOW";
+							break;
+						case ESB_PONG_FLAG_SCAN:
+							cmd_name = "SCAN";
+							break;
+						case ESB_PONG_FLAG_MAG_CLEAR:
+							cmd_name = "MAG_CLEAR";
+							break;
+						case ESB_PONG_FLAG_REBOOT:
+							cmd_name = "REBOOT";
+							break;
+						case ESB_PONG_FLAG_CLEAR:
+							cmd_name = "CLEAR";
+							break;
+						case ESB_PONG_FLAG_DFU:
+							cmd_name = "DFU";
+							break;
+						case ESB_PONG_FLAG_SET_CHANNEL:
+							cmd_name = "SET_CHANNEL";
+							break;
+						}
+						if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
+							LOG_INF(
+								"Remote command %s (0x%02X) received, channel=%u, will execute in %dms",
+								cmd_name,
+								pong_flags,
+								received_channel_value,
+								REMOTE_COMMAND_DELAY_MS
+							);
+						} else {
+							LOG_INF(
+								"Remote command %s (0x%02X) received, will execute in %dms",
+								cmd_name,
+								pong_flags,
+								REMOTE_COMMAND_DELAY_MS
+							);
+						}
+					}
+				} else {
+					// received NORMAL flag, indicates the receiver has confirmed our echo
+					if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
+						LOG_DBG("Receiver confirmed command 0x%02X, resetting state", acked_remote_command);
+						received_remote_command = ESB_PONG_FLAG_NORMAL;
+						acked_remote_command = ESB_PONG_FLAG_NORMAL;
+						remote_command_receive_time = 0;
+					}
+				}
 			}
-		}
-		break;
-	}
+			}
+			break;
+		default:
+			LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
+		} // end of rx_payload length switch
+	} break;
+		// end of ESB_EVENT_RX_RECEIVED
+	} // end of event switch
 }
 
 // this was randomly generated
@@ -1082,6 +1009,14 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		ping_failed = false;
 		// Set sequence number
 		data[2] = ping_counter;
+		if (server_time_synced) {
+			// TODO: Set local store server time if synced
+			uint32_t server_time_ticks = (uint32_t)esb_get_server_time_ticks_64();
+			data[3] = (server_time_ticks >> 24) & 0xFF;
+			data[4] = (server_time_ticks >> 16) & 0xFF;
+			data[5] = (server_time_ticks >> 8) & 0xFF;
+			data[6] = server_time_ticks & 0xFF;
+		}
 		// Calculate crc8 checksum over first 12 bytes
 		uint8_t crc_calc = crc8_ccitt(0x07, data, ESB_PING_LEN - 1);
 		data[ESB_PING_LEN - 1] = crc_calc;
@@ -1102,21 +1037,18 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 
 	// if sending ping packet, we need send another small packet to get ack result asap
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
-		esb_start_tx();
-		// uint32_t now32 = (uint32_t)now;
+		uint8_t this_ctr = tx_payload.data[2];
+		ping_history[ping_history_idx].counter = this_ctr;
+		ping_history[ping_history_idx].ping_ticks = sys_clock_tick_get_32();
+		LOG_INF("PING sent (ctr=%u)", (unsigned)tx_payload.data[2]);
 		ping_pending = true;
 		ping_ctr_sent = tx_payload.data[2];
 		ping_send_time = k_uptime_get();
 
 		// Record cycles for THIS counter in circular buffer (for accurate RTT calculation)
-		uint8_t this_ctr = tx_payload.data[2];
-		ping_history[ping_history_idx].counter = this_ctr;
-		ping_history[ping_history_idx].cycles = k_cycle_get_32();
 		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
 
 		last_tx_time = k_uptime_get();
-		LOG_INF("PING sent (ctr=%u)", (unsigned)tx_payload.data[2]);
-
 		esb_write_ack(ESB_PING_TYPE);
 	} else if (tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
 		// PING failed to queue - this is critical!
@@ -1210,6 +1142,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		esb_write_queued++;
 	}
 
+	esb_start_tx();
 	send_data = true;
 }
 
@@ -1229,7 +1162,7 @@ uint8_t esb_get_ping_ack_flag(void)
 	return ESB_PONG_FLAG_NORMAL;
 }
 
-uint64_t esb_get_server_time_cycles_64(void)
+uint64_t esb_get_server_time_ticks_64(void)
 {
 	if (!server_time_synced) {
 		return 0;
@@ -1239,27 +1172,23 @@ uint64_t esb_get_server_time_cycles_64(void)
 	if (now - g_last_sync_timestamp > TIME_SYNC_TIMEOUT_MS) {
 		LOG_WRN("Time sync timeout: %lld ms since last sync, clearing sync state", now - g_last_sync_timestamp);
 		server_time_synced = false;
-		g_time_initialized = false;
 		return 0;
 	}
 
-	uint32_t current_local = k_cycle_get_32();
-	uint32_t elapsed = current_local - g_last_sync_local_cycles;
-
-	return g_server_virtual_cycles + elapsed;
+	return g_server_ticks_offset + sys_clock_tick_get_32();
 }
 
 uint64_t esb_get_server_time_us_64(void)
 {
-	uint64_t cycles = esb_get_server_time_cycles_64();
+	uint64_t ticks = esb_get_server_time_ticks_64();
 
-	return (cycles * 1000000ULL) / sys_clock_hw_cycles_per_sec();
+	return k_ticks_to_us_near64(ticks);
 }
 
 uint32_t esb_get_server_time(void)
 {
-	uint64_t cycles = esb_get_server_time_cycles_64();
-	if (cycles == 0) {
+	uint64_t ticks = esb_get_server_time_ticks_64();
+	if (ticks == 0) {
 		return 0;
 	}
 	uint64_t time_us = esb_get_server_time_us_64();
