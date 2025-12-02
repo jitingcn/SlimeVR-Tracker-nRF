@@ -25,6 +25,7 @@
 #include "sensor/sensor.h"
 #include "system/system.h"
 #include "connection.h"
+#include "zephyr/sys/time_units.h"
 
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #if defined(NRF54L15_XXAA)
@@ -115,7 +116,10 @@ static uint32_t g_last_rx_raw_ticks = 0;
 static uint32_t g_last_sync_local_ticks = 0;
 static bool g_time_initialized = false;
 static int64_t g_last_sync_timestamp = 0;
+static int32_t g_clock_skew_fixed = 0; // Fixed point skew (20 bit fraction)
+static int64_t g_last_skew_update_time = 0;
 #define TIME_SYNC_TIMEOUT_MS 60000
+#define SKEW_SHIFT 20
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -546,6 +550,8 @@ void event_handler(struct esb_evt const *event)
 						}
 					}
 
+					// Check flags field (byte 7)
+					uint8_t pong_flags = rx_payload.data[7];
 					uint32_t rtt_us = 0;
 
 					if (ping_ticks_for_this_ctr != 0) {
@@ -567,7 +573,9 @@ void event_handler(struct esb_evt const *event)
 						}
 
 						if (rtt_us < 3000) {
-							int32_t server_offset_ticks = (int32_t)(ping_rx_ticks - (ping_ticks_for_this_ctr));
+							int32_t estimated_air_ticks = k_us_to_ticks_floor32(150);
+							int32_t server_offset_ticks
+								= (int32_t)(ping_rx_ticks - (ping_ticks_for_this_ctr + estimated_air_ticks));
 							int32_t estimated_server_ticks = (int32_t)(server_offset_ticks + sys_clock_tick_get_32());
 
 							LOG_INF(
@@ -577,14 +585,52 @@ void event_handler(struct esb_evt const *event)
 								server_offset_ticks - g_server_ticks_offset
 							);
 							g_last_rx_raw_ticks = ping_rx_ticks;
+
+							// Calculate skew BEFORE updating g_last_sync_local_ticks
+							if (pong_flags == ESB_PONG_FLAG_NORMAL && g_time_initialized
+								&& g_last_sync_local_ticks > 0) {
+								int32_t remote_ticks_diff
+									= ((int32_t)rx_payload.data[8] << 24) | ((int32_t)rx_payload.data[9] << 16)
+									| ((int32_t)rx_payload.data[10] << 8) | ((int32_t)rx_payload.data[11]);
+
+								uint32_t interval = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
+								// Only update if interval is sufficient (e.g. > 100ms) to avoid noise
+								if (interval > 3200) { // ~100ms
+									// Calculate skew error in fixed point
+									int64_t diff_shifted = ((int64_t)remote_ticks_diff) << SKEW_SHIFT;
+									int32_t skew_error_fixed = (int32_t)(diff_shifted / interval);
+
+									// Accumulate skew error (Integrator) with Gain 1/8 (faster convergence)
+									g_clock_skew_fixed += skew_error_fixed >> 3;
+
+									g_last_skew_update_time = k_uptime_get();
+									LOG_INF(
+										"Skew update: diff=%d interval=%u error_fixed=%d total_skew_fixed=%d",
+										remote_ticks_diff,
+										interval,
+										skew_error_fixed,
+										g_clock_skew_fixed
+									);
+								}
+							}
+
+							g_last_rx_raw_ticks = ping_rx_ticks;
 							g_last_sync_local_ticks = ping_ticks_for_this_ctr;
 							g_last_sync_timestamp = k_uptime_get();
-							g_server_ticks_offset = server_offset_ticks;
-							server_time_synced = true;
 
+							// Smooth server offset update to reject RTT jitter
+							// If not initialized, take value directly
 							if (!g_time_initialized) {
+								g_server_ticks_offset = server_offset_ticks;
 								g_time_initialized = true;
+							} else {
+								// Filter: New = Old + (Target - Old) / 4
+								// This dampens the impact of RTT spikes (like the 2.3ms case)
+								int32_t offset_diff = server_offset_ticks - g_server_ticks_offset;
+								g_server_ticks_offset += offset_diff / 4;
 							}
+
+							server_time_synced = true;
 
 							// Convert to ms for human-readable display
 							uint32_t server_time_ms = k_ticks_to_ms_near32(estimated_server_ticks);
@@ -601,99 +647,91 @@ void event_handler(struct esb_evt const *event)
 								estimated_server_ticks
 							);
 						}
+					} else {
+						// No history found - likely too old or buffer wrapped
 					}
-				} else {
-					// No history found - likely too old or buffer wrapped
-				}
 
-				// Check flags field (byte 7)
-				uint8_t pong_flags = rx_payload.data[7];
+					// handle remote commands and delayed execution
+					if (pong_flags != ESB_PONG_FLAG_NORMAL) {
+						if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
+							// new command received
+							received_remote_command = pong_flags;
+							remote_command_receive_time = k_uptime_get();
 
-				// TODO: update offset
-				if (pong_flags == ESB_PONG_FLAG_NORMAL) {
-				}
+							// For SET_CHANNEL command, extract channel value from data[8-11]
+							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
+								received_channel_value
+									= ((uint32_t)rx_payload.data[8] << 24) | ((uint32_t)rx_payload.data[9] << 16)
+									| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
+							}
 
-				// handle remote commands and delayed execution
-				if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-					if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
-						// new command received
-						received_remote_command = pong_flags;
-						remote_command_receive_time = k_uptime_get();
-
-						// For SET_CHANNEL command, extract channel value from data[8-11]
-						if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
-							received_channel_value
-								= ((uint32_t)rx_payload.data[8] << 24) | ((uint32_t)rx_payload.data[9] << 16)
-								| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
+							const char *cmd_name = "UNKNOWN";
+							switch (pong_flags) {
+							case ESB_PONG_FLAG_SHUTDOWN:
+								cmd_name = "SHUTDOWN";
+								break;
+							case ESB_PONG_FLAG_CALIBRATE:
+								cmd_name = "CALIBRATE";
+								break;
+							case ESB_PONG_FLAG_SIX_SIDE_CAL:
+								cmd_name = "SIX_SIDE_CAL";
+								break;
+							case ESB_PONG_FLAG_MEOW:
+								cmd_name = "MEOW";
+								break;
+							case ESB_PONG_FLAG_SCAN:
+								cmd_name = "SCAN";
+								break;
+							case ESB_PONG_FLAG_MAG_CLEAR:
+								cmd_name = "MAG_CLEAR";
+								break;
+							case ESB_PONG_FLAG_REBOOT:
+								cmd_name = "REBOOT";
+								break;
+							case ESB_PONG_FLAG_CLEAR:
+								cmd_name = "CLEAR";
+								break;
+							case ESB_PONG_FLAG_DFU:
+								cmd_name = "DFU";
+								break;
+							case ESB_PONG_FLAG_SET_CHANNEL:
+								cmd_name = "SET_CHANNEL";
+								break;
+							}
+							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
+								LOG_INF(
+									"Remote command %s (0x%02X) received, channel=%u, will execute in %dms",
+									cmd_name,
+									pong_flags,
+									received_channel_value,
+									REMOTE_COMMAND_DELAY_MS
+								);
+							} else {
+								LOG_INF(
+									"Remote command %s (0x%02X) received, will execute in %dms",
+									cmd_name,
+									pong_flags,
+									REMOTE_COMMAND_DELAY_MS
+								);
+							}
 						}
-
-						const char *cmd_name = "UNKNOWN";
-						switch (pong_flags) {
-						case ESB_PONG_FLAG_SHUTDOWN:
-							cmd_name = "SHUTDOWN";
-							break;
-						case ESB_PONG_FLAG_CALIBRATE:
-							cmd_name = "CALIBRATE";
-							break;
-						case ESB_PONG_FLAG_SIX_SIDE_CAL:
-							cmd_name = "SIX_SIDE_CAL";
-							break;
-						case ESB_PONG_FLAG_MEOW:
-							cmd_name = "MEOW";
-							break;
-						case ESB_PONG_FLAG_SCAN:
-							cmd_name = "SCAN";
-							break;
-						case ESB_PONG_FLAG_MAG_CLEAR:
-							cmd_name = "MAG_CLEAR";
-							break;
-						case ESB_PONG_FLAG_REBOOT:
-							cmd_name = "REBOOT";
-							break;
-						case ESB_PONG_FLAG_CLEAR:
-							cmd_name = "CLEAR";
-							break;
-						case ESB_PONG_FLAG_DFU:
-							cmd_name = "DFU";
-							break;
-						case ESB_PONG_FLAG_SET_CHANNEL:
-							cmd_name = "SET_CHANNEL";
-							break;
+					} else {
+						// received NORMAL flag, indicates the receiver has confirmed our echo
+						if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
+							LOG_DBG("Receiver confirmed command 0x%02X, resetting state", acked_remote_command);
+							received_remote_command = ESB_PONG_FLAG_NORMAL;
+							acked_remote_command = ESB_PONG_FLAG_NORMAL;
+							remote_command_receive_time = 0;
 						}
-						if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
-							LOG_INF(
-								"Remote command %s (0x%02X) received, channel=%u, will execute in %dms",
-								cmd_name,
-								pong_flags,
-								received_channel_value,
-								REMOTE_COMMAND_DELAY_MS
-							);
-						} else {
-							LOG_INF(
-								"Remote command %s (0x%02X) received, will execute in %dms",
-								cmd_name,
-								pong_flags,
-								REMOTE_COMMAND_DELAY_MS
-							);
-						}
-					}
-				} else {
-					// received NORMAL flag, indicates the receiver has confirmed our echo
-					if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
-						LOG_DBG("Receiver confirmed command 0x%02X, resetting state", acked_remote_command);
-						received_remote_command = ESB_PONG_FLAG_NORMAL;
-						acked_remote_command = ESB_PONG_FLAG_NORMAL;
-						remote_command_receive_time = 0;
 					}
 				}
-			}
-			}
-			break;
-		default:
-			LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
-		} // end of rx_payload length switch
-	} break;
-		// end of ESB_EVENT_RX_RECEIVED
+			} break;
+			default:
+				LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
+			} // end of rx_payload length switch
+		}
+		break;
+	} // end of ESB_EVENT_RX_RECEIVED
 	} // end of event switch
 }
 
@@ -1175,7 +1213,15 @@ uint64_t esb_get_server_time_ticks_64(void)
 		return 0;
 	}
 
-	return g_server_ticks_offset + sys_clock_tick_get_32();
+	int64_t skew_correction = 0;
+	if (g_clock_skew_fixed != 0) {
+		uint32_t current_ticks = sys_clock_tick_get_32();
+		// Calculate elapsed time since last sync point
+		uint32_t elapsed = current_ticks - g_last_sync_local_ticks;
+		skew_correction = ((int64_t)elapsed * g_clock_skew_fixed) >> SKEW_SHIFT;
+	}
+
+	return g_server_ticks_offset + sys_clock_tick_get_32() + skew_correction;
 }
 
 uint64_t esb_get_server_time_us_64(void)
