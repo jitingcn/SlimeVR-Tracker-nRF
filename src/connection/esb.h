@@ -86,8 +86,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define TDMA_PACKETS_PER_SECOND 160 // Target TPS per tracker
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
 #define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
-#define TDMA_GUARD_TIME_US 200
-#define TDMA_PREWARM_ADVANCE_US 1000
+#define TDMA_GUARD_TIME_US 50
 
 bool esb_ready(void);
 

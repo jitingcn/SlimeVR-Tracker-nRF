@@ -24,8 +24,10 @@
 #include "util.h"
 #include "esb.h"
 #include "build_defines.h"
-#include "hid.h"
+#include "zephyr/sys/time_units.h"
+// #include "hid.h"
 
+#include <stdint.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 
@@ -33,13 +35,8 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-#define PACKET_BUFFER_SIZE 4
-static uint8_t packet_buffer[PACKET_BUFFER_SIZE][16] = {0};
-static atomic_t write_idx = ATOMIC_INIT(0);
-static atomic_t read_idx = ATOMIC_INIT(0);
+// Packet sequence number for data packets
 static uint8_t packet_sequence = 0;
-static int64_t last_ping_time = 0;
-static uint32_t ping_interval_ms = PING_INTERVAL_MS;
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
@@ -49,13 +46,107 @@ static bool no_ack = true;
 static bool no_ack = false;
 #endif
 
+typedef enum {
+	SLOT_TYPE_PING,   // Sync frame (1Hz, distributed)
+	SLOT_TYPE_STATUS, // Status frame (1Hz)
+	SLOT_TYPE_INFO,   // Device info (10Hz)
+	SLOT_TYPE_MAG,    // Magnetometer (5Hz, if enabled)
+	SLOT_TYPE_QUAT    // Quaternion data (fills remaining slots)
+} slot_type_t;
+
+// Schedule tick counter
+static uint32_t schedule_tick = 0;
+
+// Get slot type for current tick
+static slot_type_t get_slot_type(uint32_t tick, uint8_t tracker_id)
+{
+	// PING: Each tracker at different time (0ms, 100ms, 200ms, ...)
+	// Distributed across 1 second to avoid receiver overload
+	uint32_t ping_interval = TDMA_PACKETS_PER_SECOND / 10;
+	uint32_t is_ping_tick = (tracker_id * ping_interval) % TDMA_PACKETS_PER_SECOND;
+	if (tick == is_ping_tick) {
+		return SLOT_TYPE_PING;
+	}
+
+	// Status: 500ms after PING
+	uint32_t is_status_tick = (is_ping_tick + (TDMA_PACKETS_PER_SECOND / 2)) % TDMA_PACKETS_PER_SECOND;
+	if (tick == is_status_tick) {
+		return SLOT_TYPE_STATUS;
+	}
+
+	// Info: 10Hz
+	uint32_t info_interval = TDMA_PACKETS_PER_SECOND / 10;
+	if (tick % info_interval == (info_interval / 2)) {
+		return SLOT_TYPE_INFO;
+	}
+
+#ifdef CONFIG_SENSOR_USE_MAG
+	// Mag: 5Hz
+	uint32_t mag_interval = TDMA_PACKETS_PER_SECOND / 5;
+	if (tick % mag_interval == 1) {
+		return SLOT_TYPE_MAG;
+	}
+#endif
+
+	// Quat: Fill remaining slots
+	return SLOT_TYPE_QUAT;
+}
+
+// Slot-based scheduling state
+static int64_t last_slot_time = 0;                // Last time we processed a slot
+static uint32_t last_processed_tick = UINT32_MAX; // Last slot tick processed (UINT32_MAX = no slot processed yet)
+
+// Get current slot tick based on sync status
+// Returns: slot tick (0 to TDMA_PACKETS_PER_SECOND-1)
+static uint32_t get_current_slot_tick(void)
+{
+	uint32_t server_time = esb_get_server_time();
+
+	if (server_time > 0) {
+		// Synchronized: use server time based TDMA
+		uint64_t server_time_us = esb_get_server_time_us_64();
+		uint32_t slot_in_second = (server_time_us / TDMA_PACKET_INTERVAL_US) % TDMA_PACKETS_PER_SECOND;
+		return slot_in_second;
+	} else {
+		// Not synchronized: use schedule_tick
+		return schedule_tick % TDMA_PACKETS_PER_SECOND;
+	}
+}
+
+// Sleep until next slot starts
+// Returns: time slept (0 if already in slot window)
+static uint32_t sleep_until_next_slot()
+{
+	uint32_t server_time = esb_get_server_time();
+
+	if (server_time > 0) {
+		// Synchronized: calculate sleep time to next slot
+		uint64_t server_time_us = esb_get_server_time_us_64();
+		uint32_t current_slot_us = server_time_us % TDMA_PACKET_INTERVAL_US;
+
+		// Always sleep until the NEXT slot starts
+		// If we're in the current slot, wait for it to end
+		uint32_t sleep_us = TDMA_PACKET_INTERVAL_US - current_slot_us + TDMA_GUARD_TIME_US;
+		if (sleep_us < 300) {
+			k_busy_wait(sleep_us);
+		} else {
+			k_usleep(sleep_us);
+		}
+		return sleep_us;
+	} else {
+		// Not synchronized: use schedule_tick with fixed interval
+		k_usleep(600);
+		return 600;
+	}
+}
+
 uint32_t get_ping_interval_ms(void)
 {
-	return ping_interval_ms;
+	return PING_INTERVAL_MS;
 }
 
 static void connection_thread(void);
-K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(connection_thread_id, 1024, connection_thread, NULL, NULL, NULL, 5, 0, 0);
 
 void connection_clocks_request_start(void)
 {
@@ -87,27 +178,6 @@ void connection_set_id(uint8_t id)
 	tracker_id = id;
 }
 
-uint8_t connection_get_packet_sequence(void)
-{
-	return packet_sequence;
-}
-
-static void write_packet_data(const uint8_t *data)
-{
-	atomic_val_t current_write = atomic_get(&write_idx);
-	atomic_val_t current_read = atomic_get(&read_idx);
-
-	atomic_val_t next_write = (current_write + 1) % PACKET_BUFFER_SIZE;
-	if (next_write == current_read) {
-		LOG_WRN("Packet buffer full, dropping packet");
-		return;
-	}
-
-	memcpy(packet_buffer[current_write], data, 16);
-
-	atomic_set(&write_idx, next_write);
-}
-
 void connection_update_sensor_ids(int imu, int mag)
 {
 	imu_id = get_server_constant_imu_id(imu);
@@ -115,23 +185,19 @@ void connection_update_sensor_ids(int imu, int mag)
 }
 
 static int64_t quat_update_time = 0;
-static int64_t last_quat_time = 0;
 static bool send_precise_quat;
 
 void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 {
 	// data_time is in system ticks, nonzero means valid measurement
 	// TODO: use data_time to measure latency! the latency should be calculated up to before radio sent data
-	send_precise_quat = q_epsilon(q, sensor_q, 0.005);
+	send_precise_quat = q_epsilon(q, sensor_q, 0.005f);
 	memcpy(sensor_q, q, sizeof(sensor_q));
 	memcpy(sensor_a, a, sizeof(sensor_a));
 	quat_update_time = k_uptime_get();
 }
 
 static int64_t mag_update_time = 0;
-#ifdef CONFIG_SENSOR_USE_MAG
-static int64_t last_mag_time = 0;
-#endif
 
 void connection_update_sensor_mag(float *m)
 {
@@ -196,7 +262,7 @@ void connection_update_status(int status)
 
 void connection_write_packet_0() // device info
 {
-	uint8_t data[16] = {0};
+	uint8_t data[17] = {0};
 	data[0] = 0; // packet 0
 	data[1] = tracker_id;
 	data[2] = batt;
@@ -212,15 +278,16 @@ void connection_write_packet_0() // device info
 	data[12] = FW_VERSION_MAJOR & 255;                                                      // fw_major
 	data[13] = FW_VERSION_MINOR & 255;                                                      // fw_minor
 	data[14] = FW_VERSION_PATCH & 255;                                                      // fw_patch
-	data[15] = 0; // rssi (supplied by receiver)
+	data[15] = 0;                 // rssi (supplied by receiver)
+	data[16] = packet_sequence++; // sequence number
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	esb_write(data, no_ack, sizeof(data));
+	// hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_1() // full precision quat and accel
 {
-	uint8_t data[16] = {0};
+	uint8_t data[17] = {0};
 	data[0] = 1; // packet 1
 	data[1] = tracker_id;
 	uint16_t *buf = (uint16_t *)&data[2];
@@ -231,15 +298,16 @@ void connection_write_packet_1() // full precision quat and accel
 	buf[4] = TO_FIXED_7(sensor_a[0]); // range is ±256m/s² or ±26.1g
 	buf[5] = TO_FIXED_7(sensor_a[1]);
 	buf[6] = TO_FIXED_7(sensor_a[2]);
+	data[16] = packet_sequence++; // sequence number
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	esb_write(data, no_ack, sizeof(data));
+	// hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_2() // reduced precision quat and accel with battery,
 								 // temp, and rssi
 {
-	uint8_t data[16] = {0};
+	uint8_t data[17] = {0};
 	data[0] = 2; // packet 2
 	data[1] = tracker_id;
 	data[2] = batt;
@@ -269,28 +337,30 @@ void connection_write_packet_2() // reduced precision quat and accel with batter
 	buf[0] = TO_FIXED_7(sensor_a[0]);
 	buf[1] = TO_FIXED_7(sensor_a[1]);
 	buf[2] = TO_FIXED_7(sensor_a[2]);
-	data[15] = 0; // rssi (supplied by receiver)
+	data[15] = 0;                 // rssi (supplied by receiver)
+	data[16] = packet_sequence++; // sequence number
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	esb_write(data, no_ack, sizeof(data));
+	// hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_3() // status
 {
-	uint8_t data[16] = {0};
+	uint8_t data[17] = {0};
 	data[0] = 3; // packet 3
 	data[1] = tracker_id;
 	data[2] = tracker_svr_status;
 	data[3] = tracker_status;
-	data[15] = 0; // rssi (supplied by receiver)
+	data[15] = 0;                 // rssi (supplied by receiver)
+	data[16] = packet_sequence++; // sequence number
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	esb_write(data, no_ack, sizeof(data));
+	// hid_write_packet_n(data); // TODO:
 }
 
 void connection_write_packet_4() // full precision quat and magnetometer
 {
-	uint8_t data[16] = {0};
+	uint8_t data[17] = {0};
 	data[0] = 4; // packet 4
 	data[1] = tracker_id;
 	uint16_t *buf = (uint16_t *)&data[2];
@@ -301,9 +371,10 @@ void connection_write_packet_4() // full precision quat and magnetometer
 	buf[4] = TO_FIXED_10(sensor_m[0]); // range is ±32G
 	buf[5] = TO_FIXED_10(sensor_m[1]);
 	buf[6] = TO_FIXED_10(sensor_m[2]);
+	data[16] = packet_sequence++; // sequence number
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	esb_write(data, no_ack, sizeof(data));
+	// hid_write_packet_n(data); // TODO:
 }
 
 // TODO: get radio channel from receiver
@@ -315,136 +386,125 @@ void connection_write_packet_4() // full precision quat and magnetometer
 // TODO: queuing, status is lowest priority, info low priority, existing data highest priority (from sensor loop)
 
 // TODO: queue packets directly for HID, or maintain separate loop while connected by USB
-
-static int64_t last_info_time = 0;
-static int64_t last_status_time = 0;
-
-static int64_t last_sensor_quat_time = 0;
-#define SENSOR_QUAT_INTERVAL_MS 6
+static int64_t last_ping_time = 0;
 
 void connection_thread(void)
 {
-	uint8_t esb_packet[17];
-	// Adaptive PING interval based on connection state
-	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
+	// Slot-based scheduling
 	while (1) {
 		int64_t now = k_uptime_get();
 
-		// Adjust PING interval based on connection health
-		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-			// During connection errors, slow down PING to every 2.5 seconds
-			ping_interval_ms = 2500;
-		} else {
-			// Normal operation - default interval
-			ping_interval_ms = PING_INTERVAL_MS;
-		}
-
+		// Wait for ESB ready
 		if (!esb_ready()) {
 			k_msleep(100);
 			continue;
 		}
 
-		// PING has highest priority
-		// This ensures connection recovery attempts continue even during errors
-		bool should_send_ping = false;
-		uint32_t server_time = esb_get_server_time();
-
-		if (server_time > 0) {
-			// TDMA scheduling: 10 trackers, 100ms slot each in 1000ms period
-			uint32_t slot_offset = (tracker_id % 10) * 100; // ms
-			uint32_t current_slot = server_time % 1000;
-
-			// Calculate slot difference with wrap-around handling
-			int32_t slot_diff = (int32_t)current_slot - (int32_t)slot_offset;
-			if (slot_diff < 0) {
-				slot_diff += 1000;
-			}
-
-			// Send if within slot window (+10ms) and minimum interval elapsed
-			if (slot_diff >= 0 && slot_diff <= 10 && now - last_ping_time >= (ping_interval_ms - 100)) {
-				should_send_ping = true;
-			}
-		} else {
-			// Fallback: not synced yet, use original time-based scheduling
-			if (now - last_ping_time >= ping_interval_ms) {
-				should_send_ping = true;
-			}
-		}
-
-		if (should_send_ping) {
-			uint8_t ping[ESB_PING_LEN] = {0};
-			ping[0] = ESB_PING_TYPE;
-			ping[1] = connection_get_id();
-			ping[2] = 0;               // ping counter, set in esb_write
-			memset(&ping[3], 0x00, 4); // reserved, should set to server time after sync
-			ping[7] = esb_get_ping_ack_flag();
-			memset(&ping[8], 0x00, 4);  // reserved
-			ping[ESB_PING_LEN - 1] = 0; // crc bit, set in esb_write
-			esb_write(ping, false, ESB_PING_LEN);
-			last_ping_time = now;
-			k_usleep(300);
-			continue;
-		}
-
-		// skip sensor data if connection error
+		// Skip sensor data if connection error
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
+			// During connection errors, try to send PING at reduced rate
+			uint32_t server_time = esb_get_server_time();
+			if (server_time == 0) {
+				// Not synced, use time-based PING every 2.5s
+				if (now - last_slot_time >= 2500) {
+					uint8_t ping[ESB_PING_LEN] = {0};
+					ping[0] = ESB_PING_TYPE;
+					ping[1] = connection_get_id();
+					ping[2] = 0;
+					memset(&ping[3], 0x00, 4);
+					ping[7] = esb_get_ping_ack_flag();
+					memset(&ping[8], 0x00, 4);
+					ping[ESB_PING_LEN - 1] = 0;
+					esb_write(ping, false, ESB_PING_LEN);
+					last_slot_time = now;
+					last_ping_time = k_uptime_get();
+				}
+			}
 			k_msleep(100);
 			continue;
 		}
 
-		atomic_val_t current_read = atomic_get(&read_idx);
-		atomic_val_t current_write = atomic_get(&write_idx);
+		// Get current slot and determine packet type
+		uint32_t current_tick = get_current_slot_tick();
 
-		if (current_read != current_write) {
-			memcpy(esb_packet, packet_buffer[current_read], 16);
-			esb_packet[16] = packet_sequence++;
-
-			atomic_set(&read_idx, (current_read + 1) % PACKET_BUFFER_SIZE);
-
-			esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
+		// Skip if we already processed this slot
+		if (current_tick == last_processed_tick) {
 			k_usleep(300);
 			continue;
 		}
-		// mag is higher priority (skip accel, quat is full precision)
-#ifdef CONFIG_SENSOR_USE_MAG
-		else if (mag_update_time && now - last_mag_time > 200) {
-			mag_update_time = 0; // data has been sent
-			last_mag_time = now;
-			connection_write_packet_4();
-			continue;
-		}
-#endif
-		// if time for info and precise quat not needed
-		else if (quat_update_time && !send_precise_quat && now - last_info_time > 100) {
-			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
-				quat_update_time = 0;
-				last_quat_time = now;
-				last_sensor_quat_time = now;
-				last_info_time = now;
-				connection_write_packet_2();
-				continue;
+
+		now = k_uptime_get();
+		slot_type_t slot = get_slot_type(current_tick, tracker_id);
+
+		// Process slot based on type
+		bool packet_sent = false;
+		switch (slot) {
+		case SLOT_TYPE_PING: {
+			if ((now - last_ping_time) > (PING_INTERVAL_MS - 100)) {
+				last_ping_time = k_uptime_get();
+				uint8_t ping[ESB_PING_LEN] = {0};
+				ping[0] = ESB_PING_TYPE;
+				ping[1] = connection_get_id();
+				ping[2] = 0;               // ping counter, set in esb_write
+				memset(&ping[3], 0x00, 4); // reserved
+				ping[7] = esb_get_ping_ack_flag();
+				memset(&ping[8], 0x00, 4);  // reserved
+				ping[ESB_PING_LEN - 1] = 0; // crc bit, set in esb_write
+				esb_write(ping, false, ESB_PING_LEN);
+				packet_sent = true;
+				break;
 			}
 		}
-		// send quat otherwise
-		else if (quat_update_time) {
-			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
-				quat_update_time = 0;
-				last_quat_time = now;
-				last_sensor_quat_time = now;
-				connection_write_packet_1();
-				continue;
-			}
-		} else if (now - last_info_time > 100) {
-			last_info_time = now;
-			connection_write_packet_0();
-			continue;
-		} else if (now - last_status_time > 1000) {
-			last_status_time = now;
+
+		case SLOT_TYPE_STATUS:
 			connection_write_packet_3();
-			continue;
-		} else {
-			connection_clocks_request_stop();
+			packet_sent = true;
+			break;
+
+		case SLOT_TYPE_INFO:
+			connection_write_packet_0();
+			packet_sent = true;
+			break;
+
+		case SLOT_TYPE_MAG:
+#ifdef CONFIG_SENSOR_USE_MAG
+			if (mag_update_time) {
+				mag_update_time = 0;
+				connection_write_packet_4();
+				packet_sent = true;
+			} else if (quat_update_time) {
+				// No mag data, send quat instead
+				quat_update_time = 0;
+				if (send_precise_quat) {
+					connection_write_packet_1();
+				} else {
+					connection_write_packet_2();
+				}
+				packet_sent = true;
+			}
+#endif
+			break;
+
+		case SLOT_TYPE_QUAT:
+			if (quat_update_time) {
+				quat_update_time = 0;
+				if (send_precise_quat) {
+					connection_write_packet_1();
+				} else {
+					connection_write_packet_2();
+				}
+				packet_sent = true;
+			}
+			break;
 		}
-		k_usleep(600);
+
+		// Update slot state
+		last_processed_tick = current_tick;
+		last_slot_time = k_uptime_get();
+		if (esb_get_server_time() == 0) {
+			schedule_tick++;
+		}
+
+		sleep_until_next_slot();
 	}
 }
