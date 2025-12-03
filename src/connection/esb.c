@@ -101,11 +101,20 @@ struct ping_history_entry {
 static struct ping_history_entry ping_history[PING_HISTORY_SIZE] = {0};
 static uint8_t ping_history_idx = 0;
 
-static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
-static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
-static int64_t remote_command_receive_time = 0;
+// Remote command state machine
+typedef enum {
+	CMD_STATE_IDLE,      // No command active
+	CMD_STATE_RECEIVED,  // Command received, waiting for NORMAL confirmation
+	CMD_STATE_CONFIRMED, // NORMAL received, delay countdown started
+	CMD_STATE_EXECUTED   // Command executed, waiting for final NORMAL acknowledgment
+} remote_command_state_t;
+
+static remote_command_state_t cmd_state = CMD_STATE_IDLE;
+static uint8_t current_command = ESB_PONG_FLAG_NORMAL;
+static int64_t state_enter_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
 #define REMOTE_COMMAND_DELAY_MS 5000
+#define REMOTE_COMMAND_TIMEOUT_MS 15000 // 15 second timeout for stuck states
 
 // Server time synchronization for TDMA scheduling (using ticks)
 static bool server_time_synced = false;
@@ -652,11 +661,14 @@ void event_handler(struct esb_evt const *event)
 					}
 
 					// handle remote commands and delayed execution
+					// Handle remote command state machine
 					if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-						if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
-							// new command received
-							received_remote_command = pong_flags;
-							remote_command_receive_time = k_uptime_get();
+						// Received a command from receiver
+						if (cmd_state == CMD_STATE_IDLE || cmd_state == CMD_STATE_EXECUTED) {
+							// Accept new command only when IDLE or after previous command executed
+							current_command = pong_flags;
+							cmd_state = CMD_STATE_RECEIVED;
+							state_enter_time = k_uptime_get();
 
 							// For SET_CHANNEL command, extract channel value from data[8-11]
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
@@ -700,28 +712,54 @@ void event_handler(struct esb_evt const *event)
 							}
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
 								LOG_INF(
-									"Remote command %s (0x%02X) received, channel=%u, will execute in %dms",
+									"Remote command %s (0x%02X) received, channel=%u, waiting for "
+									"confirmation",
 									cmd_name,
 									pong_flags,
-									received_channel_value,
-									REMOTE_COMMAND_DELAY_MS
+									received_channel_value
 								);
 							} else {
 								LOG_INF(
-									"Remote command %s (0x%02X) received, will execute in %dms",
+									"Remote command %s (0x%02X) received, waiting for confirmation",
 									cmd_name,
-									pong_flags,
-									REMOTE_COMMAND_DELAY_MS
+									pong_flags
 								);
 							}
+						} else {
+							// Already processing a command, ignore new command
+							LOG_DBG(
+								"Ignoring new command 0x%02X (current state: %d, command: 0x%02X)",
+								pong_flags,
+								cmd_state,
+								current_command
+							);
 						}
 					} else {
-						// received NORMAL flag, indicates the receiver has confirmed our echo
-						if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
-							LOG_DBG("Receiver confirmed command 0x%02X, resetting state", acked_remote_command);
-							received_remote_command = ESB_PONG_FLAG_NORMAL;
-							acked_remote_command = ESB_PONG_FLAG_NORMAL;
-							remote_command_receive_time = 0;
+						// Received NORMAL flag from receiver
+						switch (cmd_state) {
+						case CMD_STATE_RECEIVED:
+							// Receiver confirmed our echo, start delay countdown
+							cmd_state = CMD_STATE_CONFIRMED;
+							state_enter_time = k_uptime_get();
+							LOG_INF(
+								"Command 0x%02X confirmed by receiver, starting %dms delay",
+								current_command,
+								REMOTE_COMMAND_DELAY_MS
+							);
+							break;
+
+						case CMD_STATE_EXECUTED:
+							// Receiver acknowledged execution, reset to IDLE
+							LOG_INF("Command 0x%02X execution acknowledged, resetting to IDLE", current_command);
+							cmd_state = CMD_STATE_IDLE;
+							current_command = ESB_PONG_FLAG_NORMAL;
+							state_enter_time = 0;
+							break;
+
+						case CMD_STATE_IDLE:
+						case CMD_STATE_CONFIRMED:
+							// NORMAL in these states is expected (no-op)
+							break;
 						}
 					}
 				}
@@ -1191,11 +1229,9 @@ bool esb_ready(void)
 
 uint8_t esb_get_ping_ack_flag(void)
 {
-	if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
-		return acked_remote_command;
-	}
-	if (received_remote_command != ESB_PONG_FLAG_NORMAL) {
-		return received_remote_command;
+	// Return current command status based on state machine
+	if (cmd_state != CMD_STATE_IDLE) {
+		return current_command; // Echo command in all non-IDLE states
 	}
 	return ESB_PONG_FLAG_NORMAL;
 }
@@ -1284,125 +1320,132 @@ static void esb_thread(void)
 		}
 		int64_t now_idle = k_uptime_get();
 
-		if (received_remote_command != ESB_PONG_FLAG_NORMAL && received_remote_command != acked_remote_command
-			&& remote_command_receive_time > 0) {
-			if (now_idle - remote_command_receive_time >= REMOTE_COMMAND_DELAY_MS) {
-				switch (received_remote_command) {
-				case ESB_PONG_FLAG_SHUTDOWN:
-					LOG_WRN("Executing remote command: SHUTDOWN");
-					sys_request_system_off(false);
-					break;
+		// Handle remote command execution based on state machine
 
-				case ESB_PONG_FLAG_CALIBRATE:
-					LOG_INF("Executing remote command: CALIBRATE");
-					sensor_request_calibration();
-					break;
+		// Timeout protection: reset if stuck in non-IDLE state too long
+		if (cmd_state != CMD_STATE_IDLE && (now_idle - state_enter_time > REMOTE_COMMAND_TIMEOUT_MS)) {
+			LOG_WRN("Command 0x%02X timeout in state %d, resetting to IDLE", current_command, cmd_state);
+			cmd_state = CMD_STATE_IDLE;
+			current_command = ESB_PONG_FLAG_NORMAL;
+			state_enter_time = 0;
+		}
 
-				case ESB_PONG_FLAG_SIX_SIDE_CAL:
+		// Execute command when in CONFIRMED state and delay has elapsed
+		if (cmd_state == CMD_STATE_CONFIRMED && (now_idle - state_enter_time >= REMOTE_COMMAND_DELAY_MS)) {
+			switch (current_command) {
+			case ESB_PONG_FLAG_SHUTDOWN:
+				LOG_WRN("Executing remote command: SHUTDOWN");
+				sys_request_system_off(false);
+				break;
+
+			case ESB_PONG_FLAG_CALIBRATE:
+				LOG_INF("Executing remote command: CALIBRATE");
+				sensor_request_calibration();
+				break;
+
+			case ESB_PONG_FLAG_SIX_SIDE_CAL:
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-					LOG_INF("Executing remote command: SIX_SIDE_CAL");
-					sensor_request_calibration_6_side();
+				LOG_INF("Executing remote command: SIX_SIDE_CAL");
+				sensor_request_calibration_6_side();
 #else
-					LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
+				LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
 #endif
-					break;
+				break;
 
-				case ESB_PONG_FLAG_MEOW:
-					LOG_INF("Executing remote command: MEOW");
-					remote_print_meow();
-					break;
+			case ESB_PONG_FLAG_MEOW:
+				LOG_INF("Executing remote command: MEOW");
+				remote_print_meow();
+				break;
 
-				case ESB_PONG_FLAG_SCAN:
-					LOG_INF("Executing remote command: SCAN");
-					sensor_request_scan(true);
-					break;
+			case ESB_PONG_FLAG_SCAN:
+				LOG_INF("Executing remote command: SCAN");
+				sensor_request_scan(true);
+				break;
 
-				case ESB_PONG_FLAG_MAG_CLEAR:
+			case ESB_PONG_FLAG_MAG_CLEAR:
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
-					LOG_INF("Executing remote command: MAG_CLEAR");
-					sensor_calibration_clear_mag(NULL, true);
+				LOG_INF("Executing remote command: MAG_CLEAR");
+				sensor_calibration_clear_mag(NULL, true);
 #else
-					LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
+				LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
 #endif
-					break;
+				break;
 
-				case ESB_PONG_FLAG_REBOOT:
-					LOG_WRN("Executing remote command: REBOOT");
-					sys_request_system_reboot(false);
-					break;
+			case ESB_PONG_FLAG_REBOOT:
+				LOG_WRN("Executing remote command: REBOOT");
+				sys_request_system_reboot(false);
+				break;
 
-				case ESB_PONG_FLAG_CLEAR:
-					LOG_WRN("Executing remote command: CLEAR (clear pairing)");
-					esb_clear_pair();
-					break;
+			case ESB_PONG_FLAG_CLEAR:
+				LOG_WRN("Executing remote command: CLEAR (clear pairing)");
+				esb_clear_pair();
+				break;
 
-				case ESB_PONG_FLAG_DFU:
+			case ESB_PONG_FLAG_DFU:
 #if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
-					LOG_WRN("Executing remote command: DFU (enter bootloader)");
+				LOG_WRN("Executing remote command: DFU (enter bootloader)");
 #if CONFIG_BUILD_OUTPUT_UF2
-					NRF_POWER->GPREGRET = 0x57;
-					k_msleep(100);
+				NRF_POWER->GPREGRET = 0x57;
+				k_msleep(100);
 #endif
-					sys_request_system_reboot(false);
+				sys_request_system_reboot(false);
 #else
-					LOG_WRN("Remote command: DFU not supported (no bootloader)");
+				LOG_WRN("Remote command: DFU not supported (no bootloader)");
 #endif
-					break;
+				break;
 
-				case ESB_PONG_FLAG_SET_CHANNEL: {
-					// Validate channel value (0-100)
-					if (received_channel_value <= 100) {
-						LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
-						// Save to retained memory
-						retained->rf_channel = (uint8_t)received_channel_value;
-						retained_update();
-						// Save to NVS
-						sys_write(
-							RF_CHANNEL_ID,
-							&retained->rf_channel,
-							&retained->rf_channel,
-							sizeof(retained->rf_channel)
-						);
-						LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
-						// Reinitialize ESB with new channel
-						esb_deinitialize();
-						k_msleep(10);
-						esb_initialize(true); // Channel will be applied inside esb_initialize
-						LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
-					} else {
-						LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
-					}
-				} break;
-
-				case ESB_PONG_FLAG_CLEAR_CHANNEL:
-					LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
-					// Clear saved channel (set to 0xFF = use default)
-					retained->rf_channel = 0xFF;
+			case ESB_PONG_FLAG_SET_CHANNEL: {
+				// Validate channel value (0-100)
+				if (received_channel_value <= 100) {
+					LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
+					// Save to retained memory
+					retained->rf_channel = (uint8_t)received_channel_value;
 					retained_update();
+					// Save to NVS
 					sys_write(
 						RF_CHANNEL_ID,
 						&retained->rf_channel,
 						&retained->rf_channel,
 						sizeof(retained->rf_channel)
 					);
-					LOG_INF("RF channel cleared, will use default on next boot");
-					// Reinitialize ESB with default channel
+					LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
+					// Reinitialize ESB with new channel
 					esb_deinitialize();
 					k_msleep(10);
-					esb_initialize(true); // Will use default channel since rf_channel is 0xFF
-					LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
-					break;
-
-				default:
-					LOG_WRN("Unknown remote command: 0x%02X", received_remote_command);
-					break;
+					esb_initialize(true); // Channel will be applied inside esb_initialize
+					LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
+				} else {
+					LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
 				}
+			} break;
 
-				acked_remote_command = received_remote_command;
+			case ESB_PONG_FLAG_CLEAR_CHANNEL:
+				LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
+				// Clear saved channel (set to 0xFF = use default)
+				retained->rf_channel = 0xFF;
+				retained_update();
+				sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
+				LOG_INF("RF channel cleared, will use default on next boot");
+				// Reinitialize ESB with default channel
+				esb_deinitialize();
+				k_msleep(10);
+				esb_initialize(true); // Will use default channel since rf_channel is 0xFF
+				LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
+				break;
 
-				if (received_remote_command == ESB_PONG_FLAG_SHUTDOWN) {
-					return;
-				}
+			default:
+				LOG_WRN("Unknown remote command: 0x%02X", current_command);
+				break;
+			}
+
+			// Transition to EXECUTED state
+			cmd_state = CMD_STATE_EXECUTED;
+			state_enter_time = now_idle; // Reset timer for EXECUTED state
+			LOG_INF("Command 0x%02X execution complete", current_command);
+
+			// Early return for SHUTDOWN command
+			if (current_command == ESB_PONG_FLAG_SHUTDOWN) {
+				return;
 			}
 		}
 
