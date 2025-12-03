@@ -33,7 +33,7 @@ static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_st
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-#define PACKET_BUFFER_SIZE 4
+#define PACKET_BUFFER_SIZE 5
 static uint8_t packet_buffer[PACKET_BUFFER_SIZE][16] = {0};
 static atomic_t write_idx = ATOMIC_INIT(0);
 static atomic_t read_idx = ATOMIC_INIT(0);
@@ -382,7 +382,7 @@ void connection_thread(void)
 			ping[ESB_PING_LEN - 1] = 0; // crc bit, set in esb_write
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
-			k_usleep(300);
+			k_usleep(350);
 			continue;
 		}
 
@@ -402,7 +402,7 @@ void connection_thread(void)
 			atomic_set(&read_idx, (current_read + 1) % PACKET_BUFFER_SIZE);
 
 			esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
-			k_usleep(300);
+			k_usleep(350);
 			continue;
 		}
 		// mag is higher priority (skip accel, quat is full precision)
@@ -442,9 +442,7 @@ void connection_thread(void)
 			last_status_time = now;
 			connection_write_packet_3();
 			continue;
-		} else {
-			connection_clocks_request_stop();
 		}
-		k_usleep(600);
+		k_usleep(700);
 	}
 }
