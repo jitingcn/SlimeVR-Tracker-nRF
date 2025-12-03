@@ -106,7 +106,7 @@ static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
-#define REMOTE_COMMAND_DELAY_MS 5000
+#define REMOTE_COMMAND_DELAY_MS 1500
 
 // Server time synchronization for TDMA scheduling (using ticks)
 static bool server_time_synced = false;
