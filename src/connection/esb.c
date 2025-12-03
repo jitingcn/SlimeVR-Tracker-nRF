@@ -36,6 +36,7 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/kernel.h>
 
+#include <stdlib.h>
 #include "esb.h"
 
 uint8_t last_reset = 0;
@@ -582,41 +583,107 @@ void event_handler(struct esb_evt const *event)
 						}
 
 						if (rtt_us < 3000) {
-							int32_t estimated_air_ticks = k_us_to_ticks_floor32(150);
+							// Calculate RTT in ticks for one-way delay compensation
+							uint32_t rtt_ticks = current_rx_ticks - ping_ticks_for_this_ctr;
+							// One-way delay is approximately RTT/2
+							int32_t one_way_delay_ticks = rtt_ticks / 2;
+
+							// NTP-style offset calculation: offset = (T2 - T1) - one_way_delay
+							// This removes the transmission delay from the offset
 							int32_t server_offset_ticks
-								= (int32_t)(ping_rx_ticks - (ping_ticks_for_this_ctr + estimated_air_ticks));
+								= (int32_t)(ping_rx_ticks - ping_ticks_for_this_ctr - one_way_delay_ticks);
+
+							// Calculate current skew contribution (drift since last sync)
+							int32_t current_skew = 0;
+							if (g_clock_skew_fixed != 0 && g_last_sync_local_ticks > 0) {
+								uint32_t elapsed = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
+								current_skew = (int32_t)(((int64_t)elapsed * g_clock_skew_fixed) >> SKEW_SHIFT);
+							}
+
+							// Predict where the offset should be now, based on previous offset + drift
+							int32_t predicted_offset = g_server_ticks_offset + current_skew;
+							int32_t offset_diff = server_offset_ticks - predicted_offset;
+
 							int32_t estimated_server_ticks = (int32_t)(server_offset_ticks + sys_clock_tick_get_32());
 
-							LOG_INF(
-								"update server offset, old offset: %d, new offset: %d, diff: %d",
+							LOG_DBG(
+								"update server offset, old: %d, pred: %d, new: %d, diff: %d (rtt=%u, skew=%d)",
 								g_server_ticks_offset,
+								predicted_offset,
 								server_offset_ticks,
-								server_offset_ticks - g_server_ticks_offset
+								offset_diff,
+								rtt_ticks,
+								current_skew
 							);
-							g_last_rx_raw_ticks = ping_rx_ticks;
+							// g_last_rx_raw_ticks update moved to after skew calculation
 
 							// Calculate skew BEFORE updating g_last_sync_local_ticks
-							if (pong_flags == ESB_PONG_FLAG_NORMAL && g_time_initialized
-								&& g_last_sync_local_ticks > 0) {
-								int32_t remote_ticks_diff
-									= ((int32_t)rx_payload.data[8] << 24) | ((int32_t)rx_payload.data[9] << 16)
-									| ((int32_t)rx_payload.data[10] << 8) | ((int32_t)rx_payload.data[11]);
+							if (pong_flags == ESB_PONG_FLAG_NORMAL && g_time_initialized && g_last_sync_local_ticks > 0
+								&& g_last_rx_raw_ticks > 0) {
 
-								uint32_t interval = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
-								// Only update if interval is sufficient (e.g. > 100ms) to avoid noise
-								if (interval > 3200) { // ~100ms
-									// Calculate skew error in fixed point
-									int64_t diff_shifted = ((int64_t)remote_ticks_diff) << SKEW_SHIFT;
-									int32_t skew_error_fixed = (int32_t)(diff_shifted / interval);
+								// Calculate intervals based on raw timestamps (independent of offset)
+								uint32_t local_interval = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
+								uint32_t remote_interval = ping_rx_ticks - g_last_rx_raw_ticks;
 
-									// Accumulate skew error (Integrator) with Gain 1/8 (faster convergence)
-									g_clock_skew_fixed += skew_error_fixed >> 3;
+								// Drift = Remote Interval - Local Interval
+								// If drift < 0, remote is slower (or local is faster)
+								int32_t drift = (int32_t)(remote_interval - local_interval);
+
+								// Calculate expected drift based on current skew compensation
+								// This is what we are already compensating for
+								int32_t expected_drift
+									= (int32_t)(((int64_t)local_interval * g_clock_skew_fixed) >> SKEW_SHIFT);
+
+								// Calculate residual drift (error term)
+								// This is the drift that is NOT yet compensated
+								int32_t residual_drift = drift - expected_drift;
+
+								// Outlier detection: large deviation may indicate restart or clock jump
+								if (abs(drift) > 3000) {
+									// Reset skew on outlier - likely restart event
+									LOG_WRN(
+										"Large drift detected (%d ticks), resetting sync "
+										"(local_int=%u remote_int=%u)",
+										drift,
+										local_interval,
+										remote_interval
+									);
+									g_clock_skew_fixed = 0;
+									g_last_skew_update_time = 0;
+									g_time_initialized = false;
+								} else if (local_interval > 3200) { // Only update if interval is sufficient (> 100ms)
+									// Calculate skew error in fixed point based on RESIDUAL drift
+									int64_t diff_shifted = ((int64_t)residual_drift) << SKEW_SHIFT;
+									int32_t skew_error_fixed = (int32_t)(diff_shifted / local_interval);
+									int32_t abs_error = abs(skew_error_fixed);
+
+									// Adaptive gain control (hill-climbing algorithm)
+									// Fast descent to local minimum, then fine adjustment
+									int gain_shift;
+									const char *gain_desc;
+									if (abs_error > 1000) {
+										// Large error: fast convergence with gain 1/2
+										gain_shift = 1;
+										gain_desc = "fast";
+									} else if (abs_error > 100) {
+										// Medium error: normal adjustment with gain 1/4
+										gain_shift = 2;
+										gain_desc = "normal";
+									} else {
+										// Small error: fine tuning with gain 1/8
+										gain_shift = 3;
+										gain_desc = "fine";
+									}
+
+									// Accumulate skew error with adaptive gain
+									g_clock_skew_fixed += skew_error_fixed >> gain_shift;
 
 									g_last_skew_update_time = k_uptime_get();
-									LOG_INF(
-										"Skew update: diff=%d interval=%u error_fixed=%d total_skew_fixed=%d",
-										remote_ticks_diff,
-										interval,
+									LOG_DBG(
+										"Skew update (%s): drift=%d interval=%u error_fixed=%d total_skew_fixed=%d",
+										gain_desc,
+										drift,
+										local_interval,
 										skew_error_fixed,
 										g_clock_skew_fixed
 									);
@@ -632,11 +699,26 @@ void event_handler(struct esb_evt const *event)
 							if (!g_time_initialized) {
 								g_server_ticks_offset = server_offset_ticks;
 								g_time_initialized = true;
+								LOG_DBG("Server offset initialized: %d ticks", server_offset_ticks);
 							} else {
-								// Filter: New = Old + (Target - Old) / 4
-								// This dampens the impact of RTT spikes (like the 2.3ms case)
-								int32_t offset_diff = server_offset_ticks - g_server_ticks_offset;
-								g_server_ticks_offset += offset_diff / 4;
+								// Large offset jump detection (> 1 second ≈ 32000 ticks)
+								// Directly reset instead of slow filtering
+								if (abs(offset_diff) > 32000) {
+									LOG_WRN(
+										"Large offset jump detected (%d ticks), resetting offset "
+										"(old=%d new=%d)",
+										offset_diff,
+										g_server_ticks_offset,
+										server_offset_ticks
+									);
+									g_server_ticks_offset = server_offset_ticks;
+								} else {
+									// Filter: New = Predicted + (Target - Predicted) / 2
+									// We update from the PREDICTED value, not the old value
+									// This eliminates lag caused by the drift
+									g_server_ticks_offset = predicted_offset + (offset_diff / 2);
+									LOG_DBG("Offset update: diff=%d new_offset=%d", offset_diff, g_server_ticks_offset);
+								}
 							}
 
 							server_time_synced = true;
