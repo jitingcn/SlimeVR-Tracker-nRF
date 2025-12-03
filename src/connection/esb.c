@@ -883,7 +883,7 @@ int esb_initialize(bool tx)
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 3;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 5;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
@@ -1144,6 +1144,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	}
 	if (!clock_status) {
 		clocks_start();
+		k_usleep(400);
 	}
 	if (data_length < 1) {
 		LOG_ERR("Invalid data length %u", data_length);
