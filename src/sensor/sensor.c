@@ -1007,8 +1007,8 @@ void sensor_loop(void)
 				packet_errors = 0;
 			}
 
-			// Also check if expected number of timesteps when using FIFO threshold
-			if (processed_timesteps && processed_timesteps != sensor_fifo_threshold)
+			// Also check if expected number of timesteps when using FIFO threshold, if FIFO threshold is being used
+			if (sensor_fifo_threshold && processed_timesteps && processed_timesteps != sensor_fifo_threshold)
 				LOG_WRN("Expected %d timestep%s, got %d", sensor_fifo_threshold, sensor_fifo_threshold == 1 ? "" : "s", processed_timesteps);
 
 			// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
