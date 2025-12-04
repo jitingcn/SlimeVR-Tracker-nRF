@@ -81,7 +81,7 @@ static bool esb_paired = false;
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 6, 0, 0);
 static int64_t last_tx_time = 0;
 
 static uint32_t ping_success_streak = 0; // consecutive success counter
@@ -1198,7 +1198,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		uint8_t this_ctr = tx_payload.data[2];
 		ping_history[ping_history_idx].counter = this_ctr;
 		ping_history[ping_history_idx].ping_ticks = sys_clock_tick_get_32();
-		LOG_INF("PING sent (ctr=%u)", (unsigned)tx_payload.data[2]);
+		LOG_DBG("PING sent (ctr=%u)", (unsigned)tx_payload.data[2]);
 		ping_pending = true;
 		ping_ctr_sent = tx_payload.data[2];
 		ping_send_time = k_uptime_get();

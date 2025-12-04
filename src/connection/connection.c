@@ -55,7 +55,7 @@ uint32_t get_ping_interval_ms(void)
 }
 
 static void connection_thread(void);
-K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 8, 0, 0);
 
 void connection_clocks_request_start(void)
 {
@@ -416,7 +416,7 @@ void connection_thread(void)
 #endif
 		// if time for info and precise quat not needed
 		else if (quat_update_time && !send_precise_quat && now - last_info_time > 100) {
-			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
+			if (now - last_sensor_quat_time > SENSOR_QUAT_INTERVAL_MS) {
 				quat_update_time = 0;
 				last_quat_time = now;
 				last_sensor_quat_time = now;
@@ -427,7 +427,7 @@ void connection_thread(void)
 		}
 		// send quat otherwise
 		else if (quat_update_time) {
-			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
+			if (now - last_sensor_quat_time > SENSOR_QUAT_INTERVAL_MS) {
 				quat_update_time = 0;
 				last_quat_time = now;
 				last_sensor_quat_time = now;
