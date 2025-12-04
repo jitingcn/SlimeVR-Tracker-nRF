@@ -81,6 +81,12 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_SET_CHANNEL 0x0A   // Set RF channel (data[8-11] contains channel value)
 #define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B // Clear RF channel setting (restore default)
 // Reserved for future use: 0x0C-0xFF
+#define ESB_PONG_FLAG_SENS_SET 0x0C
+#define ESB_PONG_FLAG_SENS_RESET 0x0D
+#define ESB_PONG_FLAG_RESET_ZRO 0x0E
+#define ESB_PONG_FLAG_RESET_ACC 0x0F
+#define ESB_PONG_FLAG_RESET_BAT 0x10
+#define ESB_PONG_FLAG_PING 0x11
 
 #define TDMA_NUM_TRACKERS 10
 #define TDMA_PACKETS_PER_SECOND 160 // Target TPS per tracker

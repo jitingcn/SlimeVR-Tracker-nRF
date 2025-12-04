@@ -38,6 +38,7 @@
 
 #include <stdlib.h>
 #include "esb.h"
+#include "console.h"
 
 uint8_t last_reset = 0;
 // const nrfx_timer_t m_timer = NRFX_TIMER_INSTANCE(1);
@@ -106,6 +107,7 @@ static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
+static float received_sens_data[3] = {0};   // Store sensitivity data
 #define REMOTE_COMMAND_DELAY_MS 1500
 
 // Server time synchronization for TDMA scheduling (using ticks)
@@ -555,7 +557,24 @@ void event_handler(struct esb_evt const *event)
 					uint8_t pong_flags = rx_payload.data[7];
 					uint32_t rtt_us = 0;
 
-					if (ping_ticks_for_this_ctr != 0) {
+					if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
+						// Special case: SENS_SET command repurposes time sync bytes for data
+						// Skip time sync update
+						int16_t x_int = (int16_t)((rx_payload.data[3] << 8) | rx_payload.data[4]);
+						int16_t y_int = (int16_t)((rx_payload.data[5] << 8) | rx_payload.data[6]);
+						int16_t z_int = (int16_t)((rx_payload.data[8] << 8) | rx_payload.data[9]);
+
+						received_sens_data[0] = (float)x_int / 100.0f;
+						received_sens_data[1] = (float)y_int / 100.0f;
+						received_sens_data[2] = (float)z_int / 100.0f;
+
+						LOG_INF(
+							"Received SENS_SET data: %.2f, %.2f, %.2f",
+							(double)received_sens_data[0],
+							(double)received_sens_data[1],
+							(double)received_sens_data[2]
+						);
+					} else if (ping_ticks_for_this_ctr != 0) {
 						// Calculate RTT: from PING send to PONG receive
 						// Note: current_rx_ticks - ping_ticks_for_this_ctr is the full RTT
 						uint32_t ticks_diff = current_rx_ticks - ping_ticks_for_this_ctr;
@@ -778,6 +797,24 @@ void event_handler(struct esb_evt const *event)
 								break;
 							case ESB_PONG_FLAG_SET_CHANNEL:
 								cmd_name = "SET_CHANNEL";
+								break;
+							case ESB_PONG_FLAG_SENS_SET:
+								cmd_name = "SENS_SET";
+								break;
+							case ESB_PONG_FLAG_SENS_RESET:
+								cmd_name = "SENS_RESET";
+								break;
+							case ESB_PONG_FLAG_RESET_ZRO:
+								cmd_name = "RESET_ZRO";
+								break;
+							case ESB_PONG_FLAG_RESET_ACC:
+								cmd_name = "RESET_ACC";
+								break;
+							case ESB_PONG_FLAG_RESET_BAT:
+								cmd_name = "RESET_BAT";
+								break;
+							case ESB_PONG_FLAG_PING:
+								cmd_name = "PING";
 								break;
 							}
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
@@ -1474,6 +1511,36 @@ static void esb_thread(void)
 					k_msleep(10);
 					esb_initialize(true); // Will use default channel since rf_channel is 0xFF
 					LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
+					break;
+
+				case ESB_PONG_FLAG_SENS_SET:
+					LOG_INF("Executing remote command: SENS_SET");
+					cmd_sens_set(received_sens_data[0], received_sens_data[1], received_sens_data[2]);
+					break;
+
+				case ESB_PONG_FLAG_SENS_RESET:
+					LOG_INF("Executing remote command: SENS_RESET");
+					cmd_sens_reset();
+					break;
+
+				case ESB_PONG_FLAG_RESET_ZRO:
+					LOG_INF("Executing remote command: RESET_ZRO");
+					cmd_reset_zro();
+					break;
+
+				case ESB_PONG_FLAG_RESET_ACC:
+					LOG_INF("Executing remote command: RESET_ACC");
+					cmd_reset_acc();
+					break;
+
+				case ESB_PONG_FLAG_RESET_BAT:
+					LOG_INF("Executing remote command: RESET_BAT");
+					cmd_reset_bat();
+					break;
+
+				case ESB_PONG_FLAG_PING:
+					LOG_INF("Executing remote command: PING");
+					cmd_ping_start();
 					break;
 
 				default:
