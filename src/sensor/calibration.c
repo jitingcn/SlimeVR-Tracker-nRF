@@ -637,37 +637,86 @@ static int isAccRest(float *acc, float *pre_acc, float threshold, int *t, int re
 // ZRO)
 int sensor_offsetBias(float *dest1, float *dest2)
 {
-	float rawData[3], last_a[3];
-	if (sensor_wait_accel(last_a, K_MSEC(1000))) {
+	float rawData[3];
+	float min_a[3], max_a[3];
+	float min_g[3], max_g[3];
+
+	// Initialize min/max with initial samples
+	if (sensor_wait_accel(min_a, K_MSEC(1000))) {
 		return -2; // Timeout
 	}
+	memcpy(max_a, min_a, sizeof(max_a));
+
+	if (sensor_wait_gyro(min_g, K_MSEC(1000))) {
+		return -2; // Timeout
+	}
+	memcpy(max_g, min_g, sizeof(max_g));
+
+#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	double accel_sum[3] = {0};
+#endif
+	double gyro_sum[3] = {0};
+
 	int64_t sampling_start_time = k_uptime_get();
 	int i = 0;
-	while (k_uptime_get() < sampling_start_time + 10000) {
+	while (k_uptime_get() < sampling_start_time + 15000) {
+		// Accumulate Accelerometer
 		if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 			return -2; // Timeout
 		}
-		if (!v_epsilon(rawData, last_a, 0.1)) {
-			return -1; // Motion detected
+
+		// Check Accel Motion (Min/Max method)
+		for (int j = 0; j < 3; j++) {
+			if (rawData[j] < min_a[j]) {
+				min_a[j] = rawData[j];
+			}
+			if (rawData[j] > max_a[j]) {
+				max_a[j] = rawData[j];
+			}
+			if (max_a[j] - min_a[j] > 0.1f) { // Threshold 0.1G
+				LOG_INF("Accel motion detected: axis %d range %.4f", j, (double)(max_a[j] - min_a[j]));
+				return -1;
+			}
 		}
+
 #if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		dest1[0] += rawData[0];
-		dest1[1] += rawData[1];
-		dest1[2] += rawData[2];
+		accel_sum[0] += rawData[0];
+		accel_sum[1] += rawData[1];
+		accel_sum[2] += rawData[2];
 #endif
+		// Accumulate Gyroscope
 		if (sensor_wait_gyro(rawData, K_MSEC(1000))) {
 			return -2; // Timeout
 		}
-		dest2[0] += rawData[0];
-		dest2[1] += rawData[1];
-		dest2[2] += rawData[2];
+
+		// Check Gyro Motion (Optimization)
+		for (int j = 0; j < 3; j++) {
+			if (rawData[j] < min_g[j]) {
+				min_g[j] = rawData[j];
+			}
+			if (rawData[j] > max_g[j]) {
+				max_g[j] = rawData[j];
+			}
+			if (max_g[j] - min_g[j] > 2.0f) { // Threshold 2.0 dps
+				LOG_INF("Gyro motion detected: axis %d range %.4f", j, (double)(max_g[j] - min_g[j]));
+				return -1;
+			}
+		}
+
+		gyro_sum[0] += rawData[0];
+		gyro_sum[1] += rawData[1];
+		gyro_sum[2] += rawData[2];
 		i++;
 	}
 	LOG_INF("Samples: %d", i);
+
+	if (i == 0) {
+		return -2;
+	}
 #if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	dest1[0] /= i;
-	dest1[1] /= i;
-	dest1[2] /= i;
+	dest1[0] = (float)(accel_sum[0] / i);
+	dest1[1] = (float)(accel_sum[1] / i);
+	dest1[2] = (float)(accel_sum[2] / i);
 	if (dest1[0] > 0.9f) {
 		dest1[0] -= 1.0f; // Remove gravity from the x-axis accelerometer bias calculation
 	} else if (dest1[0] < -0.9f) {
@@ -684,9 +733,9 @@ int sensor_offsetBias(float *dest1, float *dest2)
 		return -1;
 	}
 #endif
-	dest2[0] /= i;
-	dest2[1] /= i;
-	dest2[2] /= i;
+	dest2[0] = (float)(gyro_sum[0] / i);
+	dest2[1] = (float)(gyro_sum[1] / i);
+	dest2[2] = (float)(gyro_sum[2] / i);
 	return 0;
 }
 
