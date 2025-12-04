@@ -680,9 +680,9 @@ int sensor_offsetBias(float *dest1, float *dest2)
 		}
 
 #if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		accel_sum[0] += rawData[0];
-		accel_sum[1] += rawData[1];
-		accel_sum[2] += rawData[2];
+		accel_sum[0] += (double)rawData[0];
+		accel_sum[1] += (double)rawData[1];
+		accel_sum[2] += (double)rawData[2];
 #endif
 		// Accumulate Gyroscope
 		if (sensor_wait_gyro(rawData, K_MSEC(1000))) {
@@ -703,9 +703,9 @@ int sensor_offsetBias(float *dest1, float *dest2)
 			}
 		}
 
-		gyro_sum[0] += rawData[0];
-		gyro_sum[1] += rawData[1];
-		gyro_sum[2] += rawData[2];
+		gyro_sum[0] += (double)rawData[0];
+		gyro_sum[1] += (double)rawData[1];
+		gyro_sum[2] += (double)rawData[2];
 		i++;
 	}
 	LOG_INF("Samples: %d", i);
