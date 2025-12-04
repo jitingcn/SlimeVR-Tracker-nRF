@@ -38,7 +38,7 @@ extern bool send_data;
 extern uint16_t led_clock;
 extern uint32_t led_clock_offset;
 
-void esb_write_ack(uint8_t type);
+int esb_write_ack(uint8_t type);
 void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 void clocks_stop(void);
@@ -89,11 +89,10 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_PING 0x11
 
 #define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 160 // Target TPS per tracker
+#define TDMA_PACKETS_PER_SECOND 125 // Target TPS per tracker
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
 #define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
-#define TDMA_GUARD_TIME_US 200
-#define TDMA_PREWARM_ADVANCE_US 1000
+#define TDMA_GUARD_TIME_US 150
 
 bool esb_ready(void);
 

@@ -320,7 +320,7 @@ static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 
 static int64_t last_sensor_quat_time = 0;
-#define SENSOR_QUAT_INTERVAL_MS 6
+#define SENSOR_QUAT_INTERVAL_MS 8
 
 void connection_thread(void)
 {
@@ -382,7 +382,7 @@ void connection_thread(void)
 			ping[ESB_PING_LEN - 1] = 0; // crc bit, set in esb_write
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
-			k_usleep(350);
+			k_msleep(1);
 			continue;
 		}
 
@@ -402,7 +402,7 @@ void connection_thread(void)
 			atomic_set(&read_idx, (current_read + 1) % PACKET_BUFFER_SIZE);
 
 			esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
-			k_usleep(350);
+			k_msleep(1);
 			continue;
 		}
 		// mag is higher priority (skip accel, quat is full precision)

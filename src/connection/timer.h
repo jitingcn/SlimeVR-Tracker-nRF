@@ -23,9 +23,48 @@
 #ifndef SLIMENRF_TIMER
 #define SLIMENRF_TIMER
 
-#include <nrfx_timer.h>
+#include <stdbool.h>
+#include <stdint.h>
 
-void timer_handler(nrf_timer_event_t event_type, void* p_context);
+/**
+ * @brief Initialize TDMA hardware timer
+ *
+ * Sets up TIMER1 @ 1MHz for TDMA slot scheduling.
+ * Must be called after tracker ID is known (after pairing).
+ */
 void timer_init(void);
 
-#endif
+/**
+ * @brief Set tracker ID for TDMA slot calculation
+ *
+ * @param id Tracker ID (0-9 for 10 tracker TDMA)
+ */
+void timer_set_tracker_id(uint8_t id);
+
+/**
+ * @brief Notify timer of skew convergence status
+ *
+ * Called from esb.c when clock skew is updated.
+ * TDMA is enabled when abs_error stays below threshold for consecutive updates.
+ *
+ * @param abs_error Absolute value of skew error (fixed point)
+ */
+void timer_on_skew_update(int32_t abs_error);
+
+/**
+ * @brief Check if TDMA mode is currently active
+ *
+ * @return true if TDMA timing control is active
+ * @return false if using immediate TX (fallback mode)
+ */
+bool timer_is_tdma_active(void);
+
+/**
+ * @brief Signal that a packet is pending transmission
+ *
+ * In TDMA mode, the timer will call esb_start_tx() at the correct slot.
+ * In non-TDMA mode, this should trigger immediate transmission.
+ */
+void timer_signal_tx_pending(void);
+
+#endif // SLIMENRF_TIMER
