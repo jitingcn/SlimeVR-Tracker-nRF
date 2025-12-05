@@ -593,7 +593,7 @@ void event_handler(struct esb_evt const *event)
 							LOG_INF("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
 						}
 
-						if (rtt_us < 3000) {
+						if (rtt_us < 1500) {
 							// Calculate RTT in ticks
 							uint32_t rtt_ticks = current_rx_ticks - ping_ticks_for_this_ctr;
 
@@ -608,8 +608,13 @@ void event_handler(struct esb_evt const *event)
 							}
 
 							// Skip update if RTT is abnormally high (> 1.5x minimum)
-							// This filters out delay spikes that would cause offset/skew jitter
-							bool rtt_outlier = (rtt_ticks > g_min_rtt_ticks + g_min_rtt_ticks / 2);
+							// Using 1.5x to catch marginal spikes that still cause drift
+							// E.g., min=32 ticks (976us) -> threshold=48 ticks (1464us)
+							bool rtt_outlier = (rtt_ticks > g_min_rtt_ticks + (g_min_rtt_ticks >> 1));
+
+							// Also mark "marginal" RTT (> 1.25x min) - good for offset update,
+							// but skip skew update as the measurement is less reliable
+							bool rtt_marginal = !rtt_outlier && (rtt_ticks > g_min_rtt_ticks + (g_min_rtt_ticks >> 2));
 
 							// Parse receiver's observed ticks_diff from PONG data[8-11]
 							// ticks_diff = receiver_rx_time - tracker_estimated_server_time
@@ -678,8 +683,10 @@ void event_handler(struct esb_evt const *event)
 							// g_last_rx_raw_ticks update moved to after skew calculation
 
 							// Calculate skew BEFORE updating g_last_sync_local_ticks
+							// Skip skew calculation if RTT is marginal (> 1.25x min) to prevent
+							// unreliable measurements from polluting skew estimation
 							if (pong_flags == ESB_PONG_FLAG_NORMAL && g_time_initialized && g_last_sync_local_ticks > 0
-								&& g_last_rx_raw_ticks > 0) {
+								&& g_last_rx_raw_ticks > 0 && !rtt_marginal) {
 
 								// Calculate intervals based on raw timestamps (independent of offset)
 								uint32_t local_interval = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
@@ -808,17 +815,31 @@ void event_handler(struct esb_evt const *event)
 									);
 									g_server_ticks_offset = reset_offset;
 								} else {
-									// Apply full correction: predicted_offset + sync_error
+									// Apply partial correction with deadband to filter noise
 									// - predicted_offset accounts for clock drift (skew)
-									// - sync_error corrects any remaining offset error
-									// Using 100% gain for both ensures fast and stable convergence
-									g_server_ticks_offset = predicted_offset + sync_error;
-									LOG_INF(
-										"Offset update: pred=%d + err=%d = new=%d",
-										predicted_offset,
-										sync_error,
-										g_server_ticks_offset
-									);
+									// - sync_error corrects remaining offset error
+									// Using 50% gain prevents single measurement spikes from
+									// causing large offset jumps while still converging
+									if (abs_error <= 3) {
+										// Within deadband: only apply skew prediction, no error correction
+										// This prevents noise from causing continuous drift
+										g_server_ticks_offset = predicted_offset;
+										LOG_INF(
+											"Offset update: pred=%d (err=%d in deadband)",
+											predicted_offset,
+											sync_error
+										);
+									} else {
+										// Apply 50% of sync_error to smooth out spikes
+										int32_t applied_error = sync_error >> 1;
+										g_server_ticks_offset = predicted_offset + applied_error;
+										LOG_INF(
+											"Offset update: pred=%d + err=%d/2 = new=%d",
+											predicted_offset,
+											sync_error,
+											g_server_ticks_offset
+										);
+									}
 								}
 							} else {
 								// Non-NORMAL flag or no feedback, just apply skew prediction

@@ -50,7 +50,7 @@ static volatile bool tx_pending_flag = false;
 #define SKEW_DIVERGE_THRESHOLD 150 // To disable: error must be > 150 (~5ms)
 #define CONVERGE_COUNT_REQUIRED 3  // Consecutive stable updates to enable
 #define DIVERGE_COUNT_REQUIRED 5   // Consecutive unstable updates to disable
-#define UNSYNC_TX_INTERVAL_US 6500 // Fallback TX interval when not synced
+#define UNSYNC_TX_INTERVAL_US 800  // Fallback TX interval when not synced
 
 // Forward declaration
 static void schedule_next_slot(void);
@@ -178,8 +178,14 @@ void timer_on_skew_update(int32_t clock_diff)
 		diverge_count++;
 		converge_count = 0; // Reset converge counter
 		if (diverge_count >= DIVERGE_COUNT_REQUIRED && tdma_enabled) {
-			tdma_enabled = false;
-			LOG_WRN("TDMA disabled (error=%d, count=%d)", clock_diff, diverge_count);
+			// Don't disable TDMA on divergence!
+			// It's better to keep running with the last known good offset (flywheel mode)
+			// than to revert to random transmission which causes collisions.
+			// tdma_enabled = false;
+			// diverge_count = 0; // Keep counting or reset? Reset to avoid log spam
+			if (diverge_count % 10 == 0) {
+				LOG_WRN("TDMA divergence detected (error=%d, count=%d), maintaining sync", clock_diff, diverge_count);
+			}
 		}
 	} else {
 		// Middle zone: don't change state, just reset counters
