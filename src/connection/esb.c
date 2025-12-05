@@ -625,7 +625,13 @@ void event_handler(struct esb_evt const *event)
 							// Use ticks_diff directly as error signal.
 							// If ticks_diff > 0, tracker estimate is too low, increase offset
 							// If ticks_diff < 0, tracker estimate is too high, decrease offset
-							int32_t sync_error = receiver_ticks_diff;
+							// Target is RTT - 550us (safety margin)
+							// This ensures we are slightly "late" (safe) rather than "early" (violation)
+							int32_t target_diff = (int32_t)(g_min_rtt_ticks - k_us_to_ticks_near32(550));
+							if (target_diff < 0) {
+								target_diff = 0;
+							}
+							int32_t sync_error = receiver_ticks_diff - target_diff;
 
 							// Calculate current skew contribution (drift since last sync)
 							int32_t current_skew = 0;
@@ -653,6 +659,7 @@ void event_handler(struct esb_evt const *event)
 								// Also skip skew update when RTT is outlier
 								// Don't update g_last_sync_local_ticks/g_last_rx_raw_ticks
 								// to avoid polluting skew calculation with outlier data
+								// Note: Don't notify timer - RTT outlier is normal, keep TDMA running
 								g_last_sync_timestamp = k_uptime_get();
 								server_time_synced = true;
 								// Skip the rest of the sync logic
@@ -730,19 +737,19 @@ void event_handler(struct esb_evt const *event)
 									// Fast descent to local minimum, then fine adjustment
 									int gain_shift;
 									const char *gain_desc;
-									// if (abs_error > 1000) {
-									// 	// Large error: fast convergence with gain 1/2
+									if (abs_error > 1000) {
+										// Large error: fast convergence with gain 1/2
 										gain_shift = 1;
 										gain_desc = "fast";
-									// } else if (abs_error > 100) {
+									} else if (abs_error > 300) {
 										// Medium error: normal adjustment with gain 1/4
-										// gain_shift = 2;
-										// gain_desc = "normal";
-									// } else {
-									// 	// Small error: fine tuning with gain 1/8
-									// 	gain_shift = 3;
-									// 	gain_desc = "fine";
-									// }
+										gain_shift = 2;
+										gain_desc = "normal";
+									} else {
+										// Small error: fine tuning with gain 1/8
+										gain_shift = 3;
+										gain_desc = "fine";
+									}
 
 									// Accumulate skew error with adaptive gain
 									g_clock_skew_fixed += skew_error_fixed >> gain_shift;
@@ -801,22 +808,15 @@ void event_handler(struct esb_evt const *event)
 									);
 									g_server_ticks_offset = reset_offset;
 								} else {
-									// Apply correction with adaptive gain
-									// Start from predicted offset (accounts for skew)
-									// Add proportional correction based on error magnitude
-									int gain_shift;
-									// if (abs_error > 1000) {
-										gain_shift = 1; // 1/2 gain for large errors
-									// } else if (abs_error > 100) {
-										// gain_shift = 2; // 1/4 gain for medium errors
-									// } else {
-									// 	gain_shift = 3; // 1/8 gain for small errors
-									// }
-									g_server_ticks_offset = predicted_offset + (sync_error >> gain_shift);
+									// Apply full correction: predicted_offset + sync_error
+									// - predicted_offset accounts for clock drift (skew)
+									// - sync_error corrects any remaining offset error
+									// Using 100% gain for both ensures fast and stable convergence
+									g_server_ticks_offset = predicted_offset + sync_error;
 									LOG_INF(
-										"Offset update: err=%d gain=1/%d new=%d",
+										"Offset update: pred=%d + err=%d = new=%d",
+										predicted_offset,
 										sync_error,
-										1 << gain_shift,
 										g_server_ticks_offset
 									);
 								}

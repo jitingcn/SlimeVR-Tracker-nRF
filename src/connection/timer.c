@@ -45,9 +45,11 @@ static int32_t converge_count = 0;
 // TX pending flag - set by esb_write, cleared after esb_start_tx
 static volatile bool tx_pending_flag = false;
 
-// Thresholds for TDMA enable/disable
-#define SKEW_CONVERGE_THRESHOLD 60 // offset diff must be <= this value
-#define CONVERGE_COUNT_REQUIRED 3  // Consecutive stable updates required
+// Thresholds for TDMA enable/disable (asymmetric to favor keeping TDMA active)
+#define SKEW_CONVERGE_THRESHOLD 30 // To enable: error must be <= 30 (~1ms)
+#define SKEW_DIVERGE_THRESHOLD 150 // To disable: error must be > 150 (~5ms)
+#define CONVERGE_COUNT_REQUIRED 3  // Consecutive stable updates to enable
+#define DIVERGE_COUNT_REQUIRED 5   // Consecutive unstable updates to disable
 #define UNSYNC_TX_INTERVAL_US 6500 // Fallback TX interval when not synced
 
 // Forward declaration
@@ -157,21 +159,33 @@ void timer_set_tracker_id(uint8_t id)
 	LOG_INF("Timer tracker_id set to %u, slot_start=%u us", id, (id % TDMA_NUM_TRACKERS) * TDMA_SLOT_DURATION_US);
 }
 
+static int diverge_count = 0;
+
 void timer_on_skew_update(int32_t clock_diff)
 {
 	clock_diff = (clock_diff < 0) ? -clock_diff : clock_diff;
+
 	if (clock_diff <= SKEW_CONVERGE_THRESHOLD) {
+		// Good: error is small
 		converge_count++;
+		diverge_count = 0; // Reset diverge counter
 		if (converge_count >= CONVERGE_COUNT_REQUIRED && !tdma_enabled) {
 			tdma_enabled = true;
-			LOG_INF("TDMA enabled (clock diff converged, error=%d)", clock_diff);
+			LOG_INF("TDMA enabled (error=%d, count=%d)", clock_diff, converge_count);
+		}
+	} else if (clock_diff > SKEW_DIVERGE_THRESHOLD) {
+		// Bad: error is very large
+		diverge_count++;
+		converge_count = 0; // Reset converge counter
+		if (diverge_count >= DIVERGE_COUNT_REQUIRED && tdma_enabled) {
+			tdma_enabled = false;
+			LOG_WRN("TDMA disabled (error=%d, count=%d)", clock_diff, diverge_count);
 		}
 	} else {
-		if (tdma_enabled) {
-			LOG_WRN("TDMA disabled (clock diff diverged, error=%d)", clock_diff);
-		}
-		tdma_enabled = false;
+		// Middle zone: don't change state, just reset counters
+		// This prevents oscillation
 		converge_count = 0;
+		diverge_count = 0;
 	}
 }
 
