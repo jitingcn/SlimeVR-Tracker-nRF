@@ -9,11 +9,13 @@ enum sys_status {
 	SYS_STATUS_PLUGGED = 16,
 	SYS_STATUS_CALIBRATION_RUNNING = 32,
 	SYS_STATUS_BUTTON_PRESSED = 64,
+	SYS_STATUS_ERROR = 7,
+	SYS_STATUS_ALL = 255,
 };
 
 void set_status(enum sys_status status, bool set);
 
-bool get_status(enum sys_status status);
+int get_status(enum sys_status status);
 
 bool status_ready(void);
 

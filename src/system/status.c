@@ -50,7 +50,7 @@ void set_status(enum sys_status status, bool set) {
 	LOG_INF("Status: %d", status_state);
 }
 
-bool get_status(enum sys_status status)
+int get_status(enum sys_status status)
 {
 	return status_state & status;
 }
