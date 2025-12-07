@@ -13,24 +13,6 @@
 		zephyr,flash = &cpuapp_rram;
 	};
 
-	vdd-c-en {
-		compatible = "regulator-fixed-sync", "regulator-fixed";
-		enable-gpios = <&gpio1 8 (NRF_GPIO_DRIVE_S0H1 | GPIO_ACTIVE_HIGH)>;
-		regulator-name = "VDD_C_EN";
-		regulator-boot-on;
-		regulator-always-on;
-		startup-delay-us = <0>;
-	};
-
-	vddio-c-en {
-		compatible = "regulator-fixed-sync", "regulator-fixed";
-		enable-gpios = <&gpio1 7 (NRF_GPIO_DRIVE_S0H1 | GPIO_ACTIVE_HIGH)>;
-		regulator-name = "VDDIO_C_EN";
-		regulator-boot-on;
-		regulator-always-on;
-		startup-delay-us = <0>;
-	};
-
 	battery-divider {
 		compatible = "voltage-divider";
 		status = "okay";
