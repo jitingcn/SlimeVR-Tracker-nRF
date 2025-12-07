@@ -70,6 +70,17 @@
 
 };
 
+&spi00 {
+	/delete-node/ mx25r6435f@0;
+
+	imu_spi: imu_spi@0 {
+		compatible = "vnd,spi-device";
+		spi-max-frequency = <DT_FREQ_M(24)>;
+		label = "imu-spi";
+		reg = <0>;
+	};
+};
+
 &uart20 {
 	status = "disabled";
 };
