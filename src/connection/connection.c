@@ -416,7 +416,7 @@ void connection_thread(void)
 #endif
 		// if time for info and precise quat not needed
 		else if (quat_update_time && !send_precise_quat && now - last_info_time > 100) {
-			if (now - last_sensor_quat_time > SENSOR_QUAT_INTERVAL_MS) {
+			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
 				quat_update_time = 0;
 				last_quat_time = now;
 				last_sensor_quat_time = now;
@@ -427,7 +427,7 @@ void connection_thread(void)
 		}
 		// send quat otherwise
 		else if (quat_update_time) {
-			if (now - last_sensor_quat_time > SENSOR_QUAT_INTERVAL_MS) {
+			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
 				quat_update_time = 0;
 				last_quat_time = now;
 				last_sensor_quat_time = now;
