@@ -247,6 +247,7 @@ void sys_clear(void)
 	}
 	printk("Resetting NVS and retained\n");
 
+	sys_nvs_init();
 	memset(retained, 0, sizeof(*retained));
 	nvs_clear(&fs);
 	nvs_init = false;
