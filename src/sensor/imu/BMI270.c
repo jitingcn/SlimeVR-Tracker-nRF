@@ -378,6 +378,7 @@ float bmi_temp_read(void)
 uint8_t bmi_setup_DRDY(uint16_t threshold)
 {
 	uint8_t buf[2];
+	threshold *= PACKET_SIZE; // byte threshold
 	buf[0] = threshold & 0xFF;
 	buf[1] = (threshold >> 8) & 0x1F;
 	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_WTM_0, buf, 2);
@@ -578,7 +579,7 @@ const sensor_imu_t sensor_imu_bmi270 = {
 
 	*bmi_setup_DRDY,
 	*bmi_setup_WOM,
-	
+
 	*imu_none_ext_setup,
 	*imu_none_ext_passthrough
 };
