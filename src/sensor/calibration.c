@@ -767,7 +767,7 @@ int sensor_offsetBias(float *dest1, float *dest2)
 
 	int64_t sampling_start_time = k_uptime_get();
 	int i = 0;
-	while (k_uptime_get() < sampling_start_time + 15000) {
+	while (k_uptime_get() < sampling_start_time + 5000) {
 		// Accumulate Accelerometer
 		if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 			return -2; // Timeout
@@ -1323,7 +1323,14 @@ void sensor_tcal_remove_point(int index_to_remove)
 		retained->tempCalPoints[index_to_remove].temp = 0.0f;
 		memset(retained->tempCalPoints[index_to_remove].bias, 0, sizeof(retained->tempCalPoints[index_to_remove].bias));
 
-		retained->tempCalState.count--;
+		// Recalculate the count by scanning all points
+		uint16_t new_count = 0;
+		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+			if (retained->tempCalPoints[i].temp != 0.0f) {
+				new_count++;
+			}
+		}
+		retained->tempCalState.count = new_count;
 		retained->tempCalState.valid = false;
 
 		printk("Point at index %d removed. Recalculating curve...\n", index_to_remove);

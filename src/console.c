@@ -464,7 +464,7 @@ static void print_help(void)
 #endif
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 	// Update the help string to show the new command set
-	printk("tcal <status|dump|remove index>Temperature calibration\n");
+	printk("  tcal <status|dump|remove index> Temperature calibration\n");
 #endif
 	printk("\n");
 	printk("Connection:\n");
@@ -491,6 +491,12 @@ static void print_help(void)
 	printk("  reset zro                  Reset ZRO calibration\n");
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("  reset acc                  Reset accelerometer calibration\n");
+#endif
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+	printk("  reset sens                 Reset gyro sensitivity calibration\n");
+#endif
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+	printk("  reset tcal                 Reset temperature calibration\n");
 #endif
 #if SENSOR_MAG_EXISTS
 	printk("  reset mag                  Reset magnetometer calibration\n");
@@ -784,7 +790,7 @@ static void console_thread(void)
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status_poly();
 				} else if (strcmp(subcmd, "clear") == 0) {
-					sensor_tcal_clear_poly();
+					cmd_reset_tcal();
 				} else if (strcmp(subcmd, "dump") == 0) {
 					if (retained->tempCalState.count == 0) {
 						printk("No temperature calibration points have been collected.\n");
@@ -830,10 +836,20 @@ static void console_thread(void)
 						long index = strtol(idx_str, &endptr, 10);
 
 						// Check if conversion was successful
-						if (idx_str == endptr || *endptr != '\0') {
+						if (endptr == idx_str) {
 							printk("Error: Invalid index '%s'. Please provide a number.\n", idx_str);
 						} else {
-							sensor_tcal_remove_point((int)index);
+							// Skip trailing whitespace
+							while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+								endptr++;
+							}
+
+							// Check for trailing non-whitespace characters
+							if (*endptr != '\0') {
+								printk("Error: Invalid characters after index '%s'.\n", idx_str);
+							} else {
+								sensor_tcal_remove_point((int)index);
+							}
 						}
 					}
 				} else {
@@ -943,7 +959,7 @@ static void console_thread(void)
 #endif
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 			else if (arg && memcmp(arg, command_reset_arg_tcal, sizeof(command_reset_arg_tcal)) == 0) {
-				sensor_tcal_clear_poly();
+				cmd_reset_tcal();
 			}
 #endif
 			else if (arg && memcmp(arg, command_reset_arg_bat, sizeof(command_reset_arg_bat)) == 0) {

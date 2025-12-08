@@ -101,7 +101,7 @@ struct retained_data {
 	uint32_t crc;
 };
 
-/* Up to 1 KB of retained data allowed right now.
+/* Up to 4 KB of retained data allowed right now.
  */
 #define RETAINED_SIZE (sizeof(struct retained_data))
 
