@@ -259,7 +259,8 @@ void sys_clear(void)
 int set_sensor_clock(bool enable, float rate, float *actual_rate)
 {
 #if CLK_EN_EXISTS
-	gpio_pin_set_dt(&clk_en, enable); // if enabling some external oscillator is available
+	int ret = gpio_pin_set_dt(&clk_en, enable); // if enabling some external oscillator is available
+	LOG_INF("CLK_EN GPIO set to %d (ret=%d)", enable, ret);
 //	*actual_rate = enable ? (float)NSEC_PER_SEC / clk_out.period : 0; // assume pwm period is the same as an equivalent external oscillator
 	*actual_rate = enable ? 32768 : 0; // default
 	return 0;

@@ -205,6 +205,19 @@ int sensor_scan(void)
 	sensor_sensor_scanning = true;
 
 	sensor_scan_read();
+	// Enable external clock for IMU (required for ICM45686 gyroscope)
+	float clock_actual_rate = 0;
+#if CONFIG_USE_SENSOR_CLOCK
+	set_sensor_clock(true, 32768, &clock_actual_rate);
+	if (clock_actual_rate != 0)
+	{
+		LOG_INF("Sensor clock enabled: %.2fHz", (double)clock_actual_rate);
+	}
+#endif
+
+	// Wait for sensors to power up and stabilize
+	k_msleep(50);
+
 	int imu_id = -1;
 #if SENSOR_IMU_SPI_EXISTS
 	// for SPI scan, set frequency of 10MHz, it will be set later by the driver initialization if needed
@@ -641,12 +654,11 @@ int sensor_init(void)
 		sensor_mag->shutdown(); // TODO: is this needed?
 	sensor_imu->shutdown(); // TODO: is this needed?
 
+	// Clock already enabled during sensor scan, just ensure it's still on
 	float clock_actual_rate = 0;
 #if CONFIG_USE_SENSOR_CLOCK
-	set_sensor_clock(true, 32768, &clock_actual_rate); // enable the clock source for IMU if present
+	set_sensor_clock(true, 32768, &clock_actual_rate); // ensure clock source is still enabled
 #endif
-	if (clock_actual_rate != 0)
-		LOG_INF("Sensor clock rate: %.2fHz", (double)clock_actual_rate);
 
 	// wait for sensor register reset // TODO: is this needed?
 	k_usleep(250);
@@ -875,6 +887,14 @@ void sensor_loop(void)
 				if (sensor_imu->fifo_process(i, rawData, raw_a, raw_g))
 					continue; // skip on error
 
+				// Debug: Log gyro values to see if they're all zero
+				static int gyro_log_count = 0;
+				if (gyro_log_count < 10)
+				{
+					LOG_INF("Gyro raw: %.3f, %.3f, %.3f", (double)raw_g[0], (double)raw_g[1], (double)raw_g[2]);
+					gyro_log_count++;
+				}
+
 				// TODO: split into separate functions
 				if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0)
 				{
@@ -1078,7 +1098,7 @@ void sensor_loop(void)
 			// Handle magnetometer calibration
 			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
 				sensor_request_calibration_mag();
-				
+
 #if DEBUG
 			if (valid_acquisition)
 			{
@@ -1117,7 +1137,7 @@ void sensor_loop(void)
 			k_msleep(sensor_update_time_ms + 10); // will be resumed by interrupt // TODO: dont use hard timeout
 			if (main_wfi) // timeout
 			{
-				LOG_WRN("Sensor interrupt timeout");
+				LOG_DBG("Sensor interrupt timeout");
 				main_wfi = false;
 			}
 		}
