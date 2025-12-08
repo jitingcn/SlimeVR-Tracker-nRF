@@ -49,4 +49,11 @@ void sensor_request_calibration(void);
 void sensor_request_calibration_6_side(void);
 void sensor_request_calibration_mag(void);
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+void sensor_calibration_get_last_gyro_offset(float offset[3]);
+void sensor_tcal_clear_poly(void);
+void sensor_tcal_status_poly(void);
+void sensor_tcal_remove_point(int index_to_remove);
+#endif
+
 #endif

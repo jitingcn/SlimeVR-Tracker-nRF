@@ -18,6 +18,14 @@
 #define BATT_STATS_INTERVAL_0 9 // ID 9 to 28
 #define BATT_STATS_CURVE_ID 29
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#define MAIN_GYRO_TEMP_ID 41
+#define MAIN_GYRO_TCAL_POINTS_ID 46
+#define MAIN_GYRO_TCAL_COEFFS_ID 47
+#define MAIN_GYRO_TCAL_STATE_ID  48
+#define MAIN_GYRO_TCAL_CORRECTION_ID 49
+#endif
+
 #define RF_CHANNEL_ID 100  // RF channel storage (changed from 30 to avoid conflicts)
 
 void configure_sense_pins(void);

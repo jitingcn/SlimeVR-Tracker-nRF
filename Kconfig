@@ -295,6 +295,43 @@ config SENSOR_SENS_REV
     help
        Number of rotations used in calculating sensitivity calibration.
 
+config SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+    bool "Progressive Manual Polynomial Calibration"
+    default y
+    help
+        Builds a polynomial temperature compensation curve incrementally.
+        Each time the standard 'calibrate' command is run, a new (temp, bias)
+        data point is added. The curve is automatically re-calculated
+        and improves over time as more points are added at different
+        temperatures.
+
+menu "Polynomial Temperature Calibration Settings"
+depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+
+config SENSOR_POLY_DEGREE
+    int "Polynomial degree"
+    default 3
+    help
+        The degree of the polynomial to fit (e.g., 3 for a cubic curve).
+
+config SENSOR_POLY_TEMP_MIN
+    int "Calibration minimum temperature (C)"
+    default 15
+
+config SENSOR_POLY_TEMP_MAX
+    int "Calibration maximum temperature (C)"
+    default 45
+
+config SENSOR_POLY_STEPS_PER_DEGREE
+    int "Calibration steps per degree C"
+    default 2
+    help
+        Enter the number of calibration points to take per degree Celsius.
+        For 0.5 C steps, enter 2.
+        For 1.0 C steps, enter 1.
+
+endmenu
+
 config RADIO_TX_POWER
     int "Radio output power (dBm)"
     default 8

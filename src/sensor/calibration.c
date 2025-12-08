@@ -71,6 +71,27 @@ static void sensor_calibrate_6_side(void);
 #endif
 static int sensor_calibrate_mag(void);
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+
+#define TEMP_TO_IDX(temp) (int)((((float)temp) - CONFIG_SENSOR_POLY_TEMP_MIN) * CONFIG_SENSOR_POLY_STEPS_PER_DEGREE)
+#define IDX_TO_TEMP(idx) (float)(((float)(idx) / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE) + CONFIG_SENSOR_POLY_TEMP_MIN)
+#define TEMP_MAX_DEVIATION 0.2f
+
+static float last_gyro_tcal_offset[3] = {0.0f, 0.0f, 0.0f};
+static inline bool is_invalid_float(float val)
+{
+	return isnan(val);
+}
+
+static int solve_linear_system(double *A, double *B, int n, double *x);
+static int polyfit(int degree, float coeffs_out[3][CONFIG_SENSOR_POLY_DEGREE + 1]);
+static void update_poly_tcal(void);                 // Function to calculate the curve
+void sensor_tcal_clear_poly(void);                  // Public function for 'tcal clear'
+void sensor_tcal_remove_point(int index_to_remove); // Public function for 'tcal remove'
+static void recalculate_tcal_correction_offset(void);
+
+#endif
+
 // helpers
 static bool wait_for_motion(bool motion, int samples);
 static int check_sides(const float *);
@@ -106,9 +127,34 @@ void sensor_calibration_process_accel(float a[3])
 void sensor_calibration_process_gyro(float g[3])
 {
 	sensor_sample_gyro(g);
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+	float calculated_offset[3] = {0.0f, 0.0f, 0.0f}; // Local variable to hold the calculated offset for this frame
+	float temp = sensor_get_current_imu_temperature();
+	if (!isnan(temp) && retained->tempCalState.valid) {
+		// Calculate the offset using polynomial coefficients
+		for (int axis = 0; axis < 3; axis++) {
+			// Start with the highest-order coefficient for the stored degree
+			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+			// Loop down to the constant term
+			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+				offset = offset * temp + retained->tempCalCoeffs[axis][i];
+			}
+			calculated_offset[axis] = offset + retained->tempCalCorrectionOffset[axis];
+			g[axis] -= calculated_offset[axis];
+		}
+	} else {
+		// Fallback to the default ZRO bias if no valid T-Cal is available
+		for (int i = 0; i < 3; i++) {
+			calculated_offset[i] = gyroBias[i];
+			g[i] -= calculated_offset[i];
+		}
+	}
+	memcpy(last_gyro_tcal_offset, calculated_offset, sizeof(last_gyro_tcal_offset));
+#else
 	for (int i = 0; i < 3; i++) {
 		g[i] -= gyroBias[i];
 	}
+#endif
 }
 
 void sensor_calibration_process_mag(float m[3])
@@ -381,6 +427,10 @@ static void sensor_calibrate_imu()
 	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
 	k_msleep(500); // Delay before beginning acquisition
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+	float current_temp = sensor_get_current_imu_temperature();
+#endif
+
 	if (imu_id == IMU_BMI270) // bmi270 specific
 	{
 		LOG_INF("Suspending sensor thread");
@@ -432,6 +482,64 @@ static void sensor_calibrate_imu()
 	}
 	sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, accelBias, sizeof(accelBias));
 	sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
+
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+	// 2. Add the new data as a T-Cal point.
+	sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &current_temp, sizeof(current_temp));
+	if (!isnan(current_temp)) {
+		int idx = TEMP_TO_IDX(current_temp);
+		if (idx >= 0 && idx < TCAL_BUFFER_SIZE) {
+
+			// Remove nearby points to avoid numerical instability
+			float min_separation = 0.3f;
+
+			// Check lower indices (sorted by temp)
+			for (int i = idx - 1; i >= 0; i--) {
+				if (retained->tempCalPoints[i].temp != 0.0f) {
+					if (fabsf(retained->tempCalPoints[i].temp - current_temp) < min_separation) {
+						retained->tempCalPoints[i].temp = 0.0f;
+						memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
+						if (retained->tempCalState.count > 0) {
+							retained->tempCalState.count--;
+						}
+						LOG_INF("T-Cal: Removed conflict point at index %d", i);
+					} else {
+						break; // Further points are even further away
+					}
+				}
+			}
+			// Check upper indices (sorted by temp)
+			for (int i = idx + 1; i < TCAL_BUFFER_SIZE; i++) {
+				if (retained->tempCalPoints[i].temp != 0.0f) {
+					if (fabsf(retained->tempCalPoints[i].temp - current_temp) < min_separation) {
+						retained->tempCalPoints[i].temp = 0.0f;
+						memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
+						if (retained->tempCalState.count > 0) {
+							retained->tempCalState.count--;
+						}
+						LOG_INF("T-Cal: Removed conflict point at index %d", i);
+					} else {
+						break; // Further points are even further away
+					}
+				}
+			}
+
+			if (retained->tempCalPoints[idx].temp == 0.0f) {
+				retained->tempCalState.count++; // Use struct member
+			}
+			retained->tempCalPoints[idx].temp = current_temp;
+			memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
+			retained->tempCalState.valid = false; // Invalidate old curve
+			update_poly_tcal();
+
+		} else {
+			LOG_WRN(
+				"T-Cal: Temperature %.2fC is outside the configured calibration range. Point not saved.",
+				(double)current_temp
+			);
+		}
+	}
+#endif
 
 	LOG_INF("Finished calibration");
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
@@ -945,3 +1053,348 @@ static void calibration_thread(void)
 		}
 	}
 }
+
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+
+void sensor_tcal_status_poly(void)
+{
+	printk("Polynomial Temperature Calibration Status:\n");
+	printk("  - Curve calculated: %s\n", retained->tempCalState.valid ? "Yes" : "No");
+	printk("  - Points collected: %u / %d\n", retained->tempCalState.count, TCAL_BUFFER_SIZE);
+
+	float min_temp = 1000.0f, max_temp = -1000.0f;
+	if (retained->tempCalState.count > 0) {
+		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+			if (retained->tempCalPoints[i].temp != 0.0f) { // Check if slot has data
+				if (retained->tempCalPoints[i].temp < min_temp) {
+					min_temp = retained->tempCalPoints[i].temp;
+				}
+				if (retained->tempCalPoints[i].temp > max_temp) {
+					max_temp = retained->tempCalPoints[i].temp;
+				}
+			}
+		}
+		printk("  - Calibrated temp range: %.2fC to %.2fC\n", (double)min_temp, (double)max_temp);
+	}
+}
+
+// Solves a system of linear equations A*x = b using Gaussian elimination with partial pivoting.
+
+// A: Pointer to the start of an n x n matrix (row-major order). Modified in place.
+// b: Pointer to the start of a vector of size n. Modified in place.
+// n: The dimension of the system.
+// x: Pointer to a vector of size n where the solution will be stored.
+
+static int solve_linear_system(double *A, double *b, int n, double *x)
+{
+	for (int i = 0; i < n; i++) {
+		// --- Partial Pivoting ---
+		// Find the row with the largest value in the current column i to use as the pivot.
+		int max_row = i;
+		for (int k = i + 1; k < n; k++) {
+			if (fabs(A[k * n + i]) > fabs(A[max_row * n + i])) {
+				max_row = k;
+			}
+		}
+
+		// Swap the entire max_row with the current row i in both matrix A and vector b.
+		for (int k = i; k < n; k++) {
+			double temp = A[i * n + k];
+			A[i * n + k] = A[max_row * n + k];
+			A[max_row * n + k] = temp;
+		}
+		double temp = b[i];
+		b[i] = b[max_row];
+		b[max_row] = temp;
+
+		// Check if the matrix is singular. A pivot element close to zero means no unique solution exists.
+		if (fabs(A[i * n + i]) < 1e-12) {
+			LOG_ERR("Matrix is singular. Cannot solve. Pivot at [%d,%d] is near zero.", i, i);
+			return -1;
+		}
+
+		// --- Forward Elimination ---
+		// For every row below the pivot row...
+		for (int k = i + 1; k < n; k++) {
+			// Calculate the factor to multiply the pivot row by.
+			double factor = A[k * n + i] / A[i * n + i];
+
+			// Subtract this multiple of the pivot row from the current row.
+			// This creates a zero in the current column for this row.
+			for (int j = i; j < n; j++) {
+				A[k * n + j] -= factor * A[i * n + j];
+			}
+			// Do the same for the result vector b.
+			b[k] -= factor * b[i];
+		}
+	}
+
+	// --- Back Substitution ---
+	// At this point, A is an upper-triangular matrix. We can solve for x from bottom to top.
+	for (int i = n - 1; i >= 0; i--) {
+		// Start with the known result for this row.
+		x[i] = b[i];
+
+		// Subtract the effect of the variables we've already solved for.
+		for (int j = i + 1; j < n; j++) {
+			x[i] -= A[i * n + j] * x[j];
+		}
+
+		// Divide by the diagonal element to get the final value for x[i].
+		x[i] = x[i] / A[i * n + i];
+	}
+
+	return 0; // Success
+}
+
+// Performs a polynomial least-squares fit.
+static int polyfit(int degree, float coeffs_out[3][CONFIG_SENSOR_POLY_DEGREE + 1])
+{
+	if (retained->tempCalState.count < degree + 1) {
+		LOG_WRN("T-Cal: Not enough points (%u) to fit a degree %d polynomial.", retained->tempCalState.count, degree);
+		return -1;
+	}
+
+	int n_coeffs = degree + 1;
+
+	// The Normal Equation for least squares is (X^T * X) * a = (X^T * y)
+	// Let A = (X^T * X) and b = (X^T * y). We solve A*a = b for the coefficients 'a'.
+
+	// Matrix A is a square matrix of size n_coeffs x n_coeffs.
+	// A[i][j] = sum of (t ^ (i+j)) over all data points.
+	double A[n_coeffs * n_coeffs];
+
+	// Vector b contains the results for each axis (X, Y, Z).
+	// b[i] = sum of (bias * (t ^ i)) over all data points.
+	double b_vectors[3][n_coeffs];
+
+	memset(A, 0, sizeof(A));
+	memset(b_vectors, 0, sizeof(b_vectors));
+
+	LOG_DBG("Polyfit: Using %u points to calculate degree %d curve.", retained->tempCalState.count, degree);
+
+	// 1. Build the A matrix and b vectors from the scattered data points.
+	for (int p_idx = 0; p_idx < TCAL_BUFFER_SIZE; ++p_idx) {
+		// Skip empty slots in the buffer
+		if (retained->tempCalPoints[p_idx].temp == 0.0f) {
+			continue;
+		}
+
+		double temp = retained->tempCalPoints[p_idx].temp;
+
+		// Pre-calculate powers of the current temperature 't' up to t^(2*degree).
+		double t_powers[2 * degree + 1];
+		t_powers[0] = 1.0; // t^0
+		for (int j = 1; j <= 2 * degree; j++) {
+			t_powers[j] = t_powers[j - 1] * temp;
+		}
+
+		// Sum the powers into the matrix A
+		for (int i = 0; i < n_coeffs; i++) {
+			for (int j = 0; j < n_coeffs; j++) {
+				A[i * n_coeffs + j] += t_powers[i + j];
+			}
+		}
+
+		// Sum the bias * powers into the vectors b
+		for (int i = 0; i < n_coeffs; i++) {
+			b_vectors[0][i] += (double)retained->tempCalPoints[p_idx].bias[0] * t_powers[i];
+			b_vectors[1][i] += (double)retained->tempCalPoints[p_idx].bias[1] * t_powers[i];
+			b_vectors[2][i] += (double)retained->tempCalPoints[p_idx].bias[2] * t_powers[i];
+		}
+	}
+
+	// 2. Solve the system A*x=b for each axis.
+	for (int axis = 0; axis < 3; axis++) {
+		// Create copies because the solver modifies the inputs in place.
+		double A_copy[n_coeffs * n_coeffs];
+		memcpy(A_copy, A, sizeof(A));
+		double b_copy[n_coeffs];
+		memcpy(b_copy, b_vectors[axis], sizeof(b_copy));
+
+		double solution[n_coeffs]; // The calculated coefficients will be stored here.
+
+		if (solve_linear_system(A_copy, b_copy, n_coeffs, solution) != 0) {
+			LOG_ERR("T-Cal: Failed to solve for polynomial coefficients. Matrix may be singular.");
+			return -1;
+		}
+
+		// Copy the double-precision solution to the float output array.
+		for (int i = 0; i < n_coeffs; i++) {
+			coeffs_out[axis][i] = (float)solution[i];
+		}
+	}
+
+	LOG_INF("Polynomial coefficients calculated successfully for degree %d.", degree);
+	return 0;
+}
+
+// Function to handle recalculating the curve after a point is added/removed
+static void update_poly_tcal(void)
+{
+	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
+	retained->tempCalState.degree = 0;
+	retained->tempCalState.valid = false;
+
+	if (retained->tempCalState.count < 2) {
+		LOG_INF("T-Cal: Not enough points (%u)...", retained->tempCalState.count);
+	} else {
+		int degree = retained->tempCalState.count - 1;
+		if (degree > CONFIG_SENSOR_POLY_DEGREE) {
+			degree = CONFIG_SENSOR_POLY_DEGREE;
+		}
+
+		LOG_INF("T-Cal: Recalculating curve with %u points", retained->tempCalState.count);
+
+		if (polyfit(degree, retained->tempCalCoeffs) == 0) {
+			retained->tempCalState.valid = true;
+			retained->tempCalState.degree = degree;
+			printk("T-Cal: New curve calculated successfully.\n");
+		} else {
+			printk("T-Cal: Failed to calculate new curve.\n");
+		}
+	}
+
+	// Save updated state to NVS
+	sys_write(
+		MAIN_GYRO_TCAL_STATE_ID,
+		&retained->tempCalState,
+		&retained->tempCalState,
+		sizeof(retained->tempCalState)
+	);
+	sys_write(
+		MAIN_GYRO_TCAL_POINTS_ID,
+		retained->tempCalPoints,
+		retained->tempCalPoints,
+		sizeof(retained->tempCalPoints)
+	);
+	sys_write(
+		MAIN_GYRO_TCAL_COEFFS_ID,
+		retained->tempCalCoeffs,
+		retained->tempCalCoeffs,
+		sizeof(retained->tempCalCoeffs)
+	);
+
+	// Invalidate sensor fusion to apply new calibration
+	sensor_fusion_invalidate();
+	// Recalculate the correction offset based on the new curve
+	recalculate_tcal_correction_offset();
+}
+
+// Public function for 'tcal clear' and 'reset tcal'
+void sensor_tcal_clear_poly(void)
+{
+	if (sensor_calibration_request(0) != 0) {
+		LOG_ERR("Another calibration is running. Cannot clear T-Cal data.");
+		printk("Error: Another calibration is running.\n");
+		return;
+	}
+
+	LOG_INF("Clearing all manual polynomial T-Cal data.");
+	memset(retained->tempCalPoints, 0, sizeof(retained->tempCalPoints));
+	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
+	memset(&retained->tempCalState, 0, sizeof(retained->tempCalState)); // Clear the whole state struct
+	memset(retained->tempCalCorrectionOffset, 0, sizeof(retained->tempCalCorrectionOffset));
+
+	// Trigger an update to save the cleared state to NVS
+	update_poly_tcal();
+	printk("All polynomial temperature calibration data has been cleared.\n");
+}
+
+// Public function for 'tcal remove <index>'
+void sensor_tcal_remove_point(int index_to_remove)
+{
+	if (sensor_calibration_request(0) != 0) {
+		LOG_ERR("Another calibration is running. Cannot remove T-Cal point.");
+		printk("Error: Another calibration is running.\n");
+		return;
+	}
+
+	if (index_to_remove < 0 || index_to_remove >= TCAL_BUFFER_SIZE) {
+		printk("Error: Index %d is out of valid range (0 to %d).\n", index_to_remove, TCAL_BUFFER_SIZE - 1);
+		return;
+	}
+
+	// Check if there was actually data in that slot
+	if (retained->tempCalPoints[index_to_remove].temp != 0.0f) {
+		LOG_INF("Removing T-Cal point at index %d.", index_to_remove);
+
+		// Zero out the slot
+		retained->tempCalPoints[index_to_remove].temp = 0.0f;
+		memset(retained->tempCalPoints[index_to_remove].bias, 0, sizeof(retained->tempCalPoints[index_to_remove].bias));
+
+		retained->tempCalState.count--;
+		retained->tempCalState.valid = false;
+
+		printk("Point at index %d removed. Recalculating curve...\n", index_to_remove);
+		update_poly_tcal(); // Recalculate and save
+	} else {
+		printk("No data found at index %d. Nothing to remove.\n", index_to_remove);
+	}
+}
+
+// Recalculates the T-Cal correction offset based on the current curve and anchor point.
+static void recalculate_tcal_correction_offset(void)
+{
+	float anchor_temp;
+	const float *anchor_bias;
+	bool anchor_found = false;
+
+	// Select the anchor point
+	if (!anchor_found && !isnan(retained->gyroTemp)) {
+		anchor_temp = retained->gyroTemp;
+		anchor_bias = retained->gyroBias;
+		anchor_found = true;
+	}
+
+	// Calculate the offset using the selected anchor
+	if (anchor_found && retained->tempCalState.valid) {
+		LOG_INF("Recalculating T-Cal correction offset using anchor temp %.2fC", (double)anchor_temp);
+
+		// 1. Evaluate the polynomial at the anchor temperature
+		float poly_bias_at_anchor[3];
+		for (int axis = 0; axis < 3; axis++) {
+			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+				offset = offset * anchor_temp + retained->tempCalCoeffs[axis][i];
+			}
+			poly_bias_at_anchor[axis] = offset;
+		}
+
+		// 2. Calculate the new correction vector: Correction = RealAnchorBias - CurveBiasAtAnchor
+		for (int i = 0; i < 3; i++) {
+			retained->tempCalCorrectionOffset[i] = anchor_bias[i] - poly_bias_at_anchor[i];
+		}
+
+		LOG_INF(
+			"New T-Cal correction offset: [%.5f, %.5f, %.5f]",
+			(double)retained->tempCalCorrectionOffset[0],
+			(double)retained->tempCalCorrectionOffset[1],
+			(double)retained->tempCalCorrectionOffset[2]
+		);
+
+	} else {
+		// If no valid anchor or curve exists, the offset must be zero.
+		if (!retained->tempCalState.valid) {
+			LOG_WRN("T-Cal curve not valid. Cannot calculate offset.");
+		}
+		if (!anchor_found) {
+			LOG_WRN("No valid anchor point found. Cannot calculate offset.");
+		}
+		memset(retained->tempCalCorrectionOffset, 0, sizeof(retained->tempCalCorrectionOffset));
+	}
+
+	// Always save the resulting correction offset (either new or zeroed out) to NVS
+	sys_write(
+		MAIN_GYRO_TCAL_CORRECTION_ID,
+		retained->tempCalCorrectionOffset,
+		retained->tempCalCorrectionOffset,
+		sizeof(retained->tempCalCorrectionOffset)
+	);
+}
+
+void sensor_calibration_get_last_gyro_offset(float offset[3])
+{
+	memcpy(offset, last_gyro_tcal_offset, sizeof(last_gyro_tcal_offset));
+}
+#endif

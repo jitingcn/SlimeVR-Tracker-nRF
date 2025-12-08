@@ -11,6 +11,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+// A single point in temperature calibration data
+struct TempCalPoint {
+	float temp;    // The temperature for this point
+	float bias[3]; // The gyro bias (x, y, z)
+};
+#endif
+
 struct retained_data {
 	/* The build version of the firmware that last updated the
 	 * retained data.
@@ -60,6 +68,21 @@ struct retained_data {
 	float accBAinv[4][3];
 	float gyroSensScale[3]; // Gyro sensitivity
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+	float gyroTemp;
+
+#define TCAL_BUFFER_SIZE                                                                                               \
+	(int)((CONFIG_SENSOR_POLY_TEMP_MAX - CONFIG_SENSOR_POLY_TEMP_MIN) * CONFIG_SENSOR_POLY_STEPS_PER_DEGREE)
+	struct TempCalPoint tempCalPoints[TCAL_BUFFER_SIZE];
+	float tempCalCoeffs[3][CONFIG_SENSOR_POLY_DEGREE + 1];
+	float tempCalCorrectionOffset[3];
+	struct {
+		uint16_t count;
+		bool valid;
+		uint8_t degree;
+	} tempCalState;
+#endif
+
 	uint8_t fusion_id; // fusion_data_stored
 	uint8_t fusion_data[512];
 
@@ -69,7 +92,7 @@ struct retained_data {
 	uint8_t imu_reg;
 	uint8_t mag_reg;
 
-	uint8_t rf_channel;  // RF channel (0-100), 0xFF means use default
+	uint8_t rf_channel; // RF channel (0-100), 0xFF means use default
 
 	/* CRC used to validate the retained data.  This must be
 	 * stored little-endian, and covers everything up to but not

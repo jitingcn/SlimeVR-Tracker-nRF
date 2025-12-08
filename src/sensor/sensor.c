@@ -125,6 +125,10 @@ static int sensor_mag_id = -1;
 static const sensor_imu_t *sensor_imu = &sensor_imu_none;
 static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+static float sensor_tcal_temp = 25.0f; // Default to 25C safety
+#endif
+
 //#define DEBUG true
 
 #if DEBUG
@@ -808,9 +812,26 @@ void sensor_loop(void)
 			if (mag_available && mag_enabled && mag_use_oneshot)
 				sensor_mag->mag_oneshot();
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+			static int64_t last_temp_read_ms = 0;
+			if (k_uptime_get() - last_temp_read_ms >= 1000) // Update every 1 second
+			{
+				last_temp_read_ms = k_uptime_get();
+				float temp = sensor_imu->temp_read();
+
+				// Only update if the value looks like a valid temperature (-10 to 60).
+				if (temp != 0.0f && temp > -10.0f && temp < 60.0f)
+				{
+					sensor_tcal_temp = temp; // Update the static cache
+				}
+
+				connection_update_sensor_temp(sensor_tcal_temp);
+			}
+#else
 			// Read IMU temperature
 			float temp = sensor_imu->temp_read(); // TODO: use as calibration data
 			connection_update_sensor_temp(temp);
+#endif
 
 			// Read gyroscope (FIFO)
 #if CONFIG_SENSOR_USE_LOW_POWER_2
@@ -1201,3 +1222,11 @@ void main_imu_restart(void)
 	if (main_ok) // only restart fusion if initialized
 		sensor_fusion->init(gyro_actual_time, accel_actual_time, 6 / 1000.0f); // TODO: using default initial time
 }
+
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+// Public function to get the current IMU temperature
+float sensor_get_current_imu_temperature(void)
+{
+    return sensor_tcal_temp;
+}
+#endif

@@ -41,7 +41,7 @@ SYS_INIT(retained_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 bool retained_validate(void)
 {
-	NRF_STATIC_ASSERT((RETAINED_CHECKED_SIZE <= 1024), "Retained data size exceeds 1 KB limit");
+	NRF_STATIC_ASSERT((RETAINED_CHECKED_SIZE <= 4096), "Retained data size exceeds 4 KB limit");
 
 	uint64_t now = init_time;
 //	uint64_t now = k_uptime_ticks(); // Get current uptime in ticks as soon as possible
