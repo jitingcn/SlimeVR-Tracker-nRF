@@ -82,6 +82,7 @@ static float last_lin_a[3] = {0}; // vector to hold last linear accelerometer
 
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
+static int64_t last_sensor_send_time = 0;
 
 static float max_gyro_speed_square;
 static bool mag_use_oneshot;
@@ -643,7 +644,7 @@ static void sensor_update_sensor_state(void)
 	{
 		if (sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER_2 || sensor_timeout == SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED)
 			last_suspend_attempt_time = k_uptime_get();
-		last_data_time = k_uptime_get();
+		// last_data_time now updated when sending data to improve responsiveness
 		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED) // Resetting IMU timeout
 			sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 		sensor_mode = SENSOR_SENSOR_MODE_LOW_NOISE;
@@ -1106,7 +1107,14 @@ void sensor_loop(void)
 			// Update orientation
 			bool send_quat_data = !q_epsilon(q, last_q, 0.001);
 			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05);
-			if (send_quat_data || send_lin_accel_data)
+
+			// Check if we need to force send based on time to maintain minimum packet rate
+			int64_t now = k_uptime_get();
+			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005) : q_epsilon(q, last_q, 0.05);
+			int64_t min_interval = resting ? 100 : 33; // 10Hz when resting, 30Hz when moving
+			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
+
+			if (send_quat_data || send_lin_accel_data || force_send_by_time)
 			{
 				memcpy(last_q, q, sizeof(q));
 				memcpy(last_lin_a, lin_a, sizeof(lin_a));
@@ -1114,6 +1122,11 @@ void sensor_loop(void)
 				q_multiply(q, q3, q_offset); // quaternion in device orientation, connection will change format from wxyz to xyzw
 				v_rotate(lin_a, q3, lin_a); // linear acceleration in local device frame, no other transformation will be done
 				connection_update_sensor_data(q_offset, lin_a, sensor_data_time);
+				last_sensor_send_time = now;
+				// Update last_data_time on every send to improve state transition responsiveness
+				if (!resting) {
+					last_data_time = now;
+				}
 			}
 
 			// Handle magnetometer calibration
