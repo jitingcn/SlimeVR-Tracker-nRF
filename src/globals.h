@@ -47,8 +47,6 @@
 #define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.7071f, 0.0f, 0.0f
 #endif
 #if defined(CONFIG_BOARD_SLIMEVRMINI_P4_UF2)
-#define SENSOR_GYROSCOPE_AXES_ALIGNMENT gx, gy, gz
-#define SENSOR_ACCELEROMETER_AXES_ALIGNMENT ax, ay, az
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
 #define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.0f, 0.0f, 0.7071f
 #endif
@@ -56,6 +54,10 @@
 #if defined(CONFIG_BOARD_SLIMENRF_R1) || defined(CONFIG_BOARD_SLIMENRF_R2) || defined(CONFIG_BOARD_SLIMENRF_R3)
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
 #define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f
+#endif
+
+#if defined(CONFIG_BOARD_FOXSMOL40_UF2)
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz
 #endif
 
 // default orientation for most boards with the sensor mounted flat on the PCB
