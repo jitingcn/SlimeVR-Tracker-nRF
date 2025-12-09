@@ -13,6 +13,7 @@
 #include <hal/nrf_gpio.h>
 
 #include "system.h"
+#include "build_defines.h"
 
 static struct nvs_fs fs;
 
@@ -174,6 +175,14 @@ static int sys_retained_init(void)
 		sys_read(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, sizeof(retained->accBAinv));
 		sys_read(BATT_STATS_CURVE_ID, &retained->battery_pptt_curve, sizeof(retained->battery_pptt_curve));
 		sys_read(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, sizeof(retained->gyroSensScale));
+		// If gyroSensScale was never set in NVS (all zeros), restore default values
+		if (retained->gyroSensScale[0] == 0.0f &&
+		    retained->gyroSensScale[1] == 0.0f &&
+		    retained->gyroSensScale[2] == 0.0f) {
+			retained->gyroSensScale[0] = 1.0f;
+			retained->gyroSensScale[1] = 1.0f;
+			retained->gyroSensScale[2] = 1.0f;
+		}
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 		sys_read(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, sizeof(retained->gyroTemp));
 		sys_read(MAIN_GYRO_TCAL_POINTS_ID, &retained->tempCalPoints, sizeof(retained->tempCalPoints));
@@ -273,6 +282,14 @@ void sys_clear(void)
 	nvs_clear(&fs);
 	nvs_init = false;
 	reset_confirm = false;
+
+	// Re-initialize fields that need non-zero default values
+	retained->gyroSensScale[0] = 1.0f;
+	retained->gyroSensScale[1] = 1.0f;
+	retained->gyroSensScale[2] = 1.0f;
+	retained->build_timestamp = BUILD_TIMESTAMP;
+	retained_update();
+
 	LOG_INF("NVS and retained reset");
 }
 
