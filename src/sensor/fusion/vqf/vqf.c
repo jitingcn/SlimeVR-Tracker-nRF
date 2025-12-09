@@ -49,20 +49,63 @@ static void set_params()
 {
 	init_params(&params);
 	params.biasClip = 5.0f;
+	params.tauAcc = 4.5f; // best result for VQF from paper
 	params.tauMag = 10.0f; // best result for VQF from paper
-	// best result from optimizer
-	params.biasForgettingTime = 136.579346;
-	params.biasSigmaInit = 3.219453;
-	params.biasSigmaMotion = 0.348501;
-	params.biasSigmaRest = 0.063616;
-	params.biasVerticalForgettingFactor = 0.007056;
-	params.motionBiasEstEnabled = true;
-	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.114532;
-	params.restMinT = 2.586910;
-	params.restThAcc = 1.418598;
-	params.restThGyr = 1.399189;
-	params.tauAcc = 4.337983;
+	// optimized with ICM-45686 data, (in parentheses based on BMI270 characteristics)
+	if (imu_id == IMU_ICM45686 || imu_id == IMU_LSM6DSR)
+	{
+		params.tauAcc = 6.5f; // best result from Lyall (best result from optimizer: 7.171490)
+//		params.tauMag = 10.0f; // best result for VQF from paper
+		params.biasSigmaInit = 0.337976f; // best result from optimizer (based on gyro ZRO temperature drift: 0.25)
+		params.biasForgettingTime = 352.235500f; // best result from optimizer (based on time for temperature change: 200)
+//		params.biasClip = 5.0f; // globally set (based on gyro ZRO: 1.0f)
+		params.biasSigmaMotion = 0.985346f; // best result from optimizer
+		params.biasVerticalForgettingFactor = 0.007959f; // best result from optimizer
+		params.biasSigmaRest = 0.028897f; // best result from optimizer (changed, unknown reason: 0.01f)
+		params.restMinT = 4.648680f; // best result from optimizer
+		params.restFilterTau = 1.900166f; // best result from optimizer
+		params.restThGyr = 2.620598f; // best result from optimizer (based on gyro noise: 0.5f)
+		params.restThAcc = 2.142593f; // best result from optimizer (based on accel noise: 0.1f)
+//		params.magCurrentTau = 0.05f;
+//		params.magRefTau = 20.0f;
+//		params.magNormTh = 0.1f;
+//		params.magDipTh = 10.0f;
+//		params.magNewTime = 20.0f;
+//		params.magNewFirstTime = 5.0f;
+//		params.magNewMinGyr = 20.0f;
+//		params.magMinUndisturbedTime = 0.5f;
+//		params.magMaxRejectionTime = 60.0f;
+//		params.magRejectionFactor = 2.0f;
+	}
+	// Per-IMU parameters, from ESP firmware
+	switch (imu_id)
+	{
+	case IMU_BMI270:
+	case IMU_ICM42688:
+		params.biasSigmaInit = 0.5f;
+		// params.biasClip = 1.0f;
+		params.restThGyr = 0.5f;
+		params.restThAcc = 0.196f;
+		break;
+//	case IMU_ICM45686:
+		// params.biasClip = 1.0f;
+//		break;
+	case IMU_LSM6DS3:
+		params.biasSigmaInit = 3.0f;
+		// params.biasClip = 6.0f;
+		params.restThGyr = 3.0f;
+		params.restThAcc = 0.392f;
+		break;
+	case IMU_LSM6DSO:
+//	case IMU_LSM6DSR:
+	case IMU_LSM6DSV:
+		params.biasSigmaInit = 1.0f;
+		// params.biasClip = 2.0f;
+		params.restThGyr = 1.0f;
+		params.restThAcc = 0.192f;
+		break;
+	default:
+	}
 }
 
 void vqf_init(float g_time, float a_time, float m_time)
