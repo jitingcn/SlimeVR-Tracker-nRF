@@ -37,7 +37,7 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/kernel.h>
 
-#include <stdlib.h>
+#include "util.h"
 #include "esb.h"
 #include "console.h"
 #include "timer.h"
@@ -123,7 +123,8 @@ static int64_t g_last_sync_timestamp = 0;
 static int32_t g_clock_skew_fixed = 0; // Fixed point skew (20 bit fraction)
 static int64_t g_last_skew_update_time = 0;
 static uint32_t g_min_rtt_ticks = 0; // Minimum RTT for outlier detection
-#define TIME_SYNC_TIMEOUT_MS 60000
+// 2 minute timeout for time sync
+#define TIME_SYNC_TIMEOUT_MS 120000
 #define SKEW_SHIFT 20
 
 // Track last sent packet for TX_FAILED diagnostics
@@ -593,7 +594,7 @@ void event_handler(struct esb_evt const *event)
 							LOG_INF("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
 						}
 
-						if (rtt_us < 1500) {
+						if (rtt_us < 1200) {
 							// Calculate RTT in ticks
 							uint32_t rtt_ticks = current_rx_ticks - ping_ticks_for_this_ctr;
 
@@ -630,9 +631,9 @@ void event_handler(struct esb_evt const *event)
 							// Use ticks_diff directly as error signal.
 							// If ticks_diff > 0, tracker estimate is too low, increase offset
 							// If ticks_diff < 0, tracker estimate is too high, decrease offset
-							// Target is RTT - 550us (safety margin)
+							// Target is RTT - 650us (safety margin)
 							// This ensures we are slightly "late" (safe) rather than "early" (violation)
-							int32_t target_diff = (int32_t)(g_min_rtt_ticks - k_us_to_ticks_near32(550));
+							int32_t target_diff = (int32_t)(g_min_rtt_ticks - k_us_to_ticks_near32(650));
 							if (target_diff < 0) {
 								target_diff = 0;
 							}
@@ -709,7 +710,7 @@ void event_handler(struct esb_evt const *event)
 								// This handles varying interval lengths properly
 								int32_t drift_per_sec
 									= (local_interval > 0)
-										? (int32_t)(((int64_t)abs(residual_drift) * 32768) / local_interval)
+										? (int32_t)(((int64_t)ABS(residual_drift) * 32768) / local_interval)
 										: 0;
 
 								// Outlier detection: drift > 500 ticks/sec (~15ms/sec) is abnormal
@@ -722,7 +723,7 @@ void event_handler(struct esb_evt const *event)
 										local_interval,
 										drift_per_sec
 									);
-								} else if (abs(drift) > 3000) {
+								} else if (ABS(drift) > 3000) {
 									// Reset skew on outlier - likely restart event
 									LOG_WRN(
 										"Large drift detected (%d ticks), resetting sync "
@@ -738,7 +739,7 @@ void event_handler(struct esb_evt const *event)
 									// Calculate skew error in fixed point based on RESIDUAL drift
 									int64_t diff_shifted = ((int64_t)residual_drift) << SKEW_SHIFT;
 									int32_t skew_error_fixed = (int32_t)(diff_shifted / local_interval);
-									int32_t abs_error = abs(skew_error_fixed);
+									int32_t abs_error = ABS(skew_error_fixed);
 
 									// Adaptive gain control (hill-climbing algorithm)
 									// Fast descent to local minimum, then fine adjustment
@@ -1493,6 +1494,71 @@ static void esb_thread(void)
 
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
+
+	// Safe runtime LF clock switch to external XTAL for TDMA precision
+	// This must be done very carefully to avoid system hang
+#if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_XTAL)
+	LOG_INF("=== LF Clock Switch Start ===");
+	LOG_INF("Current LF source: %d, running: %d",
+		nrf_clock_lf_src_get(NRF_CLOCK),
+		nrf_clock_lf_is_running(NRF_CLOCK));
+
+	// Check if already using external XTAL
+	nrf_clock_lfclk_t current_src = nrf_clock_lf_src_get(NRF_CLOCK);
+	if (current_src == NRF_CLOCK_LFCLK_XTAL || current_src == NRF_CLOCK_LFCLK_XTAL_FULL_SWING) {
+		LOG_INF("Already using external XTAL, no switch needed");
+	} else {
+		LOG_WRN("Switching LF clock from RC to external XTAL...");
+
+		// CRITICAL: Disable interrupts during clock switch to prevent tick-dependent code
+		unsigned int key = irq_lock();
+
+		// Stop LF clock
+		nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
+
+		// Busy-wait for clock to stop (use CPU cycles, not system tick)
+		// Typical stop time: < 1ms
+		volatile uint32_t stop_timeout = 100000; // ~10ms @ 16MHz
+		while (nrf_clock_lf_is_running(NRF_CLOCK) && stop_timeout > 0) {
+			stop_timeout--;
+		}
+
+		if (stop_timeout == 0) {
+			LOG_ERR("LF clock failed to stop!");
+			irq_unlock(key);
+		} else {
+			// Set new clock source
+			nrf_clock_lf_src_set(NRF_CLOCK, NRF_CLOCK_LFCLK_XTAL_FULL_SWING);
+
+			// Start LF clock with new source
+			nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
+
+			// Busy-wait for clock to start and stabilize
+			// External XTAL startup: 250-500ms typical
+			// Use longer timeout to be safe
+			volatile uint32_t start_timeout = 10000000; // ~625ms @ 16MHz
+			while (!nrf_clock_lf_is_running(NRF_CLOCK) && start_timeout > 0) {
+				start_timeout--;
+			}
+
+			// Re-enable interrupts
+			irq_unlock(key);
+
+			if (start_timeout > 0) {
+				LOG_INF("LF clock switch successful!");
+				LOG_INF("New LF source: %d, running: %d",
+					nrf_clock_lf_src_get(NRF_CLOCK),
+					nrf_clock_lf_is_running(NRF_CLOCK));
+			} else {
+				LOG_ERR("LF clock failed to start! System may be unstable");
+				LOG_ERR("This usually means no external XTAL is present on hardware");
+			}
+		}
+	}
+	LOG_INF("=== LF Clock Switch End ===");
+#else
+	LOG_INF("External XTAL not configured in prj.conf, using default LF clock");
+#endif
 
 	while (1) {
 #if CONFIG_CONNECTION_OVER_HID
