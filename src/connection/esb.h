@@ -89,7 +89,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_PING 0x11
 
 #define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 125 // Target TPS per tracker
+#define TDMA_PACKETS_PER_SECOND 111 // Target TPS per tracker
 #define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
 #define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
 #define TDMA_GUARD_TIME_US 30

@@ -343,7 +343,6 @@ void sys_request_system_off(bool immediate)
 {
 #ifdef ADAFRUIT_BOOTLOADER
 	// Reset LFCLK before getting into DFU
-	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
 	nrf_clock_lf_src_set(NRF_CLOCK, NRF_CLOCK_LFCLK_RC);
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
 #endif
@@ -359,7 +358,6 @@ void sys_request_system_reboot(bool immediate)
 {
 #ifdef ADAFRUIT_BOOTLOADER
 	// Reset LFCLK before getting into DFU
-	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
 	nrf_clock_lf_src_set(NRF_CLOCK, NRF_CLOCK_LFCLK_RC);
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
 #endif
