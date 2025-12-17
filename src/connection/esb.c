@@ -104,6 +104,16 @@ struct ping_history_entry {
 static struct ping_history_entry ping_history[PING_HISTORY_SIZE] = {0};
 static uint8_t ping_history_idx = 0;
 
+// Precise timestamp tracking for PING packets
+struct ping_tx_timestamp {
+	uint8_t counter;
+	uint32_t tx_start_ticks;      // Time when esb_start_tx() is called
+	uint32_t tx_success_ticks;    // Time when TX_SUCCESS event fires
+	bool tx_completed;            // Whether TX_SUCCESS has been received
+};
+static struct ping_tx_timestamp ping_tx_timestamps[PING_HISTORY_SIZE] = {0};
+static uint8_t ping_tx_timestamp_idx = 0;
+
 static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
@@ -126,6 +136,15 @@ static uint32_t g_min_rtt_ticks = 0; // Minimum RTT for outlier detection
 // 2 minute timeout for time sync
 #define TIME_SYNC_TIMEOUT_MS 120000
 #define SKEW_SHIFT 20
+
+// Skew compensation limits for LFXO with RC calibration
+// With LFXO + RC cal, clock accuracy should be 20-50 ppm
+// 50 ppm = 50 ticks per 1M ticks = 1.6 ticks per second @ 32768 Hz
+// In fixed point (20 bit fraction): 50 ppm = 52 (approx)
+// TEMPORARILY DISABLED: Skew adjustment may be causing instability
+#define ENABLE_SKEW_COMPENSATION 1  // Set to 0 to disable skew adjustment
+#define MAX_SKEW_PPM 50             // Maximum allowed clock skew in ppm
+#define MAX_SKEW_FIXED ((int32_t)((int64_t)MAX_SKEW_PPM * (1 << SKEW_SHIFT) / 1000000))
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -350,14 +369,36 @@ void event_handler(struct esb_evt const *event)
 	static uint32_t last_log_time = 0;
 
 	switch (event->evt_id) {
-	case ESB_EVENT_TX_SUCCESS:
+	case ESB_EVENT_TX_SUCCESS: {
+		// CRITICAL: Capture TX success timestamp immediately for accurate RTT calculation
+		uint32_t tx_success_ticks = sys_clock_tick_get_32();
+
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
+
+		// If this was a PING packet (not the ACK payload), record the TX success time
+		if (last_tx.type == ESB_PING_TYPE && !last_tx.is_ack_payload) {
+			// Find the matching counter in our timestamp buffer and update it
+			for (int i = 0; i < PING_HISTORY_SIZE; i++) {
+				if (ping_tx_timestamps[i].counter == ping_ctr_sent &&
+				    !ping_tx_timestamps[i].tx_completed) {
+					ping_tx_timestamps[i].tx_success_ticks = tx_success_ticks;
+					ping_tx_timestamps[i].tx_completed = true;
+
+					uint32_t tx_delay = tx_success_ticks - ping_tx_timestamps[i].tx_start_ticks;
+					LOG_DBG("PING TX_SUCCESS: ctr=%u, tx_delay=%u ticks (%u us)",
+					        ping_ctr_sent, tx_delay, k_ticks_to_us_floor32(tx_delay));
+					break;
+				}
+			}
+		}
+
 		if (esb_paired && last_tx.type != ESB_PING_TYPE) {
 			clocks_stop();
 		}
 		break;
+	}
 	case ESB_EVENT_TX_FAILED:
 		tx_failed_count++;
 
@@ -425,7 +466,9 @@ void event_handler(struct esb_evt const *event)
 		}
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
+		// CRITICAL: Capture RX timestamp immediately for accurate RTT calculation
 		uint32_t current_rx_ticks = sys_clock_tick_get_32();
+
 		int err = 0;
 		err = esb_read_rx_payload(&rx_payload);
 		if (err == -ENODATA) {
@@ -546,12 +589,30 @@ void event_handler(struct esb_evt const *event)
 					uint32_t ping_rx_ticks = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
 										   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
 
-					// Find send ticks for this PONG's counter in history
-					uint32_t ping_ticks_for_this_ctr = 0;
+					// Find precise TX timestamps for this PONG's counter
+					uint32_t tx_start_ticks = 0;
+					uint32_t tx_success_ticks = 0;
+					bool found_precise_timestamp = false;
+
 					for (int i = 0; i < PING_HISTORY_SIZE; i++) {
-						if (ping_history[i].counter == rx_ctr && ping_history[i].ping_ticks != 0) {
-							ping_ticks_for_this_ctr = ping_history[i].ping_ticks;
+						if (ping_tx_timestamps[i].counter == rx_ctr &&
+						    ping_tx_timestamps[i].tx_completed) {
+							tx_start_ticks = ping_tx_timestamps[i].tx_start_ticks;
+							tx_success_ticks = ping_tx_timestamps[i].tx_success_ticks;
+							found_precise_timestamp = true;
 							break;
+						}
+					}
+
+					// Fallback to old method if precise timestamp not found
+					if (!found_precise_timestamp) {
+						for (int i = 0; i < PING_HISTORY_SIZE; i++) {
+							if (ping_history[i].counter == rx_ctr && ping_history[i].ping_ticks != 0) {
+								tx_start_ticks = ping_history[i].ping_ticks;
+								tx_success_ticks = tx_start_ticks; // Approximate
+								LOG_WRN("Using fallback timestamp for ctr=%u", rx_ctr);
+								break;
+							}
 						}
 					}
 
@@ -576,46 +637,58 @@ void event_handler(struct esb_evt const *event)
 							(double)received_sens_data[1],
 							(double)received_sens_data[2]
 						);
-					} else if (ping_ticks_for_this_ctr != 0) {
-						// Calculate RTT: from PING send to PONG receive
-						// Note: current_rx_ticks - ping_ticks_for_this_ctr is the full RTT
-						uint32_t ticks_diff = current_rx_ticks - ping_ticks_for_this_ctr;
-						rtt_us = k_ticks_to_us_floor32(ticks_diff);
+					} else if (tx_success_ticks != 0) {
+						// Calculate RTT using precise TX_SUCCESS timestamp
+						// This is the most accurate RTT: from TX completion to RX reception
+						uint32_t rtt_ticks = current_rx_ticks - tx_success_ticks;
+						rtt_us = k_ticks_to_us_floor32(rtt_ticks);
 
-						// log ping and rtt
-						if (rtt_us > 1000) {
+						// Also calculate total delay from TX start
+						uint32_t total_delay_ticks = current_rx_ticks - tx_start_ticks;
+						uint32_t tx_delay_ticks = tx_success_ticks - tx_start_ticks;
+
+						// log ping and rtt with detailed timing info
+						if (found_precise_timestamp) {
 							LOG_INF(
-								"PONG ok, ack rtt=%u.%03u ms (ctr=%u)",
+								"PONG ok: rtt=%u.%03u ms, tx_delay=%u us, total=%u.%03u ms (ctr=%u)",
+								(unsigned)(rtt_us / 1000),
+								(unsigned)(rtt_us % 1000),
+								(unsigned)k_ticks_to_us_floor32(tx_delay_ticks),
+								(unsigned)(k_ticks_to_us_floor32(total_delay_ticks) / 1000),
+								(unsigned)(k_ticks_to_us_floor32(total_delay_ticks) % 1000),
+								rx_ctr
+							);
+						} else {
+							LOG_INF(
+								"PONG ok: rtt~%u.%03u ms (ctr=%u, approx)",
 								(unsigned)(rtt_us / 1000),
 								(unsigned)(rtt_us % 1000),
 								rx_ctr
 							);
-						} else if (rtt_us < 1000) {
-							LOG_INF("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
 						}
 
-						if (rtt_us < 1200) {
-							// Calculate RTT in ticks
-							uint32_t rtt_ticks = current_rx_ticks - ping_ticks_for_this_ctr;
-
+						// RTT validity check: must be reasonable for 2.4GHz wireless (100us - 5ms)
+						if (rtt_us >= 100 && rtt_us < 5000) {
 							// Track minimum RTT (with slow decay to adapt to changing conditions)
-							// Minimum RTT is more reliable than average because delay spikes are common
+							// Using precise TX_SUCCESS timestamp gives us more accurate minimum
 							if (g_min_rtt_ticks == 0 || rtt_ticks < g_min_rtt_ticks) {
 								g_min_rtt_ticks = rtt_ticks;
+								LOG_INF("New min RTT: %u ticks (%u us)", rtt_ticks, rtt_us);
 							} else {
 								// Slowly increase min if no new minimum (handles link quality changes)
 								// Increase by 1 tick every update (~1 second)
 								g_min_rtt_ticks += 1;
 							}
 
-							// Skip update if RTT is abnormally high (> 1.5x minimum)
-							// Using 1.5x to catch marginal spikes that still cause drift
-							// E.g., min=32 ticks (976us) -> threshold=48 ticks (1464us)
-							bool rtt_outlier = (rtt_ticks > g_min_rtt_ticks + (g_min_rtt_ticks >> 1));
 
-							// Also mark "marginal" RTT (> 1.25x min) - good for offset update,
+							// IMPROVED: More aggressive outlier detection (1.2x instead of 1.5x)
+							// This catches marginal spikes that still cause drift
+							// E.g., min=32 ticks (976us) -> threshold=38 ticks (1159us)
+							bool rtt_outlier = (rtt_ticks > g_min_rtt_ticks + (g_min_rtt_ticks / 5));
+
+							// Also mark "marginal" RTT (> 1.1x min) - good for offset update,
 							// but skip skew update as the measurement is less reliable
-							bool rtt_marginal = !rtt_outlier && (rtt_ticks > g_min_rtt_ticks + (g_min_rtt_ticks >> 2));
+							bool rtt_marginal = !rtt_outlier && (rtt_ticks > g_min_rtt_ticks + (g_min_rtt_ticks / 10));
 
 							// Parse receiver's observed ticks_diff from PONG data[8-11]
 							// ticks_diff = receiver_rx_time - tracker_estimated_server_time
@@ -631,18 +704,72 @@ void event_handler(struct esb_evt const *event)
 							// Use ticks_diff directly as error signal.
 							// If ticks_diff > 0, tracker estimate is too low, increase offset
 							// If ticks_diff < 0, tracker estimate is too high, decrease offset
-							// Target is RTT - 650us (safety margin)
-							// This ensures we are slightly "late" (safe) rather than "early" (violation)
-							int32_t target_diff = (int32_t)(g_min_rtt_ticks - k_us_to_ticks_near32(650));
-							if (target_diff < 0) {
-								target_diff = 0;
+							// Target = (RTT - TX_delay) / 2 + safety_margin
+							// This accounts for asymmetric delays and provides accurate one-way estimate
+							uint32_t tx_delay_ticks = tx_success_ticks - tx_start_ticks;
+
+							// CRITICAL: Detect retransmissions
+							// Normal TX delay @ 2Mbps: ~100-600us (3-20 ticks)
+							// If tx_delay > 1ms, it indicates retransmission occurred
+							// Retransmission timing is unreliable - skip this sync update
+							if (tx_delay_ticks > k_us_to_ticks_near32(1000)) {
+								LOG_WRN(
+									"Retransmission detected (tx_delay=%u us), skipping sync update",
+									k_ticks_to_us_floor32(tx_delay_ticks)
+								);
+								// Don't update offset - retransmission timing is unreliable
+								break;
 							}
+
+							// Also skip if TX delay is larger than RTT
+							// (might indicate timer wrap or other issues)
+							// Note: Use > not >= because they can be equal due to rounding
+							if (tx_delay_ticks > rtt_ticks) {
+								LOG_WRN(
+									"TX delay (%u us) > RTT (%u us), skipping sync",
+									k_ticks_to_us_floor32(tx_delay_ticks),
+									k_ticks_to_us_floor32(rtt_ticks)
+								);
+								break;
+							}
+
+							// CRITICAL FIX: Understanding RxTimeDiff and target_diff
+							//
+							// Timeline breakdown:
+							// T0: tx_start_ticks - PING queued
+							// T1: tx_success_ticks - PING actually transmitted (after tx_delay)
+							// T2: receiver receives PING (T1 + uplink_delay)
+							// T3: current_rx_ticks - tracker receives PONG
+							//
+							// Measurements:
+							// - tx_delay = T1 - T0 (hardware processing time, ~15 ticks = 457us)
+							// - rtt_ticks = T3 - T1 (actual round-trip from TX to RX, ~15 ticks = 457us)
+							// - receiver_ticks_diff = receiver's view of timing error
+							//
+							// KEY INSIGHT: rtt_ticks is ALREADY the pure network delay!
+							// It measures from tx_success (T1) to rx (T3).
+							// We should NOT subtract tx_delay from it.
+							//
+							// Previously incorrect:
+							//   net_rtt = rtt_ticks - tx_delay_ticks  // WRONG! Makes net_rtt=0
+							//   target_diff = net_rtt / 2 = 0         // WRONG!
+							//
+							// Correct understanding:
+							// - rtt_ticks = uplink + downlink delay
+							// - target_diff = rtt_ticks / 2 (expected uplink delay)
+							// - RxTimeDiff should equal target_diff in ideal case
+							//
+							// Why previous approach was wrong:
+							// tx_delay and rtt are INDEPENDENT time segments:
+							// [tx_start]--tx_delay-->[tx_success]--rtt-->[rx_received]
+							//                         <-uplink-> <-downlink->
+							int32_t target_diff = (int32_t)(rtt_ticks / 2);
 							int32_t sync_error = receiver_ticks_diff - target_diff;
 
 							// Calculate current skew contribution (drift since last sync)
 							int32_t current_skew = 0;
 							if (g_clock_skew_fixed != 0 && g_last_sync_local_ticks > 0) {
-								uint32_t elapsed = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
+								uint32_t elapsed = tx_success_ticks - g_last_sync_local_ticks;
 								current_skew = (int32_t)(((int64_t)elapsed * g_clock_skew_fixed) >> SKEW_SHIFT);
 							}
 
@@ -684,13 +811,17 @@ void event_handler(struct esb_evt const *event)
 							// g_last_rx_raw_ticks update moved to after skew calculation
 
 							// Calculate skew BEFORE updating g_last_sync_local_ticks
-							// Skip skew calculation if RTT is marginal (> 1.25x min) to prevent
-							// unreliable measurements from polluting skew estimation
+							// Skip skew calculation if RTT is marginal or outlier
+							// Also skip if interval is too short (< 50ms) for accurate measurement
+							uint32_t local_interval_check = (g_last_sync_local_ticks > 0)
+								? (tx_success_ticks - g_last_sync_local_ticks) : 0;
+							bool interval_sufficient = (local_interval_check > k_us_to_ticks_near32(50000)); // > 50ms
+
 							if (pong_flags == ESB_PONG_FLAG_NORMAL && g_time_initialized && g_last_sync_local_ticks > 0
-								&& g_last_rx_raw_ticks > 0 && !rtt_marginal) {
+								&& g_last_rx_raw_ticks > 0 && !rtt_marginal && !rtt_outlier && interval_sufficient) {
 
 								// Calculate intervals based on raw timestamps (independent of offset)
-								uint32_t local_interval = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
+								uint32_t local_interval = tx_success_ticks - g_last_sync_local_ticks;
 								uint32_t remote_interval = ping_rx_ticks - g_last_rx_raw_ticks;
 
 								// Drift = Remote Interval - Local Interval
@@ -759,18 +890,46 @@ void event_handler(struct esb_evt const *event)
 										gain_desc = "fine";
 									}
 
+#if ENABLE_SKEW_COMPENSATION
 									// Accumulate skew error with adaptive gain
-									g_clock_skew_fixed += skew_error_fixed >> gain_shift;
+									int32_t new_skew = g_clock_skew_fixed + (skew_error_fixed >> gain_shift);
+
+									// Clamp skew to maximum allowed value (±MAX_SKEW_FIXED)
+									// This prevents unrealistic skew values from accumulating
+									if (new_skew > MAX_SKEW_FIXED) {
+										LOG_WRN("Skew clamped to +%d (was %d, max=%d ppm)",
+										        MAX_SKEW_FIXED, new_skew, MAX_SKEW_PPM);
+										new_skew = MAX_SKEW_FIXED;
+									} else if (new_skew < -MAX_SKEW_FIXED) {
+										LOG_WRN("Skew clamped to -%d (was %d, max=%d ppm)",
+										        MAX_SKEW_FIXED, new_skew, MAX_SKEW_PPM);
+										new_skew = -MAX_SKEW_FIXED;
+									}
+
+									g_clock_skew_fixed = new_skew;
 
 									g_last_skew_update_time = k_uptime_get();
+
+									// Convert skew to ppm for logging
+									int32_t skew_ppm = (int32_t)(((int64_t)g_clock_skew_fixed * 1000000) >> SKEW_SHIFT);
 									LOG_INF(
-										"Skew update (%s): drift=%d interval=%u error_fixed=%d total_skew_fixed=%d",
+										"Skew update (%s): drift=%d interval=%u error_fixed=%d total_skew_fixed=%d (%d ppm)",
 										gain_desc,
 										drift,
 										local_interval,
 										skew_error_fixed,
-										g_clock_skew_fixed
+										g_clock_skew_fixed,
+										skew_ppm
 									);
+#else
+									// Skew compensation disabled - log but don't update
+									LOG_DBG(
+										"Skew disabled: drift=%d interval=%u (would be error_fixed=%d)",
+										drift,
+										local_interval,
+										skew_error_fixed
+									);
+#endif
 
 									// Notify timer module for TDMA enable/disable
 									// The original code had `timer_on_skew_update(offset_diff);` here.
@@ -783,7 +942,7 @@ void event_handler(struct esb_evt const *event)
 							}
 
 							g_last_rx_raw_ticks = ping_rx_ticks;
-							g_last_sync_local_ticks = ping_ticks_for_this_ctr;
+							g_last_sync_local_ticks = tx_success_ticks;
 							g_last_sync_timestamp = k_uptime_get();
 
 							// Update offset based on receiver feedback
@@ -792,7 +951,7 @@ void event_handler(struct esb_evt const *event)
 							if (!g_time_initialized) {
 								// First sync: use T2-T1-RTT/2 as initial estimate
 								int32_t initial_offset
-									= (int32_t)(ping_rx_ticks - ping_ticks_for_this_ctr - rtt_ticks / 2);
+									= (int32_t)(ping_rx_ticks - tx_success_ticks - rtt_ticks / 2);
 								g_server_ticks_offset = initial_offset;
 								g_time_initialized = true;
 								LOG_INF("Server offset initialized: %d ticks (T2-T1-RTT/2)", initial_offset);
@@ -808,7 +967,7 @@ void event_handler(struct esb_evt const *event)
 								if (abs_error > 32000) {
 									// Reset using traditional method
 									int32_t reset_offset
-										= (int32_t)(ping_rx_ticks - ping_ticks_for_this_ctr - rtt_ticks / 2);
+										= (int32_t)(ping_rx_ticks - tx_success_ticks - rtt_ticks / 2);
 									LOG_WRN(
 										"Large sync error (%d ticks), resetting offset to %d",
 										sync_error,
@@ -816,29 +975,64 @@ void event_handler(struct esb_evt const *event)
 									);
 									g_server_ticks_offset = reset_offset;
 								} else {
-									// Apply partial correction with deadband to filter noise
+									// Detect catastrophic offset jump (> 100 ticks = 3ms)
+									// This indicates a measurement error or system event
+									int32_t offset_delta = predicted_offset - g_server_ticks_offset;
+									int32_t offset_delta_abs = (offset_delta < 0) ? -offset_delta : offset_delta;
+
+									if (offset_delta_abs > 100) {
+										// Large offset jump detected - likely a bad measurement
+										// Reject the update and reset min_rtt to force re-sync
+										LOG_ERR(
+											"REJECT: Catastrophic offset jump %d ticks (%d us), resetting sync",
+											offset_delta,
+											k_ticks_to_us_floor32(offset_delta_abs)
+										);
+										g_min_rtt_ticks = rtt_ticks; // Reset min to current RTT
+										g_clock_skew_fixed = 0; // Reset skew
+										// Don't update offset - keep current value
+										break;
+									}
+
+									// Apply partial correction with adaptive deadband
 									// - predicted_offset accounts for clock drift (skew)
 									// - sync_error corrects remaining offset error
-									// Using 50% gain prevents single measurement spikes from
-									// causing large offset jumps while still converging
+									// Adaptive gain: stronger correction for larger errors
 									if (abs_error <= 3) {
+										// Tightened deadband: 3 ticks (~90us)
 										// Within deadband: only apply skew prediction, no error correction
-										// This prevents noise from causing continuous drift
 										g_server_ticks_offset = predicted_offset;
 										LOG_INF(
-											"Offset update: pred=%d (err=%d in deadband)",
+											"Offset update: pred=%d (err=%d in deadband) skew_contrib=%d",
 											predicted_offset,
-											sync_error
+											sync_error,
+											current_skew
+										);
+									} else if (abs_error <= 10) {
+										// Small error: 33% gain for gentle correction
+										int32_t applied_error = sync_error / 3;
+										g_server_ticks_offset = predicted_offset + applied_error;
+										LOG_INF(
+											"Offset update: pred=%d + err=%d/3 = new=%d (skew=%d target_diff=%d rx_diff=%d)",
+											predicted_offset,
+											sync_error,
+											g_server_ticks_offset,
+											current_skew,
+											target_diff,
+											receiver_ticks_diff
 										);
 									} else {
-										// Apply 50% of sync_error to smooth out spikes
+										// Large error: 50% gain for faster convergence
 										int32_t applied_error = sync_error >> 1;
 										g_server_ticks_offset = predicted_offset + applied_error;
 										LOG_INF(
-											"Offset update: pred=%d + err=%d/2 = new=%d",
+											"Offset update: pred=%d + err=%d/2 = new=%d (skew=%d target_diff=%d rx_diff=%d)",
 											predicted_offset,
 											sync_error,
-											g_server_ticks_offset
+											g_server_ticks_offset,
+											current_skew,
+											target_diff,
+											receiver_ticks_diff
 										);
 									}
 								}
@@ -862,6 +1056,9 @@ void event_handler(struct esb_evt const *event)
 								server_ms,
 								estimated_server_ticks
 							);
+						} else {
+							// Skip sync update for invalid RTT
+							LOG_WRN("Invalid RTT %u us, skipping sync (min=%u)", rtt_us, k_ticks_to_us_floor32(g_min_rtt_ticks));
 						}
 					} else {
 						// No history found - likely too old or buffer wrapped
@@ -997,7 +1194,7 @@ int esb_initialize(bool tx)
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 5;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 1 : 3;
 		config.tx_mode = ESB_TXMODE_MANUAL;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
@@ -1298,6 +1495,17 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 			data[4] = (server_time_ticks >> 16) & 0xFF;
 			data[5] = (server_time_ticks >> 8) & 0xFF;
 			data[6] = server_time_ticks & 0xFF;
+
+			// DIAGNOSTIC: Log what we're sending
+			uint32_t local_now = sys_clock_tick_get_32();
+			LOG_DBG(
+				"PING send: ctr=%u local=%u offset=%d est_srv=%u (diff=%d us)",
+				ping_counter,
+				local_now,
+				g_server_ticks_offset,
+				server_time_ticks,
+				k_ticks_to_us_floor32((int32_t)(server_time_ticks - local_now))
+			);
 		}
 		// Calculate crc8 checksum over first 12 bytes
 		uint8_t crc_calc = crc8_ccitt(0x07, data, ESB_PING_LEN - 1);
@@ -1320,14 +1528,26 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	// if sending ping packet, we need send another small packet to get ack result asap
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
 		uint8_t this_ctr = tx_payload.data[2];
+
+		// Record TX start time BEFORE esb_start_tx() for precise RTT calculation
+		uint32_t tx_start_ticks = sys_clock_tick_get_32();
+
+		// Record in new precise timestamp structure
+		ping_tx_timestamps[ping_tx_timestamp_idx].counter = this_ctr;
+		ping_tx_timestamps[ping_tx_timestamp_idx].tx_start_ticks = tx_start_ticks;
+		ping_tx_timestamps[ping_tx_timestamp_idx].tx_completed = false;
+		ping_tx_timestamp_idx = (ping_tx_timestamp_idx + 1) % PING_HISTORY_SIZE;
+
+		// Keep old method for compatibility
 		ping_history[ping_history_idx].counter = this_ctr;
-		ping_history[ping_history_idx].ping_ticks = sys_clock_tick_get_32();
+		ping_history[ping_history_idx].ping_ticks = tx_start_ticks;
+		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
+
 		LOG_DBG("PING sent (ctr=%u)", (unsigned)tx_payload.data[2]);
 		ping_pending = true;
 		ping_ctr_sent = tx_payload.data[2];
 		ping_send_time = k_uptime_get();
-		// Record cycles for THIS counter in circular buffer (for accurate RTT calculation)
-		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
+
 		esb_start_tx();
 		while (!esb_is_idle()) {
 			k_usleep(10);
