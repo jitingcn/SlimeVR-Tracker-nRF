@@ -401,6 +401,10 @@ static void button_thread(void)
 				press_time = 0;
 				set_status(SYS_STATUS_BUTTON_PRESSED, false); // TODO: is needed?
 			}
+			else // shutting down or rebooting
+			{
+				k_thread_abort(button_thread_id);
+			}
 		}
 		k_msleep(20);
 	}
