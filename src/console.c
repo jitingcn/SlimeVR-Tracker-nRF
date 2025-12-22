@@ -35,9 +35,9 @@ LOG_MODULE_REGISTER(console, LOG_LEVEL_INF);
 static void console_thread(void);
 #if USB_EXISTS
 static struct k_thread console_thread_id;
-static K_THREAD_STACK_DEFINE(console_thread_id_stack, 1024); // TODO: larger stack size to handle print info
+static K_THREAD_STACK_DEFINE(console_thread_id_stack, 2048);
 #else
-K_THREAD_DEFINE(console_thread_id, 1024, console_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(console_thread_id, 2048, console_thread, NULL, NULL, NULL, 6, 0, 0);
 #endif
 
 #define DFU_EXISTS CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
@@ -794,7 +794,7 @@ static void console_thread(void)
 				} else if (strcmp(subcmd, "dump") == 0) {
 					if (retained->tempCalState.count == 0) {
 						printk("No temperature calibration points have been collected.\n");
-						return;
+						continue;
 					}
 
 					printk("Dumping %u collected temperature calibration points:\n", retained->tempCalState.count);
@@ -832,11 +832,11 @@ static void console_thread(void)
 					if (idx_str == NULL) {
 						printk("Error: Missing index. Use: tcal remove <index>\n");
 					} else {
-						char *endptr;
+						char *endptr = NULL;
 						long index = strtol(idx_str, &endptr, 10);
 
 						// Check if conversion was successful
-						if (endptr == idx_str) {
+						if (endptr == NULL || endptr == idx_str) {
 							printk("Error: Invalid index '%s'. Please provide a number.\n", idx_str);
 						} else {
 							// Skip trailing whitespace
