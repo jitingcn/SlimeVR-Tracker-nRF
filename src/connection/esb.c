@@ -813,6 +813,15 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_RESET_BAT:
 								cmd_name = "RESET_BAT";
 								break;
+							case ESB_PONG_FLAG_RESET_TCAL:
+								cmd_name = "RESET_TCAL";
+								break;
+							case ESB_PONG_FLAG_TCAL_AUTO_ON:
+								cmd_name = "TCAL_AUTO_ON";
+								break;
+							case ESB_PONG_FLAG_TCAL_AUTO_OFF:
+								cmd_name = "TCAL_AUTO_OFF";
+								break;
 							case ESB_PONG_FLAG_PING:
 								cmd_name = "PING";
 								break;
@@ -1536,6 +1545,29 @@ static void esb_thread(void)
 				case ESB_PONG_FLAG_RESET_BAT:
 					LOG_INF("Executing remote command: RESET_BAT");
 					cmd_reset_bat();
+					break;
+
+				case ESB_PONG_FLAG_RESET_TCAL:
+					LOG_INF("Executing remote command: RESET_TCAL");
+					cmd_reset_tcal();
+					break;
+
+				case ESB_PONG_FLAG_TCAL_AUTO_ON:
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+					LOG_INF("Executing remote command: TCAL_AUTO_ON");
+					sensor_tcal_set_auto_calibration(true);
+#else
+					LOG_WRN("Remote command: TCAL_AUTO_ON not supported (T-Cal disabled in config)");
+#endif
+					break;
+
+				case ESB_PONG_FLAG_TCAL_AUTO_OFF:
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+					LOG_INF("Executing remote command: TCAL_AUTO_OFF");
+					sensor_tcal_set_auto_calibration(false);
+#else
+					LOG_WRN("Remote command: TCAL_AUTO_OFF not supported (T-Cal disabled in config)");
+#endif
 					break;
 
 				case ESB_PONG_FLAG_PING:

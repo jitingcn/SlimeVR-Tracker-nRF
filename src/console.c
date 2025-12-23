@@ -464,7 +464,7 @@ static void print_help(void)
 #endif
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 	// Update the help string to show the new command set
-	printk("  tcal <status|dump|remove index> Temperature calibration\n");
+	printk("  tcal <status|dump|remove index|auto on|auto off> Temperature calibration\n");
 #endif
 	printk("\n");
 	printk("Connection:\n");
@@ -779,18 +779,33 @@ static void console_thread(void)
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
-				printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index>\n");
+				printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index|check|auto on|auto off>\n");
 			} else {
 				// Tokenize the argument string by space to get the subcommand
 				char *subcmd = strtok((char *)arg, " ");
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
-					printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index>\n");
+					printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index|check|auto on|auto off>\n");
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status_poly();
+					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
 				} else if (strcmp(subcmd, "clear") == 0) {
 					cmd_reset_tcal();
+				} else if (strcmp(subcmd, "auto") == 0) {
+					char *auto_arg = strtok(NULL, " ");
+					if (auto_arg == NULL) {
+						printk("Error: Missing argument. Use: tcal auto <on|off>\n");
+					} else if (strcmp(auto_arg, "on") == 0) {
+						sensor_tcal_set_auto_calibration(true);
+						printk("T-Cal auto-calibration enabled. Device will auto-calibrate when resting.\n");
+						printk("Note: Sleep timeout will be prevented during auto-calibration mode.\n");
+					} else if (strcmp(auto_arg, "off") == 0) {
+						sensor_tcal_set_auto_calibration(false);
+						printk("T-Cal auto-calibration disabled.\n");
+					} else {
+						printk("Error: Invalid argument '%s'. Use: tcal auto <on|off>\n", auto_arg);
+					}
 				} else if (strcmp(subcmd, "dump") == 0) {
 					if (retained->tempCalState.count == 0) {
 						printk("No temperature calibration points have been collected.\n");
@@ -852,8 +867,30 @@ static void console_thread(void)
 							}
 						}
 					}
+				} else if (strcmp(subcmd, "check") == 0) {
+					float current_temp = sensor_get_current_imu_temperature();
+					if (isnan(current_temp)) {
+						printk("Error: Cannot read current temperature.\n");
+					} else {
+						float closest_temp, distance;
+						bool needs_cal = sensor_tcal_is_temp_outside_range(current_temp, &closest_temp, &distance);
+						printk("Current temperature: %.2fC\n", (double)current_temp);
+						if (!isnan(closest_temp)) {
+							printk("Closest calibration point: %.2fC (distance: %.2fC)\n",
+								(double)closest_temp, (double)distance);
+							float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
+							printk("Configured sampling interval: %.2fC\n", (double)sampling_interval);
+							if (needs_cal) {
+								printk("Status: NEEDS calibration (distance > interval, auto-cal may trigger)\n");
+							} else {
+								printk("Status: Calibration sufficient (within sampling interval)\n");
+							}
+						} else {
+							printk("Status: No calibration data available (auto-cal will trigger)\n");
+						}
+					}
 				} else {
-					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|remove index>\n", subcmd);
+					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|remove index|check|auto on|auto off>\n", subcmd);
 				}
 			}
 		}

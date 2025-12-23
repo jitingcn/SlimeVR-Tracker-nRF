@@ -1129,6 +1129,19 @@ void sensor_loop(void)
 				}
 			}
 
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+			// Check for automatic temperature calibration (only when device is resting)
+			if (resting) {
+				float current_temp = sensor_get_current_imu_temperature();
+				if (!isnan(current_temp)) {
+					sensor_tcal_check_auto_calibration(current_temp);
+					// If auto-calibration is enabled, reset last_data_time to prevent sleep
+					if (sensor_tcal_get_auto_calibration()) {
+						last_data_time = now;
+					}
+				}
+			}
+#endif
 			// Handle magnetometer calibration
 			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
 				sensor_request_calibration_mag();
