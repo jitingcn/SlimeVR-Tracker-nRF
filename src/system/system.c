@@ -401,6 +401,10 @@ static void button_thread(void)
 				press_time = 0;
 				set_status(SYS_STATUS_BUTTON_PRESSED, false); // TODO: is needed?
 			}
+			else // shutting down or rebooting
+			{
+				k_thread_abort(button_thread_id);
+			}
 		}
 		k_msleep(20);
 	}
@@ -471,8 +475,14 @@ int sys_user_shutdown(void)
 	if (button_read()) // If alternate button is available and still pressed, wait for the user to stop pressing the
 					   // button
 	{
-		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
+		set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
+		bool led_on = false;
 		while (button_read()) {
+			if (!led_on && k_uptime_get() - start_time > 500) // long pattern starts with led on, so delay pattern a bit
+			{
+				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
+				led_on = 1;
+			}
 			if (k_uptime_get() - start_time > 4000) // held for over 5 seconds, cancel shutdown
 			{
 				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
