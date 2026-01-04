@@ -26,5 +26,6 @@ int16_t sys_get_last_cycle_max_pptt(void);
 uint64_t sys_get_last_cycle_runtime(void);
 
 void sys_reset_battery_tracker(void);
+void sys_print_battery_tracker_debug(void);
 
 #endif

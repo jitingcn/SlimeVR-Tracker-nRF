@@ -126,26 +126,27 @@ void configure_sense_pins(void)
 
 static bool nvs_init = false;
 
-static inline void sys_nvs_init(void)
+static inline bool sys_nvs_init(void)
 {
 	if (nvs_init) {
-		return;
+		return true;
 	}
 	struct flash_pages_info info;
 	fs.flash_device = NVS_PARTITION_DEVICE;
 	fs.offset = NVS_PARTITION_OFFSET; // starting at NVS_PARTITION_OFFSET
 	if (flash_get_page_info_by_offs(fs.flash_device, fs.offset, &info)) {
 		LOG_ERR("Failed to get page info");
-		return;
+		return false;
 	}
 	fs.sector_size = info.size; // sector_size equal to the pagesize
-	fs.sector_count = 4U;       // 4 sectors
+	fs.sector_count = 6U;       // 6 sectors
 	int err = nvs_mount(&fs);
 	if (err) {
-		LOG_ERR("Failed to mount NVS");
-		return;
+		LOG_ERR("Failed to mount NVS, error: %d", err);
+		return false;
 	}
 	nvs_init = true;
+	return true;
 }
 
 static bool ram_retention_valid = false;
@@ -165,7 +166,13 @@ static int sys_retained_init(void)
 	if (!retained_validate()) // Check ram retention
 	{
 		LOG_WRN("Invalidated RAM");
-		sys_nvs_init();
+		if (!sys_nvs_init()) {
+			LOG_ERR("NVS init failed during retained init, cannot restore data from flash");
+			// Don't try to read from NVS if it failed to init
+			// The data will be zero/uninitialized but we can't recover it
+			retained_update();
+			return 0;
+		}
 		// read from nvs to retained
 		sys_read(PAIRED_ID, &retained->paired_addr, sizeof(retained->paired_addr));
 		sys_read(MAIN_SENSOR_DATA_ID, &retained->sensor_data, sizeof(retained->sensor_data));
@@ -199,6 +206,8 @@ static int sys_retained_init(void)
 	} else {
 		LOG_INF("Validated RAM");
 		ram_retention_valid = true;
+		// Still need to init NVS for later sys_read/sys_write calls (e.g., battery_tracker)
+		sys_nvs_init();
 	}
 	return 0;
 }
@@ -232,7 +241,14 @@ void reboot_counter_write(uint8_t reboot_counter)
 // write to retained and nvs
 void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 {
-	sys_nvs_init();
+	if (!sys_nvs_init()) {
+		LOG_ERR("sys_write: NVS init failed, cannot write ID %d", id);
+		if (retained_ptr) {
+			memcpy(retained_ptr, data, len);
+			retained_update();
+		}
+		return;
+	}
 	if (retained_ptr) {
 		memcpy(retained_ptr, data, len);
 	}
@@ -248,7 +264,11 @@ void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 
 void sys_read(uint16_t id, void *data, size_t len)
 {
-	sys_nvs_init();
+	if (!sys_nvs_init()) {
+		LOG_ERR("sys_read: NVS init failed, cannot read ID %d", id);
+		memset(data, 0, len);
+		return;
+	}
 	int err = nvs_read(&fs, id, data, len);
 	if (err < 0) {
 		if (err == -ENOENT) // suppress ENOENT

@@ -63,7 +63,7 @@ static uint8_t paired_addr[8] = {0};
 static bool esb_initialized = false;
 static bool esb_paired = false;
 
-#define TX_ERROR_THRESHOLD 270
+#define TX_ERROR_THRESHOLD 300
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
 
@@ -121,7 +121,7 @@ static bool g_time_initialized = false;
 static int64_t g_last_sync_timestamp = 0;
 static int32_t g_clock_skew_fixed = 0; // Fixed point skew (20 bit fraction)
 static int64_t g_last_skew_update_time = 0;
-#define TIME_SYNC_TIMEOUT_MS 60000
+#define TIME_SYNC_TIMEOUT_MS 90000
 #define SKEW_SHIFT 20
 
 // Track last sent packet for TX_FAILED diagnostics

@@ -316,7 +316,7 @@ config SENSOR_POLY_DEGREE
 
 config SENSOR_POLY_TEMP_MIN
     int "Calibration minimum temperature (C)"
-    default 15
+    default 10
 
 config SENSOR_POLY_TEMP_MAX
     int "Calibration maximum temperature (C)"

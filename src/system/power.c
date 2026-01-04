@@ -412,7 +412,7 @@ static void sys_system_off(void) // TODO: add timeout
 	// Clear sensor addresses
 	sensor_scan_clear();
 	LOG_INF("Requested sensor scan on next boot");
-//	sensor_retained_write();
+	// sensor_retained_write();
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
 #if IMU_INT_EXISTS
@@ -441,7 +441,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 {
 	LOG_INF("System reboot requested");
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
-//	sensor_retained_write();
+	sensor_retained_write();
 	// Set system reboot
 	LOG_INF("Rebooting nRF");
 	sys_update_battery_tracker(current_battery_pptt, device_plugged);

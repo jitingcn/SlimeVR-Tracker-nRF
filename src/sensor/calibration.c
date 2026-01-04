@@ -1372,8 +1372,6 @@ static void update_poly_tcal(void)
 	retained->tempCalState.degree = 0;
 	retained->tempCalState.valid = false;
 
-	retained_update();
-
 	if (retained->tempCalState.count < 2) {
 		LOG_INF("T-Cal: Not enough points (%u)...", retained->tempCalState.count);
 	} else {
@@ -1392,8 +1390,6 @@ static void update_poly_tcal(void)
 			printk("T-Cal: Failed to calculate new curve.\n");
 		}
 	}
-
-	retained_update();
 
 	// Save updated state to NVS
 	sys_write(

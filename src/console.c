@@ -426,6 +426,9 @@ static void print_battery_tracker(void)
 		printk("\nCalibration: None\n");
 	}
 	printk("Cycle count: ~%.2f\n", (double)sys_get_battery_cycles() / 20.0);
+
+	// Print debug information
+	sys_print_battery_tracker_debug();
 }
 
 static void print_meow(void)
@@ -599,6 +602,11 @@ void cmd_reset_tcal(void)
 void cmd_reset_bat(void)
 {
 	sys_reset_battery_tracker();
+}
+
+void cmd_bat_debug(void)
+{
+	sys_print_battery_tracker_debug();
 }
 
 void cmd_ping_start(void)
