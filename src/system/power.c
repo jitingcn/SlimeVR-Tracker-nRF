@@ -43,6 +43,7 @@ static bool battery_low = false;
 static bool plugged = false;
 static bool power_init = false;
 static bool device_plugged = false;
+static bool device_charged = false;
 
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
@@ -613,6 +614,8 @@ static void power_thread(void)
 			set_status(SYS_STATUS_PLUGGED, false);
 		}
 
+		device_charged = charged; // TODO: timer on device_plugged could be used to infer charged state
+
 		if (!power_init)
 		{
 			// log battery state once
@@ -652,7 +655,7 @@ static void power_thread(void)
 			sys_update_battery_tracker(current_battery_pptt, device_plugged);
 		calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
 
-		connection_update_battery(battery_available, device_plugged, calibrated_battery_pptt, battery_mV);
+		connection_update_battery(battery_available, device_plugged, device_charged, calibrated_battery_pptt, battery_mV);
 
 		if (charging)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
