@@ -1074,9 +1074,9 @@ void sensor_loop(void)
 				float gyro_speed = sqrtf(max_gyro_speed_square);
 				float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
 				if (mag_target_time < 0.005f && mag_skip_oneshot) // only use continuous modes if oneshot is not available
-					mag_target_time = 0.005;
+					mag_target_time = 0.005f;
 				if (mag_target_time > 0.1f) // limit to 0.1 (minimum 10Hz)
-					mag_target_time = 0.1;
+					mag_target_time = 0.1f;
 				sys_interface_resume();
 				if (mag_target_time < 0.005f) // cap at 0.005 (200Hz), above this the sensor will use oneshot mode instead
 				{
@@ -1091,7 +1091,7 @@ void sensor_loop(void)
 					{
 						if (!err)
 							mag_skip_oneshot = true;
-						mag_target_time = 0.005;
+						mag_target_time = 0.005f;
 					}
 				}
 				if (mag_target_time >= 0.005f || mag_actual_time != INFINITY) // under 200Hz or magnetometer did not have a oneshot mode
@@ -1105,13 +1105,13 @@ void sensor_loop(void)
 			}
 
 			// Update orientation
-			bool send_quat_data = !q_epsilon(q, last_q, 0.001);
-			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05);
+			bool send_quat_data = !q_epsilon(q, last_q, 0.001f);
+			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05f);
 
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
-			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005) : q_epsilon(q, last_q, 0.05);
-			int64_t min_interval = resting ? 100 : 33; // 10Hz when resting, 30Hz when moving
+			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005f) : q_epsilon(q, last_q, 0.05f);
+			int64_t min_interval = resting ? 5000 : 2000; // 0.2Hz when resting, 0.5Hz when moving
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 			if (send_quat_data || send_lin_accel_data || force_send_by_time)
