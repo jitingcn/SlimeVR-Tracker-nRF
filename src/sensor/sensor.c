@@ -80,6 +80,9 @@ static float q3[4] = {SENSOR_QUATERNION_CORRECTION}; // correction quaternion
 
 static float last_lin_a[3] = {0}; // vector to hold last linear accelerometer
 
+static float temp; // sensor temperature
+static int64_t last_temp_time = -1000;
+
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
@@ -179,6 +182,19 @@ const char *sensor_get_sensor_fusion_name(void)
 	if (fusion_id < 0)
 		return "None";
 	return fusion_names[fusion_id];
+}
+
+int sensor_get_sensor_temperature(float *ptr)
+{
+	if (sensor_imu == &sensor_imu_none || (k_uptime_get() - last_temp_time > 1000))
+	{
+		if (get_status(SYS_STATUS_SENSOR_ERROR))
+			return -2; // no imu!
+		else
+			return -1; // imu probably not scanned yet or temp not read yet or last valid temp is old
+	}
+	&ptr = temp;
+	return 0;
 }
 
 void sensor_scan_thread(void)
@@ -817,8 +833,10 @@ void sensor_loop(void)
 			static int64_t last_temp_read_ms = 0;
 			if (k_uptime_get() - last_temp_read_ms >= 1000) // Update every 1 second
 			{
+				// Read IMU temperature
 				last_temp_read_ms = k_uptime_get();
-				float temp = sensor_imu->temp_read();
+				last_temp_time = k_uptime_get();
+				temp = sensor_imu->temp_read();
 
 				// Only update if the value looks like a valid temperature (-10 to 60).
 				if (temp != 0.0f && temp > -10.0f && temp < 60.0f)
@@ -826,11 +844,12 @@ void sensor_loop(void)
 					sensor_tcal_temp = temp; // Update the static cache
 				}
 
-				connection_update_sensor_temp(sensor_tcal_temp);
+				connection_update_sensor_temp(temp);
 			}
 #else
 			// Read IMU temperature
-			float temp = sensor_imu->temp_read(); // TODO: use as calibration data
+			temp = sensor_imu->temp_read(); // TODO: use as calibration data
+			last_temp_time = k_uptime_get();
 			connection_update_sensor_temp(temp);
 #endif
 
@@ -1132,7 +1151,7 @@ void sensor_loop(void)
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 			// Check for automatic temperature calibration (only when device is resting)
 			if (resting) {
-				float current_temp = sensor_get_current_imu_temperature();
+				float current_temp = temp;
 				if (!isnan(current_temp)) {
 					sensor_tcal_check_auto_calibration(current_temp);
 					// If auto-calibration is enabled, reset last_data_time to prevent sleep
@@ -1248,11 +1267,3 @@ void main_imu_restart(void)
 	if (main_ok) // only restart fusion if initialized
 		sensor_fusion->init(gyro_actual_time, accel_actual_time, 6 / 1000.0f); // TODO: using default initial time
 }
-
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-// Public function to get the current IMU temperature
-float sensor_get_current_imu_temperature(void)
-{
-    return sensor_tcal_temp;
-}
-#endif
