@@ -145,9 +145,9 @@ void sensor_calibration_process_accel(float a[3])
 #else
 	// In single-side calibration mode, accelBias should be zero.
 	// Single-side bias is orientation-dependent and should not be applied.
-	for (int i = 0; i < 3; i++) {
-		a[i] -= accelBias[i];
-	}
+	// for (int i = 0; i < 3; i++) {
+	// 	a[i] -= accelBias[i];
+	// }
 #endif
 }
 
