@@ -1031,7 +1031,7 @@ int sensor_6_sideBias(float a_inv[][3])
 				int64_t sampling_start_time = k_uptime_get();
 				uint8_t i = 0;
 				// Increased sampling time from 1000ms to 5000ms for better calibration quality
-				while (k_uptime_get() < sampling_start_time + 5000) {
+				while (k_uptime_get() - sampling_start_time < 5000) {
 					if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 						return -2; // Timeout, magneto state not handled here
 					}
@@ -1040,7 +1040,7 @@ int sensor_6_sideBias(float a_inv[][3])
 					}
 					magneto_sample(rawData[0], rawData[1], rawData[2], ata, &norm_sum, &sample_count);
 					// Progress indicator every 500ms for 5 second sampling
-					if (k_uptime_get() >= sampling_start_time + i * 500) {
+					if (k_uptime_get() - sampling_start_time >= i * 500) {
 						printk("#");
 						i++;
 					}
