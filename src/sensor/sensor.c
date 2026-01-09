@@ -830,20 +830,13 @@ void sensor_loop(void)
 				sensor_mag->mag_oneshot();
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-			static int64_t last_temp_read_ms = 0;
-			if (k_uptime_get() - last_temp_read_ms >= 1000) // Update every 1 second
+			// Read IMU temperature
+			// Only update if the value looks like a valid temperature (-10 to 60).
+			if (temp != 0.0f && temp > -10.0f && temp < 60.0f)
 			{
-				// Read IMU temperature
-				last_temp_read_ms = k_uptime_get();
-				last_temp_time = k_uptime_get();
 				temp = sensor_imu->temp_read();
-
-				// Only update if the value looks like a valid temperature (-10 to 60).
-				if (temp != 0.0f && temp > -10.0f && temp < 60.0f)
-				{
-					sensor_tcal_temp = temp; // Update the static cache
-				}
-
+				last_temp_time = k_uptime_get();
+				sensor_tcal_temp = temp; // Update the static cache
 				connection_update_sensor_temp(temp);
 			}
 #else
@@ -1267,3 +1260,11 @@ void main_imu_restart(void)
 	if (main_ok) // only restart fusion if initialized
 		sensor_fusion->init(gyro_actual_time, accel_actual_time, 6 / 1000.0f); // TODO: using default initial time
 }
+
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+// Public function to get the current IMU temperature
+float sensor_get_current_imu_temperature(void)
+{
+	return temp;
+}
+#endif
