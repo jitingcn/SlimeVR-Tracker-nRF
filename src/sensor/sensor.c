@@ -193,7 +193,7 @@ int sensor_get_sensor_temperature(float *ptr)
 		else
 			return -1; // imu probably not scanned yet or temp not read yet or last valid temp is old
 	}
-	&ptr = temp;
+	*ptr = temp;
 	return 0;
 }
 
