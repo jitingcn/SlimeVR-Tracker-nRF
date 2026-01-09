@@ -831,10 +831,10 @@ void sensor_loop(void)
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 			// Read IMU temperature
+			temp = sensor_imu->temp_read();
 			// Only update if the value looks like a valid temperature (-10 to 60).
 			if (temp != 0.0f && temp > -10.0f && temp < 60.0f)
 			{
-				temp = sensor_imu->temp_read();
 				last_temp_time = k_uptime_get();
 				sensor_tcal_temp = temp; // Update the static cache
 				connection_update_sensor_temp(temp);
@@ -1267,6 +1267,6 @@ void main_imu_restart(void)
 // Public function to get the current IMU temperature
 float sensor_get_current_imu_temperature(void)
 {
-	return temp;
+	return sensor_tcal_temp;
 }
 #endif
