@@ -143,6 +143,8 @@ void sensor_calibration_process_accel(float a[3])
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	apply_BAinv(a, accBAinv);
 #else
+	// In single-side calibration mode, accelBias should be zero.
+	// Single-side bias is orientation-dependent and should not be applied.
 	for (int i = 0; i < 3; i++) {
 		a[i] -= accelBias[i];
 	}
@@ -493,17 +495,11 @@ static void sensor_calibrate_imu()
 		}
 		a_bias[0] = NAN; // invalidate calibration
 	} else {
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		LOG_INF("Accelerometer bias: %.5f %.5f %.5f", (double)a_bias[0], (double)a_bias[1], (double)a_bias[2]);
-#endif
 		LOG_INF("Gyroscope bias: %.5f %.5f %.5f", (double)g_bias[0], (double)g_bias[1], (double)g_bias[2]);
 	}
 	if (sensor_calibration_validate(a_bias, g_bias, false)) {
 		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		LOG_INF("Restoring previous calibration");
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		LOG_INF("Accelerometer bias: %.5f %.5f %.5f", (double)accelBias[0], (double)accelBias[1], (double)accelBias[2]);
-#endif
 		LOG_INF("Gyroscope bias: %.5f %.5f %.5f", (double)gyroBias[0], (double)gyroBias[1], (double)gyroBias[2]);
 		sensor_calibration_validate(NULL, NULL, true); // additionally verify old calibration
 		return;
@@ -513,7 +509,11 @@ static void sensor_calibrate_imu()
 		memcpy(gyroBias, g_bias, sizeof(gyroBias));
 		sensor_fusion_invalidate(); // only invalidate fusion if calibration was successful
 	}
+#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	// In 6-side calibration mode, save accelerometer bias (full calibration matrix used elsewhere)
 	sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, accelBias, sizeof(accelBias));
+#endif
+	// Always save gyroscope bias (ZRO is orientation-independent)
 	sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
@@ -951,33 +951,13 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 #endif
 
 #if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	// Calculate IQR for accelerometer as well
-	double accel_sum[3] = {0};
-	for (int k = 0; k < i; k++) {
-		accel_sum[0] += (double)accel_samples[k][0];
-		accel_sum[1] += (double)accel_samples[k][1];
-		accel_sum[2] += (double)accel_samples[k][2];
-	}
-	dest1[0] = (float)(accel_sum[0] / i);
-	dest1[1] = (float)(accel_sum[1] / i);
-	dest1[2] = (float)(accel_sum[2] / i);
-
-	// Remove gravity from the appropriate axis
-	if (dest1[0] > 0.9f) {
-		dest1[0] -= 1.0f;
-	} else if (dest1[0] < -0.9f) {
-		dest1[0] += 1.0f;
-	} else if (dest1[1] > 0.9f) {
-		dest1[1] -= 1.0f;
-	} else if (dest1[1] < -0.9f) {
-		dest1[1] += 1.0f;
-	} else if (dest1[2] > 0.9f) {
-		dest1[2] -= 1.0f;
-	} else if (dest1[2] < -0.9f) {
-		dest1[2] += 1.0f;
-	} else {
-		return -1;
-	}
+	// In single-side calibration mode, do NOT calculate accelerometer bias.
+	// Single-side measured bias is only valid for that specific orientation and
+	// applying it in other orientations would introduce larger errors.
+	// Only 6-side calibration can provide orientation-independent correction via matrix transform.
+	dest1[0] = 0.0f;
+	dest1[1] = 0.0f;
+	dest1[2] = 0.0f;
 #endif
 
 	return 0;

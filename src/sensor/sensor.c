@@ -977,7 +977,9 @@ void sensor_loop(void)
 					if (valid_acquisition)
 						total_accel_samples++;
 #endif
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 					sensor_calibration_process_accel(raw_a);
+#endif
 					float ax = raw_a[0];
 					float ay = raw_a[1];
 					float az = raw_a[2];
