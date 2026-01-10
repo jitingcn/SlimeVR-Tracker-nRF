@@ -41,7 +41,7 @@ SYS_INIT(retained_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 bool retained_validate(void)
 {
-	NRF_STATIC_ASSERT((RETAINED_CHECKED_SIZE <= 4096), "Retained data size exceeds 4 KB limit");
+	NRF_STATIC_ASSERT((RETAINED_CHECKED_SIZE <= 3072), "Retained data size exceeds 3 KB limit");
 
 	uint64_t now = init_time;
 //	uint64_t now = k_uptime_ticks(); // Get current uptime in ticks as soon as possible
@@ -70,6 +70,10 @@ bool retained_validate(void)
 		retained->gyroSensScale[0] = 1.0f;
 		retained->gyroSensScale[1] = 1.0f;
 		retained->gyroSensScale[2] = 1.0f;
+		// Initialize battery tracker to invalid state (-1)
+		retained->max_battery_pptt = -1;
+		retained->min_battery_pptt = -1;
+		retained->battery_pptt_saved = -1;
 	}
 
 	/* Reset to accrue runtime from this session. */

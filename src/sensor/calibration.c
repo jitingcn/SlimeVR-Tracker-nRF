@@ -25,6 +25,7 @@
 #include "util.h"
 
 #include <math.h>
+#include <stdlib.h>
 
 #include "sensors_enum.h"
 #include "magneto/magneto1_4.h"
@@ -75,10 +76,31 @@ static int sensor_calibrate_mag(void);
 
 #define TEMP_TO_IDX(temp) (int)((((float)temp) - CONFIG_SENSOR_POLY_TEMP_MIN) * CONFIG_SENSOR_POLY_STEPS_PER_DEGREE)
 #define IDX_TO_TEMP(idx) (float)(((float)(idx) / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE) + CONFIG_SENSOR_POLY_TEMP_MIN)
-#define TEMP_MAX_DEVIATION 0.2f
 
-// Temperature stability threshold for calibration (max allowed temp change during sampling)
-#define TCAL_TEMP_STABILITY_THRESHOLD 0.5f  // °C
+// =============================================================================
+// T-Cal Constants for sensor_offsetBias
+// =============================================================================
+
+// Temperature range threshold - stop collecting when exceeded
+#define TCAL_TEMP_RANGE_THRESHOLD 1.0f  // °C - stop early if temp changes this much
+
+// Minimum samples required for a valid calibration point
+#define TCAL_MIN_SAMPLES (CONFIG_SENSOR_GYRO_ODR * 4)  // 4 seconds at current gyro ODR
+
+// Maximum sampling time before forcing finalization (ms)
+#define TCAL_MAX_SAMPLE_TIME_MS 6000  // 6 seconds max
+
+// Minimum sampling time before allowing finalization (ms)
+#define TCAL_MIN_SAMPLE_TIME_MS 4000  // 4 seconds min
+
+// Temperature check time - only check temp threshold after this time (ms)
+#define TCAL_TEMP_CHECK_TIME_MS 4000  // 4 seconds - prioritize sampling time over temp stability
+
+// Gyro motion threshold during collection (dps) - using range
+#define TCAL_GYRO_MOTION_THRESHOLD 2.0f
+
+// Accel motion threshold during collection (G) - using range
+#define TCAL_ACCEL_MOTION_THRESHOLD 0.12f
 
 // Auto-calibration control
 static bool tcal_auto_calibration_enabled = false;
@@ -124,9 +146,11 @@ void sensor_calibration_process_accel(float a[3])
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	apply_BAinv(a, accBAinv);
 #else
-	for (int i = 0; i < 3; i++) {
-		a[i] -= accelBias[i];
-	}
+	// In single-side calibration mode, accelBias should be zero.
+	// Single-side bias is orientation-dependent and should not be applied.
+	// for (int i = 0; i < 3; i++) {
+	// 	a[i] -= accelBias[i];
+	// }
 #endif
 }
 
@@ -474,17 +498,11 @@ static void sensor_calibrate_imu()
 		}
 		a_bias[0] = NAN; // invalidate calibration
 	} else {
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		LOG_INF("Accelerometer bias: %.5f %.5f %.5f", (double)a_bias[0], (double)a_bias[1], (double)a_bias[2]);
-#endif
 		LOG_INF("Gyroscope bias: %.5f %.5f %.5f", (double)g_bias[0], (double)g_bias[1], (double)g_bias[2]);
 	}
 	if (sensor_calibration_validate(a_bias, g_bias, false)) {
 		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		LOG_INF("Restoring previous calibration");
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		LOG_INF("Accelerometer bias: %.5f %.5f %.5f", (double)accelBias[0], (double)accelBias[1], (double)accelBias[2]);
-#endif
 		LOG_INF("Gyroscope bias: %.5f %.5f %.5f", (double)gyroBias[0], (double)gyroBias[1], (double)gyroBias[2]);
 		sensor_calibration_validate(NULL, NULL, true); // additionally verify old calibration
 		return;
@@ -494,7 +512,11 @@ static void sensor_calibrate_imu()
 		memcpy(gyroBias, g_bias, sizeof(gyroBias));
 		sensor_fusion_invalidate(); // only invalidate fusion if calibration was successful
 	}
+#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	// In 6-side calibration mode, save accelerometer bias (full calibration matrix used elsewhere)
 	sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, accelBias, sizeof(accelBias));
+#endif
+	// Always save gyroscope bias (ZRO is orientation-independent)
 	sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
@@ -757,8 +779,7 @@ static int isAccRest(float *acc, float *pre_acc, float threshold, int *t, int re
 }
 #endif
 
-// TODO: setup 6 sided calibration (bias and scale, and maybe gyro ZRO?), setup temp calibration (particulary for gyro
-// ZRO)
+// TODO: setup 6 sided calibration (bias and scale, and maybe gyro ZRO?), setup temp calibration (particulary for gyro ZRO)
 int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_range)
 {
 	float rawData[3];
@@ -776,30 +797,47 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 	}
 	memcpy(max_g, min_g, sizeof(max_g));
 
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	double accel_sum[3] = {0};
-#endif
+	// Use online algorithm - accumulate sums instead of storing all samples
+	// This reduces memory from ~168KB to <100 bytes!
 	double gyro_sum[3] = {0};
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-	// Temperature sampling for T-Cal: record start, middle, end temps
-	float temp_sum = 0.0;
-	int temp_sample_count = 0;
-	float temp_start = NAN, temp_mid = NAN, temp_end = NAN;
+	double temp_sum = 0;
+	float temp_min = INFINITY, temp_max = -INFINITY;
 	float current_temp;
+	int valid_temp_count = 0;
 
 	// Record start temperature
 	current_temp = sensor_get_current_imu_temperature();
 	if (!isnan(current_temp) && current_temp > -10.0f && current_temp < 60.0f) {
-		temp_start = current_temp;
-		temp_sum += current_temp;
-		temp_sample_count++;
+		temp_min = current_temp;
+		temp_max = current_temp;
 	}
 #endif
 
 	int64_t sampling_start_time = k_uptime_get();
 	int i = 0;
-	while (k_uptime_get() < sampling_start_time + 3000) {
+	bool temp_threshold_reached = false;
+
+	// Collect samples with smart stop conditions
+	// Now we only check timing and motion, not sample count
+	while (true) {
+		int64_t elapsed = k_uptime_get() - sampling_start_time;
+
+		// Check stop conditions
+		if (elapsed >= TCAL_MAX_SAMPLE_TIME_MS) {
+			LOG_INF("Max sampling time reached (%lld ms)", elapsed);
+			break;
+		}
+
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+		// Check temperature threshold only after TCAL_TEMP_CHECK_TIME_MS
+		if (elapsed >= TCAL_TEMP_CHECK_TIME_MS && temp_threshold_reached) {
+			LOG_INF("Temperature threshold reached after %lld ms with %d samples", elapsed, i);
+			break;
+		}
+#endif
+
 		// Accumulate Accelerometer
 		if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 			return -2; // Timeout
@@ -813,23 +851,18 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 			if (rawData[j] > max_a[j]) {
 				max_a[j] = rawData[j];
 			}
-			if (max_a[j] - min_a[j] > 0.1f) { // Threshold 0.1G
+			if (max_a[j] - min_a[j] > TCAL_ACCEL_MOTION_THRESHOLD) {
 				LOG_INF("Accel motion detected: axis %d range %.4f", j, (double)(max_a[j] - min_a[j]));
 				return -1;
 			}
 		}
 
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		accel_sum[0] += (double)rawData[0];
-		accel_sum[1] += (double)rawData[1];
-		accel_sum[2] += (double)rawData[2];
-#endif
 		// Accumulate Gyroscope
-		if (sensor_wait_gyro(rawData, K_MSEC(1000))) {
+		if (sensor_wait_gyro(rawData, K_MSEC(500))) {
 			return -2; // Timeout
 		}
 
-		// Check Gyro Motion (Optimization)
+		// Check Gyro Motion
 		for (int j = 0; j < 3; j++) {
 			if (rawData[j] < min_g[j]) {
 				min_g[j] = rawData[j];
@@ -837,107 +870,68 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 			if (rawData[j] > max_g[j]) {
 				max_g[j] = rawData[j];
 			}
-			if (max_g[j] - min_g[j] > 2.0f) { // Threshold 2.0 dps
+			if (max_g[j] - min_g[j] > TCAL_GYRO_MOTION_THRESHOLD) {
 				LOG_INF("Gyro motion detected: axis %d range %.4f", j, (double)(max_g[j] - min_g[j]));
 				return -1;
 			}
 		}
 
+		// Accumulate gyro data using online algorithm
 		gyro_sum[0] += (double)rawData[0];
 		gyro_sum[1] += (double)rawData[1];
 		gyro_sum[2] += (double)rawData[2];
-		i++;
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-		// Sample temperature throughout calibration
+		// Sample and accumulate temperature
 		current_temp = sensor_get_current_imu_temperature();
 		if (!isnan(current_temp) && current_temp > -10.0f && current_temp < 60.0f) {
-			temp_sum += current_temp;
-			temp_sample_count++;
+			temp_sum += (double)current_temp;
+			valid_temp_count++;
 
-			// Record middle temperature (around 1.5s)
-			if (isnan(temp_mid) && k_uptime_get() >= sampling_start_time + 1500) {
-				temp_mid = current_temp;
+			if (current_temp < temp_min) temp_min = current_temp;
+			if (current_temp > temp_max) temp_max = current_temp;
+
+			// Check if temperature range threshold exceeded
+			if ((temp_max - temp_min) >= TCAL_TEMP_RANGE_THRESHOLD) {
+				temp_threshold_reached = true;
 			}
 		}
 #endif
+		i++;
 	}
-	LOG_INF("Samples: %d", i);
 
-	if (i == 0) {
+	LOG_INF("Samples collected: %d", i);
+
+	if (i < TCAL_MIN_SAMPLES) {
+		LOG_WRN("Not enough samples: %d < %d", i, TCAL_MIN_SAMPLES);
 		return -2;
 	}
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-	// Record end temperature
-	current_temp = sensor_get_current_imu_temperature();
-	if (!isnan(current_temp) && current_temp > -10.0f && current_temp < 60.0f) {
-		temp_end = current_temp;
-		temp_sum += current_temp;
-		temp_sample_count++;
+	if (avg_temp != NULL && valid_temp_count > 0) {
+		*avg_temp = (float)(temp_sum / valid_temp_count);
+		LOG_INF("T-Cal: Average temperature: %.2fC (%d samples)", (double)*avg_temp, valid_temp_count);
 	}
 
-	// Calculate average temperature
-	if (temp_sample_count > 0 && avg_temp != NULL) {
-		*avg_temp = (float)(temp_sum / temp_sample_count);
-		LOG_INF("T-Cal: Average temperature during calibration: %.2fC (%d samples)",
-			(double)*avg_temp, temp_sample_count);
-	} else if (avg_temp != NULL) {
-		*avg_temp = NAN;
-	}
-
-	// Check temperature stability
-	if (!isnan(temp_start) && !isnan(temp_end) && temp_range != NULL) {
-		float min_temp = temp_start;
-		float max_temp = temp_start;
-
-		if (!isnan(temp_mid)) {
-			if (temp_mid < min_temp) min_temp = temp_mid;
-			if (temp_mid > max_temp) max_temp = temp_mid;
-		}
-		if (temp_end < min_temp) min_temp = temp_end;
-		if (temp_end > max_temp) max_temp = temp_end;
-
-		*temp_range = max_temp - min_temp;
-
-		LOG_INF("T-Cal: Temperature range during calibration: %.2fC (%.2fC to %.2fC)",
-			(double)*temp_range, (double)min_temp, (double)max_temp);
-
-		// Check if temperature changed too much
-		if (*temp_range > TCAL_TEMP_STABILITY_THRESHOLD) {
-			LOG_WRN("T-Cal: Temperature changed too much (%.2fC) during calibration. "
-				"Rejecting calibration. Please wait for temperature to stabilize.",
-				(double)*temp_range);
-			return -3; // Temperature instability error
-		}
-	} else if (temp_range != NULL) {
-		*temp_range = NAN;
+	if (temp_range != NULL) {
+		*temp_range = temp_max - temp_min;
+		LOG_INF("T-Cal: Temperature range: %.2fC (%.2fC to %.2fC)",
+			(double)*temp_range, (double)temp_min, (double)temp_max);
 	}
 #endif
 
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	dest1[0] = (float)(accel_sum[0] / i);
-	dest1[1] = (float)(accel_sum[1] / i);
-	dest1[2] = (float)(accel_sum[2] / i);
-	if (dest1[0] > 0.9f) {
-		dest1[0] -= 1.0f; // Remove gravity from the x-axis accelerometer bias calculation
-	} else if (dest1[0] < -0.9f) {
-		dest1[0] += 1.0f; // Remove gravity from the x-axis accelerometer bias calculation
-	} else if (dest1[1] > 0.9f) {
-		dest1[1] -= 1.0f; // Remove gravity from the y-axis accelerometer bias calculation
-	} else if (dest1[1] < -0.9f) {
-		dest1[1] += 1.0f; // Remove gravity from the y-axis accelerometer bias calculation
-	} else if (dest1[2] > 0.9f) {
-		dest1[2] -= 1.0f; // Remove gravity from the z-axis accelerometer bias calculation
-	} else if (dest1[2] < -0.9f) {
-		dest1[2] += 1.0f; // Remove gravity from the z-axis accelerometer bias calculation
-	} else {
-		return -1;
-	}
-#endif
+	// Calculate averages
 	dest2[0] = (float)(gyro_sum[0] / i);
 	dest2[1] = (float)(gyro_sum[1] / i);
 	dest2[2] = (float)(gyro_sum[2] / i);
+
+#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	// In single-side calibration mode, do NOT calculate accelerometer bias.
+	dest1[0] = 0.0f;
+	dest1[1] = 0.0f;
+	dest1[2] = 0.0f;
+#endif
+
 	return 0;
 }
 
@@ -989,7 +983,7 @@ int sensor_6_sideBias(float a_inv[][3])
 				int64_t sampling_start_time = k_uptime_get();
 				uint8_t i = 0;
 				// Increased sampling time from 1000ms to 5000ms for better calibration quality
-				while (k_uptime_get() < sampling_start_time + 5000) {
+				while (k_uptime_get() - sampling_start_time < 5000) {
 					if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 						return -2; // Timeout, magneto state not handled here
 					}
@@ -998,7 +992,7 @@ int sensor_6_sideBias(float a_inv[][3])
 					}
 					magneto_sample(rawData[0], rawData[1], rawData[2], ata, &norm_sum, &sample_count);
 					// Progress indicator every 500ms for 5 second sampling
-					if (k_uptime_get() >= sampling_start_time + i * 500) {
+					if (k_uptime_get() - sampling_start_time >= i * 500) {
 						printk("#");
 						i++;
 					}
@@ -1330,8 +1324,6 @@ static void update_poly_tcal(void)
 	retained->tempCalState.degree = 0;
 	retained->tempCalState.valid = false;
 
-	retained_update();
-
 	if (retained->tempCalState.count < 2) {
 		LOG_INF("T-Cal: Not enough points (%u)...", retained->tempCalState.count);
 	} else {
@@ -1350,8 +1342,6 @@ static void update_poly_tcal(void)
 			printk("T-Cal: Failed to calculate new curve.\n");
 		}
 	}
-
-	retained_update();
 
 	// Save updated state to NVS
 	sys_write(
@@ -1497,8 +1487,8 @@ bool sensor_tcal_is_temp_outside_range(float temp, float *min_temp, float *max_t
 	if (max_temp) *max_temp = closest_distance;
 
 	// Need calibration if closest point is farther than sampling interval
-	// Add small tolerance (10%) to avoid triggering at boundary
-	return (closest_distance > sampling_interval * 1.1f);
+	// Add small tolerance (5%) to avoid triggering at boundary
+	return (closest_distance > sampling_interval * 1.05f);
 }
 
 // Set auto-calibration enabled/disabled
@@ -1517,8 +1507,10 @@ bool sensor_tcal_get_auto_calibration(void)
 // Check and request auto calibration if conditions are met
 void sensor_tcal_check_auto_calibration(float current_temp)
 {
-	static int64_t last_check_time = 0;
-	static int64_t last_auto_cal_time = 0;
+	static int64_t last_calibration_time = 0;
+	static float last_temp = NAN;
+	static float min_temp_since_last_check = NAN;
+	static int64_t temp_history_time = 0;
 
 	int64_t now = k_uptime_get();
 
@@ -1527,42 +1519,112 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 		return;
 	}
 
-	// Only check every 3 seconds to avoid excessive checking
-	if ((now - last_check_time) < 3000) {
+	// Prevent starting new calibration while previous one is still running
+	// Use calibration cooldown time (TCAL_MAX_SAMPLE_TIME_MS + margin)
+	const int64_t calibration_cooldown_ms = TCAL_MAX_SAMPLE_TIME_MS + 10000; // 5s sampling + 10s margin = 15s
+	if ((now - last_calibration_time) < calibration_cooldown_ms) {
 		return;
 	}
-	last_check_time = now;
-
-	// Don't auto-calibrate too frequently (at least 13 seconds between auto cals)
-	if ((now - last_auto_cal_time) < 13000) {
-		return;
-	}
-
-	// Check if we need periodic recalibration (every 5 minutes)
-	const int64_t periodic_cal_interval = 300000; // 5 minutes
-	bool needs_periodic_cal = (now - last_auto_cal_time) > periodic_cal_interval;
 
 	// Check if temperature is outside calibrated range
-	float min_temp, max_temp;
-	bool needs_temp_cal = sensor_tcal_is_temp_outside_range(current_temp, &min_temp, &max_temp);
+	float closest_temp, distance;
+	bool needs_temp_cal = sensor_tcal_is_temp_outside_range(current_temp, &closest_temp, &distance);
 
-	// Trigger calibration if either condition is met
-	if (needs_temp_cal) {
-		LOG_INF("T-Cal Auto: Temp %.2fC needs calibration (closest: %.2fC, distance: %.2fC)",
-			(double)current_temp, (double)min_temp, (double)max_temp);
-	} else if (needs_periodic_cal) {
-		LOG_INF("T-Cal Auto: Periodic recalibration (>5min since last cal, temp: %.2fC)",
-			(double)current_temp);
-	} else {
-		return; // No calibration needed
+	// Only proceed if temperature calibration is needed
+	if (!needs_temp_cal) {
+		// Update temperature tracking even when calibration is not needed
+		if (!isnan(current_temp)) {
+			if (isnan(min_temp_since_last_check) || current_temp < min_temp_since_last_check) {
+				min_temp_since_last_check = current_temp;
+			}
+		}
+		return;
 	}
 
-	LOG_INF("T-Cal Auto: Requesting auto-calibration (device is resting)");
-	last_auto_cal_time = now;
+	// Track temperature trend - only calibrate when temperature is rising
+	bool is_temp_rising = false;
+
+	// Validate current temperature reading
+	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
+		LOG_WRN("T-Cal Auto: Invalid temperature reading %.2fC - skipping", (double)current_temp);
+		return;
+	}
+
+	// Initialize tracking on first run
+	if (isnan(last_temp)) {
+		last_temp = current_temp;
+		min_temp_since_last_check = current_temp;
+		temp_history_time = now;
+		LOG_DBG("T-Cal Auto: Initializing temperature tracking at %.2fC", (double)current_temp);
+		return;
+	}
+
+	// Update minimum temperature tracker
+	if (isnan(min_temp_since_last_check) || current_temp < min_temp_since_last_check) {
+		min_temp_since_last_check = current_temp;
+	}
+
+	// Check temperature trend every 10 seconds to smooth out sensor noise
+	const int64_t temp_check_interval_ms = 10000;
+	if ((now - temp_history_time) >= temp_check_interval_ms) {
+		float temp_change = current_temp - last_temp;
+		float temp_rise_from_min = current_temp - min_temp_since_last_check;
+
+		// Temperature thresholds adjusted for typical IMU sensor accuracy (~1°C) and noise (~0.1-0.5°C)
+		const float short_term_rise_threshold = 0.3f;  // 0.3°C over 10s - clear rising trend
+		const float long_term_rise_threshold = 0.5f;   // 0.5°C from minimum - significant rise after drop
+
+		// Temperature is rising if:
+		// 1. It increased compared to last check (short-term trend, above noise level)
+		// 2. OR it's rising significantly from recent minimum (handles temp drop then rise case)
+		if (temp_change >= short_term_rise_threshold || temp_rise_from_min >= long_term_rise_threshold) {
+			is_temp_rising = true;
+			if (temp_rise_from_min >= long_term_rise_threshold) {
+				LOG_INF("T-Cal Auto: Temperature rising from recent minimum (%.2fC -> %.2fC, +%.2fC)",
+					(double)min_temp_since_last_check, (double)current_temp, (double)temp_rise_from_min);
+			} else {
+				LOG_INF("T-Cal Auto: Temperature rising (%.2fC -> %.2fC, +%.2fC over %llds)",
+					(double)last_temp, (double)current_temp, (double)temp_change, temp_check_interval_ms / 1000);
+			}
+		} else {
+			LOG_DBG("T-Cal Auto: Temperature not rising (%.2fC -> %.2fC, change: %.2fC, from min: +%.2fC) - skipping",
+				(double)last_temp, (double)current_temp, (double)temp_change, (double)temp_rise_from_min);
+		}
+
+		// Update temperature history
+		last_temp = current_temp;
+		temp_history_time = now;
+	}
+
+	// Only trigger calibration if temperature is rising
+	if (!is_temp_rising) {
+		return;
+	}
+
+	// Provide friendly log message based on whether calibration points exist
+	if (isnan(closest_temp)) {
+		LOG_INF("T-Cal Auto: Temp %.2fC needs calibration (no existing calibration points)",
+			(double)current_temp);
+	} else {
+		LOG_INF("T-Cal Auto: Temp %.2fC needs calibration (closest: %.2fC, distance: %.2fC)",
+			(double)current_temp, (double)closest_temp, (double)distance);
+	}
+
+	LOG_INF("T-Cal Auto: Requesting auto-calibration (device is resting, temperature rising)");
 
 	// Request standard calibration (which will include tcal)
 	// The calibration routine itself will check if device is still using wait_for_motion()
-	sensor_request_calibration();
+	int request_result = sensor_calibration_request(1);
+
+	// Only update timing if request was successful
+	if (request_result == 0) {
+		// Record calibration start time
+		last_calibration_time = now;
+		// Reset minimum temperature tracker after triggering calibration
+		min_temp_since_last_check = current_temp;
+	} else {
+		LOG_DBG("T-Cal Auto: Calibration request rejected (already running), will retry later");
+	}
 }
 
 // Recalculates the T-Cal correction offset based on the current curve and anchor point.

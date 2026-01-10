@@ -80,6 +80,9 @@ static float q3[4] = {SENSOR_QUATERNION_CORRECTION}; // correction quaternion
 
 static float last_lin_a[3] = {0}; // vector to hold last linear accelerometer
 
+static float temp; // sensor temperature
+static int64_t last_temp_time = -1000;
+
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
@@ -179,6 +182,19 @@ const char *sensor_get_sensor_fusion_name(void)
 	if (fusion_id < 0)
 		return "None";
 	return fusion_names[fusion_id];
+}
+
+int sensor_get_sensor_temperature(float *ptr)
+{
+	if (sensor_imu == &sensor_imu_none || (k_uptime_get() - last_temp_time > 1000))
+	{
+		if (get_status(SYS_STATUS_SENSOR_ERROR))
+			return -2; // no imu!
+		else
+			return -1; // imu probably not scanned yet or temp not read yet or last valid temp is old
+	}
+	*ptr = temp;
+	return 0;
 }
 
 void sensor_scan_thread(void)
@@ -814,23 +830,19 @@ void sensor_loop(void)
 				sensor_mag->mag_oneshot();
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-			static int64_t last_temp_read_ms = 0;
-			if (k_uptime_get() - last_temp_read_ms >= 1000) // Update every 1 second
+			// Read IMU temperature
+			temp = sensor_imu->temp_read();
+			// Only update if the value looks like a valid temperature (-10 to 60).
+			if (temp != 0.0f && temp > -10.0f && temp < 60.0f)
 			{
-				last_temp_read_ms = k_uptime_get();
-				float temp = sensor_imu->temp_read();
-
-				// Only update if the value looks like a valid temperature (-10 to 60).
-				if (temp != 0.0f && temp > -10.0f && temp < 60.0f)
-				{
-					sensor_tcal_temp = temp; // Update the static cache
-				}
-
-				connection_update_sensor_temp(sensor_tcal_temp);
+				last_temp_time = k_uptime_get();
+				sensor_tcal_temp = temp; // Update the static cache
+				connection_update_sensor_temp(temp);
 			}
 #else
 			// Read IMU temperature
-			float temp = sensor_imu->temp_read(); // TODO: use as calibration data
+			temp = sensor_imu->temp_read(); // TODO: use as calibration data
+			last_temp_time = k_uptime_get();
 			connection_update_sensor_temp(temp);
 #endif
 
@@ -965,7 +977,10 @@ void sensor_loop(void)
 					if (valid_acquisition)
 						total_accel_samples++;
 #endif
+					// Always call sensor_calibration_process_accel to update sample buffers
+					// This is needed for calibration routines (e.g., wait_for_motion) even without 6-side calibration
 					sensor_calibration_process_accel(raw_a);
+
 					float ax = raw_a[0];
 					float ay = raw_a[1];
 					float az = raw_a[2];
@@ -1074,9 +1089,9 @@ void sensor_loop(void)
 				float gyro_speed = sqrtf(max_gyro_speed_square);
 				float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
 				if (mag_target_time < 0.005f && mag_skip_oneshot) // only use continuous modes if oneshot is not available
-					mag_target_time = 0.005;
+					mag_target_time = 0.005f;
 				if (mag_target_time > 0.1f) // limit to 0.1 (minimum 10Hz)
-					mag_target_time = 0.1;
+					mag_target_time = 0.1f;
 				sys_interface_resume();
 				if (mag_target_time < 0.005f) // cap at 0.005 (200Hz), above this the sensor will use oneshot mode instead
 				{
@@ -1091,7 +1106,7 @@ void sensor_loop(void)
 					{
 						if (!err)
 							mag_skip_oneshot = true;
-						mag_target_time = 0.005;
+						mag_target_time = 0.005f;
 					}
 				}
 				if (mag_target_time >= 0.005f || mag_actual_time != INFINITY) // under 200Hz or magnetometer did not have a oneshot mode
@@ -1105,13 +1120,13 @@ void sensor_loop(void)
 			}
 
 			// Update orientation
-			bool send_quat_data = !q_epsilon(q, last_q, 0.001);
-			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05);
+			bool send_quat_data = !q_epsilon(q, last_q, 0.001f);
+			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05f);
 
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
-			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005) : q_epsilon(q, last_q, 0.05);
-			int64_t min_interval = resting ? 100 : 33; // 10Hz when resting, 30Hz when moving
+			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005f) : q_epsilon(q, last_q, 0.05f);
+			int64_t min_interval = resting ? 5000 : 2000; // 0.2Hz when resting, 0.5Hz when moving
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 			if (send_quat_data || send_lin_accel_data || force_send_by_time)
@@ -1132,7 +1147,7 @@ void sensor_loop(void)
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 			// Check for automatic temperature calibration (only when device is resting)
 			if (resting) {
-				float current_temp = sensor_get_current_imu_temperature();
+				float current_temp = temp;
 				if (!isnan(current_temp)) {
 					sensor_tcal_check_auto_calibration(current_temp);
 					// If auto-calibration is enabled, reset last_data_time to prevent sleep
@@ -1253,6 +1268,6 @@ void main_imu_restart(void)
 // Public function to get the current IMU temperature
 float sensor_get_current_imu_temperature(void)
 {
-    return sensor_tcal_temp;
+	return sensor_tcal_temp;
 }
 #endif

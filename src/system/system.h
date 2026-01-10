@@ -7,7 +7,6 @@
 
 #define RBT_CNT_ID 1
 #define PAIRED_ID 2
-#define MAIN_SENSOR_DATA_ID 8
 #define MAIN_ACCEL_BIAS_ID 3
 #define MAIN_GYRO_BIAS_ID 4
 #define MAIN_MAG_BIAS_ID 5
@@ -15,18 +14,19 @@
 #define MAIN_ACC_6_BIAS_ID 7
 
 #define BATT_STATS_LAST_RUN_ID 8
-#define BATT_STATS_INTERVAL_0 9 // ID 9 to 28
+#define BATT_STATS_INTERVAL_0 9 // ID 9 to 28 (20 intervals)
 #define BATT_STATS_CURVE_ID 29
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-#define MAIN_GYRO_TEMP_ID 41
-#define MAIN_GYRO_TCAL_POINTS_ID 46
-#define MAIN_GYRO_TCAL_COEFFS_ID 47
-#define MAIN_GYRO_TCAL_STATE_ID  48
-#define MAIN_GYRO_TCAL_CORRECTION_ID 49
-#endif
+#define MAIN_SENSOR_DATA_ID 30
+#define RF_CHANNEL_ID 31 // RF channel storage
 
-#define RF_CHANNEL_ID 100  // RF channel storage (changed from 30 to avoid conflicts)
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#define MAIN_GYRO_TEMP_ID 32
+#define MAIN_GYRO_TCAL_POINTS_ID 33
+#define MAIN_GYRO_TCAL_COEFFS_ID 34
+#define MAIN_GYRO_TCAL_STATE_ID  35
+#define MAIN_GYRO_TCAL_CORRECTION_ID 36
+#endif
 
 void configure_sense_pins(void);
 
