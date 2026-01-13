@@ -84,9 +84,6 @@ static int sensor_calibrate_mag(void);
 // Temperature range threshold - stop collecting when exceeded
 #define TCAL_TEMP_RANGE_THRESHOLD 1.0f  // °C - stop early if temp changes this much
 
-// Minimum samples required for a valid calibration point
-#define TCAL_MIN_SAMPLES (CONFIG_SENSOR_GYRO_ODR * 4)  // 4 seconds at current gyro ODR
-
 // Maximum sampling time before forcing finalization (ms)
 #define TCAL_MAX_SAMPLE_TIME_MS 6000  // 6 seconds max
 
@@ -819,8 +816,19 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 	int i = 0;
 	bool temp_threshold_reached = false;
 
+	// Accel motion check counter - check every N gyro samples to avoid blocking
+	// Use actual sensor ODR instead of config values (e.g., real 208Hz vs config 200Hz)
+	float actual_gyro_odr = sensor_get_gyro_odr();
+	float actual_accel_odr = sensor_get_accel_odr();
+	int accel_check_interval = (int)(actual_gyro_odr / actual_accel_odr + 0.5f); // Round to nearest
+	if (accel_check_interval < 1) accel_check_interval = 1; // Ensure at least 1
+	int accel_check_counter = 0;
+
+	LOG_INF("Calibration: Using actual ODR - Gyro: %.2fHz, Accel: %.2fHz, Check interval: %d",
+		(double)actual_gyro_odr, (double)actual_accel_odr, accel_check_interval);
+
 	// Collect samples with smart stop conditions
-	// Now we only check timing and motion, not sample count
+	// Main loop runs at gyro ODR, accel checked periodically
 	while (true) {
 		int64_t elapsed = k_uptime_get() - sampling_start_time;
 
@@ -838,27 +846,32 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 		}
 #endif
 
-		// Accumulate Accelerometer
-		if (sensor_wait_accel(rawData, K_MSEC(1000))) {
-			return -2; // Timeout
-		}
+		// Check accelerometer motion periodically (not every loop iteration)
+		// This prevents the loop from being blocked by slower accel ODR
+		if (accel_check_counter >= accel_check_interval) {
+			if (sensor_wait_accel(rawData, K_MSEC(100))) {
+				return -2; // Timeout
+			}
 
-		// Check Accel Motion (Min/Max method)
-		for (int j = 0; j < 3; j++) {
-			if (rawData[j] < min_a[j]) {
-				min_a[j] = rawData[j];
+			// Check Accel Motion (Min/Max method)
+			for (int j = 0; j < 3; j++) {
+				if (rawData[j] < min_a[j]) {
+					min_a[j] = rawData[j];
+				}
+				if (rawData[j] > max_a[j]) {
+					max_a[j] = rawData[j];
+				}
+				if (max_a[j] - min_a[j] > TCAL_ACCEL_MOTION_THRESHOLD) {
+					LOG_INF("Accel motion detected: axis %d range %.4f", j, (double)(max_a[j] - min_a[j]));
+					return -1;
+				}
 			}
-			if (rawData[j] > max_a[j]) {
-				max_a[j] = rawData[j];
-			}
-			if (max_a[j] - min_a[j] > TCAL_ACCEL_MOTION_THRESHOLD) {
-				LOG_INF("Accel motion detected: axis %d range %.4f", j, (double)(max_a[j] - min_a[j]));
-				return -1;
-			}
+			accel_check_counter = 0;
 		}
+		accel_check_counter++;
 
 		// Accumulate Gyroscope
-		if (sensor_wait_gyro(rawData, K_MSEC(500))) {
+		if (sensor_wait_gyro(rawData, K_MSEC(100))) {
 			return -2; // Timeout
 		}
 
@@ -902,8 +915,13 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 
 	LOG_INF("Samples collected: %d", i);
 
-	if (i < TCAL_MIN_SAMPLES) {
-		LOG_WRN("Not enough samples: %d < %d", i, TCAL_MIN_SAMPLES);
+	// Calculate minimum samples based on actual gyro ODR (not config value)
+	// Target: 4 seconds of gyro data at actual rate
+	int min_samples_required = (int)(actual_gyro_odr * 4.0f);
+
+	if (i < min_samples_required) {
+		LOG_WRN("Not enough samples: %d < %d (based on actual gyro ODR: %.2fHz)",
+			i, min_samples_required, (double)actual_gyro_odr);
 		return -2;
 	}
 

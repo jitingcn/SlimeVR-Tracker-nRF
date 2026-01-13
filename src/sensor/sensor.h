@@ -55,6 +55,10 @@ void main_imu_restart(void);
 float sensor_get_current_imu_temperature(void);
 #endif
 
+// Get actual sensor ODR (Output Data Rate) in Hz
+float sensor_get_accel_odr(void);
+float sensor_get_gyro_odr(void);
+
 typedef struct sensor_fusion {
 	void (*init)(float, float, float);  // gyro_time, accel_time, mag_time
 	void (*load)(const void*);

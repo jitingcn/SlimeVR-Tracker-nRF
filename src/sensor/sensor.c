@@ -1271,3 +1271,21 @@ float sensor_get_current_imu_temperature(void)
 	return sensor_tcal_temp;
 }
 #endif
+
+// Get actual accelerometer ODR in Hz
+float sensor_get_accel_odr(void)
+{
+	if (accel_actual_time > 0.0f) {
+		return 1.0f / accel_actual_time;
+	}
+	return (float)CONFIG_SENSOR_ACCEL_ODR; // Fallback to config value
+}
+
+// Get actual gyroscope ODR in Hz
+float sensor_get_gyro_odr(void)
+{
+	if (gyro_actual_time > 0.0f) {
+		return 1.0f / gyro_actual_time;
+	}
+	return (float)CONFIG_SENSOR_GYRO_ODR; // Fallback to config value
+}
