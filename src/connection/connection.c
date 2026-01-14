@@ -122,7 +122,7 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 {
 	// data_time is in system ticks, nonzero means valid measurement
 	// TODO: use data_time to measure latency! the latency should be calculated up to before radio sent data
-	send_precise_quat = q_epsilon(q, sensor_q, 0.005);
+	send_precise_quat = q_epsilon(q, sensor_q, 0.005f);
 	memcpy(sensor_q, q, sizeof(sensor_q));
 	memcpy(sensor_a, a, sizeof(sensor_a));
 	quat_update_time = k_uptime_get();

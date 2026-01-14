@@ -1126,7 +1126,7 @@ void sensor_loop(void)
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
 			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005f) : q_epsilon(q, last_q, 0.05f);
-			int64_t min_interval = resting ? 5000 : 2000; // 0.2Hz when resting, 0.5Hz when moving
+			int64_t min_interval = 2000;
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 			if (send_quat_data || send_lin_accel_data || force_send_by_time)
@@ -1136,10 +1136,15 @@ void sensor_loop(void)
 				float q_offset[4];
 				q_multiply(q, q3, q_offset); // quaternion in device orientation, connection will change format from wxyz to xyzw
 				v_rotate(lin_a, q3, lin_a); // linear acceleration in local device frame, no other transformation will be done
+
+				if (!send_quat_data && !send_lin_accel_data) {
+					memset(lin_a, 0, sizeof(lin_a)); // zero out linear acceleration when no motion detected
+				}
+
 				connection_update_sensor_data(q_offset, lin_a, sensor_data_time);
 				last_sensor_send_time = now;
 				// Update last_data_time on every send to improve state transition responsiveness
-				if (!resting) {
+				if (send_quat_data) {
 					last_data_time = now;
 				}
 			}
