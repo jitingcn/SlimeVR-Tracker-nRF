@@ -1,5 +1,6 @@
 #include "globals.h"
 #include "sensor/sensor.h"
+#include "sensor/calibration.h"
 #include "battery.h"
 #include "battery_tracker.h"
 #include "connection/connection.h"
@@ -413,6 +414,10 @@ static void sys_system_off(void) // TODO: add timeout
 	// Clear sensor addresses
 	sensor_scan_clear();
 	LOG_INF("Requested sensor scan on next boot");
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+	// Reset boot calibration state so it will recalibrate on next boot
+	sensor_boot_cal_reset();
+#endif
 	// sensor_retained_write();
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
@@ -442,6 +447,10 @@ static void sys_system_reboot(void) // TODO: add timeout
 {
 	LOG_INF("System reboot requested");
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+	// Reset boot calibration state so it will recalibrate on next boot
+	sensor_boot_cal_reset();
+#endif
 	sensor_retained_write();
 	// Set system reboot
 	LOG_INF("Rebooting nRF");

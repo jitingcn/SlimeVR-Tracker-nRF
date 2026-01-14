@@ -1145,6 +1145,9 @@ void sensor_loop(void)
 			}
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+			// Check for boot calibration (higher priority than auto calibration)
+			sensor_tcal_boot_calibration_check();
+
 			// Check for automatic temperature calibration (only when device is resting)
 			if (resting) {
 				float current_temp = temp;

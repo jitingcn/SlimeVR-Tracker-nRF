@@ -78,6 +78,22 @@ static int sensor_calibrate_mag(void);
 #define IDX_TO_TEMP(idx) (float)(((float)(idx) / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE) + CONFIG_SENSOR_POLY_TEMP_MIN)
 
 // =============================================================================
+// Boot Calibration - Runtime D_offset Calculation
+// =============================================================================
+
+// Boot calibration constants
+#define BOOT_CAL_TIME_WINDOW_START_MS  10000   // 10 seconds after boot
+#define BOOT_CAL_TIME_WINDOW_END_MS    30000  // 30 seconds after boot
+#define BOOT_CAL_MAX_ATTEMPTS          3      // Maximum retry attempts
+#define BOOT_CAL_MIN_CURVE_POINTS      5     // Minimum calibration points required 5
+#define BOOT_CAL_MAX_CURVE_ERROR       0.01f  // Maximum RSS error threshold 0.01f
+
+// Forward declarations for boot calibration
+static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp);
+static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp);
+static int sensor_perform_boot_calibration(void);
+
+// =============================================================================
 // T-Cal Constants for sensor_offsetBias
 // =============================================================================
 
@@ -103,16 +119,10 @@ static int sensor_calibrate_mag(void);
 static bool tcal_auto_calibration_enabled = false;
 
 static float last_gyro_tcal_offset[3] = {0.0f, 0.0f, 0.0f};
-static inline bool is_invalid_float(float val)
-{
-	return isnan(val);
-}
 
 static int solve_linear_system(double *A, double *B, int n, double *x);
 static int polyfit(int degree, float coeffs_out[3][CONFIG_SENSOR_POLY_DEGREE + 1]);
 static void update_poly_tcal(void);                 // Function to calculate the curve
-void sensor_tcal_clear_poly(void);                  // Public function for 'tcal clear'
-void sensor_tcal_remove_point(int index_to_remove); // Public function for 'tcal remove'
 static void recalculate_tcal_correction_offset(void);
 
 #endif
@@ -166,7 +176,14 @@ void sensor_calibration_process_gyro(float g[3])
 			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
 				offset = offset * temp + retained->tempCalCoeffs[axis][i];
 			}
+			// Apply correction offset and boot calibration D_offset
 			calculated_offset[axis] = offset + retained->tempCalCorrectionOffset[axis];
+
+			// Add boot calibration D_offset if valid
+			if (retained->bootCalState.doffset_valid) {
+				calculated_offset[axis] += retained->bootCalState.doffset[axis];
+			}
+
 			g[axis] -= calculated_offset[axis];
 		}
 	} else {
@@ -1146,6 +1163,14 @@ static void calibration_thread(void)
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #endif
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+		case 3: // Boot calibration
+			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
+			sensor_perform_boot_calibration();
+			sensor_calibration_request(-1); // clear request
+			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+			break;
+#endif
 		default:
 			if (magneto_progress & 0b10000000) {
 				requested = sensor_calibrate_mag();
@@ -1166,21 +1191,54 @@ void sensor_tcal_status_poly(void)
 {
 	printk("Polynomial Temperature Calibration Status:\n");
 	printk("  - Curve calculated: %s\n", retained->tempCalState.valid ? "Yes" : "No");
+	printk("  - Polynomial degree: %u (CONFIG_SENSOR_POLY_DEGREE=%d)\n",
+		retained->tempCalState.degree, CONFIG_SENSOR_POLY_DEGREE);
 	printk("  - Points collected: %u / %d\n", retained->tempCalState.count, TCAL_BUFFER_SIZE);
 
-	float min_temp = 1000.0f, max_temp = -1000.0f;
-	if (retained->tempCalState.count > 0) {
-		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
-			if (retained->tempCalPoints[i].temp != 0.0f) { // Check if slot has data
-				if (retained->tempCalPoints[i].temp < min_temp) {
-					min_temp = retained->tempCalPoints[i].temp;
-				}
-				if (retained->tempCalPoints[i].temp > max_temp) {
-					max_temp = retained->tempCalPoints[i].temp;
-				}
-			}
+	// Use quality assessment to get calibrated temperature range and error
+	float current_temp = sensor_get_current_imu_temperature();
+	tcal_quality_t quality;
+	bool quality_ok = sensor_tcal_assess_quality(current_temp, &quality);
+
+	if (quality.point_count > 0 && quality.temp_min < quality.temp_max) {
+		printk("  - Calibrated temp range: %.2fC to %.2fC\n",
+			(double)quality.temp_min, (double)quality.temp_max);
+	}
+
+	// Display curve error and quality assessment
+	if (retained->tempCalState.valid && quality.point_count > 0) {
+		// Display RSS error (matches visualization tool format)
+		printk("  - Curve error (RSS): %.4f\n", (double)quality.curve_error);
+
+		// Display quality status
+		const char *quality_str;
+		if (quality_ok) {
+			quality_str = "GOOD - Suitable for boot calibration";
+		} else if (!quality.curve_valid) {
+			quality_str = "POOR - Curve not valid";
+		} else if (quality.point_count < BOOT_CAL_MIN_CURVE_POINTS) {
+			quality_str = "INSUFFICIENT - Need more calibration points";
+		} else if (quality.curve_error > BOOT_CAL_MAX_CURVE_ERROR) {
+			quality_str = "POOR - Curve RSS error too high (threshold: 0.01)";
+		} else if (!quality.temp_in_range) {
+			quality_str = "OUT_OF_RANGE - Current temperature outside calibrated range";
+		} else {
+			quality_str = "UNKNOWN";
 		}
-		printk("  - Calibrated temp range: %.2fC to %.2fC\n", (double)min_temp, (double)max_temp);
+		printk("  - Calibration quality: %s\n", quality_str);
+	}
+
+	// Display Boot Calibration D_offset
+	printk("\nBoot Calibration Status:\n");
+	if (retained->bootCalState.doffset_valid) {
+		printk("  - D_offset (runtime): [%.5f, %.5f, %.5f] dps\n",
+			(double)retained->bootCalState.doffset[0],
+			(double)retained->bootCalState.doffset[1],
+			(double)retained->bootCalState.doffset[2]);
+		printk("  - Boot Cal completed: Yes\n");
+	} else {
+		printk("  - D_offset: Not available\n");
+		printk("  - Boot Cal completed: %s\n", retained->bootCalState.completed ? "Failed/Skipped" : "Not yet");
 	}
 }
 
@@ -1709,4 +1767,346 @@ void sensor_calibration_get_last_gyro_offset(float offset[3])
 {
 	memcpy(offset, last_gyro_tcal_offset, sizeof(last_gyro_tcal_offset));
 }
+
+// =============================================================================
+// Boot Calibration Implementation
+// =============================================================================
+
+/**
+ * Assess temperature calibration quality for boot calibration
+ * Returns true if quality is sufficient for boot calibration
+ */
+bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
+{
+	if (!quality) {
+		return false;
+	}
+
+	// Initialize quality structure
+	quality->curve_valid = retained->tempCalState.valid;
+	quality->point_count = retained->tempCalState.count;
+	quality->curve_error = 0.0f; // TODO: Calculate actual curve error if needed
+	quality->temp_min = INFINITY;
+	quality->temp_max = -INFINITY;
+	quality->temp_in_range = false;
+
+	// Check curve validity
+	if (!quality->curve_valid) {
+		LOG_WRN("Boot Cal: Curve not valid");
+		return false;
+	}
+
+	// Check minimum point count
+	if (quality->point_count < BOOT_CAL_MIN_CURVE_POINTS) {
+		LOG_WRN("Boot Cal: Insufficient points (%u < %d)",
+			quality->point_count, BOOT_CAL_MIN_CURVE_POINTS);
+		return false;
+	}
+
+	// Find temperature range from calibration points
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (retained->tempCalPoints[i].temp != 0.0f) {
+			if (retained->tempCalPoints[i].temp < quality->temp_min) {
+				quality->temp_min = retained->tempCalPoints[i].temp;
+			}
+			if (retained->tempCalPoints[i].temp > quality->temp_max) {
+				quality->temp_max = retained->tempCalPoints[i].temp;
+			}
+		}
+	}
+
+	// Check if current temperature is within calibrated range
+	// Must have points both above and below current temperature
+	if (current_temp > quality->temp_min && current_temp < quality->temp_max) {
+		quality->temp_in_range = true;
+	} else {
+		LOG_WRN("Boot Cal: Temperature %.2fC outside calibrated range [%.2fC, %.2fC]",
+			(double)current_temp, (double)quality->temp_min, (double)quality->temp_max);
+		return false;
+	}
+
+	// Calculate curve fitting error using RSS (Residual Sum of Squares)
+	// This matches the visualization tool's error calculation method:
+	// RSS = Σ(predicted - actual)²
+	float total_rss = 0.0f;
+	int valid_points = 0;
+
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (retained->tempCalPoints[i].temp == 0.0f) {
+			continue; // Skip empty slots
+		}
+
+		float temp = retained->tempCalPoints[i].temp;
+
+		// Calculate error for each axis using RSS
+		for (int axis = 0; axis < 3; axis++) {
+			// Evaluate polynomial at this temperature
+			float predicted = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+			for (int j = retained->tempCalState.degree - 1; j >= 0; j--) {
+				predicted = predicted * temp + retained->tempCalCoeffs[axis][j];
+			}
+
+			float actual = retained->tempCalPoints[i].bias[axis];
+
+			// Calculate squared error (RSS component)
+			float residual = predicted - actual;
+			total_rss += residual * residual;
+		}
+		valid_points++;
+	}
+
+	// Store total RSS as curve error (matches visualization tool)
+	if (valid_points > 0) {
+		quality->curve_error = total_rss;
+	} else {
+		quality->curve_error = INFINITY;
+		LOG_ERR("Boot Cal: No valid points found for error calculation");
+		return false;
+	}
+
+	// Check if error is within acceptable range
+	// For RSS, we need a different threshold (much larger than percentage-based)
+	// A good cubic fit should have RSS < 0.01 for typical gyro bias values
+	const float RSS_THRESHOLD = 0.01f;
+	if (quality->curve_error > RSS_THRESHOLD) {
+		LOG_WRN("Boot Cal: Curve error (RSS) %.4f exceeds threshold %.4f",
+			(double)quality->curve_error, (double)RSS_THRESHOLD);
+		return false;
+	}
+
+	LOG_INF("Boot Cal: Quality OK - points: %u, RSS error: %.4f, temp range: [%.2fC, %.2fC], current: %.2fC",
+		quality->point_count, (double)quality->curve_error,
+		(double)quality->temp_min, (double)quality->temp_max, (double)current_temp);
+
+	return true;
+}
+
+/**
+ * Collect bias at current temperature (reuses standard calibration logic)
+ * Does NOT save the point to calibration data
+ */
+static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp)
+{
+	LOG_INF("Boot Cal: Starting bias collection (4-6 seconds)...");
+
+	// Use the existing sensor_offsetBias function with same parameters
+	// This ensures consistent quality between boot cal and normal cal
+	float temp_range = NAN;
+	float dummy_accel_bias[3] = {0};
+
+	int err = sensor_offsetBias(dummy_accel_bias, dest_bias, avg_temp, &temp_range);
+
+	if (err) {
+		if (err == -1) {
+			LOG_INF("Boot Cal: Motion detected during collection");
+		} else if (err == -2) {
+			LOG_ERR("Boot Cal: Timeout during collection");
+		} else if (err == -3) {
+			LOG_WRN("Boot Cal: Temperature unstable during collection");
+		}
+		return err;
+	}
+
+	LOG_INF("Boot Cal: Collected bias [%.5f, %.5f, %.5f] at temp %.2fC (range: %.2fC)",
+		(double)dest_bias[0], (double)dest_bias[1], (double)dest_bias[2],
+		(double)*avg_temp, (double)temp_range);
+
+	return 0;
+}
+
+/**
+ * Calculate D_offset and store in runtime state (not persisted)
+ */
+static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp)
+{
+	if (!retained->tempCalState.valid) {
+		LOG_ERR("Boot Cal: Cannot calculate D_offset - curve not valid");
+		return -1;
+	}
+
+	// Calculate curve value at current temperature
+	float curve_bias[3];
+	for (int axis = 0; axis < 3; axis++) {
+		// Evaluate polynomial at current temperature
+		float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+		for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+			offset = offset * temp + retained->tempCalCoeffs[axis][i];
+		}
+		curve_bias[axis] = offset;
+	}
+
+	LOG_INF("Boot Cal: Curve predicts [%.5f, %.5f, %.5f] at temp %.2fC",
+		(double)curve_bias[0], (double)curve_bias[1], (double)curve_bias[2],
+		(double)temp);
+
+	// Calculate D_offset = measured - curve
+	for (int axis = 0; axis < 3; axis++) {
+		retained->bootCalState.doffset[axis] = measured_bias[axis] - curve_bias[axis];
+	}
+
+	retained->bootCalState.doffset_valid = true;
+
+	LOG_INF("Boot Cal: Calculated D_offset [%.5f, %.5f, %.5f] (stored in retained memory)",
+		(double)retained->bootCalState.doffset[0],
+		(double)retained->bootCalState.doffset[1],
+		(double)retained->bootCalState.doffset[2]);
+
+	return 0;
+}
+
+/**
+ * Main boot calibration check function
+ * Called from sensor loop, manages state and timing
+ * This function only checks conditions and requests calibration,
+ * the actual calibration is performed by the calibration thread
+ */
+void sensor_tcal_boot_calibration_check(void)
+{
+	// Check if feature is enabled
+	if (!retained->bootCalState.enabled) {
+		return;
+	}
+
+	// Check if already completed or requested
+	if (retained->bootCalState.completed) {
+		return;
+	}
+
+	// Check time window using uptime
+	int64_t uptime = k_uptime_get();
+
+	// Before window starts
+	if (uptime < BOOT_CAL_TIME_WINDOW_START_MS) {
+		return;
+	}
+
+	// After window ends - give up
+	if (uptime >= BOOT_CAL_TIME_WINDOW_END_MS) {
+		if (!retained->bootCalState.completed) {
+			LOG_INF("Boot Cal: Time window expired (uptime: %lld ms), giving up", uptime);
+			retained->bootCalState.completed = true;
+		}
+		return;
+	}
+
+	// Check if another calibration is running
+	if (sensor_calibration_request(0) != 0) {
+		return; // Calibration in progress, wait
+	}
+
+	// Get current temperature
+	float current_temp = sensor_get_current_imu_temperature();
+	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
+		return; // Invalid temperature
+	}
+
+	// Assess curve quality (only once, not on every check)
+	static bool quality_checked = false;
+	if (!quality_checked) {
+		tcal_quality_t quality;
+		if (!sensor_tcal_assess_quality(current_temp, &quality)) {
+			// Quality not sufficient, mark as completed to avoid repeated checks
+			LOG_WRN("Boot Cal: Quality insufficient, disabling for this boot");
+			retained->bootCalState.completed = true;
+			return;
+		}
+		quality_checked = true;
+	}
+
+	// Log entry into time window (only once)
+	static bool logged_window_entry = false;
+	if (!logged_window_entry) {
+		LOG_INF("Boot Cal: In time window (5-30s), uptime: %lld ms, waiting for stationary condition...", uptime);
+		logged_window_entry = true;
+	}
+
+	// Request boot calibration through calibration request system
+	// This will be executed by the calibration thread, avoiding deadlock
+	int request_result = sensor_calibration_request(3); // Use ID 3 for boot calibration
+	if (request_result == 0) {
+		LOG_INF("Boot Cal: Requested calibration through calibration thread");
+	}
+}
+
+/**
+ * Perform boot calibration (called by calibration thread)
+ * Returns 0 on success, non-zero on failure
+ */
+static int sensor_perform_boot_calibration(void)
+{
+	// Get current temperature
+	float current_temp = sensor_get_current_imu_temperature();
+	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
+		LOG_ERR("Boot Cal: Invalid temperature");
+		return -1;
+	}
+
+	// Attempt to collect bias
+	float measured_bias[3];
+	float avg_temp;
+
+	int err = sensor_boot_bias_collect(measured_bias, &avg_temp);
+
+	if (err) {
+		// Collection failed
+		retained->bootCalState.attempt_count++;
+
+		if (retained->bootCalState.attempt_count >= BOOT_CAL_MAX_ATTEMPTS) {
+			LOG_WRN("Boot Cal: Maximum attempts (%d) reached, giving up", BOOT_CAL_MAX_ATTEMPTS);
+			retained->bootCalState.completed = true;
+		}
+		return err;
+	}
+
+	// Calculate D_offset
+	err = sensor_tcal_calculate_doffset(measured_bias, avg_temp);
+	if (err) {
+		LOG_ERR("Boot Cal: Failed to calculate D_offset");
+		retained->bootCalState.completed = true;
+		return err;
+	}
+
+	// Success!
+	retained->bootCalState.completed = true;
+	int64_t uptime = k_uptime_get();
+	LOG_INF("Boot Cal: Completed successfully (uptime: %lld ms)", uptime);
+	return 0;
+}
+
+// Enable/disable boot calibration
+void sensor_boot_cal_set_enabled(bool enabled)
+{
+	retained->bootCalState.enabled = enabled;
+	LOG_INF("Boot Cal: %s", enabled ? "Enabled" : "Disabled");
+}
+
+// Get boot calibration status
+bool sensor_boot_cal_is_completed(void)
+{
+	return retained->bootCalState.completed;
+}
+
+// Get boot calibration D_offset
+void sensor_boot_cal_get_doffset(float offset[3])
+{
+	if (retained->bootCalState.doffset_valid) {
+		memcpy(offset, retained->bootCalState.doffset, sizeof(retained->bootCalState.doffset));
+	} else {
+		memset(offset, 0, sizeof(retained->bootCalState.doffset));
+	}
+}
+
+// Reset boot calibration state (call before reboot/shutdown, not before WoM)
+void sensor_boot_cal_reset(void)
+{
+	retained->bootCalState.enabled = true;
+	retained->bootCalState.completed = false;
+	retained->bootCalState.attempt_count = 0;
+	retained->bootCalState.doffset_valid = false;
+	retained->bootCalState.doffset[0] = 0.0f;
+	retained->bootCalState.doffset[1] = 0.0f;
+	retained->bootCalState.doffset[2] = 0.0f;
+	LOG_INF("Boot Cal: State reset (will recalibrate on next boot)");
+}
+
 #endif
