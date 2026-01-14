@@ -316,26 +316,47 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 {
 	int err = 0;
 	uint16_t total = 0;
-	uint16_t count = UINT16_MAX;
-	while (count > 0 && len >= PACKET_SIZE)
+
+	while (len >= PACKET_SIZE)
 	{
+		// Read FIFO status to get number of available packets
 		uint8_t rawCount[2];
-		err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, &rawCount[0], 2);
-		count = (uint16_t)((rawCount[1] & 3) << 8 | rawCount[0]); // Turn the 16 bits into a unsigned 16-bit value. Only LSB on FIFO_STATUS2 is used, but we mask 2nd bit too // TODO: might be 3 bits not 2
+		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, rawCount, 2);
+		if (err)
+		{
+			LOG_ERR("Failed to read FIFO status");
+			break;
+		}
+
+		// Parse FIFO word count (10-bit field: bits 1:0 of rawCount[1] and all 8 bits of rawCount[0])
+		uint16_t count = (uint16_t)((rawCount[1] & 0x03) << 8 | rawCount[0]);
+		if (count == 0)
+			break; // FIFO is empty
+
+		// Limit read to available buffer space
 		uint16_t limit = len / PACKET_SIZE;
 		if (count > limit)
 		{
-			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", count - limit);
+			LOG_WRN("FIFO buffer limit: dropping %d packets", count - limit);
 			count = limit;
 		}
-		for (int i = 0; i < count; i++)
-			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_DATA_OUT_TAG, &data[i * PACKET_SIZE], PACKET_SIZE);
+
+		// Batch read all packets in one SPI transaction
+		// LSM6DSV supports continuous read from FIFO_DATA_OUT_TAG register
+		uint16_t bytes_to_read = count * PACKET_SIZE;
+		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_DATA_OUT_TAG, data, bytes_to_read);
 		if (err)
-			LOG_ERR("Communication error");
-		data += count * PACKET_SIZE;
-		len -= count * PACKET_SIZE;
+		{
+			LOG_ERR("Failed to read FIFO data");
+			break;
+		}
+
+		// Update pointers and counters
+		data += bytes_to_read;
+		len -= bytes_to_read;
 		total += count;
 	}
+
 	return total;
 }
 
@@ -550,7 +571,7 @@ const sensor_imu_t sensor_imu_lsm6dsv = {
 
 	*lsm_setup_DRDY,
 	*lsm_setup_WOM,
-	
+
 	*lsm_ext_setup,
 	*lsm_ext_passthrough
 };
