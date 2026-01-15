@@ -176,6 +176,31 @@ void vqf_get_relative_rest_deviations(float *out)
 	getRelativeRestDeviations(&params, &state, out);
 }
 
+void vqf_get_debug_info(vqf_debug_info_t *info)
+{
+	if (!info) return;
+
+	info->rest_detected = getRestDetected(&state);
+	getRelativeRestDeviations(&params, &state, info->rest_deviations);
+	info->bias_sigma = getBiasEstimate(&state, &coeffs, info->bias);
+	info->delta = getDelta(&state);
+	info->mag_dist_detected = getMagDistDetected(&state);
+	info->mag_ref_norm = getMagRefNorm(&state);
+	info->mag_ref_dip = getMagRefDip(&state);
+
+	// Convert bias from rad/s to °/s
+	for (int i = 0; i < 3; i++) {
+		info->bias[i] *= 180.0f / M_PI;
+	}
+	info->bias_sigma *= 180.0f / M_PI;
+
+	// Convert delta from rad to degrees
+	info->delta *= 180.0f / M_PI;
+
+	// Convert mag_ref_dip from rad to degrees
+	info->mag_ref_dip *= 180.0f / M_PI;
+}
+
 const sensor_fusion_t sensor_fusion_vqf = {
 	*vqf_init,
 	*vqf_load,

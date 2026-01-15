@@ -48,6 +48,20 @@ void vqf_get_quat(float *q);
 bool vqf_get_rest_detected(void);
 void vqf_get_relative_rest_deviations(float *out);
 
+// Debug information structure
+typedef struct {
+    bool rest_detected;
+    float rest_deviations[2];  // [gyr, acc]
+    float bias[3];             // rad/s
+    float bias_sigma;          // rad/s
+    float delta;               // rad
+    bool mag_dist_detected;
+    float mag_ref_norm;
+    float mag_ref_dip;
+} vqf_debug_info_t;
+
+void vqf_get_debug_info(vqf_debug_info_t *info);
+
 extern const sensor_fusion_t sensor_fusion_vqf;
 
 #endif
