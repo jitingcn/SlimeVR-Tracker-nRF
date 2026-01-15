@@ -83,10 +83,14 @@ static int sensor_calibrate_mag(void);
 
 // Boot calibration constants
 #define BOOT_CAL_TIME_WINDOW_START_MS  10000   // 10 seconds after boot
-#define BOOT_CAL_TIME_WINDOW_END_MS    30000  // 30 seconds after boot
-#define BOOT_CAL_MAX_ATTEMPTS          3      // Maximum retry attempts
-#define BOOT_CAL_MIN_CURVE_POINTS      5     // Minimum calibration points required 5
-#define BOOT_CAL_MAX_CURVE_ERROR       0.01f  // Maximum RSS error threshold 0.01f
+#define BOOT_CAL_TIME_WINDOW_END_MS    30000   // 30 seconds after boot
+#define BOOT_CAL_MAX_ATTEMPTS          3       // Maximum retry attempts
+#define BOOT_CAL_MIN_CURVE_POINTS      5       // Minimum calibration points required
+#define BOOT_CAL_MAX_CURVE_ERROR       0.005f   // Maximum RSS error threshold
+
+// T-Cal fitting strategy constants
+#define TCAL_CURVE_ERROR_THRESHOLD     0.005f   // RSS threshold - use polynomial if below, interpolation if above
+#define TCAL_BOUNDARY_POINT_COUNT      2       // Number of boundary points to use linear method
 
 // Forward declarations for boot calibration
 static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp);
@@ -245,6 +249,25 @@ static struct {
 	.valid = false
 };
 
+// =============================================================================
+// T-Cal RSS Cache - Curve Quality Assessment Optimization
+// =============================================================================
+
+/**
+ * RSS (Residual Sum of Squares) cache for curve quality assessment
+ * Caches the calculated RSS value to avoid redundant calculations
+ * Invalidated when calibration data changes
+ */
+static struct {
+	float rss;              // Cached RSS value
+	bool valid;             // Cache validity flag
+	uint16_t point_count;   // Point count when RSS was calculated
+} rss_cache = {
+	.rss = 0.0f,
+	.valid = false,
+	.point_count = 0
+};
+
 /**
  * Invalidate the lookup cache
  * Must be called when calibration points are added, removed, or modified
@@ -255,6 +278,84 @@ static void sensor_tcal_cache_invalidate(void)
 	tcal_lookup_cache.left_idx = -1;
 	tcal_lookup_cache.right_idx = -1;
 	tcal_lookup_cache.last_temp = 0.0f;
+
+	// Also invalidate RSS cache since calibration data changed
+	rss_cache.valid = false;
+	rss_cache.point_count = 0;
+}
+
+/**
+ * Get cached curve RSS (Residual Sum of Squares) value
+ * Calculates and caches RSS on first call or when curve is updated
+ * RSS measures how well the polynomial fits the calibration points
+ *
+ * @return Cached RSS value, or calculated value if cache is invalid
+ */
+static float get_cached_curve_rss(void)
+{
+	// Check cache validity
+	// Cache is valid if:
+	// 1. Cache was previously validated
+	// 2. Point count hasn't changed
+	// 3. Curve is still valid
+	if (rss_cache.valid &&
+	    rss_cache.point_count == retained->tempCalState.count &&
+	    retained->tempCalState.valid) {
+		LOG_DBG("T-Cal RSS: Using cached value %.5f", (double)rss_cache.rss);
+		return rss_cache.rss;
+	}
+
+	// Cache invalid or first time - calculate RSS
+	if (!retained->tempCalState.valid || retained->tempCalState.count < 2) {
+		LOG_WRN("T-Cal RSS: Curve not valid or insufficient points");
+		rss_cache.valid = false;
+		return INFINITY;
+	}
+
+	// Calculate RSS (Residual Sum of Squares)
+	// RSS = Σ(predicted - actual)²
+	float total_rss = 0.0f;
+	int valid_points = 0;
+
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (retained->tempCalPoints[i].temp == 0.0f) {
+			continue; // Skip empty slots
+		}
+
+		float temp = retained->tempCalPoints[i].temp;
+
+		// Calculate error for each axis using RSS
+		for (int axis = 0; axis < 3; axis++) {
+			// Evaluate polynomial at this temperature using Horner's method
+			float predicted = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+			for (int j = retained->tempCalState.degree - 1; j >= 0; j--) {
+				predicted = predicted * temp + retained->tempCalCoeffs[axis][j];
+			}
+
+			float actual = retained->tempCalPoints[i].bias[axis];
+
+			// Calculate squared error (RSS component)
+			float residual = predicted - actual;
+			total_rss += residual * residual;
+		}
+		valid_points++;
+	}
+
+	if (valid_points == 0) {
+		LOG_ERR("T-Cal RSS: No valid points found");
+		rss_cache.valid = false;
+		return INFINITY;
+	}
+
+	// Cache the calculated RSS
+	rss_cache.rss = total_rss;
+	rss_cache.valid = true;
+	rss_cache.point_count = retained->tempCalState.count;
+
+	LOG_INF("T-Cal RSS: Calculated and cached RSS = %.5f (from %d points)",
+		(double)total_rss, valid_points);
+
+	return total_rss;
 }
 
 #endif
@@ -303,6 +404,7 @@ void sensor_calibration_process_gyro(float g[3])
 	// Determine which calibration method to use
 	bool use_interpolation = false;
 	bool use_polynomial = false;
+	bool force_interpolation = false; // Force interpolation for boundary/extrapolation
 
 #if defined(CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE)
 	// Always use interpolation
@@ -311,11 +413,64 @@ void sensor_calibration_process_gyro(float g[3])
 	// Always use polynomial
 	use_polynomial = true;
 #elif defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
-	// Auto: choose based on data point count
-	if (retained->tempCalState.count >= 5) {
-		use_interpolation = true;
-	} else if (retained->tempCalState.count >= 2 && retained->tempCalState.valid) {
-		use_polynomial = true;
+	// Auto: choose based on cached curve RSS and temperature position
+	// RSS is calculated once when first needed, then cached
+	if (retained->tempCalState.count >= 5 && retained->tempCalState.valid) {
+		// Check if we're at boundary or outside range
+		bool at_boundary = false;
+		bool outside_range = false;
+
+		// Find min/max temperature and check position
+		float min_temp = INFINITY, max_temp = -INFINITY;
+		int point_count = 0;
+		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+			if (retained->tempCalPoints[i].temp != 0.0f) {
+				if (retained->tempCalPoints[i].temp < min_temp) min_temp = retained->tempCalPoints[i].temp;
+				if (retained->tempCalPoints[i].temp > max_temp) max_temp = retained->tempCalPoints[i].temp;
+				point_count++;
+			}
+		}
+
+		// Check if outside range
+		if (temp < min_temp || temp > max_temp) {
+			outside_range = true;
+			force_interpolation = true; // Always use linear extrapolation
+		} else if (point_count >= TCAL_BOUNDARY_POINT_COUNT) {
+			// Check if within boundary region (near min or max by 2 point intervals)
+			float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
+			float boundary_threshold = sampling_interval * TCAL_BOUNDARY_POINT_COUNT;
+
+			if ((temp - min_temp) < boundary_threshold || (max_temp - temp) < boundary_threshold) {
+				at_boundary = true;
+				force_interpolation = true; // Use linear interpolation at boundaries
+			}
+		}
+
+		// Decide based on position and cached curve RSS (supports dynamic switching)
+		if (force_interpolation) {
+			use_interpolation = true;
+			LOG_DBG("T-Cal: Using interpolation (boundary/outside range)");
+		} else {
+			float curve_rss = get_cached_curve_rss();
+			if (curve_rss < TCAL_CURVE_ERROR_THRESHOLD) {
+				// Low RSS error - use polynomial
+				use_polynomial = true;
+				LOG_DBG("T-Cal: Using polynomial (RSS %.5f < %.5f)",
+					(double)curve_rss, (double)TCAL_CURVE_ERROR_THRESHOLD);
+			} else {
+				// High RSS error - use interpolation
+				use_interpolation = true;
+				LOG_DBG("T-Cal: Using interpolation (RSS %.5f >= %.5f)",
+					(double)curve_rss, (double)TCAL_CURVE_ERROR_THRESHOLD);
+			}
+		}
+	} else if (retained->tempCalState.count >= 2) {
+		// Not enough points for reliable error calculation, use simple logic
+		if (retained->tempCalState.valid) {
+			use_polynomial = true;
+		} else {
+			use_interpolation = true;
+		}
 	}
 #endif
 
@@ -1523,8 +1678,8 @@ void sensor_tcal_status_poly(void)
 
 	// Display curve error and quality assessment
 	if (retained->tempCalState.valid && quality.point_count > 0) {
-		// Display RSS error (matches visualization tool format)
-		printk("  - Curve error (RSS): %.4f\n", (double)quality.curve_error);
+		// Display RSS error
+		printk("  - Curve error (RSS): %.5f\n", (double)quality.curve_error);
 
 		// Display quality status
 		const char *quality_str;
@@ -1535,7 +1690,7 @@ void sensor_tcal_status_poly(void)
 		} else if (quality.point_count < BOOT_CAL_MIN_CURVE_POINTS) {
 			quality_str = "INSUFFICIENT - Need more calibration points";
 		} else if (quality.curve_error > BOOT_CAL_MAX_CURVE_ERROR) {
-			quality_str = "POOR - Curve RSS error too high (threshold: 0.01)";
+			quality_str = "MODERATE - RSS error high, will use interpolation";
 		} else if (!quality.temp_in_range) {
 			quality_str = "OUT_OF_RANGE - Current temperature outside calibrated range";
 		} else {
@@ -1714,6 +1869,9 @@ static void update_poly_tcal(void)
 {
 	// Invalidate lookup cache since calibration data changed
 	sensor_tcal_cache_invalidate();
+
+	// Invalidate RSS cache
+	rss_cache.valid = false;
 
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
 	retained->tempCalState.degree = 0;
@@ -2151,7 +2309,6 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 	}
 
 	// Calculate curve fitting error using RSS (Residual Sum of Squares)
-	// This matches the visualization tool's error calculation method:
 	// RSS = Σ(predicted - actual)²
 	float total_rss = 0.0f;
 	int valid_points = 0;
@@ -2180,7 +2337,7 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 		valid_points++;
 	}
 
-	// Store total RSS as curve error (matches visualization tool)
+	// Store total RSS as curve error
 	if (valid_points > 0) {
 		quality->curve_error = total_rss;
 	} else {
@@ -2189,20 +2346,27 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 		return false;
 	}
 
-	// Check if error is within acceptable range
-	// For RSS, we need a different threshold (much larger than percentage-based)
-	// A good cubic fit should have RSS < 0.01 for typical gyro bias values
-	const float RSS_THRESHOLD = 0.01f;
-	if (quality->curve_error > RSS_THRESHOLD) {
-		LOG_WRN("Boot Cal: Curve error (RSS) %.4f exceeds threshold %.4f",
-			(double)quality->curve_error, (double)RSS_THRESHOLD);
-		return false;
+	// Log curve error status (only once to avoid spam)
+	static bool logged_quality = false;
+	if (!logged_quality) {
+		if (quality->curve_error > BOOT_CAL_MAX_CURVE_ERROR) {
+			LOG_INF("Boot Cal: RSS error %.5f exceeds threshold %.5f, will use interpolation method",
+				(double)quality->curve_error, (double)BOOT_CAL_MAX_CURVE_ERROR);
+		} else {
+			LOG_INF("Boot Cal: RSS error %.5f is good, polynomial method available",
+				(double)quality->curve_error);
+		}
+
+		LOG_INF("Boot Cal: Quality check passed - points: %u, RSS error: %.5f, temp range: [%.2fC, %.2fC], current: %.2fC",
+			quality->point_count, (double)quality->curve_error,
+			(double)quality->temp_min, (double)quality->temp_max, (double)current_temp);
+		logged_quality = true;
 	}
 
-	LOG_INF("Boot Cal: Quality OK - points: %u, RSS error: %.4f, temp range: [%.2fC, %.2fC], current: %.2fC",
-		quality->point_count, (double)quality->curve_error,
-		(double)quality->temp_min, (double)quality->temp_max, (double)current_temp);
-
+	// Boot calibration can proceed regardless of curve error
+	// - If RSS error is low (<0.01), use polynomial
+	// - If RSS error is high (>=0.01), use interpolation
+	// Both methods are valid for boot calibration
 	return true;
 }
 
@@ -2241,33 +2405,77 @@ static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp)
 
 /**
  * Calculate D_offset and store in runtime state (not persisted)
+ * Uses intelligent method selection based on curve error and temperature position
  */
 static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp)
 {
-	// Calculate curve value at current temperature using the same method as runtime
+	// Calculate curve value at current temperature using intelligent method selection
 	float curve_bias[3];
 	bool offset_calculated = false;
+	bool use_interpolation = false;
+	bool use_polynomial = false;
 
-	// Try interpolation first (if configured)
-#if defined(CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE) || defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
-	if (retained->tempCalState.count >= 2) {
-		if (sensor_tcal_lookup_interpolate(temp, curve_bias) == 0) {
-			offset_calculated = true;
-			LOG_INF("Boot Cal: Using interpolation method");
+#if defined(CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE)
+	// Always use interpolation
+	use_interpolation = true;
+#elif defined(CONFIG_SENSOR_TCAL_METHOD_POLYNOMIAL)
+	// Always use polynomial
+	use_polynomial = true;
+#elif defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
+	// Auto: choose based on cached RSS and temperature position
+	if (retained->tempCalState.count >= 5 && retained->tempCalState.valid) {
+		// Check temperature position
+		float min_temp = INFINITY, max_temp = -INFINITY;
+		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+			if (retained->tempCalPoints[i].temp != 0.0f) {
+				if (retained->tempCalPoints[i].temp < min_temp) min_temp = retained->tempCalPoints[i].temp;
+				if (retained->tempCalPoints[i].temp > max_temp) max_temp = retained->tempCalPoints[i].temp;
+			}
+		}
+
+		// Force interpolation at boundaries or outside range
+		bool force_interpolation = false;
+		if (temp < min_temp || temp > max_temp) {
+			force_interpolation = true;
+		} else {
+			float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
+			float boundary_threshold = sampling_interval * TCAL_BOUNDARY_POINT_COUNT;
+			if ((temp - min_temp) < boundary_threshold || (max_temp - temp) < boundary_threshold) {
+				force_interpolation = true;
+			}
+		}
+
+		// Decide based on position and cached RSS
+		if (force_interpolation) {
+			use_interpolation = true;
+		} else {
+			float curve_rss = get_cached_curve_rss();
+			if (curve_rss < TCAL_CURVE_ERROR_THRESHOLD) {
+				use_polynomial = true;
+			} else {
+				use_interpolation = true;
+			}
+		}
+	} else if (retained->tempCalState.count >= 2) {
+		if (retained->tempCalState.valid) {
+			use_polynomial = true;
+		} else {
+			use_interpolation = true;
 		}
 	}
 #endif
 
-	// Fallback to polynomial if needed
-	if (!offset_calculated) {
-#if defined(CONFIG_SENSOR_TCAL_METHOD_POLYNOMIAL) || defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
-		if (!retained->tempCalState.valid) {
-			LOG_ERR("Boot Cal: Cannot calculate D_offset - no valid calibration");
-			return -1;
+	// Try selected method
+	if (use_interpolation && retained->tempCalState.count >= 2) {
+		if (sensor_tcal_lookup_interpolate(temp, curve_bias) == 0) {
+			offset_calculated = true;
+			LOG_INF("Boot Cal: Using interpolation method for D_offset");
 		}
+	}
 
+	// Try polynomial if not calculated yet
+	if (!offset_calculated && use_polynomial && retained->tempCalState.valid) {
 		for (int axis = 0; axis < 3; axis++) {
-			// Evaluate polynomial at current temperature
 			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
 			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
 				offset = offset * temp + retained->tempCalCoeffs[axis][i];
@@ -2275,11 +2483,12 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 			curve_bias[axis] = offset;
 		}
 		offset_calculated = true;
-		LOG_INF("Boot Cal: Using polynomial method");
-#else
+		LOG_INF("Boot Cal: Using polynomial method for D_offset");
+	}
+
+	if (!offset_calculated) {
 		LOG_ERR("Boot Cal: Cannot calculate D_offset - no valid calibration method");
 		return -1;
-#endif
 	}
 
 	LOG_INF("Boot Cal: Curve predicts [%.5f, %.5f, %.5f] at temp %.2fC",
@@ -2347,17 +2556,17 @@ void sensor_tcal_boot_calibration_check(void)
 		return; // Invalid temperature
 	}
 
-	// Assess curve quality (only once, not on every check)
-	static bool quality_checked = false;
-	if (!quality_checked) {
-		tcal_quality_t quality;
-		if (!sensor_tcal_assess_quality(current_temp, &quality)) {
-			// Quality not sufficient, mark as completed to avoid repeated checks
+	// Assess curve quality (quality check is called but logs are throttled inside)
+	tcal_quality_t quality;
+	if (!sensor_tcal_assess_quality(current_temp, &quality)) {
+		// Quality not sufficient, mark as completed to avoid repeated checks
+		static bool logged_insufficient = false;
+		if (!logged_insufficient) {
 			LOG_WRN("Boot Cal: Quality insufficient, disabling for this boot");
-			retained->bootCalState.completed = true;
-			return;
+			logged_insufficient = true;
 		}
-		quality_checked = true;
+		retained->bootCalState.completed = true;
+		return;
 	}
 
 	// Log entry into time window (only once)
