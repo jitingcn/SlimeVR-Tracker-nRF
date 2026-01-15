@@ -582,14 +582,14 @@ void event_handler(struct esb_evt const *event)
 
 						// log ping and rtt
 						if (rtt_us > 1000) {
-							LOG_INF(
+							LOG_DBG(
 								"PONG ok, ack rtt=%u.%03u ms (ctr=%u)",
 								(unsigned)(rtt_us / 1000),
 								(unsigned)(rtt_us % 1000),
 								rx_ctr
 							);
 						} else if (rtt_us < 1000) {
-							LOG_INF("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
+							LOG_DBG("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
 						}
 
 						if (rtt_us < 3000) {
@@ -739,7 +739,7 @@ void event_handler(struct esb_evt const *event)
 							uint32_t server_s = (server_time_ms / 1000) % 60;
 							uint32_t server_m = (server_time_ms / 60000) % 60;
 							uint32_t server_h = (server_time_ms / 3600000) % 24;
-							LOG_INF(
+							LOG_DBG(
 								"estimated server time: %02u:%02u:%02u.%03u (ticks=%u)",
 								server_h,
 								server_m,
