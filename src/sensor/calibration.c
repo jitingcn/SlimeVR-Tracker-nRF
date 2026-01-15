@@ -156,6 +156,7 @@ static struct {
 /**
  * Check if we should log extrapolation information
  * Only logs on state changes or significant temperature changes
+ * Uses strict time throttling to prevent log spam near boundaries
  */
 static bool should_log_extrapolation(bool is_above, float temp)
 {
@@ -163,9 +164,21 @@ static bool should_log_extrapolation(bool is_above, float temp)
 	const int64_t LOG_THROTTLE_MS = 5000; // Log at most once per 5 seconds
 	const float TEMP_CHANGE_THRESHOLD = 1.0f; // Log if temperature changed by 1°C
 
+	// Check if this is a direction change (below -> above or vice versa)
+	bool direction_changed = extrap_log_state.is_extrapolating &&
+	                        (extrap_log_state.is_above_range != is_above);
+
 	// First extrapolation or direction changed
-	if (!extrap_log_state.is_extrapolating ||
-	    extrap_log_state.is_above_range != is_above) {
+	if (!extrap_log_state.is_extrapolating || direction_changed) {
+		// Even for first extrapolation, respect time throttling to prevent spam
+		// when temperature oscillates near boundary
+		if ((now - extrap_log_state.last_log_time) < LOG_THROTTLE_MS) {
+			// Update state but don't log
+			extrap_log_state.is_extrapolating = true;
+			extrap_log_state.is_above_range = is_above;
+			return false;
+		}
+
 		extrap_log_state.is_extrapolating = true;
 		extrap_log_state.is_above_range = is_above;
 		extrap_log_state.last_log_time = now;
@@ -192,12 +205,22 @@ static bool should_log_extrapolation(bool is_above, float temp)
 
 /**
  * Reset extrapolation log state (called when entering interpolation range)
+ * Uses hysteresis to prevent log spam when temperature oscillates near boundary
  */
 static void reset_extrapolation_log_state(void)
 {
 	if (extrap_log_state.is_extrapolating) {
+		int64_t now = k_uptime_get();
+		const int64_t LOG_THROTTLE_MS = 5000; // Same as extrapolation throttle
+
+		// Only log if we've been extrapolating for a while or it's been a while since last log
+		// This prevents spam when temperature oscillates near the boundary
+		if ((now - extrap_log_state.last_log_time) >= LOG_THROTTLE_MS) {
+			LOG_INF("T-Cal: Temperature back in calibrated range");
+			extrap_log_state.last_log_time = now;
+		}
+
 		extrap_log_state.is_extrapolating = false;
-		LOG_INF("T-Cal: Temperature back in calibrated range");
 	}
 }
 
