@@ -135,6 +135,73 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3]);
 static void sensor_tcal_cache_invalidate(void);
 
 // =============================================================================
+// T-Cal Extrapolation Log Throttling
+// =============================================================================
+
+/**
+ * State tracker for extrapolation logging to prevent log spam
+ */
+static struct {
+	bool is_extrapolating;     // Currently in extrapolation mode
+	bool is_above_range;       // True if above max, false if below min
+	int64_t last_log_time;     // Last time we logged (ms)
+	float last_temp;           // Last temperature logged
+} extrap_log_state = {
+	.is_extrapolating = false,
+	.is_above_range = false,
+	.last_log_time = 0,
+	.last_temp = 0.0f
+};
+
+/**
+ * Check if we should log extrapolation information
+ * Only logs on state changes or significant temperature changes
+ */
+static bool should_log_extrapolation(bool is_above, float temp)
+{
+	int64_t now = k_uptime_get();
+	const int64_t LOG_THROTTLE_MS = 5000; // Log at most once per 5 seconds
+	const float TEMP_CHANGE_THRESHOLD = 1.0f; // Log if temperature changed by 1°C
+
+	// First extrapolation or direction changed
+	if (!extrap_log_state.is_extrapolating ||
+	    extrap_log_state.is_above_range != is_above) {
+		extrap_log_state.is_extrapolating = true;
+		extrap_log_state.is_above_range = is_above;
+		extrap_log_state.last_log_time = now;
+		extrap_log_state.last_temp = temp;
+		return true;
+	}
+
+	// Throttle by time
+	if ((now - extrap_log_state.last_log_time) < LOG_THROTTLE_MS) {
+		return false;
+	}
+
+	// Check if temperature changed significantly
+	if (fabsf(temp - extrap_log_state.last_temp) >= TEMP_CHANGE_THRESHOLD) {
+		extrap_log_state.last_log_time = now;
+		extrap_log_state.last_temp = temp;
+		return true;
+	}
+
+	// Update time but don't log
+	extrap_log_state.last_log_time = now;
+	return false;
+}
+
+/**
+ * Reset extrapolation log state (called when entering interpolation range)
+ */
+static void reset_extrapolation_log_state(void)
+{
+	if (extrap_log_state.is_extrapolating) {
+		extrap_log_state.is_extrapolating = false;
+		LOG_INF("T-Cal: Temperature back in calibrated range");
+	}
+}
+
+// =============================================================================
 // T-Cal Lookup Cache - Performance Optimization
 // =============================================================================
 
@@ -2753,8 +2820,10 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3])
 		if (delta < 2.0f) {
 			// Strategy 1: Small delta - use flat extrapolation (boundary value)
 			memcpy(bias_out, retained->tempCalPoints[min_idx].bias, sizeof(float) * 3);
-			LOG_DBG("T-Cal Extrapolate: Flat extrapolation at %.2fC (%.2fC below min)",
-				(double)temp, (double)delta);
+			if (should_log_extrapolation(false, temp)) {
+				LOG_INF("T-Cal Extrapolate: Flat extrapolation at %.2fC (%.2fC below min)",
+					(double)temp, (double)delta);
+			}
 		} else {
 			// Strategy 2: Large delta - find second lowest point for linear extrapolation
 			int second_idx = -1;
@@ -2789,8 +2858,10 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3])
 						                copysignf(max_extrap, extrap_delta);
 					}
 				}
-				LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC below min)",
-					(double)temp, (double)delta);
+				if (should_log_extrapolation(false, temp)) {
+					LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC below min)",
+						(double)temp, (double)delta);
+				}
 			} else {
 				// Fallback: use flat extrapolation if no second point
 				memcpy(bias_out, retained->tempCalPoints[min_idx].bias, sizeof(float) * 3);
@@ -2805,8 +2876,10 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3])
 		if (delta < 2.0f) {
 			// Strategy 1: Small delta - flat extrapolation
 			memcpy(bias_out, retained->tempCalPoints[max_idx].bias, sizeof(float) * 3);
-			LOG_DBG("T-Cal Extrapolate: Flat extrapolation at %.2fC (%.2fC above max)",
-				(double)temp, (double)delta);
+			if (should_log_extrapolation(true, temp)) {
+				LOG_INF("T-Cal Extrapolate: Flat extrapolation at %.2fC (%.2fC above max)",
+					(double)temp, (double)delta);
+			}
 		} else {
 			// Strategy 2: Large delta - find second highest point
 			int second_idx = -1;
@@ -2840,8 +2913,10 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3])
 						                copysignf(max_extrap, extrap_delta);
 					}
 				}
-				LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC above max)",
-					(double)temp, (double)delta);
+				if (should_log_extrapolation(true, temp)) {
+					LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC above max)",
+						(double)temp, (double)delta);
+				}
 			} else {
 				// Fallback: flat extrapolation
 				memcpy(bias_out, retained->tempCalPoints[max_idx].bias, sizeof(float) * 3);
@@ -2924,11 +2999,13 @@ static int sensor_tcal_lookup_interpolate(float temp, float bias_out[3])
 	// Handle different cases
 	if (left_idx >= 0 && right_idx >= 0 && left_idx != right_idx) {
 		// Case 1: Temperature is between two points - interpolate
+		reset_extrapolation_log_state();
 		linear_interpolate(left_idx, right_idx, temp, bias_out);
 		return 0;
 
 	} else if (left_idx >= 0 && right_idx >= 0 && left_idx == right_idx) {
 		// Case 2: Temperature exactly matches a calibration point
+		reset_extrapolation_log_state();
 		memcpy(bias_out, retained->tempCalPoints[left_idx].bias, sizeof(float) * 3);
 		LOG_DBG("T-Cal Interpolate: Exact match at %.2fC", (double)temp);
 		return 0;
