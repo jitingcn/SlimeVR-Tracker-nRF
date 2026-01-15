@@ -1143,8 +1143,8 @@ void sensor_loop(void)
 
 				connection_update_sensor_data(q_offset, lin_a, sensor_data_time);
 				last_sensor_send_time = now;
-				// Update last_data_time on every send to improve state transition responsiveness
-				if (send_quat_data) {
+
+				if (!resting) {
 					last_data_time = now;
 				}
 			}
