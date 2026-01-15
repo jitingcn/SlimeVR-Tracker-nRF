@@ -79,6 +79,9 @@ void sensor_boot_cal_set_enabled(bool enabled);
 bool sensor_boot_cal_is_completed(void);
 void sensor_boot_cal_get_doffset(float offset[3]);
 void sensor_boot_cal_reset(void); // Reset boot calibration state (call before reboot/shutdown, not before WoM)
+
+// Test function for comparing calibration methods
+void sensor_tcal_test_methods(float temp);
 #endif
 
 #endif

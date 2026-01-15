@@ -467,7 +467,7 @@ static void print_help(void)
 #endif
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 	// Update the help string to show the new command set
-	printk("  tcal <status|dump|remove index|auto on|auto off> Temperature calibration\n");
+	printk("  tcal <status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
 #endif
 	printk("\n");
 	printk("Connection:\n");
@@ -787,14 +787,14 @@ static void console_thread(void)
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
-				printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index|check|auto on|auto off>\n");
+				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
 			} else {
 				// Tokenize the argument string by space to get the subcommand
 				char *subcmd = strtok((char *)arg, " ");
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
-					printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index|check|auto on|auto off>\n");
+					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status_poly();
 					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
@@ -875,6 +875,27 @@ static void console_thread(void)
 							}
 						}
 					}
+				} else if (strcmp(subcmd, "test") == 0) {
+					char *temp_str = strtok(NULL, " ");
+					if (temp_str == NULL) {
+						// Use current temperature if no argument provided
+						float current_temp = sensor_get_current_imu_temperature();
+						if (isnan(current_temp)) {
+							printk("Error: Cannot read current temperature. Please specify temperature: tcal test <temp>\n");
+						} else {
+							sensor_tcal_test_methods(current_temp);
+						}
+					} else {
+						char *endptr = NULL;
+						float test_temp = strtof(temp_str, &endptr);
+
+						if (endptr == temp_str || *endptr != '\0') {
+							printk("Error: Invalid temperature '%s'. Use: tcal test <temp>\n", temp_str);
+							printk("Example: tcal test 25.5\n");
+						} else {
+							sensor_tcal_test_methods(test_temp);
+						}
+					}
 				} else if (strcmp(subcmd, "check") == 0) {
 					float current_temp = sensor_get_current_imu_temperature();
 					if (isnan(current_temp)) {
@@ -898,7 +919,7 @@ static void console_thread(void)
 						}
 					}
 				} else {
-					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|remove index|check|auto on|auto off>\n", subcmd);
+					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off>\n", subcmd);
 				}
 			}
 		}

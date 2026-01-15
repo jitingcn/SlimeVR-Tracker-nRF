@@ -125,6 +125,48 @@ static int polyfit(int degree, float coeffs_out[3][CONFIG_SENSOR_POLY_DEGREE + 1
 static void update_poly_tcal(void);                 // Function to calculate the curve
 static void recalculate_tcal_correction_offset(void);
 
+// =============================================================================
+// T-Cal Interpolation Method - Forward Declarations
+// =============================================================================
+static int find_neighbor_points(float temp, int *left_idx, int *right_idx);
+static void linear_interpolate(int left_idx, int right_idx, float temp, float bias_out[3]);
+static int sensor_tcal_lookup_interpolate(float temp, float bias_out[3]);
+static int sensor_tcal_extrapolate(float temp, float bias_out[3]);
+static void sensor_tcal_cache_invalidate(void);
+
+// =============================================================================
+// T-Cal Lookup Cache - Performance Optimization
+// =============================================================================
+
+/**
+ * Cache structure for temperature lookup optimization
+ * Exploits temperature continuity: IMU temperature changes slowly,
+ * so most lookups will be in the same interval as the last lookup.
+ */
+static struct {
+	float last_temp;      // Last queried temperature
+	int left_idx;         // Cached left neighbor index
+	int right_idx;        // Cached right neighbor index
+	bool valid;           // Cache validity flag
+} tcal_lookup_cache = {
+	.last_temp = 0.0f,
+	.left_idx = -1,
+	.right_idx = -1,
+	.valid = false
+};
+
+/**
+ * Invalidate the lookup cache
+ * Must be called when calibration points are added, removed, or modified
+ */
+static void sensor_tcal_cache_invalidate(void)
+{
+	tcal_lookup_cache.valid = false;
+	tcal_lookup_cache.left_idx = -1;
+	tcal_lookup_cache.right_idx = -1;
+	tcal_lookup_cache.last_temp = 0.0f;
+}
+
 #endif
 
 // helpers
@@ -167,24 +209,69 @@ void sensor_calibration_process_gyro(float g[3])
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 	float calculated_offset[3] = {0.0f, 0.0f, 0.0f}; // Local variable to hold the calculated offset for this frame
 	float temp = sensor_get_current_imu_temperature();
-	if (!isnan(temp) && retained->tempCalState.valid) {
-		// Calculate the offset using polynomial coefficients
-		for (int axis = 0; axis < 3; axis++) {
-			// Start with the highest-order coefficient for the stored degree
-			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-			// Loop down to the constant term
-			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-				offset = offset * temp + retained->tempCalCoeffs[axis][i];
+
+	// Determine which calibration method to use
+	bool use_interpolation = false;
+	bool use_polynomial = false;
+
+#if defined(CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE)
+	// Always use interpolation
+	use_interpolation = true;
+#elif defined(CONFIG_SENSOR_TCAL_METHOD_POLYNOMIAL)
+	// Always use polynomial
+	use_polynomial = true;
+#elif defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
+	// Auto: choose based on data point count
+	if (retained->tempCalState.count >= 5) {
+		use_interpolation = true;
+	} else if (retained->tempCalState.count >= 2 && retained->tempCalState.valid) {
+		use_polynomial = true;
+	}
+#endif
+
+	// Calculate offset based on selected method
+	if (!isnan(temp) && (use_interpolation || use_polynomial)) {
+		bool offset_calculated = false;
+
+		if (use_interpolation) {
+			// Use interpolation method
+			if (sensor_tcal_lookup_interpolate(temp, calculated_offset) == 0) {
+				offset_calculated = true;
 			}
+		}
+
+		if (!offset_calculated && use_polynomial && retained->tempCalState.valid) {
+			// Fallback to or use polynomial method
+			for (int axis = 0; axis < 3; axis++) {
+				// Start with the highest-order coefficient for the stored degree
+				float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+				// Loop down to the constant term
+				for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+					offset = offset * temp + retained->tempCalCoeffs[axis][i];
+				}
+				calculated_offset[axis] = offset;
+			}
+			offset_calculated = true;
+		}
+
+		if (offset_calculated) {
 			// Apply correction offset and boot calibration D_offset
-			calculated_offset[axis] = offset + retained->tempCalCorrectionOffset[axis];
+			for (int axis = 0; axis < 3; axis++) {
+				calculated_offset[axis] += retained->tempCalCorrectionOffset[axis];
 
-			// Add boot calibration D_offset if valid
-			if (retained->bootCalState.doffset_valid) {
-				calculated_offset[axis] += retained->bootCalState.doffset[axis];
+				// Add boot calibration D_offset if valid
+				if (retained->bootCalState.doffset_valid) {
+					calculated_offset[axis] += retained->bootCalState.doffset[axis];
+				}
+
+				g[axis] -= calculated_offset[axis];
 			}
-
-			g[axis] -= calculated_offset[axis];
+		} else {
+			// Fallback to static bias
+			for (int i = 0; i < 3; i++) {
+				calculated_offset[i] = gyroBias[i];
+				g[i] -= calculated_offset[i];
+			}
 		}
 	} else {
 		// Fallback to the default ZRO bias if no valid T-Cal is available
@@ -534,61 +621,185 @@ static void sensor_calibrate_imu()
 	sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-	// 2. Add the new data as a T-Cal point using average temperature
+	// 2. Check if T-Cal coverage is good - if so, only calculate D_offset instead of saving point
 	sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
 	if (!isnan(avg_temp)) {
-		LOG_INF("T-Cal: Saving calibration point at average temp %.2fC (range: %.2fC)",
-			(double)avg_temp, (double)temp_range);
-		int idx = TEMP_TO_IDX(avg_temp);
-		if (idx >= 0 && idx < TCAL_BUFFER_SIZE) {
+		// Check if current temperature has good T-Cal coverage
+		tcal_quality_t quality;
+		bool has_good_coverage = false;
 
-			// Remove nearby points to avoid numerical instability
-			float min_separation = 0.3f;
+		if (sensor_tcal_assess_quality(avg_temp, &quality) && quality.temp_in_range) {
+			// Find closest point and check for upper/lower bounds
+			float closest_distance = INFINITY;
+			bool has_lower_bound = false;  // Point below current temp
+			bool has_upper_bound = false;  // Point above current temp
+			float lower_distance = INFINITY;
+			float upper_distance = INFINITY;
+			float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
 
-			// Check lower indices (sorted by temp)
-			for (int i = idx - 1; i >= 0; i--) {
+			for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
 				if (retained->tempCalPoints[i].temp != 0.0f) {
-					if (fabsf(retained->tempCalPoints[i].temp - avg_temp) < min_separation) {
-						retained->tempCalPoints[i].temp = 0.0f;
-						memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
-						if (retained->tempCalState.count > 0) {
-							retained->tempCalState.count--;
+					float point_temp = retained->tempCalPoints[i].temp;
+					float distance = fabsf(point_temp - avg_temp);
+
+					if (distance < closest_distance) {
+						closest_distance = distance;
+					}
+
+					// Check if this point is below or above current temp
+					if (point_temp < avg_temp) {
+						has_lower_bound = true;
+						if (distance < lower_distance) {
+							lower_distance = distance;
 						}
-						LOG_INF("T-Cal: Removed conflict point at index %d", i);
-					} else {
-						break; // Further points are even further away
+					} else if (point_temp > avg_temp) {
+						has_upper_bound = true;
+						if (distance < upper_distance) {
+							upper_distance = distance;
+						}
 					}
 				}
 			}
-			// Check upper indices (sorted by temp)
-			for (int i = idx + 1; i < TCAL_BUFFER_SIZE; i++) {
-				if (retained->tempCalPoints[i].temp != 0.0f) {
-					if (fabsf(retained->tempCalPoints[i].temp - avg_temp) < min_separation) {
-						retained->tempCalPoints[i].temp = 0.0f;
-						memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
-						if (retained->tempCalState.count > 0) {
-							retained->tempCalState.count--;
-						}
-						LOG_INF("T-Cal: Removed conflict point at index %d", i);
-					} else {
-						break; // Further points are even further away
-					}
+
+
+			// Coverage is good if:
+			// 1. Closest point is within sampling interval (very close match)
+			// OR
+			// 2. Has both upper and lower bounds AND closest is within 2x sampling interval
+			if (closest_distance <= sampling_interval) {
+				// Very close to existing point - definitely good coverage
+				has_good_coverage = true;
+				LOG_INF("T-Cal: Excellent coverage at %.2fC (closest: %.2fC away, within sampling interval)",
+					(double)avg_temp, (double)closest_distance);
+			} else if (has_lower_bound && has_upper_bound &&
+			           closest_distance <= sampling_interval * 2.0f) {
+				// Bounded interpolation with reasonable distance
+				has_good_coverage = true;
+				LOG_INF("T-Cal: Good coverage at %.2fC (bounded: lower %.2fC, upper %.2fC)",
+					(double)avg_temp, (double)lower_distance, (double)upper_distance);
+			} else {
+				// Log why coverage is insufficient
+				if (!has_lower_bound || !has_upper_bound) {
+					LOG_INF("T-Cal: Coverage insufficient at %.2fC (missing %s bound, closest: %.2fC)",
+						(double)avg_temp,
+						!has_lower_bound ? "lower" : "upper",
+						(double)closest_distance);
+				} else {
+					LOG_INF("T-Cal: Coverage insufficient at %.2fC (closest: %.2fC > threshold: %.2fC)",
+						(double)avg_temp, (double)closest_distance, (double)(sampling_interval * 2.0f));
+				}
+			}
+		}
+
+		if (has_good_coverage) {
+			// Calculate and apply D_offset instead of saving new point
+			LOG_INF("T-Cal: Calculating D_offset instead of saving new point (preserving curve)");
+
+			// Calculate curve value at current temperature
+			float curve_bias[3];
+			bool offset_calculated = false;
+
+			// Try interpolation first
+			if (retained->tempCalState.count >= 2) {
+				if (sensor_tcal_lookup_interpolate(avg_temp, curve_bias) == 0) {
+					offset_calculated = true;
 				}
 			}
 
-			if (retained->tempCalPoints[idx].temp == 0.0f) {
-				retained->tempCalState.count++; // Use struct member
+			// Fallback to polynomial if needed
+			if (!offset_calculated && retained->tempCalState.valid) {
+				for (int axis = 0; axis < 3; axis++) {
+					float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+					for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+						offset = offset * avg_temp + retained->tempCalCoeffs[axis][i];
+					}
+					curve_bias[axis] = offset;
+				}
+				offset_calculated = true;
 			}
-			retained->tempCalPoints[idx].temp = avg_temp;
-			memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
-			retained->tempCalState.valid = false; // Invalidate old curve
-			update_poly_tcal();
 
-		} else {
-			LOG_WRN(
-				"T-Cal: Temperature %.2fC is outside the configured calibration range. Point not saved.",
-				(double)avg_temp
-			);
+			if (offset_calculated) {
+				// Calculate D_offset = measured - curve
+				for (int axis = 0; axis < 3; axis++) {
+					retained->tempCalCorrectionOffset[axis] = g_bias[axis] - curve_bias[axis];
+				}
+
+				LOG_INF("T-Cal: Updated D_offset [%.5f, %.5f, %.5f]",
+					(double)retained->tempCalCorrectionOffset[0],
+					(double)retained->tempCalCorrectionOffset[1],
+					(double)retained->tempCalCorrectionOffset[2]);
+
+				// Save correction offset to NVS
+				sys_write(
+					MAIN_GYRO_TCAL_CORRECTION_ID,
+					retained->tempCalCorrectionOffset,
+					retained->tempCalCorrectionOffset,
+					sizeof(retained->tempCalCorrectionOffset)
+				);
+
+				// Invalidate sensor fusion to apply new offset
+				sensor_fusion_invalidate();
+			} else {
+				LOG_WRN("T-Cal: Failed to calculate D_offset, falling back to point save");
+				has_good_coverage = false; // Fall through to save point
+			}
+		}
+
+		if (!has_good_coverage) {
+			// Normal path: save as new calibration point
+			LOG_INF("T-Cal: Saving calibration point at average temp %.2fC (range: %.2fC)",
+				(double)avg_temp, (double)temp_range);
+			int idx = TEMP_TO_IDX(avg_temp);
+			if (idx >= 0 && idx < TCAL_BUFFER_SIZE) {
+
+				// Remove nearby points to avoid numerical instability
+				float min_separation = 0.3f;
+
+				// Check lower indices (sorted by temp)
+				for (int i = idx - 1; i >= 0; i--) {
+					if (retained->tempCalPoints[i].temp != 0.0f) {
+						if (fabsf(retained->tempCalPoints[i].temp - avg_temp) < min_separation) {
+							retained->tempCalPoints[i].temp = 0.0f;
+							memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
+							if (retained->tempCalState.count > 0) {
+								retained->tempCalState.count--;
+							}
+							LOG_INF("T-Cal: Removed conflict point at index %d", i);
+						} else {
+							break; // Further points are even further away
+						}
+					}
+				}
+				// Check upper indices (sorted by temp)
+				for (int i = idx + 1; i < TCAL_BUFFER_SIZE; i++) {
+					if (retained->tempCalPoints[i].temp != 0.0f) {
+						if (fabsf(retained->tempCalPoints[i].temp - avg_temp) < min_separation) {
+							retained->tempCalPoints[i].temp = 0.0f;
+							memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
+							if (retained->tempCalState.count > 0) {
+								retained->tempCalState.count--;
+							}
+							LOG_INF("T-Cal: Removed conflict point at index %d", i);
+						} else {
+							break; // Further points are even further away
+						}
+					}
+				}
+
+				if (retained->tempCalPoints[idx].temp == 0.0f) {
+					retained->tempCalState.count++; // Use struct member
+				}
+				retained->tempCalPoints[idx].temp = avg_temp;
+				memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
+				retained->tempCalState.valid = false; // Invalidate old curve
+				update_poly_tcal();
+
+			} else {
+				LOG_WRN(
+					"T-Cal: Temperature %.2fC is outside the configured calibration range. Point not saved.",
+					(double)avg_temp
+				);
+			}
 		}
 	}
 #endif
@@ -793,7 +1004,6 @@ static int isAccRest(float *acc, float *pre_acc, float threshold, int *t, int re
 }
 #endif
 
-// TODO: setup 6 sided calibration (bias and scale, and maybe gyro ZRO?), setup temp calibration (particulary for gyro ZRO)
 int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_range)
 {
 	float rawData[3];
@@ -811,8 +1021,6 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 	}
 	memcpy(max_g, min_g, sizeof(max_g));
 
-	// Use online algorithm - accumulate sums instead of storing all samples
-	// This reduces memory from ~168KB to <100 bytes!
 	double gyro_sum[3] = {0};
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
@@ -1414,6 +1622,9 @@ static int polyfit(int degree, float coeffs_out[3][CONFIG_SENSOR_POLY_DEGREE + 1
 // Function to handle recalculating the curve after a point is added/removed
 static void update_poly_tcal(void)
 {
+	// Invalidate lookup cache since calibration data changed
+	sensor_tcal_cache_invalidate();
+
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
 	retained->tempCalState.degree = 0;
 	retained->tempCalState.valid = false;
@@ -1472,6 +1683,9 @@ void sensor_tcal_clear_poly(void)
 		return;
 	}
 
+	// Invalidate lookup cache since calibration data will be cleared
+	sensor_tcal_cache_invalidate();
+
 	LOG_INF("Clearing all manual polynomial T-Cal data.");
 	memset(retained->tempCalPoints, 0, sizeof(retained->tempCalPoints));
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
@@ -1526,6 +1740,9 @@ void sensor_tcal_remove_point(int index_to_remove)
 
 	// Check if there was actually data in that slot
 	if (retained->tempCalPoints[index_to_remove].temp != 0.0f) {
+		// Invalidate lookup cache since a point is being removed
+		sensor_tcal_cache_invalidate();
+
 		LOG_INF("Removing T-Cal point at index %d.", index_to_remove);
 
 		// Zero out the slot
@@ -1937,20 +2154,42 @@ static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp)
  */
 static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp)
 {
-	if (!retained->tempCalState.valid) {
-		LOG_ERR("Boot Cal: Cannot calculate D_offset - curve not valid");
-		return -1;
-	}
-
-	// Calculate curve value at current temperature
+	// Calculate curve value at current temperature using the same method as runtime
 	float curve_bias[3];
-	for (int axis = 0; axis < 3; axis++) {
-		// Evaluate polynomial at current temperature
-		float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-		for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-			offset = offset * temp + retained->tempCalCoeffs[axis][i];
+	bool offset_calculated = false;
+
+	// Try interpolation first (if configured)
+#if defined(CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE) || defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
+	if (retained->tempCalState.count >= 2) {
+		if (sensor_tcal_lookup_interpolate(temp, curve_bias) == 0) {
+			offset_calculated = true;
+			LOG_INF("Boot Cal: Using interpolation method");
 		}
-		curve_bias[axis] = offset;
+	}
+#endif
+
+	// Fallback to polynomial if needed
+	if (!offset_calculated) {
+#if defined(CONFIG_SENSOR_TCAL_METHOD_POLYNOMIAL) || defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
+		if (!retained->tempCalState.valid) {
+			LOG_ERR("Boot Cal: Cannot calculate D_offset - no valid calibration");
+			return -1;
+		}
+
+		for (int axis = 0; axis < 3; axis++) {
+			// Evaluate polynomial at current temperature
+			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+				offset = offset * temp + retained->tempCalCoeffs[axis][i];
+			}
+			curve_bias[axis] = offset;
+		}
+		offset_calculated = true;
+		LOG_INF("Boot Cal: Using polynomial method");
+#else
+		LOG_ERR("Boot Cal: Cannot calculate D_offset - no valid calibration method");
+		return -1;
+#endif
 	}
 
 	LOG_INF("Boot Cal: Curve predicts [%.5f, %.5f, %.5f] at temp %.2fC",
@@ -2034,7 +2273,7 @@ void sensor_tcal_boot_calibration_check(void)
 	// Log entry into time window (only once)
 	static bool logged_window_entry = false;
 	if (!logged_window_entry) {
-		LOG_INF("Boot Cal: In time window (5-30s), uptime: %lld ms, waiting for stationary condition...", uptime);
+		LOG_INF("Boot Cal: In time window (10-30s), uptime: %lld ms, waiting for stationary condition...", uptime);
 		logged_window_entry = true;
 	}
 
@@ -2052,12 +2291,32 @@ void sensor_tcal_boot_calibration_check(void)
  */
 static int sensor_perform_boot_calibration(void)
 {
+	LOG_INF("Boot Cal: Starting boot calibration");
+	set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
+
 	// Get current temperature
 	float current_temp = sensor_get_current_imu_temperature();
 	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
 		LOG_ERR("Boot Cal: Invalid temperature");
+		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		return -1;
 	}
+
+	// Wait for device to be stationary
+	if (!wait_for_motion(false, 6)) {
+		LOG_WRN("Boot Cal: Device not stationary");
+		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
+		retained->bootCalState.attempt_count++;
+
+		if (retained->bootCalState.attempt_count >= BOOT_CAL_MAX_ATTEMPTS) {
+			LOG_WRN("Boot Cal: Maximum attempts (%d) reached, giving up", BOOT_CAL_MAX_ATTEMPTS);
+			retained->bootCalState.completed = true;
+		}
+		return -1;
+	}
+
+	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
+	k_msleep(500); // Delay before beginning acquisition
 
 	// Attempt to collect bias
 	float measured_bias[3];
@@ -2066,11 +2325,24 @@ static int sensor_perform_boot_calibration(void)
 	int err = sensor_boot_bias_collect(measured_bias, &avg_temp);
 
 	if (err) {
-		// Collection failed
+		// Collection failed - check if we should trigger a full calibration
 		retained->bootCalState.attempt_count++;
+		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 
 		if (retained->bootCalState.attempt_count >= BOOT_CAL_MAX_ATTEMPTS) {
-			LOG_WRN("Boot Cal: Maximum attempts (%d) reached, giving up", BOOT_CAL_MAX_ATTEMPTS);
+			LOG_WRN("Boot Cal: Maximum attempts (%d) reached", BOOT_CAL_MAX_ATTEMPTS);
+
+			// Check if we should auto-trigger single-side calibration to collect data
+			tcal_quality_t quality;
+			if (!sensor_tcal_assess_quality(current_temp, &quality)) {
+				LOG_INF("Boot Cal: T-Cal quality insufficient, triggering single-side calibration");
+				retained->bootCalState.completed = true; // Mark boot cal as complete to avoid re-entry
+
+				// Request standard calibration to collect tcal data
+				sensor_request_calibration();
+				return -2; // Special error code indicating auto-calibration triggered
+			}
+
 			retained->bootCalState.completed = true;
 		}
 		return err;
@@ -2080,14 +2352,18 @@ static int sensor_perform_boot_calibration(void)
 	err = sensor_tcal_calculate_doffset(measured_bias, avg_temp);
 	if (err) {
 		LOG_ERR("Boot Cal: Failed to calculate D_offset");
+		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		retained->bootCalState.completed = true;
 		return err;
 	}
 
-	// Success!
+	// Success! Invalidate sensor fusion to apply new calibration
 	retained->bootCalState.completed = true;
 	int64_t uptime = k_uptime_get();
 	LOG_INF("Boot Cal: Completed successfully (uptime: %lld ms)", uptime);
+	sensor_fusion_invalidate();
+
+	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
 	return 0;
 }
 
@@ -2125,6 +2401,542 @@ void sensor_boot_cal_reset(void)
 	retained->bootCalState.doffset[1] = 0.0f;
 	retained->bootCalState.doffset[2] = 0.0f;
 	LOG_INF("Boot Cal: State reset (will recalibrate on next boot)");
+}
+
+// =============================================================================
+// T-Cal Test/Debug Functions
+// =============================================================================
+
+/**
+ * Test and compare different calibration methods at a given temperature
+ * Useful for debugging and understanding method differences
+ */
+void sensor_tcal_test_methods(float temp)
+{
+	if (retained->tempCalState.count < 1) {
+		printk("No calibration data available.\n");
+		return;
+	}
+
+	printk("\n=== T-Cal Method Comparison at %.2fC ===\n", (double)temp);
+	printk("Total calibration points: %u\n\n", retained->tempCalState.count);
+
+	// Show available calibration points
+	float min_temp = INFINITY, max_temp = -INFINITY;
+	int point_count = 0;
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (retained->tempCalPoints[i].temp != 0.0f) {
+			float t = retained->tempCalPoints[i].temp;
+			if (t < min_temp) min_temp = t;
+			if (t > max_temp) max_temp = t;
+			point_count++;
+		}
+	}
+	printk("Calibrated range: %.2fC to %.2fC\n", (double)min_temp, (double)max_temp);
+
+	// Show temperature position
+	if (temp < min_temp) {
+		printk("Test temp is %.2fC BELOW calibrated range\n", (double)(min_temp - temp));
+	} else if (temp > max_temp) {
+		printk("Test temp is %.2fC ABOVE calibrated range\n", (double)(temp - max_temp));
+	} else {
+		printk("Test temp is WITHIN calibrated range\n");
+	}
+	printk("\n");
+
+	// Method 1: Interpolation (if enough points)
+	if (retained->tempCalState.count >= 2) {
+		float interp_bias[3];
+		int result = sensor_tcal_lookup_interpolate(temp, interp_bias);
+
+		if (result == 0) {
+			printk("Interpolation Method:\n");
+			printk("  Bias: [%.5f, %.5f, %.5f] dps\n",
+				(double)interp_bias[0], (double)interp_bias[1], (double)interp_bias[2]);
+
+			// Find which points were used
+			int left_idx, right_idx;
+			find_neighbor_points(temp, &left_idx, &right_idx);
+
+			if (left_idx >= 0 && right_idx >= 0) {
+				if (left_idx == right_idx) {
+					printk("  Method: Exact match at %.2fC\n",
+						(double)retained->tempCalPoints[left_idx].temp);
+				} else if (temp < min_temp || temp > max_temp) {
+					printk("  Method: Extrapolation\n");
+					if (temp < min_temp) {
+						printk("  Using points at %.2fC and %.2fC\n",
+							(double)retained->tempCalPoints[left_idx].temp,
+							(double)retained->tempCalPoints[right_idx].temp);
+					} else {
+						printk("  Using points at %.2fC and %.2fC\n",
+							(double)retained->tempCalPoints[left_idx].temp,
+							(double)retained->tempCalPoints[right_idx].temp);
+					}
+				} else {
+					printk("  Method: Linear interpolation\n");
+					printk("  Between %.2fC and %.2fC\n",
+						(double)retained->tempCalPoints[left_idx].temp,
+						(double)retained->tempCalPoints[right_idx].temp);
+					float ratio = (temp - retained->tempCalPoints[left_idx].temp) /
+						(retained->tempCalPoints[right_idx].temp - retained->tempCalPoints[left_idx].temp);
+					printk("  Interpolation ratio: %.3f\n", (double)ratio);
+				}
+			}
+		} else {
+			printk("Interpolation Method: FAILED\n");
+		}
+		printk("\n");
+	} else {
+		printk("Interpolation Method: Not enough points (need >= 2)\n\n");
+	}
+
+	// Method 2: Polynomial (if valid)
+	if (retained->tempCalState.valid) {
+		float poly_bias[3];
+		for (int axis = 0; axis < 3; axis++) {
+			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+				offset = offset * temp + retained->tempCalCoeffs[axis][i];
+			}
+			poly_bias[axis] = offset;
+		}
+
+		printk("Polynomial Method (degree %u):\n", retained->tempCalState.degree);
+		printk("  Bias: [%.5f, %.5f, %.5f] dps\n",
+			(double)poly_bias[0], (double)poly_bias[1], (double)poly_bias[2]);
+		printk("\n");
+
+		// Compare methods if both available
+		if (retained->tempCalState.count >= 2) {
+			float interp_bias[3];
+			if (sensor_tcal_lookup_interpolate(temp, interp_bias) == 0) {
+				float diff[3];
+				float max_diff = 0.0f;
+				for (int i = 0; i < 3; i++) {
+					diff[i] = poly_bias[i] - interp_bias[i];
+					if (fabsf(diff[i]) > max_diff) {
+						max_diff = fabsf(diff[i]);
+					}
+				}
+				printk("Method Difference (Polynomial - Interpolation):\n");
+				printk("  Delta: [%.5f, %.5f, %.5f] dps\n",
+					(double)diff[0], (double)diff[1], (double)diff[2]);
+				printk("  Max difference: %.5f dps\n", (double)max_diff);
+				printk("\n");
+			}
+		}
+	} else {
+		printk("Polynomial Method: Not available (curve not calculated)\n\n");
+	}
+
+	// Show correction offset and boot cal D_offset if active
+	bool has_corrections = false;
+	for (int i = 0; i < 3; i++) {
+		if (retained->tempCalCorrectionOffset[i] != 0.0f ||
+		    (retained->bootCalState.doffset_valid && retained->bootCalState.doffset[i] != 0.0f)) {
+			has_corrections = true;
+			break;
+		}
+	}
+
+	if (has_corrections) {
+		printk("Additional Offsets:\n");
+		if (retained->tempCalCorrectionOffset[0] != 0.0f ||
+		    retained->tempCalCorrectionOffset[1] != 0.0f ||
+		    retained->tempCalCorrectionOffset[2] != 0.0f) {
+			printk("  Correction offset: [%.5f, %.5f, %.5f] dps\n",
+				(double)retained->tempCalCorrectionOffset[0],
+				(double)retained->tempCalCorrectionOffset[1],
+				(double)retained->tempCalCorrectionOffset[2]);
+		}
+		if (retained->bootCalState.doffset_valid) {
+			printk("  Boot cal D_offset: [%.5f, %.5f, %.5f] dps\n",
+				(double)retained->bootCalState.doffset[0],
+				(double)retained->bootCalState.doffset[1],
+				(double)retained->bootCalState.doffset[2]);
+		}
+		printk("\n");
+	}
+
+	// Show final effective bias that would be applied
+	printk("Final Effective Bias (as applied to gyro data):\n");
+
+	// Calculate what would actually be used
+	float final_bias[3] = {0.0f, 0.0f, 0.0f};
+	bool calculated = false;
+
+	// Try interpolation first if configured for auto or interpolate mode
+#if defined(CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE) || defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
+	if (retained->tempCalState.count >= 2) {
+		if (sensor_tcal_lookup_interpolate(temp, final_bias) == 0) {
+			calculated = true;
+		}
+	}
+#endif
+
+	// Fallback to polynomial if not calculated yet
+#if defined(CONFIG_SENSOR_TCAL_METHOD_POLYNOMIAL) || defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
+	if (!calculated && retained->tempCalState.valid) {
+		for (int axis = 0; axis < 3; axis++) {
+			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
+			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
+				offset = offset * temp + retained->tempCalCoeffs[axis][i];
+			}
+			final_bias[axis] = offset;
+		}
+		calculated = true;
+	}
+#endif
+
+	if (calculated) {
+		// Add correction offset
+		for (int i = 0; i < 3; i++) {
+			final_bias[i] += retained->tempCalCorrectionOffset[i];
+		}
+
+		// Add boot cal D_offset if valid
+		if (retained->bootCalState.doffset_valid) {
+			for (int i = 0; i < 3; i++) {
+				final_bias[i] += retained->bootCalState.doffset[i];
+			}
+		}
+
+		printk("  Total: [%.5f, %.5f, %.5f] dps\n",
+			(double)final_bias[0], (double)final_bias[1], (double)final_bias[2]);
+
+		// Show configured method
+#if defined(CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE)
+		printk("  Method: Interpolation (CONFIG_SENSOR_TCAL_METHOD_INTERPOLATE)\n");
+#elif defined(CONFIG_SENSOR_TCAL_METHOD_POLYNOMIAL)
+		printk("  Method: Polynomial (CONFIG_SENSOR_TCAL_METHOD_POLYNOMIAL)\n");
+#elif defined(CONFIG_SENSOR_TCAL_METHOD_AUTO)
+		printk("  Method: Auto (CONFIG_SENSOR_TCAL_METHOD_AUTO)\n");
+		if (retained->tempCalState.count >= 5) {
+			printk("  Currently using: Interpolation (>= 5 points)\n");
+		} else if (retained->tempCalState.count >= 2 && retained->tempCalState.valid) {
+			printk("  Currently using: Polynomial (2-4 points)\n");
+		}
+#endif
+	} else {
+		printk("  Fallback to static bias: [%.5f, %.5f, %.5f] dps\n",
+			(double)retained->gyroBias[0],
+			(double)retained->gyroBias[1],
+			(double)retained->gyroBias[2]);
+		printk("  (No valid T-Cal method available)\n");
+	}
+
+	printk("\n=== End of T-Cal Method Comparison ===\n");
+}
+
+// =============================================================================
+// T-Cal Interpolation Method - Implementation
+// =============================================================================
+
+/**
+ * Find the two data points that surround the given temperature
+ *
+ * @param temp Current temperature
+ * @param left_idx Output: index of the point at or below temp
+ * @param right_idx Output: index of the point at or above temp
+ * @return 0 on success, -1 if not enough points
+ */
+static int find_neighbor_points(float temp, int *left_idx, int *right_idx)
+{
+	*left_idx = -1;
+	*right_idx = -1;
+
+	float left_temp = -INFINITY;
+	float right_temp = INFINITY;
+
+	// Search through all calibration points
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		// Skip empty slots
+		if (retained->tempCalPoints[i].temp == 0.0f) {
+			continue;
+		}
+
+		float point_temp = retained->tempCalPoints[i].temp;
+
+		// Find the closest point at or below current temperature
+		if (point_temp <= temp && point_temp > left_temp) {
+			*left_idx = i;
+			left_temp = point_temp;
+		}
+
+		// Find the closest point at or above current temperature
+		if (point_temp >= temp && point_temp < right_temp) {
+			*right_idx = i;
+			right_temp = point_temp;
+		}
+	}
+
+	// Check if we found at least one point
+	if (*left_idx < 0 && *right_idx < 0) {
+		return -1; // No data points at all
+	}
+
+	return 0;
+}
+
+/**
+ * Perform linear interpolation between two points
+ *
+ * @param left_idx Index of the left (lower temperature) point
+ * @param right_idx Index of the right (higher temperature) point
+ * @param temp Current temperature
+ * @param bias_out Output: interpolated bias for each axis
+ */
+static void linear_interpolate(int left_idx, int right_idx, float temp, float bias_out[3])
+{
+	float left_temp = retained->tempCalPoints[left_idx].temp;
+	float right_temp = retained->tempCalPoints[right_idx].temp;
+
+	// Calculate interpolation ratio [0, 1], guarding against division by zero
+	float denom = right_temp - left_temp;
+	float ratio;
+	if (fabsf(denom) < 1e-6f) {
+		// Degenerate case: temperatures are equal (or extremely close).
+		// Fall back to using the left point's bias (ratio = 0).
+		ratio = 0.0f;
+	} else {
+		ratio = (temp - left_temp) / denom;
+	}
+
+	// Linear interpolation: bias = left + (right - left) * ratio
+	for (int axis = 0; axis < 3; axis++) {
+		float left_bias = retained->tempCalPoints[left_idx].bias[axis];
+		float right_bias = retained->tempCalPoints[right_idx].bias[axis];
+		bias_out[axis] = left_bias + (right_bias - left_bias) * ratio;
+	}
+
+	LOG_DBG("T-Cal Interpolate: %.2fC between [%.2fC, %.2fC], ratio=%.3f",
+		(double)temp, (double)left_temp, (double)right_temp, (double)ratio);
+}
+
+/**
+ * Extrapolate bias for temperatures outside the calibrated range
+ *
+ * @param temp Current temperature
+ * @param bias_out Output: extrapolated bias
+ * @return 0 on success, -1 if no data
+ */
+static int sensor_tcal_extrapolate(float temp, float bias_out[3])
+{
+	// Find min and max temperature points
+	int min_idx = -1, max_idx = -1;
+	float min_temp = INFINITY, max_temp = -INFINITY;
+
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (retained->tempCalPoints[i].temp == 0.0f) continue;
+
+		float point_temp = retained->tempCalPoints[i].temp;
+		if (point_temp < min_temp) {
+			min_temp = point_temp;
+			min_idx = i;
+		}
+		if (point_temp > max_temp) {
+			max_temp = point_temp;
+			max_idx = i;
+		}
+	}
+
+	if (min_idx < 0 || max_idx < 0) {
+		LOG_ERR("T-Cal Extrapolate: No data points available");
+		return -1;
+	}
+
+	if (temp < min_temp) {
+		// Below minimum temperature
+		float delta = min_temp - temp;
+
+		if (delta < 2.0f) {
+			// Strategy 1: Small delta - use flat extrapolation (boundary value)
+			memcpy(bias_out, retained->tempCalPoints[min_idx].bias, sizeof(float) * 3);
+			LOG_DBG("T-Cal Extrapolate: Flat extrapolation at %.2fC (%.2fC below min)",
+				(double)temp, (double)delta);
+		} else {
+			// Strategy 2: Large delta - find second lowest point for linear extrapolation
+			int second_idx = -1;
+			float second_temp = INFINITY;
+
+			for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+				if (i == min_idx || retained->tempCalPoints[i].temp == 0.0f) continue;
+				float point_temp = retained->tempCalPoints[i].temp;
+				if (point_temp < second_temp) {
+					second_temp = point_temp;
+					second_idx = i;
+				}
+			}
+
+			if (second_idx >= 0) {
+				// Linear extrapolation using two lowest points
+				float slope[3];
+				for (int axis = 0; axis < 3; axis++) {
+					slope[axis] = (retained->tempCalPoints[second_idx].bias[axis] -
+					              retained->tempCalPoints[min_idx].bias[axis]) /
+					             (second_temp - min_temp);
+
+					// Extrapolate with slope
+					bias_out[axis] = retained->tempCalPoints[min_idx].bias[axis] +
+					                slope[axis] * (temp - min_temp);
+
+					// Limit extrapolation to prevent excessive values
+					float max_extrap = fabsf(slope[axis]) * 5.0f; // Max 5°C worth of change
+					float extrap_delta = bias_out[axis] - retained->tempCalPoints[min_idx].bias[axis];
+					if (fabsf(extrap_delta) > max_extrap) {
+						bias_out[axis] = retained->tempCalPoints[min_idx].bias[axis] +
+						                copysignf(max_extrap, extrap_delta);
+					}
+				}
+				LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC below min)",
+					(double)temp, (double)delta);
+			} else {
+				// Fallback: use flat extrapolation if no second point
+				memcpy(bias_out, retained->tempCalPoints[min_idx].bias, sizeof(float) * 3);
+				LOG_WRN("T-Cal Extrapolate: Only one point available, using flat extrapolation");
+			}
+		}
+
+	} else if (temp > max_temp) {
+		// Above maximum temperature - similar logic
+		float delta = temp - max_temp;
+
+		if (delta < 2.0f) {
+			// Strategy 1: Small delta - flat extrapolation
+			memcpy(bias_out, retained->tempCalPoints[max_idx].bias, sizeof(float) * 3);
+			LOG_DBG("T-Cal Extrapolate: Flat extrapolation at %.2fC (%.2fC above max)",
+				(double)temp, (double)delta);
+		} else {
+			// Strategy 2: Large delta - find second highest point
+			int second_idx = -1;
+			float second_temp = -INFINITY;
+
+			for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+				if (i == max_idx || retained->tempCalPoints[i].temp == 0.0f) continue;
+				float point_temp = retained->tempCalPoints[i].temp;
+				if (point_temp > second_temp) {
+					second_temp = point_temp;
+					second_idx = i;
+				}
+			}
+
+			if (second_idx >= 0) {
+				// Linear extrapolation using two highest points
+				float slope[3];
+				for (int axis = 0; axis < 3; axis++) {
+					slope[axis] = (retained->tempCalPoints[max_idx].bias[axis] -
+					              retained->tempCalPoints[second_idx].bias[axis]) /
+					             (max_temp - second_temp);
+
+					bias_out[axis] = retained->tempCalPoints[max_idx].bias[axis] +
+					                slope[axis] * (temp - max_temp);
+
+					// Limit extrapolation
+					float max_extrap = fabsf(slope[axis]) * 3.0f;
+					float extrap_delta = bias_out[axis] - retained->tempCalPoints[max_idx].bias[axis];
+					if (fabsf(extrap_delta) > max_extrap) {
+						bias_out[axis] = retained->tempCalPoints[max_idx].bias[axis] +
+						                copysignf(max_extrap, extrap_delta);
+					}
+				}
+				LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC above max)",
+					(double)temp, (double)delta);
+			} else {
+				// Fallback: flat extrapolation
+				memcpy(bias_out, retained->tempCalPoints[max_idx].bias, sizeof(float) * 3);
+				LOG_WRN("T-Cal Extrapolate: Only one point available, using flat extrapolation");
+			}
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * Main lookup and interpolation function with caching
+ * Calculates bias at given temperature using linear interpolation
+ * Uses cache to avoid redundant searches when temperature is similar
+ *
+ * @param temp Current temperature
+ * @param bias_out Output: calculated 3-axis gyro bias
+ * @return 0 on success, -1 on failure
+ */
+static int sensor_tcal_lookup_interpolate(float temp, float bias_out[3])
+{
+	// Check if we have any data
+	if (retained->tempCalState.count < 1) {
+		LOG_ERR("T-Cal Interpolate: No calibration data available");
+		return -1;
+	}
+
+	// Try to use cache if valid
+	if (tcal_lookup_cache.valid) {
+		// Temperature hasn't changed much (within 0.5°C)
+		if (fabsf(temp - tcal_lookup_cache.last_temp) < 0.5f) {
+			// Verify cached indices are still valid
+			if (tcal_lookup_cache.left_idx >= 0 &&
+			    tcal_lookup_cache.left_idx < TCAL_BUFFER_SIZE &&
+			    tcal_lookup_cache.right_idx >= 0 &&
+			    tcal_lookup_cache.right_idx < TCAL_BUFFER_SIZE) {
+
+				float t_left = retained->tempCalPoints[tcal_lookup_cache.left_idx].temp;
+				float t_right = retained->tempCalPoints[tcal_lookup_cache.right_idx].temp;
+
+				// Check if temperature is still in the cached interval
+				if ((temp >= t_left && temp <= t_right) ||
+				    (temp <= t_left && temp >= t_right)) {
+					// Cache hit! Use cached indices directly
+					if (tcal_lookup_cache.left_idx == tcal_lookup_cache.right_idx) {
+						// Exact match case
+						memcpy(bias_out, retained->tempCalPoints[tcal_lookup_cache.left_idx].bias, sizeof(float) * 3);
+					} else {
+						// Interpolate using cached indices
+						linear_interpolate(tcal_lookup_cache.left_idx,
+						                  tcal_lookup_cache.right_idx,
+						                  temp, bias_out);
+					}
+					tcal_lookup_cache.last_temp = temp;
+					LOG_DBG("T-Cal: Cache hit at %.2fC", (double)temp);
+					return 0;
+				}
+			}
+		}
+		// Cache miss - need to search
+		LOG_DBG("T-Cal: Cache miss (temp changed from %.2fC to %.2fC)",
+		       (double)tcal_lookup_cache.last_temp, (double)temp);
+	}
+
+	// Cache miss or invalid - perform full search
+	int left_idx, right_idx;
+	if (find_neighbor_points(temp, &left_idx, &right_idx) != 0) {
+		LOG_ERR("T-Cal Interpolate: Failed to find neighbor points");
+		tcal_lookup_cache.valid = false;
+		return -1;
+	}
+
+	// Update cache with new search results
+	tcal_lookup_cache.left_idx = left_idx;
+	tcal_lookup_cache.right_idx = right_idx;
+	tcal_lookup_cache.last_temp = temp;
+	tcal_lookup_cache.valid = true;
+
+	// Handle different cases
+	if (left_idx >= 0 && right_idx >= 0 && left_idx != right_idx) {
+		// Case 1: Temperature is between two points - interpolate
+		linear_interpolate(left_idx, right_idx, temp, bias_out);
+		return 0;
+
+	} else if (left_idx >= 0 && right_idx >= 0 && left_idx == right_idx) {
+		// Case 2: Temperature exactly matches a calibration point
+		memcpy(bias_out, retained->tempCalPoints[left_idx].bias, sizeof(float) * 3);
+		LOG_DBG("T-Cal Interpolate: Exact match at %.2fC", (double)temp);
+		return 0;
+
+	} else {
+		// Case 3: Temperature is outside calibrated range - extrapolate
+		return sensor_tcal_extrapolate(temp, bias_out);
+	}
 }
 
 #endif
