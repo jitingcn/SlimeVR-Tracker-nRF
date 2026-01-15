@@ -145,7 +145,7 @@ static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 static int sensor_calibration_request(int id);
 
 static void calibration_thread(void);
-K_THREAD_DEFINE(calibration_thread_id, 1024, calibration_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(calibration_thread_id, 4096, calibration_thread, NULL, NULL, NULL, 6, 0, 0);
 
 void sensor_calibration_process_accel(float a[3])
 {
@@ -970,114 +970,132 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 	return 0;
 }
 
-// TODO: can be used to get a better gyro bias
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+// Target number of samples, 6 faces + 12 edges
+#define CALIB_TARGET_SAMPLES 18
+// Orientation difference threshold (cosine value).
+// cos(25 degrees) ≈ 0.90. If dot product > 0.90, the angle between two directions is less than 25 degrees, considered duplicate.
+#define MIN_ORIENTATION_DIFF_COS 0.90f
+// Acceleration threshold for determining stationary state
+#define THRESHOLD_ACC 0.02f
+// Number of samples to collect for each orientation
+#define SAMPLES_PER_ORIENTATION 500
+typedef struct {
+	float x, y, z;
+} Vector3;
+
 int sensor_6_sideBias(float a_inv[][3])
 {
-	// Acc 6 side calibrate
 	float rawData[3];
 	float pre_acc[3] = {0};
-
-	const float THRESHOLD_ACC = 0.05;
 	int resttime = 0;
 
+	Vector3 captured_dirs[CALIB_TARGET_SAMPLES];
+	int captured_count = 0;
+
 	magneto_reset();
-	int c = 0;
-	printk("Starting accelerometer calibration.\n");
-	while (1) {
-		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
-		printk("Waiting for a resting state...\n");
+
+	LOG_INF("Starting Multi-Position Calibration (Target: %d poses)", CALIB_TARGET_SAMPLES);
+	LOG_INF("Please rotate device to random orientations and hold still.");
+
+	// Main loop: until target number of samples collected
+	while (captured_count < CALIB_TARGET_SAMPLES) {
+
+		// 1. Wait for device to be stationary
+		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR); // Indicate searching for stationary state
 		while (1) {
 			if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 				return -2; // Timeout, magneto state not handled here
 			}
-			int rest = isAccRest(rawData, pre_acc, THRESHOLD_ACC, &resttime, 100);
-			pre_acc[0] = rawData[0];
-			pre_acc[1] = rawData[1];
-			pre_acc[2] = rawData[2];
 
-			// force not resting until a new side is detected and stable
-			uint8_t new_magneto_progress = magneto_progress;
-			new_magneto_progress |= check_sides(rawData);
-			if (new_magneto_progress > magneto_progress && new_magneto_progress == last_magneto_progress) {
-				if (k_uptime_get() < magneto_progress_time) {
-					rest = 0;
-				}
-			} else {
-				magneto_progress_time = k_uptime_get() + 1000;
-				last_magneto_progress = new_magneto_progress;
-				rest = 0;
-			}
+			int rest = isAccRest(rawData, pre_acc, THRESHOLD_ACC, &resttime, 100);
+			memcpy(pre_acc, rawData, sizeof(rawData)); // Update previous data
 
 			if (rest == 1) {
-				magneto_progress = new_magneto_progress;
-				printk("Rest detected, starting recording. Please do not move. %d\n", c);
-				set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
-				k_msleep(100);
+				// Device is stationary, now check if this pose is new
+				// Calculate current vector magnitude
+				float norm = sqrtf(rawData[0]*rawData[0] + rawData[1]*rawData[1] + rawData[2]*rawData[2]);
+				if (norm < 0.1f) continue; // Prevent division by zero (unlikely under gravity)
 
-				int64_t sampling_start_time = k_uptime_get();
-				uint8_t i = 0;
-				// Increased sampling time from 1000ms to 5000ms for better calibration quality
-				while (k_uptime_get() - sampling_start_time < 5000) {
-					if (sensor_wait_accel(rawData, K_MSEC(1000))) {
-						return -2; // Timeout, magneto state not handled here
-					}
-					if (!v_epsilon(rawData, pre_acc, 0.1)) {
-						return -1; // Motion detected
-					}
-					magneto_sample(rawData[0], rawData[1], rawData[2], ata, &norm_sum, &sample_count);
-					// Progress indicator every 500ms for 5 second sampling
-					if (k_uptime_get() - sampling_start_time >= i * 500) {
-						printk("#");
-						i++;
+				// Normalize current vector
+				float curr_dir_x = rawData[0] / norm;
+				float curr_dir_y = rawData[1] / norm;
+				float curr_dir_z = rawData[2] / norm;
+
+				bool is_duplicate = false;
+				// Compare with historical data
+				for (int i = 0; i < captured_count; i++) {
+					// Calculate cosine of angle using dot product
+					float dot = curr_dir_x * captured_dirs[i].x +
+								curr_dir_y * captured_dirs[i].y +
+								curr_dir_z * captured_dirs[i].z;
+
+					// If dot product is close to 1, the directions are almost the same,
+					// or a slight wobble of a previous direction
+					if (dot > MIN_ORIENTATION_DIFF_COS) {
+						is_duplicate = true;
+						break;
 					}
 				}
-				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
-				printk("Recorded values!\n");
-				printk("%d side done\n", c);
-				c++;
-				break;
+
+				if (!is_duplicate) {
+					// This is a new valid pose! Break the wait loop and start capturing data
+					// Save this direction vector
+					captured_dirs[captured_count].x = curr_dir_x;
+					captured_dirs[captured_count].y = curr_dir_y;
+					captured_dirs[captured_count].z = curr_dir_z;
+					break;
+				} else {
+					// Duplicate pose detected, briefly flash LED to prompt user to change orientation, but do not error
+					set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
+					k_msleep(100); // Debounce slightly
+				}
 			}
-			k_msleep(100);
+			k_msleep(20);
 		}
-		if (c >= 6) {
-			break;
-		}
-		printk("Waiting for the next side... %d \n", c);
-		while (1) {
-			k_msleep(100);
+
+		LOG_INF("Capturing pose %d/%d...", captured_count + 1, CALIB_TARGET_SAMPLES);
+		set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
+
+		int sample_idx = 0;
+		while (sample_idx < SAMPLES_PER_ORIENTATION) {
 			if (sensor_wait_accel(rawData, K_MSEC(1000))) {
-				return -2; // Timeout, magneto state not handled here
+				return -2;
 			}
-			int rest = isAccRest(rawData, pre_acc, THRESHOLD_ACC, &resttime, 100);
-			pre_acc[0] = rawData[0];
-			pre_acc[1] = rawData[1];
-			pre_acc[2] = rawData[2];
 
-			if (rest == 0) {
-				resttime = 0;
+			if (!v_epsilon(rawData, pre_acc, 0.03f)) {
+				LOG_INF("Motion detected during capture, retrying...");
+				sample_idx = -1;
 				break;
 			}
+			memcpy(pre_acc, rawData, sizeof(rawData));
+
+			magneto_sample(rawData[0], rawData[1], rawData[2], ata, &norm_sum, &sample_count);
+
+			sample_idx++;
+
+			if (sample_idx % 50 == 0) printk(".");
 		}
+
+		if (sample_idx == -1) {
+			continue;
+		}
+
+		captured_count++;
+		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
+		LOG_INF("Pose %d saved!", captured_count);
+
+		k_msleep(500);
 	}
 
-	printk("Calculating the data....\n");
-#if DEBUG
-	printk("ata:\n");
-	for (int i = 0; i < 10; i++) {
-		for (int j = 0; j < 10; j++) {
-			printk("%7.2f, ", (double)ata[i * 10 + j]);
-		}
-		printk("\n");
-		k_msleep(3);
-	}
-	printk("norm_sum: %.2f, sample_count: %.0f\n", norm_sum, sample_count);
-#endif
-	wait_for_threads(); // TODO: let the data cook or something idk why this has to be here to work
+	LOG_INF("Calculating calibration matrix...");
+
+	wait_for_threads();
 	magneto_current_calibration(a_inv, ata, norm_sum, sample_count);
+
 	magneto_reset();
 
-	printk("Calibration is complete.\n");
+	LOG_INF("Calibration calculation complete.");
 	return 0;
 }
 #endif
