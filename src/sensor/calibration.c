@@ -2783,6 +2783,7 @@ static void linear_interpolate(int left_idx, int right_idx, float temp, float bi
 
 /**
  * Extrapolate bias for temperatures outside the calibrated range
+ * Uses up to 3 nearest points for more stable extrapolation
  *
  * @param temp Current temperature
  * @param bias_out Output: extrapolated bias
@@ -2814,10 +2815,10 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3])
 	}
 
 	if (temp < min_temp) {
-		// Below minimum temperature
+		// Below minimum temperature - extrapolate using lowest points
 		float delta = min_temp - temp;
 
-		if (delta < 2.0f) {
+		if (delta < 1.5f) {
 			// Strategy 1: Small delta - use flat extrapolation (boundary value)
 			memcpy(bias_out, retained->tempCalPoints[min_idx].bias, sizeof(float) * 3);
 			if (should_log_extrapolation(false, temp)) {
@@ -2825,55 +2826,98 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3])
 					(double)temp, (double)delta);
 			}
 		} else {
-			// Strategy 2: Large delta - find second lowest point for linear extrapolation
-			int second_idx = -1;
-			float second_temp = INFINITY;
+			// Strategy 2: Large delta - find up to 3 lowest points for stable extrapolation
+			// Array to hold indices and temperatures of lowest points
+			typedef struct { int idx; float temp; } TempPoint;
+			TempPoint lowest_points[3] = {{-1, INFINITY}, {-1, INFINITY}, {-1, INFINITY}};
+			int point_count = 0;
 
+			// Collect all valid points
 			for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
-				if (i == min_idx || retained->tempCalPoints[i].temp == 0.0f) continue;
+				if (retained->tempCalPoints[i].temp == 0.0f) continue;
+
 				float point_temp = retained->tempCalPoints[i].temp;
-				if (point_temp < second_temp) {
-					second_temp = point_temp;
-					second_idx = i;
+
+				// Insert this point in sorted order (ascending temperature)
+				for (int j = 0; j < 3; j++) {
+					if (lowest_points[j].idx == -1 || point_temp < lowest_points[j].temp) {
+						// Shift higher elements
+						for (int k = 2; k > j; k--) {
+							lowest_points[k] = lowest_points[k-1];
+						}
+						lowest_points[j].idx = i;
+						lowest_points[j].temp = point_temp;
+						if (point_count < 3) point_count++;
+						break;
+					}
 				}
 			}
 
-			if (second_idx >= 0) {
-				// Linear extrapolation using two lowest points
-				float slope[3];
-				for (int axis = 0; axis < 3; axis++) {
-					slope[axis] = (retained->tempCalPoints[second_idx].bias[axis] -
-					              retained->tempCalPoints[min_idx].bias[axis]) /
-					             (second_temp - min_temp);
+			if (point_count >= 2) {
+				// Calculate slope using multiple points for averaging
+				float avg_slope[3] = {0.0f, 0.0f, 0.0f};
+				int slope_count = 0;
 
-					// Extrapolate with slope
-					bias_out[axis] = retained->tempCalPoints[min_idx].bias[axis] +
-					                slope[axis] * (temp - min_temp);
+				// Calculate slopes between consecutive points
+				for (int i = 0; i < point_count - 1; i++) {
+					int idx1 = lowest_points[i].idx;
+					int idx2 = lowest_points[i+1].idx;
+					float temp_diff = lowest_points[i+1].temp - lowest_points[i].temp;
 
-					// Limit extrapolation to prevent excessive values
-					float max_extrap = fabsf(slope[axis]) * 5.0f; // Max 5°C worth of change
-					float extrap_delta = bias_out[axis] - retained->tempCalPoints[min_idx].bias[axis];
-					if (fabsf(extrap_delta) > max_extrap) {
-						bias_out[axis] = retained->tempCalPoints[min_idx].bias[axis] +
-						                copysignf(max_extrap, extrap_delta);
+					if (fabsf(temp_diff) > 0.1f) { // Avoid division by very small numbers
+						for (int axis = 0; axis < 3; axis++) {
+							float slope = (retained->tempCalPoints[idx2].bias[axis] -
+							              retained->tempCalPoints[idx1].bias[axis]) / temp_diff;
+							avg_slope[axis] += slope;
+						}
+						slope_count++;
 					}
 				}
-				if (should_log_extrapolation(false, temp)) {
-					LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC below min)",
-						(double)temp, (double)delta);
+
+				if (slope_count > 0) {
+					// Average the slopes
+					for (int axis = 0; axis < 3; axis++) {
+						avg_slope[axis] /= slope_count;
+					}
+
+					// Extrapolate using averaged slope from the lowest point
+					for (int axis = 0; axis < 3; axis++) {
+						bias_out[axis] = retained->tempCalPoints[min_idx].bias[axis] +
+						                avg_slope[axis] * (temp - min_temp);
+
+						// Limit extrapolation to prevent excessive values
+						float max_extrap = fabsf(avg_slope[axis]) * 10.0f; // Max 10°C worth of change
+						float extrap_delta = bias_out[axis] - retained->tempCalPoints[min_idx].bias[axis];
+						if (fabsf(extrap_delta) > max_extrap) {
+							bias_out[axis] = retained->tempCalPoints[min_idx].bias[axis] +
+							                copysignf(max_extrap, extrap_delta);
+						}
+					}
+
+					if (should_log_extrapolation(false, temp)) {
+						LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC below min, using %d points)",
+							(double)temp, (double)delta, point_count);
+					}
+				} else {
+					// Fallback to flat if slope calculation failed
+					memcpy(bias_out, retained->tempCalPoints[min_idx].bias, sizeof(float) * 3);
+					LOG_WRN("T-Cal Extrapolate: Could not calculate slope, using flat extrapolation");
 				}
 			} else {
-				// Fallback: use flat extrapolation if no second point
+				// Only one point available - flat extrapolation
 				memcpy(bias_out, retained->tempCalPoints[min_idx].bias, sizeof(float) * 3);
-				LOG_WRN("T-Cal Extrapolate: Only one point available, using flat extrapolation");
+				if (should_log_extrapolation(false, temp)) {
+					LOG_INF("T-Cal Extrapolate: Flat extrapolation at %.2fC (only 1 point available)",
+						(double)temp);
+				}
 			}
 		}
 
 	} else if (temp > max_temp) {
-		// Above maximum temperature - similar logic
+		// Above maximum temperature - extrapolate using highest points
 		float delta = temp - max_temp;
 
-		if (delta < 2.0f) {
+		if (delta < 1.5f) {
 			// Strategy 1: Small delta - flat extrapolation
 			memcpy(bias_out, retained->tempCalPoints[max_idx].bias, sizeof(float) * 3);
 			if (should_log_extrapolation(true, temp)) {
@@ -2881,46 +2925,89 @@ static int sensor_tcal_extrapolate(float temp, float bias_out[3])
 					(double)temp, (double)delta);
 			}
 		} else {
-			// Strategy 2: Large delta - find second highest point
-			int second_idx = -1;
-			float second_temp = -INFINITY;
+			// Strategy 2: Large delta - find up to 3 highest points for stable extrapolation
+			typedef struct { int idx; float temp; } TempPoint;
+			TempPoint highest_points[3] = {{-1, -INFINITY}, {-1, -INFINITY}, {-1, -INFINITY}};
+			int point_count = 0;
 
+			// Collect all valid points
 			for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
-				if (i == max_idx || retained->tempCalPoints[i].temp == 0.0f) continue;
+				if (retained->tempCalPoints[i].temp == 0.0f) continue;
+
 				float point_temp = retained->tempCalPoints[i].temp;
-				if (point_temp > second_temp) {
-					second_temp = point_temp;
-					second_idx = i;
+
+				// Insert this point in sorted order (descending temperature)
+				for (int j = 0; j < 3; j++) {
+					if (highest_points[j].idx == -1 || point_temp > highest_points[j].temp) {
+						// Shift lower elements
+						for (int k = 2; k > j; k--) {
+							highest_points[k] = highest_points[k-1];
+						}
+						highest_points[j].idx = i;
+						highest_points[j].temp = point_temp;
+						if (point_count < 3) point_count++;
+						break;
+					}
 				}
 			}
 
-			if (second_idx >= 0) {
-				// Linear extrapolation using two highest points
-				float slope[3];
-				for (int axis = 0; axis < 3; axis++) {
-					slope[axis] = (retained->tempCalPoints[max_idx].bias[axis] -
-					              retained->tempCalPoints[second_idx].bias[axis]) /
-					             (max_temp - second_temp);
+			if (point_count >= 2) {
+				// Calculate slope using multiple points for averaging
+				float avg_slope[3] = {0.0f, 0.0f, 0.0f};
+				int slope_count = 0;
 
-					bias_out[axis] = retained->tempCalPoints[max_idx].bias[axis] +
-					                slope[axis] * (temp - max_temp);
+				// Calculate slopes between consecutive points
+				for (int i = 0; i < point_count - 1; i++) {
+					int idx1 = highest_points[i].idx;
+					int idx2 = highest_points[i+1].idx;
+					float temp_diff = highest_points[i].temp - highest_points[i+1].temp;
 
-					// Limit extrapolation
-					float max_extrap = fabsf(slope[axis]) * 3.0f;
-					float extrap_delta = bias_out[axis] - retained->tempCalPoints[max_idx].bias[axis];
-					if (fabsf(extrap_delta) > max_extrap) {
-						bias_out[axis] = retained->tempCalPoints[max_idx].bias[axis] +
-						                copysignf(max_extrap, extrap_delta);
+					if (fabsf(temp_diff) > 0.1f) { // Avoid division by very small numbers
+						for (int axis = 0; axis < 3; axis++) {
+							float slope = (retained->tempCalPoints[idx1].bias[axis] -
+							              retained->tempCalPoints[idx2].bias[axis]) / temp_diff;
+							avg_slope[axis] += slope;
+						}
+						slope_count++;
 					}
 				}
-				if (should_log_extrapolation(true, temp)) {
-					LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC above max)",
-						(double)temp, (double)delta);
+
+				if (slope_count > 0) {
+					// Average the slopes
+					for (int axis = 0; axis < 3; axis++) {
+						avg_slope[axis] /= slope_count;
+					}
+
+					// Extrapolate using averaged slope from the highest point
+					for (int axis = 0; axis < 3; axis++) {
+						bias_out[axis] = retained->tempCalPoints[max_idx].bias[axis] +
+						                avg_slope[axis] * (temp - max_temp);
+
+						// Limit extrapolation to prevent excessive values
+						float max_extrap = fabsf(avg_slope[axis]) * 10.0f; // Max 10°C worth of change
+						float extrap_delta = bias_out[axis] - retained->tempCalPoints[max_idx].bias[axis];
+						if (fabsf(extrap_delta) > max_extrap) {
+							bias_out[axis] = retained->tempCalPoints[max_idx].bias[axis] +
+							                copysignf(max_extrap, extrap_delta);
+						}
+					}
+
+					if (should_log_extrapolation(true, temp)) {
+						LOG_INF("T-Cal Extrapolate: Linear extrapolation at %.2fC (%.2fC above max, using %d points)",
+							(double)temp, (double)delta, point_count);
+					}
+				} else {
+					// Fallback to flat if slope calculation failed
+					memcpy(bias_out, retained->tempCalPoints[max_idx].bias, sizeof(float) * 3);
+					LOG_WRN("T-Cal Extrapolate: Could not calculate slope, using flat extrapolation");
 				}
 			} else {
-				// Fallback: flat extrapolation
+				// Only one point available - flat extrapolation
 				memcpy(bias_out, retained->tempCalPoints[max_idx].bias, sizeof(float) * 3);
-				LOG_WRN("T-Cal Extrapolate: Only one point available, using flat extrapolation");
+				if (should_log_extrapolation(true, temp)) {
+					LOG_INF("T-Cal Extrapolate: Flat extrapolation at %.2fC (only 1 point available)",
+						(double)temp);
+				}
 			}
 		}
 	}
