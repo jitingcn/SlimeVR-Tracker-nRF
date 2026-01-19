@@ -43,8 +43,8 @@ jobs:
                   #{boardname: "nrf52dk/nrf52832", fileformat: "hex", filename: "SlimeNRF_nRF52dk_Tracker"},
                   #{boardname: "nrf52840dk/nrf52840", fileformat: "hex", filename: "SlimeNRF_nRF52840dk_Tracker"},
                   {boardname: "foxsmol40_uf2/nrf52840", fileformat: "uf2", filename: "FoxApplication_FoxSmol40_Tracker" },
+                  {boardname: "foxsnacklite_uf2/nrf52840", fileformat: "uf2", filename: "FoxApplication_FoxSnackLite_Tracker" },
                   {boardname: "foxsmolv1_spi_uf2/nrf52840", fileformat: "uf2", filename: "FoxApplication_FoxSmol_V1_SPI_Tracker" },
-                  {boardname: "promicro_uf2/nrf52840/spi", fileformat: "uf2", filename: "SlimeNRF_ProMicro_SPI_Tracker_TimeOut_SystemOff"},
                   {boardname: "mochi_uf2/nrf52833", fileformat: "uf2", filename: "MOCHI_UF2"},
 
                 ]

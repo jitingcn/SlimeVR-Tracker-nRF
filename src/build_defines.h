@@ -132,7 +132,7 @@ static uint8_t get_server_constant_tracker_status(int status) __attribute__((unu
 #define FW_BOARD 0
 #elif CONFIG_BOARD_XIAO_BLE
 #define FW_BOARD 0
-#elif CONFIG_BOARD_FOXSMOLV1_SPI_UF2 || CONFIG_BOARD_FOXSMOL40_UF2
+#elif CONFIG_BOARD_FOXSMOLV1_SPI_UF2 || CONFIG_BOARD_FOXSMOL40_UF2 || CONFIG_BOARD_FOXSNACKLITE_UF2
 #define FW_BOARD 0
 #else
 #define FW_BOARD 0
