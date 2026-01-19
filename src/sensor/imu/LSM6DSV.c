@@ -315,49 +315,42 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 {
 	int err = 0;
-	uint16_t total = 0;
 
-	while (len >= PACKET_SIZE)
+	// Read FIFO status to get number of available packets
+	uint8_t rawCount[2];
+	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, rawCount, 2);
+	if (err)
 	{
-		// Read FIFO status to get number of available packets
-		uint8_t rawCount[2];
-		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, rawCount, 2);
-		if (err)
-		{
-			LOG_ERR("Failed to read FIFO status");
-			break;
-		}
-
-		// Parse FIFO word count (10-bit field: bits 1:0 of rawCount[1] and all 8 bits of rawCount[0])
-		uint16_t count = (uint16_t)((rawCount[1] & 0x03) << 8 | rawCount[0]);
-		if (count == 0)
-			break; // FIFO is empty
-
-		// Limit read to available buffer space
-		uint16_t limit = len / PACKET_SIZE;
-		if (count > limit)
-		{
-			LOG_WRN("FIFO buffer limit: dropping %d packets", count - limit);
-			count = limit;
-		}
-
-		// Batch read all packets in one SPI transaction
-		// LSM6DSV supports continuous read from FIFO_DATA_OUT_TAG register
-		uint16_t bytes_to_read = count * PACKET_SIZE;
-		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_DATA_OUT_TAG, data, bytes_to_read);
-		if (err)
-		{
-			LOG_ERR("Failed to read FIFO data");
-			break;
-		}
-
-		// Update pointers and counters
-		data += bytes_to_read;
-		len -= bytes_to_read;
-		total += count;
+		LOG_ERR("Failed to read FIFO status");
+		return 0;
 	}
 
-	return total;
+	// Parse FIFO word count (10-bit field: bits 1:0 of rawCount[1] and all 8 bits of rawCount[0])
+	uint16_t count = (uint16_t)((rawCount[1] & 0x03) << 8 | rawCount[0]);
+
+	// Early return if FIFO is empty
+	if (count == 0)
+		return 0;
+
+	// Limit read to available buffer space
+	uint16_t limit = len / PACKET_SIZE;
+	if (count > limit)
+	{
+		LOG_WRN("FIFO buffer limit: dropping %d packets", count - limit);
+		count = limit;
+	}
+
+	// Batch read all packets in one SPI transaction
+	// LSM6DSV supports continuous read from FIFO_DATA_OUT_TAG register
+	uint16_t bytes_to_read = count * PACKET_SIZE;
+	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_DATA_OUT_TAG, data, bytes_to_read);
+	if (err)
+	{
+		LOG_ERR("Failed to read FIFO data");
+		return 0;
+	}
+
+	return count;
 }
 
 int lsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
