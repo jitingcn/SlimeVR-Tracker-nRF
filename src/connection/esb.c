@@ -1395,15 +1395,15 @@ static void esb_thread(void)
 		if (ping_failures >= TX_ERROR_THRESHOLD) {
 #if CONFIG_CONNECTION_OVER_HID
 			// only raise error while not potentially communicating by usb
-			if (get_status(SYS_STATUS_CONNECTION_ERROR) == false && get_status(SYS_STATUS_USB_CONNECTED) == false)
+			if (get_status(SYS_STATUS_CONNECTION_ERROR) == false && get_status(SYS_STATUS_USB_CONNECTED) == false && get_status(SYS_STATUS_CALIBRATION_RUNNING) == false)
 #else
-			if (get_status(SYS_STATUS_CONNECTION_ERROR) == false)
+			if (get_status(SYS_STATUS_CONNECTION_ERROR) == false && get_status(SYS_STATUS_CALIBRATION_RUNNING) == false)
 #endif
 				set_status(SYS_STATUS_CONNECTION_ERROR, true);
 #if USER_SHUTDOWN_ENABLED
 			if (!shutdown_requested && connection_error_start_time > 0
 				&& k_uptime_get() - connection_error_start_time
-					   > CONFIG_CONNECTION_TIMEOUT_DELAY) // shutdown if receiver is not detected
+					   > CONFIG_CONNECTION_TIMEOUT_DELAY && get_status(SYS_STATUS_CALIBRATION_RUNNING) == false) // shutdown if receiver is not detected and not in calibrating
 			{
 				LOG_WRN("No response from receiver in %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
 				shutdown_requested = true;
