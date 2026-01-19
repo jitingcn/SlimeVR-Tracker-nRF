@@ -507,7 +507,7 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	// Wait for transaction
 	uint8_t status = 0;
 	int64_t timeout = k_uptime_get() + 10;
-	while ((status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
+	while (!(status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master
 	k_usleep(300);
@@ -541,11 +541,11 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear XLDA
 	uint8_t status = 0;
 	int64_t timeout = k_uptime_get() + 10;
-	while ((status & 0x01) && k_uptime_get() < timeout) // XLDA
+	while (!(status & 0x01) && k_uptime_get() < timeout) // XLDA
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
 	status = 0;
 	timeout = k_uptime_get() + 10;
-	while ((status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP
+	while (!(status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER_MAINPAGE, &status);
 	// Read data
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
