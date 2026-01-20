@@ -41,14 +41,14 @@ typedef struct {
 	bool enabled;
 	int64_t start_time;
 	int64_t duration_ms;
-	int64_t last_output_time;
-	uint32_t output_interval_ms;
-	uint32_t sample_count;
+	uint32_t accel_count;         // Count accel samples since last output
+	uint32_t output_every_n;      // Output every N accel samples
+	uint32_t output_count;        // Total output count
 } sensor_debug_state_t;
 
 static sensor_debug_state_t debug_state = {
 	.enabled = false,
-	.output_interval_ms = 100  // Default 100ms
+	.output_every_n = 2  // Default: output every 2 accel samples
 };
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(imu_spi), okay)
@@ -1161,13 +1161,14 @@ void sensor_loop(void)
 				sys_interface_suspend();
 			}
 
-			// Debug mode output - after all fusion processing is complete
-			if (sensor_debug_is_active()) {
-				int64_t current_time = k_uptime_get();
-				if (current_time - debug_state.last_output_time >= debug_state.output_interval_ms) {
-					debug_state.last_output_time = current_time;
-					debug_state.sample_count++;
+			// Debug mode output - based on accel sample count, not time interval
+			if (sensor_debug_is_active() && debug_a_samples > 0) {
+				debug_state.accel_count += debug_a_samples;
+				if (debug_state.accel_count >= debug_state.output_every_n) {
+					debug_state.accel_count = 0;
+					debug_state.output_count++;
 
+					int64_t current_time = k_uptime_get();
 					float elapsed_sec = (float)(current_time - debug_state.start_time) / 1000.0f;
 
 					// Calculate average raw and calibrated data
@@ -1192,13 +1193,13 @@ void sensor_loop(void)
 #endif
 
 					// Compact output format with raw, calibrated, and fused data
-					printk("[%.1fs] RAW: A[%.2f,%.2f,%.2f] G[%.1f,%.1f,%.1f] T:%.1fC | ",
+					printk("[%.2fs] RAW: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f] T:%.2fC | ",
 						(double)elapsed_sec,
 						(double)avg_raw_a[0], (double)avg_raw_a[1], (double)avg_raw_a[2],
 						(double)avg_raw_g[0], (double)avg_raw_g[1], (double)avg_raw_g[2],
 						(double)temp);
 
-					printk("CAL: A[%.2f,%.2f,%.2f] G[%.1f,%.1f,%.1f] | ",
+					printk("CAL: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f] | ",
 						(double)a[0], (double)a[1], (double)a[2],
 						(double)avg_cal_g[0], (double)avg_cal_g[1], (double)avg_cal_g[2]);
 
@@ -1406,17 +1407,20 @@ void sensor_debug_start(uint32_t duration_sec)
 	debug_state.enabled = true;
 	debug_state.start_time = k_uptime_get();
 	debug_state.duration_ms = duration_sec * 1000;
-	debug_state.last_output_time = 0;
-	debug_state.sample_count = 0;
+	debug_state.accel_count = 0;
+	debug_state.output_count = 0;
+	// output_every_n is already set to 5 by default
 
-	LOG_INF("Debug mode started for %u seconds", duration_sec);
+	float accel_odr = sensor_get_accel_odr();
+	LOG_INF("Debug mode started for %u seconds (accel ODR: %.1fHz, output every %u samples)",
+		duration_sec, (double)accel_odr, debug_state.output_every_n);
 }
 
 void sensor_debug_stop(void)
 {
 	if (debug_state.enabled) {
 		debug_state.enabled = false;
-		LOG_INF("Debug mode stopped. %u samples captured", debug_state.sample_count);
+		LOG_INF("Debug mode stopped. %u outputs generated", debug_state.output_count);
 	}
 }
 

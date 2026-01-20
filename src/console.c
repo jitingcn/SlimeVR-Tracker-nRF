@@ -489,7 +489,7 @@ static void print_help(void)
 	printk("Other:\n");
 	printk("  meow                       Meow!\n");
 	printk("  help                       Show this help message\n");
-	printk("  debug [duration]           Start sensor debug mode (default 10s)\n");
+	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 10s)\n");
 	printk("\n");
 	printk("Debug Commands:\n");
 	printk("  reset zro                  Reset ZRO calibration\n");
@@ -1007,18 +1007,17 @@ static void console_thread(void)
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
 			print_meow();
 		} else if (memcmp(line, command_debug, sizeof(command_debug)) == 0) {
-			uint32_t duration = 3; // Default 3 seconds
+			uint32_t duration = 1; // Default 1 second
 			if (arg) {
 				char *endptr;
 				long dur = strtol((char *)arg, &endptr, 10);
-				if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 30) {
+				if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 60) {
 					duration = (uint32_t)dur;
 				} else {
-					printk("Invalid duration. Using default 3 seconds.\n");
+					printk("Invalid duration (1-60s). Using default 1 seconds.\n");
 				}
 			}
 			sensor_debug_start(duration);
-			printk("Sensor debug started for %u seconds.\n", duration);
 		} else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
 			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0) {
 				cmd_reset_zro();
