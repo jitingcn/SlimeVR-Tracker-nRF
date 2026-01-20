@@ -1223,7 +1223,7 @@ void sensor_loop(void)
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
 			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005f) : q_epsilon(q, last_q, 0.05f);
-			int64_t min_interval = 2000;
+			int64_t min_interval = 1000;
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 			if (send_quat_data || send_lin_accel_data || force_send_by_time)
