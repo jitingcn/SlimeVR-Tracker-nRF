@@ -467,7 +467,7 @@ static void print_help(void)
 #endif
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 	// Update the help string to show the new command set
-	printk("  tcal <status|dump|remove index|auto on|auto off> Temperature calibration\n");
+	printk("  tcal <status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
 #endif
 	printk("\n");
 	printk("Connection:\n");
@@ -489,6 +489,7 @@ static void print_help(void)
 	printk("Other:\n");
 	printk("  meow                       Meow!\n");
 	printk("  help                       Show this help message\n");
+	printk("  debug [duration]           Start sensor debug mode (default 10s)\n");
 	printk("\n");
 	printk("Debug Commands:\n");
 	printk("  reset zro                  Reset ZRO calibration\n");
@@ -668,6 +669,7 @@ static void console_thread(void)
 	uint8_t command_scan[] = "scan";
 	uint8_t command_calibrate[] = "calibrate";
 	uint8_t command_help[] = "help";
+	uint8_t command_debug[] = "debug";
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	uint8_t command_6_side[] = "6-side";
@@ -787,14 +789,14 @@ static void console_thread(void)
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
-				printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index|check|auto on|auto off>\n");
+				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
 			} else {
 				// Tokenize the argument string by space to get the subcommand
 				char *subcmd = strtok((char *)arg, " ");
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
-					printk("Error: Missing argument. Use: tcal <status|clear|dump|remove index|check|auto on|auto off>\n");
+					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status_poly();
 					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
@@ -875,6 +877,27 @@ static void console_thread(void)
 							}
 						}
 					}
+				} else if (strcmp(subcmd, "test") == 0) {
+					char *temp_str = strtok(NULL, " ");
+					if (temp_str == NULL) {
+						// Use current temperature if no argument provided
+						float current_temp = sensor_get_current_imu_temperature();
+						if (isnan(current_temp)) {
+							printk("Error: Cannot read current temperature. Please specify temperature: tcal test <temp>\n");
+						} else {
+							sensor_tcal_test_methods(current_temp);
+						}
+					} else {
+						char *endptr = NULL;
+						float test_temp = strtof(temp_str, &endptr);
+
+						if (endptr == temp_str || *endptr != '\0') {
+							printk("Error: Invalid temperature '%s'. Use: tcal test <temp>\n", temp_str);
+							printk("Example: tcal test 25.5\n");
+						} else {
+							sensor_tcal_test_methods(test_temp);
+						}
+					}
 				} else if (strcmp(subcmd, "check") == 0) {
 					float current_temp = sensor_get_current_imu_temperature();
 					if (isnan(current_temp)) {
@@ -898,7 +921,7 @@ static void console_thread(void)
 						}
 					}
 				} else {
-					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|remove index|check|auto on|auto off>\n", subcmd);
+					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off>\n", subcmd);
 				}
 			}
 		}
@@ -983,6 +1006,19 @@ static void console_thread(void)
 #endif
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
 			print_meow();
+		} else if (memcmp(line, command_debug, sizeof(command_debug)) == 0) {
+			uint32_t duration = 3; // Default 3 seconds
+			if (arg) {
+				char *endptr;
+				long dur = strtol((char *)arg, &endptr, 10);
+				if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 30) {
+					duration = (uint32_t)dur;
+				} else {
+					printk("Invalid duration. Using default 3 seconds.\n");
+				}
+			}
+			sensor_debug_start(duration);
+			printk("Sensor debug started for %u seconds.\n", duration);
 		} else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
 			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0) {
 				cmd_reset_zro();

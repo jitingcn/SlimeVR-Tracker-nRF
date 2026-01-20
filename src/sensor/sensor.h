@@ -59,6 +59,11 @@ float sensor_get_current_imu_temperature(void);
 float sensor_get_accel_odr(void);
 float sensor_get_gyro_odr(void);
 
+// Debug mode functions
+void sensor_debug_start(uint32_t duration_sec);
+void sensor_debug_stop(void);
+bool sensor_debug_is_active(void);
+
 typedef struct sensor_fusion {
 	void (*init)(float, float, float);  // gyro_time, accel_time, mag_time
 	void (*load)(const void*);

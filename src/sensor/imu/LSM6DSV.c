@@ -15,6 +15,9 @@ float gyro_sensitivity = 0.070f; // Default 2000dps (FS = ±2000 dps: 70 mdps/LS
 static uint8_t accel_fs = FS_XL_16G;
 static uint8_t gyro_fs = FS_G_2000DPS;
 
+// Store chip type: 0x70 for LSM6DSV, 0x71 for LSM6DSV16B/ISM330BX
+static uint8_t chip_who_am_i = 0x70;
+
 // TODO: shared with LSM
 uint8_t last_accel_mode = 0xff;
 uint8_t last_gyro_mode = 0xff;
@@ -28,21 +31,89 @@ LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
 int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
 	// setup interface for SPI
+	LOG_INF("Initializing LSM6DSV...");
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(10), 0);
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL6, gyro_fs); // set gyro FS
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, accel_fs); // set accel FS
+
+	// Perform soft reset to ensure known state
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
+	k_msleep(2); // Wait for reset to complete
+
+	// Read WHO_AM_I to verify communication
+	uint8_t who_am_i = 0;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_WHO_AM_I, &who_am_i);
+	LOG_INF("WHO_AM_I = 0x%02X (expected 0x70/0x71)", who_am_i);
+	if (who_am_i != 0x70 && who_am_i != 0x71) // 0x70 for LSM6DSV, 0x71 for LSM6DSV16B/ISM330BX
+	{
+		LOG_ERR("Invalid WHO_AM_I value");
+		return -1;
+	}
+
+	// Store chip type for data order handling
+	chip_who_am_i = who_am_i;
+
+	// Power on sensors first by setting power mode and ODR (following ICM45686 pattern)
+	// OP_MODE_XL_HP (000) = high-performance mode (default, valid for all ODRs 7.5Hz-7.68kHz)
+	// OP_MODE_G_HP (000) = high-performance mode (default, valid for all ODRs 7.5Hz-7.68kHz)
+	// Using 15Hz initially to power on sensors with minimal current
+	LOG_INF("Powering on sensors in high-performance mode...");
+	uint8_t ctrl1_val = (OP_MODE_XL_HP << 4) | ODR_15Hz;
+	uint8_t ctrl2_val = (OP_MODE_G_HP << 4) | ODR_15Hz;
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, ctrl1_val); // accel HP mode, 15Hz
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL2, ctrl2_val); // gyro HP mode, 15Hz
+
+	// Read back to verify
+	uint8_t ctrl1_readback = 0, ctrl2_readback = 0;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, &ctrl1_readback);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL2, &ctrl2_readback);
+	LOG_INF("CTRL1 write=0x%02X readback=0x%02X, CTRL2 write=0x%02X readback=0x%02X",
+		ctrl1_val, ctrl1_readback, ctrl2_val, ctrl2_readback);
+
 	if (err)
-		LOG_ERR("Communication error");
-	last_accel_odr = 0xff; // reset last odr
-	last_gyro_odr = 0xff; // reset last odr
+		LOG_ERR("Communication error during power-on");
+
+	// Wait for gyroscope startup AFTER powering on (Ton = 30ms typical, 45ms max)
+	LOG_INF("Waiting for gyroscope startup (50ms)...");
+	k_msleep(50);
+
+	// Now configure FS and other settings after sensors are powered and stable
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL6, gyro_fs); // set gyro FS
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, accel_fs); // set accel FS
+
+	// Read back to verify FS configuration
+	uint8_t ctrl6_readback = 0, ctrl8_readback = 0;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL6, &ctrl6_readback);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, &ctrl8_readback);
+	LOG_INF("CTRL6 (gyro FS) write=0x%02X readback=0x%02X, CTRL8 (accel FS) write=0x%02X readback=0x%02X",
+		gyro_fs, ctrl6_readback, accel_fs, ctrl8_readback);
+
+	if (err)
+		LOG_ERR("Communication error during FS configuration");
+
+	last_accel_odr = 0xff; // reset last odr to force update
+	last_gyro_odr = 0xff; // reset last odr to force update
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, 0x18); // INT H_LACTIVE active low, PP_OD open-drain
+
+	// Read internal frequency calibration
 	int8_t internal_freq_fine;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_INTERNAL_FREQ_FINE, &internal_freq_fine); // affects ODR
 	freq_scale = 1.0f + 0.0013f * (float)internal_freq_fine;
+	LOG_INF("INTERNAL_FREQ_FINE = %d, freq_scale = %.6f", internal_freq_fine, (double)freq_scale);
+
+	// Update to target ODR
 	err |= lsm_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
+
+	// Enable FIFO in continuous mode
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, 0x06); // enable Continuous mode
+
+	// Read back to verify FIFO mode
+	uint8_t fifo_ctrl4_readback = 0;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, &fifo_ctrl4_readback);
+	LOG_INF("FIFO_CTRL4 write=0x06 readback=0x%02X", fifo_ctrl4_readback);
+
 	if (err)
-		LOG_ERR("Communication error");
+		LOG_ERR("Communication error during initialization");
+	else
+		LOG_INF("LSM6DSV initialization complete");
 	return (err < 0 ? err : 0);
 }
 
@@ -299,10 +370,25 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	last_accel_odr = ODR_XL;
 	last_gyro_odr = ODR_G;
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, OP_MODE_XL << 4 | ODR_XL); // set accel ODR and mode
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL2, OP_MODE_G << 4 | ODR_G); // set gyro ODR and mode
+	uint8_t ctrl1_config = OP_MODE_XL << 4 | ODR_XL;
+	uint8_t ctrl2_config = OP_MODE_G << 4 | ODR_G;
+	uint8_t fifo_ctrl3_config = ODR_XL | (ODR_G << 4);
 
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL3, ODR_XL | (ODR_G << 4)); // set accel and gyro batch rate
+	LOG_INF("CTRL1 write=0x%02X (OP_MODE_XL=%d, ODR_XL=%d), CTRL2 write=0x%02X (OP_MODE_G=%d, ODR_G=%d)",
+		ctrl1_config, OP_MODE_XL, ODR_XL, ctrl2_config, OP_MODE_G, ODR_G);
+
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, ctrl1_config); // set accel ODR and mode
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL2, ctrl2_config); // set gyro ODR and mode
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL3, fifo_ctrl3_config); // set accel and gyro batch rate
+
+	// Read back to verify
+	uint8_t ctrl1_readback = 0, ctrl2_readback = 0, fifo_ctrl3_readback = 0;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, &ctrl1_readback);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL2, &ctrl2_readback);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL3, &fifo_ctrl3_readback);
+	LOG_INF("CTRL1 readback=0x%02X, CTRL2 readback=0x%02X, FIFO_CTRL3 readback=0x%02X",
+		ctrl1_readback, ctrl2_readback, fifo_ctrl3_readback);
+
 	if (err)
 		LOG_ERR("Communication error");
 
@@ -315,74 +401,105 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 {
 	int err = 0;
-	uint16_t total = 0;
 
-	while (len >= PACKET_SIZE)
+	// Read FIFO status registers (STATUS1 + STATUS2) to get word count and status flags
+	uint8_t rawStatus[2];
+	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, rawStatus, 2);
+	if (err)
 	{
-		// Read FIFO status to get number of available packets
-		uint8_t rawCount[2];
-		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, rawCount, 2);
-		if (err)
-		{
-			LOG_ERR("Failed to read FIFO status");
-			break;
-		}
-
-		// Parse FIFO word count (10-bit field: bits 1:0 of rawCount[1] and all 8 bits of rawCount[0])
-		uint16_t count = (uint16_t)((rawCount[1] & 0x03) << 8 | rawCount[0]);
-		if (count == 0)
-			break; // FIFO is empty
-
-		// Limit read to available buffer space
-		uint16_t limit = len / PACKET_SIZE;
-		if (count > limit)
-		{
-			LOG_WRN("FIFO buffer limit: dropping %d packets", count - limit);
-			count = limit;
-		}
-
-		// Batch read all packets in one SPI transaction
-		// LSM6DSV supports continuous read from FIFO_DATA_OUT_TAG register
-		uint16_t bytes_to_read = count * PACKET_SIZE;
-		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_DATA_OUT_TAG, data, bytes_to_read);
-		if (err)
-		{
-			LOG_ERR("Failed to read FIFO data");
-			break;
-		}
-
-		// Update pointers and counters
-		data += bytes_to_read;
-		len -= bytes_to_read;
-		total += count;
+		LOG_ERR("Failed to read FIFO status");
+		return 0;
 	}
 
-	return total;
+	// Parse FIFO word count (10-bit field: bits 1:0 of STATUS2 and all 8 bits of STATUS1)
+	uint16_t count = (uint16_t)((rawStatus[1] & LSM6DSV_FIFO_DIFF_8) << 8 | rawStatus[0]);
+
+	// Early return if FIFO is empty
+	if (count == 0)
+		return 0;
+
+	// Check for FIFO overflow (latched status, cleared on read)
+	if (rawStatus[1] & LSM6DSV_FIFO_OVR_LATCHED)
+	{
+		LOG_WRN("FIFO overflow detected - data may be lost");
+	}
+
+	// Limit read to available buffer space
+	uint16_t limit = len / PACKET_SIZE;
+	if (count > limit)
+	{
+		LOG_WRN("FIFO buffer limit: dropping %d packets", count - limit);
+		count = limit;
+	}
+
+	// Batch read all packets in one SPI transaction
+	// LSM6DSV supports continuous read from FIFO_DATA_OUT_TAG register
+	uint16_t bytes_to_read = count * PACKET_SIZE;
+	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_DATA_OUT_TAG, data, bytes_to_read);
+	if (err)
+	{
+		LOG_ERR("Failed to read FIFO data");
+		return 0;
+	}
+
+	return count;
 }
 
 int lsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
 	index *= PACKET_SIZE;
-	if ((data[index] >> 3) == 0x02) // Accelerometer NC (Accelerometer uncompressed data)
+	uint8_t tag = data[index] >> 3;  // TAG_SENSOR[4:0]
+
+	switch (tag)
 	{
-		for (int i = 0; i < 3; i++) // x, y, z
+	case LSM6DSV_TAG_ACCEL_NC:
+		// Parse accelerometer data
+		// LSM6DSV16B (0x71): Z, Y, X order in FIFO
+		// LSM6DSV (0x70): X, Y, Z order in FIFO
+		if (chip_who_am_i == 0x71)
 		{
-			a[i] = (int16_t)((((uint16_t)data[index + 2 + (i * 2)]) << 8) | data[index + 1 + (i * 2)]);
-			a[i] *= accel_sensitivity;
+			// LSM6DSV16B: Read Z, Y, X and store as X, Y, Z
+			a[2] = (int16_t)((((uint16_t)data[index + 2]) << 8) | data[index + 1]); // Z
+			a[1] = (int16_t)((((uint16_t)data[index + 4]) << 8) | data[index + 3]); // Y
+			a[0] = (int16_t)((((uint16_t)data[index + 6]) << 8) | data[index + 5]); // X
 		}
+		else
+		{
+			// LSM6DSV: Normal X, Y, Z order
+			for (int i = 0; i < 3; i++)
+			{
+				a[i] = (int16_t)((((uint16_t)data[index + 2 + (i * 2)]) << 8) | data[index + 1 + (i * 2)]);
+			}
+		}
+		for (int i = 0; i < 3; i++)
+			a[i] *= accel_sensitivity;
 		return 0;
-	}
-	if ((data[index] >> 3) == 0x01) // Gyroscope NC (Gyroscope uncompressed data)
-	{
-		for (int i = 0; i < 3; i++) // x, y, z
+
+	case LSM6DSV_TAG_GYRO_NC:
+		// Parse gyroscope data
+		// Both LSM6DSV and LSM6DSV16B: X, Y, Z order in FIFO
+		for (int i = 0; i < 3; i++)
 		{
 			g[i] = (int16_t)((((uint16_t)data[index + 2 + (i * 2)]) << 8) | data[index + 1 + (i * 2)]);
 			g[i] *= gyro_sensitivity;
 		}
 		return 0;
+
+	case LSM6DSV_TAG_FIFO_EMPTY:
+		// FIFO empty marker - skip silently
+		return 1;
+
+	case LSM6DSV_TAG_TEMP:
+	case LSM6DSV_TAG_TIMESTAMP:
+	case LSM6DSV_TAG_CFG_CHANGE:
+		// Known non-sensor data tags - skip
+		return 1;
+
+	default:
+		// Unknown or unsupported tag (compressed data, sensor hub, SFLP, etc.)
+		LOG_DBG("Skipping FIFO packet with tag 0x%02X", tag);
+		return 1;
 	}
-	// TODO: need to skip invalid data
-	return 1;
 }
 
 void lsm_accel_read(float a[3])
@@ -391,12 +508,27 @@ void lsm_accel_read(float a[3])
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_L_A, &rawAccel[0], 6);
 	if (err)
 		LOG_ERR("Communication error");
-	for (int i = 0; i < 3; i++) // x, y, z
+
+	// LSM6DSV16B (0x71): Z, Y, X order in registers (reading from OUTX_L_A gets Z, Y, X)
+	// LSM6DSV (0x70): X, Y, Z order in registers
+	if (chip_who_am_i == 0x71)
 	{
-		a[i] = (int16_t)((((uint16_t)rawAccel[1 + (i * 2)]) << 8) | rawAccel[i * 2]);
-		a[i] *= accel_sensitivity;
+		// LSM6DSV16B: Read Z, Y, X and store as X, Y, Z
+		a[2] = (int16_t)((((uint16_t)rawAccel[1]) << 8) | rawAccel[0]); // Z
+		a[1] = (int16_t)((((uint16_t)rawAccel[3]) << 8) | rawAccel[2]); // Y
+		a[0] = (int16_t)((((uint16_t)rawAccel[5]) << 8) | rawAccel[4]); // X
 	}
-	// TODO: for ISM330BX, the accelerometer data is in ZYX order
+	else
+	{
+		// LSM6DSV: Normal X, Y, Z order
+		for (int i = 0; i < 3; i++) // x, y, z
+		{
+			a[i] = (int16_t)((((uint16_t)rawAccel[1 + (i * 2)]) << 8) | rawAccel[i * 2]);
+		}
+	}
+
+	for (int i = 0; i < 3; i++)
+		a[i] *= accel_sensitivity;
 }
 
 void lsm_gyro_read(float g[3])
@@ -507,7 +639,7 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	// Wait for transaction
 	uint8_t status = 0;
 	int64_t timeout = k_uptime_get() + 10;
-	while ((status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
+	while (!(status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master
 	k_usleep(300);
@@ -541,11 +673,11 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear XLDA
 	uint8_t status = 0;
 	int64_t timeout = k_uptime_get() + 10;
-	while ((status & 0x01) && k_uptime_get() < timeout) // XLDA
+	while (!(status & 0x01) && k_uptime_get() < timeout) // XLDA
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
 	status = 0;
 	timeout = k_uptime_get() + 10;
-	while ((status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP
+	while (!(status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER_MAINPAGE, &status);
 	// Read data
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers

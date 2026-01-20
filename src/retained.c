@@ -74,6 +74,16 @@ bool retained_validate(void)
 		retained->max_battery_pptt = -1;
 		retained->min_battery_pptt = -1;
 		retained->battery_pptt_saved = -1;
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+		// Initialize boot calibration state - default enabled
+		retained->bootCalState.enabled = true;
+		retained->bootCalState.completed = false;
+		retained->bootCalState.attempt_count = 0;
+		retained->bootCalState.doffset_valid = false;
+		retained->bootCalState.doffset[0] = 0.0f;
+		retained->bootCalState.doffset[1] = 0.0f;
+		retained->bootCalState.doffset[2] = 0.0f;
+#endif
 	}
 
 	/* Reset to accrue runtime from this session. */

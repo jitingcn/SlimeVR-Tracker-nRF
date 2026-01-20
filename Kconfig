@@ -227,7 +227,7 @@ config SENSOR_GYRO_ODR
 
 config SENSOR_ACCEL_FS
     int "Accelerometer full scale (g)"
-    default 8
+    default 16
     help
         Requested accelerometer full scale. Actual scale will be raised to the nearest supported scale.
         A lower scale may improve noise performance, but is more likely to saturate.
@@ -304,6 +304,40 @@ config SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
         data point is added. The curve is automatically re-calculated
         and improves over time as more points are added at different
         temperatures.
+
+choice
+    prompt "Temperature Calibration Method"
+    default SENSOR_TCAL_METHOD_AUTO
+    depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+    help
+        Choose the temperature calibration method:
+        - Polynomial: Uses global curve fitting (legacy method)
+        - Interpolation: Uses local linear interpolation (more accurate)
+        - Auto: Automatically chooses the best method based on data points
+
+config SENSOR_TCAL_METHOD_POLYNOMIAL
+    bool "Polynomial Fitting (Legacy)"
+    help
+        Use polynomial fitting for temperature calibration.
+        Fits a global polynomial curve through all calibration points.
+        May have larger errors in some temperature ranges.
+
+config SENSOR_TCAL_METHOD_INTERPOLATE
+    bool "Linear Interpolation"
+    help
+        Use linear interpolation for temperature calibration.
+        Interpolates between nearby calibration points.
+        More accurate with dense calibration points.
+
+config SENSOR_TCAL_METHOD_AUTO
+    bool "Auto (Hybrid Strategy)"
+    help
+        Automatically choose the best calibration method:
+        - Uses polynomial when data points are sparse (<5 points)
+        - Uses interpolation when data points are dense (>=5 points)
+        - Adapts to data quality for optimal accuracy
+
+endchoice
 
 menu "Polynomial Temperature Calibration Settings"
 depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL

@@ -93,6 +93,15 @@ struct retained_data {
 		bool valid;
 		uint8_t degree;
 	} tempCalState;
+
+	// Boot calibration state (runtime only, persists in WoM but resets on full reboot)
+	struct {
+		bool enabled;              // Feature enabled
+		bool completed;            // Completed for this boot
+		uint8_t attempt_count;     // Number of attempts
+		float doffset[3];          // Calculated D_offset (runtime only)
+		bool doffset_valid;        // D_offset is valid
+	} bootCalState;
 #endif
 
 	/* CRC used to validate the retained data.  This must be

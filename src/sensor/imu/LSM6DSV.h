@@ -4,8 +4,11 @@
 #include "sensor/sensor.h"
 
 // https://www.st.com/resource/en/datasheet/lsm6dsv.pdf
+#define LSM6DSV_WHO_AM_I                   0x0F
 #define LSM6DSV_IF_CFG                     0x03
 
+#define LSM6DSV_FIFO_CTRL1                 0x07  // FIFO watermark threshold [7:0]
+#define LSM6DSV_FIFO_CTRL2                 0x08  // FIFO watermark threshold [8], stop on WTM, compression
 #define LSM6DSV_FIFO_CTRL3                 0x09
 #define LSM6DSV_FIFO_CTRL4                 0x0A
 #define LSM6DSV_COUNTER_BDR_REG1           0x0B
@@ -19,8 +22,42 @@
 #define LSM6DSV_CTRL8                      0x17
 #define LSM6DSV_CTRL9                      0x18
 
-#define LSM6DSV_FIFO_STATUS1               0x1B
+#define LSM6DSV_FIFO_STATUS1               0x1B  // FIFO word count [7:0]
+#define LSM6DSV_FIFO_STATUS2               0x1C  // FIFO word count [9:8] + status flags
 #define LSM6DSV_STATUS_REG                 0x1E
+
+// FIFO_STATUS2 bit definitions (0x1C)
+#define LSM6DSV_FIFO_OVR_LATCHED           0x80  // FIFO overrun latched status (reset when read)
+#define LSM6DSV_COUNTER_BDR_IA             0x40  // Counter batch data rate interrupt active
+#define LSM6DSV_FIFO_FULL_IA               0x20  // FIFO full interrupt active
+#define LSM6DSV_FIFO_OVR_IA                0x10  // FIFO overrun interrupt active
+#define LSM6DSV_FIFO_WTM_IA                0x08  // FIFO watermark interrupt active
+#define LSM6DSV_FIFO_DIFF_8                0x03  // FIFO word count bits [9:8]
+
+// FIFO data tag definitions (TAG_SENSOR [4:0] from FIFO_DATA_OUT_TAG byte >> 3)
+#define LSM6DSV_TAG_FIFO_EMPTY             0x00  // FIFO empty
+#define LSM6DSV_TAG_GYRO_NC                0x01  // Gyroscope NC (uncompressed)
+#define LSM6DSV_TAG_ACCEL_NC               0x02  // Accelerometer NC (uncompressed)
+#define LSM6DSV_TAG_TEMP                   0x03  // Temperature
+#define LSM6DSV_TAG_TIMESTAMP              0x04  // Timestamp
+#define LSM6DSV_TAG_CFG_CHANGE             0x05  // Configuration change
+#define LSM6DSV_TAG_ACCEL_NC_T_2           0x06  // Accelerometer NC_T_2 (2-axis)
+#define LSM6DSV_TAG_ACCEL_NC_T_1           0x07  // Accelerometer NC_T_1 (1-axis)
+#define LSM6DSV_TAG_ACCEL_2XC              0x08  // Accelerometer 2x compressed
+#define LSM6DSV_TAG_ACCEL_3XC              0x09  // Accelerometer 3x compressed
+#define LSM6DSV_TAG_GYRO_NC_T_2            0x0A  // Gyroscope NC_T_2 (2-axis)
+#define LSM6DSV_TAG_GYRO_NC_T_1            0x0B  // Gyroscope NC_T_1 (1-axis)
+#define LSM6DSV_TAG_GYRO_2XC               0x0C  // Gyroscope 2x compressed
+#define LSM6DSV_TAG_GYRO_3XC               0x0D  // Gyroscope 3x compressed
+#define LSM6DSV_TAG_SENSORHUB_SLAVE0       0x0E  // Sensor hub slave 0
+#define LSM6DSV_TAG_SENSORHUB_SLAVE1       0x0F  // Sensor hub slave 1
+#define LSM6DSV_TAG_SENSORHUB_SLAVE2       0x10  // Sensor hub slave 2
+#define LSM6DSV_TAG_SENSORHUB_SLAVE3       0x11  // Sensor hub slave 3
+#define LSM6DSV_TAG_STEP_COUNTER           0x12  // Step counter
+#define LSM6DSV_TAG_SFLP_GAME_RV           0x13  // SFLP game rotation vector
+#define LSM6DSV_TAG_SFLP_GYRO_BIAS         0x16  // SFLP gyroscope bias
+#define LSM6DSV_TAG_SFLP_GRAVITY           0x17  // SFLP gravity vector
+#define LSM6DSV_TAG_SENSORHUB_NACK         0x19  // Sensor hub NACK
 
 #define LSM6DSV_OUT_TEMP_L                 0x20
 #define LSM6DSV_OUTX_L_G                   0x22
