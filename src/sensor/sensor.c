@@ -124,6 +124,22 @@ static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
 
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+// Gyroscope oversampling state for noise reduction
+// Accumulates gyro samples and averages them before fusion
+static float gyro_oversample_sum[3] = {0};
+static int gyro_oversample_count = 0;
+static float gyro_effective_time; // Effective time step for fusion after oversampling
+#endif
+
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+// Accelerometer oversampling state for noise reduction
+// Accumulates accel samples and averages them before fusion
+static float accel_oversample_sum[3] = {0};
+static int accel_oversample_count = 0;
+static float accel_effective_time; // Effective time step for fusion after oversampling
+#endif
+
 static float accel_actual_range;  // Actual accelerometer full scale range (g)
 static float gyro_actual_range;   // Actual gyroscope full scale range (deg/s)
 
@@ -782,6 +798,28 @@ int sensor_init(void)
 	}
 	LOG_INF("Initialized sensors");
 
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	// Initialize gyro oversampling state
+	gyro_oversample_count = 0;
+	for (int i = 0; i < 3; i++)
+		gyro_oversample_sum[i] = 0;
+	// Calculate effective time step for fusion after oversampling
+	gyro_effective_time = gyro_actual_time * CONFIG_SENSOR_GYRO_OVERSAMPLING;
+	LOG_INF("Gyro oversampling: %dx, effective rate: %.2fHz",
+		CONFIG_SENSOR_GYRO_OVERSAMPLING, 1.0 / (double)gyro_effective_time);
+#endif
+
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	// Initialize accel oversampling state
+	accel_oversample_count = 0;
+	for (int i = 0; i < 3; i++)
+		accel_oversample_sum[i] = 0;
+	// Calculate effective time step for fusion after oversampling
+	accel_effective_time = accel_actual_time * CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+	LOG_INF("Accel oversampling: %dx, effective rate: %.2fHz",
+		CONFIG_SENSOR_ACCEL_OVERSAMPLING, 1.0 / (double)accel_effective_time);
+#endif
+
 	// Setup fusion
 	sensor_retained_read(); // TODO: useless
 	if (fusion_id == FUSION_VQF)
@@ -794,7 +832,19 @@ int sensor_init(void)
 	}
 	else
 	{
-		sensor_fusion->init(gyro_actual_time, accel_actual_time, mag_initial_time); // TODO: using initial time since mag are not polled at the actual rate
+		// Determine effective gyro time step for fusion
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+		float fusion_gyro_time = gyro_effective_time;
+#else
+		float fusion_gyro_time = gyro_actual_time;
+#endif
+		// Determine effective accel time step for fusion
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+		float fusion_accel_time = accel_effective_time;
+#else
+		float fusion_accel_time = accel_actual_time;
+#endif
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, mag_initial_time); // TODO: using initial time since mag are not polled at the actual rate
 	}
 
 	sensor_calibration_update_sensor_ids(sensor_imu_id);
@@ -908,24 +958,41 @@ void sensor_loop(void)
 #endif
 
 			// Read gyroscope (FIFO)
+			// Buffer size calculation:
+			// - Worst case is ICM 20 byte packet
+			// - At 1600Hz gyro ODR with 6ms update interval: 1600 * 0.006 = ~10 packets
+			// - At 1000Hz ODR with 33ms low power update: 1000 * 0.033 = ~33 packets
+			// - At 1000Hz ODR with 100ms low power 2 update: 1000 * 0.100 = ~100 packets
+			// - With 4x oversampling at 1600Hz: effectively same as 400Hz but with 4x raw packets
 #if CONFIG_SENSOR_USE_LOW_POWER_2
-			uint8_t* rawData = (uint8_t*)k_malloc(1900);  // Limit FIFO read to 2048 bytes (worst case is ICM 20 byte packet at 1000Hz and 100ms update time)
+			uint8_t* rawData = (uint8_t*)k_malloc(2048);  // Increased for oversampling: worst case ~100 packets * 20 bytes = 2000 bytes
 			if (rawData == NULL)
 			{
 				LOG_ERR("Failed to allocate memory for FIFO buffer");
 				set_status(SYS_STATUS_SENSOR_ERROR, true);
 				main_ok = false;
 			}
-			uint16_t packets = sensor_imu->fifo_read(rawData, 1900); // TODO: name this better?
+			uint16_t packets = sensor_imu->fifo_read(rawData, 2048);
+#elif CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+			// With oversampling, we read more raw gyro samples per update interval
+			// E.g., 1600Hz * 6ms = ~10 packets, but need margin for timing jitter
+			uint8_t* rawData = (uint8_t*)k_malloc(1536);  // ~75 packets * 20 bytes, enough for 4x oversampling
+			if (rawData == NULL)
+			{
+				LOG_ERR("Failed to allocate memory for FIFO buffer");
+				set_status(SYS_STATUS_SENSOR_ERROR, true);
+				main_ok = false;
+			}
+			uint16_t packets = sensor_imu->fifo_read(rawData, 1536);
 #else
-			uint8_t* rawData = (uint8_t*)k_malloc(1024);  // Limit FIFO read to 768 bytes (worst case is ICM 20 byte packet at 1000Hz and 33ms update time)
+			uint8_t* rawData = (uint8_t*)k_malloc(1024);  // Standard: ~50 packets * 20 bytes
 			if (rawData == NULL)
 			{
 				LOG_ERR("Failed to allocate memory for FIFO buffer");
 				set_status(SYS_STATUS_SENSOR_ERROR, true);
 				main_ok = false;
 			}
-			uint16_t packets = sensor_imu->fifo_read(rawData, 1024); // TODO: name this better?
+			uint16_t packets = sensor_imu->fifo_read(rawData, 1024);
 #endif
 
 			// Debug info
@@ -1006,11 +1073,73 @@ void sensor_loop(void)
 #endif
 					// Accumulate raw gyro for debug
 					if (sensor_debug_is_active()) {
-						for (int i = 0; i < 3; i++)
-							debug_raw_g_sum[i] += raw_g[i];
+						for (int j = 0; j < 3; j++)
+							debug_raw_g_sum[j] += raw_g[j];
 						debug_g_samples++;
 					}
 
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+					// Gyroscope oversampling: accumulate raw samples BEFORE calibration
+					// This is the optimal position because:
+					// 1. Noise reduction is most effective on raw data before any processing
+					// 2. Calibration (bias/sensitivity) are linear operations, so order doesn't affect result mathematically
+					// 3. More efficient: calibration operations run once per averaged sample instead of per raw sample
+					for (int j = 0; j < 3; j++)
+						gyro_oversample_sum[j] += raw_g[j];
+					gyro_oversample_count++;
+
+					// When we have enough samples, compute average and then apply calibration
+					if (gyro_oversample_count >= CONFIG_SENSOR_GYRO_OVERSAMPLING)
+					{
+						float g_avg[3];
+						for (int j = 0; j < 3; j++)
+						{
+							g_avg[j] = gyro_oversample_sum[j] / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+							gyro_oversample_sum[j] = 0; // Reset accumulator
+						}
+						gyro_oversample_count = 0;
+
+						// Now apply calibration to the averaged data
+						sensor_calibration_process_gyro(g_avg);
+
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+						// Apply sensitivity scaling
+						if (retained) {
+							g_avg[0] *= retained->gyroSensScale[0];
+							g_avg[1] *= retained->gyroSensScale[1];
+							g_avg[2] *= retained->gyroSensScale[2];
+						}
+#endif
+
+						// Accumulate calibrated gyro for debug (after zero bias and sensitivity calibration)
+						if (sensor_debug_is_active()) {
+							for (int j = 0; j < 3; j++)
+								debug_cal_g_sum[j] += g_avg[j];
+						}
+
+						// Update range statistics with calibrated gyro data
+						sensor_update_range_stats_gyro(g_avg);
+
+						// Process fusion with averaged and calibrated gyro data
+						sensor_fusion->update_gyro(g_avg, gyro_effective_time);
+						g_count++;
+
+						if (mag_available && mag_enabled)
+						{
+							// Get fusion's corrected gyro data (or get gyro bias from fusion) and use it here
+							float g_off[3] = {};
+							sensor_fusion->get_gyro_bias(g_off);
+							for (int j = 0; j < 3; j++)
+								g_off[j] = g_avg[j] - g_off[j];
+
+							// Get the highest gyro speed
+							float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1] + g_off[2] * g_off[2];
+							if (gyro_speed_square > max_gyro_speed_square)
+								max_gyro_speed_square = gyro_speed_square;
+						}
+					}
+#else
+					// No oversampling: apply calibration directly
 					sensor_calibration_process_gyro(raw_g);
 					float gx = raw_g[0];
 					float gy = raw_g[1];
@@ -1028,14 +1157,14 @@ void sensor_loop(void)
 
 					// Accumulate calibrated gyro for debug (after zero bias and sensitivity calibration)
 					if (sensor_debug_is_active()) {
-						for (int i = 0; i < 3; i++)
-							debug_cal_g_sum[i] += g[i];
+						for (int j = 0; j < 3; j++)
+							debug_cal_g_sum[j] += g[j];
 					}
 
-					// Update range statistics with raw gyro data (before fusion correction)
+					// Update range statistics with calibrated gyro data
 					sensor_update_range_stats_gyro(g);
 
-					// Process fusion
+					// Process fusion directly
 					sensor_fusion->update_gyro(g, gyro_actual_time);
 
 					g_count++;
@@ -1045,14 +1174,15 @@ void sensor_loop(void)
 						// Get fusion's corrected gyro data (or get gyro bias from fusion) and use it here
 						float g_off[3] = {};
 						sensor_fusion->get_gyro_bias(g_off);
-						for (int i = 0; i < 3; i++)
-							g_off[i] = g[i] - g_off[i];
+						for (int j = 0; j < 3; j++)
+							g_off[j] = g[j] - g_off[j];
 
 						// Get the highest gyro speed
 						float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1] + g_off[2] * g_off[2];
 						if (gyro_speed_square > max_gyro_speed_square)
 							max_gyro_speed_square = gyro_speed_square;
 					}
+#endif
 				}
 
 				if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0)
@@ -1068,6 +1198,49 @@ void sensor_loop(void)
 						debug_a_samples++;
 					}
 
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+					// Accelerometer oversampling: accumulate raw samples BEFORE calibration
+					// This is the optimal position because:
+					// 1. Noise reduction is most effective on raw data before any processing
+					// 2. Calibration (bias/scale) are linear operations, so order doesn't affect result mathematically
+					// 3. More efficient: calibration operations run once per averaged sample instead of per raw sample
+					for (int j = 0; j < 3; j++)
+						accel_oversample_sum[j] += raw_a[j];
+					accel_oversample_count++;
+
+					// When we have enough samples, compute average and then apply calibration
+					if (accel_oversample_count >= CONFIG_SENSOR_ACCEL_OVERSAMPLING)
+					{
+						float a_avg[3];
+						for (int j = 0; j < 3; j++)
+						{
+							a_avg[j] = accel_oversample_sum[j] / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+							accel_oversample_sum[j] = 0; // Reset accumulator
+						}
+						accel_oversample_count = 0;
+
+						// Now apply calibration to the averaged data
+						// Always call sensor_calibration_process_accel to update sample buffers
+						// This is needed for calibration routines (e.g., wait_for_motion) even without 6-side calibration
+						sensor_calibration_process_accel(a_avg);
+
+						float ax = a_avg[0];
+						float ay = a_avg[1];
+						float az = a_avg[2];
+						float a[] = {ax, ay, az};
+
+						// Update range statistics with calibrated accel data
+						sensor_update_range_stats_accel(a);
+
+						// Process fusion with averaged and calibrated accel data
+						sensor_fusion->update_accel(a, accel_effective_time);
+
+						for (int i = 0; i < 3; i++)
+							a_sum[i] += a[i];
+						a_count++;
+					}
+#else
+					// No oversampling: apply calibration directly
 					// Always call sensor_calibration_process_accel to update sample buffers
 					// This is needed for calibration routines (e.g., wait_for_motion) even without 6-side calibration
 					sensor_calibration_process_accel(raw_a);
@@ -1086,6 +1259,7 @@ void sensor_loop(void)
 					for (int i = 0; i < 3; i++)
 						a_sum[i] += a[i];
 					a_count++;
+#endif
 				}
 
 				processed_packets++;
@@ -1159,8 +1333,19 @@ void sensor_loop(void)
 			}
 
 			// Also check if expected number of timesteps when using FIFO threshold, if FIFO threshold is being used
+			// With gyro oversampling enabled, the expected fusion timesteps is reduced by the oversampling factor
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+			int expected_timesteps = sensor_fifo_threshold / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+			// Allow some tolerance for partial accumulation at boundaries
+			if (sensor_fifo_threshold && processed_timesteps &&
+			    (processed_timesteps < expected_timesteps - 1 || processed_timesteps > expected_timesteps + 1))
+				LOG_WRN("Expected ~%d timestep%s (oversampling %dx), got %d",
+					expected_timesteps, expected_timesteps == 1 ? "" : "s",
+					CONFIG_SENSOR_GYRO_OVERSAMPLING, processed_timesteps);
+#else
 			if (sensor_fifo_threshold && processed_timesteps && processed_timesteps != sensor_fifo_threshold)
 				LOG_WRN("Expected %d timestep%s, got %d", sensor_fifo_threshold, sensor_fifo_threshold == 1 ? "" : "s", processed_timesteps);
+#endif
 
 			// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
 //			sensor_fusion->update_gyro_sanity(g, m);

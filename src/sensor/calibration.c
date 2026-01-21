@@ -1288,14 +1288,28 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 
 	// Accel motion check counter - check every N gyro samples to avoid blocking
 	// Use actual sensor ODR instead of config values (e.g., real 208Hz vs config 200Hz)
+	// Note: The accel data from sensor_wait_accel is already oversampled,
+	// so we need to account for the accel oversampling factor when calculating the interval.
 	float actual_gyro_odr = sensor_get_gyro_odr();
 	float actual_accel_odr = sensor_get_accel_odr();
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	// Effective accel rate after oversampling
+	float effective_accel_odr = actual_accel_odr / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+	int accel_check_interval = (int)(actual_gyro_odr / effective_accel_odr + 0.5f); // Round to nearest
+#else
 	int accel_check_interval = (int)(actual_gyro_odr / actual_accel_odr + 0.5f); // Round to nearest
+#endif
 	if (accel_check_interval < 1) accel_check_interval = 1; // Ensure at least 1
 	int accel_check_counter = 0;
 
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	LOG_INF("Calibration: Using actual ODR - Gyro: %.2fHz, Accel: %.2fHz (effective: %.2fHz with %dx oversampling), Check interval: %d",
+		(double)actual_gyro_odr, (double)actual_accel_odr, (double)effective_accel_odr,
+		CONFIG_SENSOR_ACCEL_OVERSAMPLING, accel_check_interval);
+#else
 	LOG_INF("Calibration: Using actual ODR - Gyro: %.2fHz, Accel: %.2fHz, Check interval: %d",
 		(double)actual_gyro_odr, (double)actual_accel_odr, accel_check_interval);
+#endif
 
 	// Collect samples with smart stop conditions
 	// Main loop runs at gyro ODR, accel checked periodically
@@ -1386,8 +1400,17 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 	LOG_INF("Samples collected: %d", i);
 
 	// Calculate minimum samples based on actual gyro ODR (not config value)
-	// Target: 4 seconds of gyro data at actual rate
+	// Target: 4 seconds of gyro data at effective rate (after oversampling)
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	// With oversampling enabled, the effective sample rate sent to calibration is reduced
+	// by the oversampling factor (e.g., 1600Hz / 4 = 400Hz effective)
+	float effective_gyro_odr = actual_gyro_odr / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+	int min_samples_required = (int)(effective_gyro_odr * 4.0f);
+	LOG_INF("Calibration: Gyro oversampling %dx, effective ODR: %.2fHz",
+		CONFIG_SENSOR_GYRO_OVERSAMPLING, (double)effective_gyro_odr);
+#else
 	int min_samples_required = (int)(actual_gyro_odr * 4.0f);
+#endif
 
 	if (i < min_samples_required) {
 		LOG_WRN("Not enough samples: %d < %d (based on actual gyro ODR: %.2fHz)",
