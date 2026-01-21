@@ -648,7 +648,7 @@ void sensor_calibration_clear(float *a_bias, float *g_bias, bool write)
 		sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, g_bias, sizeof(gyroBias));
 	}
 
-	sensor_fusion_invalidate();
+	sensor_fusion_update_bias(NULL); // Only bias changed, preserve orientation
 }
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
@@ -856,7 +856,7 @@ static void sensor_calibrate_imu()
 		LOG_INF("Applying calibration");
 		memcpy(accelBias, a_bias, sizeof(accelBias));
 		memcpy(gyroBias, g_bias, sizeof(gyroBias));
-		sensor_fusion_invalidate(); // only invalidate fusion if calibration was successful
+		sensor_fusion_update_bias(NULL); // Only bias changed, preserve orientation
 	}
 #if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	// In 6-side calibration mode, save accelerometer bias (full calibration matrix used elsewhere)
@@ -982,8 +982,8 @@ static void sensor_calibrate_imu()
 					sizeof(retained->tempCalCorrectionOffset)
 				);
 
-				// Invalidate sensor fusion to apply new offset
-				sensor_fusion_invalidate();
+				// Update fusion bias while preserving orientation
+				sensor_fusion_update_bias(NULL);
 			} else {
 				LOG_WRN("T-Cal: Failed to calculate D_offset, falling back to point save");
 				has_good_coverage = false; // Fall through to save point
@@ -1918,8 +1918,8 @@ static void update_poly_tcal(void)
 
 	recalculate_tcal_correction_offset();
 
-	// Invalidate sensor fusion to apply new calibration
-	sensor_fusion_invalidate();
+	// Update fusion bias while preserving orientation
+	sensor_fusion_update_bias(NULL);
 }
 
 // Public function for 'tcal clear' and 'reset tcal'
@@ -1966,8 +1966,8 @@ void sensor_tcal_clear_poly(void)
 		sizeof(retained->tempCalCorrectionOffset)
 	);
 
-	// Invalidate sensor fusion to apply cleared calibration
-	sensor_fusion_invalidate();
+	// Update fusion bias while preserving orientation
+	sensor_fusion_update_bias(NULL);
 
 	printk("All polynomial temperature calibration data has been cleared.\n");
 }
@@ -2656,11 +2656,11 @@ static int sensor_perform_boot_calibration(void)
 		return err;
 	}
 
-	// Success! Invalidate sensor fusion to apply new calibration
+	// Success! Update fusion bias while preserving orientation
 	retained->bootCalState.completed = true;
 	int64_t uptime = k_uptime_get();
 	LOG_INF("Boot Cal: Completed successfully (uptime: %lld ms)", uptime);
-	sensor_fusion_invalidate();
+	sensor_fusion_update_bias(NULL);
 
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
 	return 0;

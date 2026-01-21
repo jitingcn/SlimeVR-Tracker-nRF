@@ -44,6 +44,7 @@ void sensor_shutdown(void);
 uint8_t sensor_setup_WOM(void);
 
 void sensor_fusion_invalidate(void);
+void sensor_fusion_update_bias(float *g_off);
 
 void wait_for_threads(void);
 void main_imu_suspend(void);

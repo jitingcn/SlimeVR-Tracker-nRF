@@ -550,7 +550,7 @@ uint8_t sensor_setup_WOM(void)
 
 void sensor_fusion_invalidate(void)
 {
-	main_imu_restart(); // reinitialize fusion
+	main_imu_restart(); // reinitialize fusion (resets quaternion to identity)
 	if (sensor_fusion_init)
 	{ // clear fusion gyro offset
 		float g_off[3] = {0};
@@ -560,6 +560,34 @@ void sensor_fusion_invalidate(void)
 	else
 	{ // TODO: always clearing the fusion?
 		retained->fusion_id = 0; // Invalidate retained fusion data
+		retained_update();
+	}
+}
+
+void sensor_fusion_update_bias(float *g_off)
+{
+	// Lightweight bias update that preserves quaternion orientation
+	// Use this after calibration changes that only affect bias/offset values
+	// Pass NULL or a float[3] with the new bias values
+	if (sensor_fusion_init)
+	{
+		float bias[3] = {0};
+		if (g_off != NULL)
+		{
+			// Use provided bias values
+			bias[0] = g_off[0];
+			bias[1] = g_off[1];
+			bias[2] = g_off[2];
+		}
+		sensor_fusion->set_gyro_bias(bias);
+		sensor_retained_write();
+		LOG_INF("Fusion bias updated: [%.3f, %.3f, %.3f]",
+			(double)bias[0], (double)bias[1], (double)bias[2]);
+	}
+	else
+	{
+		// If fusion is not initialized yet, just invalidate retained data
+		retained->fusion_id = 0;
 		retained_update();
 	}
 }

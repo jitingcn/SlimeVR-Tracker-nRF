@@ -418,7 +418,8 @@ static void sys_system_off(void) // TODO: add timeout
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
 #endif
-	// sensor_retained_write();
+	sensor_fusion_update_bias(NULL);
+	sensor_retained_write();
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
 #if IMU_INT_EXISTS
@@ -435,7 +436,7 @@ static void sys_system_off(void) // TODO: add timeout
 	disconnect_sensor_pins();
 #endif
 	sys_update_battery_tracker(current_battery_pptt, device_plugged);
-//	retained_update();
+	// retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
@@ -451,6 +452,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
 #endif
+	sensor_fusion_update_bias(NULL);
 	sensor_retained_write();
 	// Set system reboot
 	LOG_INF("Rebooting nRF");

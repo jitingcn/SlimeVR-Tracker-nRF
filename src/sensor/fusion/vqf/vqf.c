@@ -130,7 +130,8 @@ void vqf_get_gyro_bias(float *g_off)
 
 void vqf_set_gyro_bias(float *g_off)
 {
-	setBiasEstimate(&state, g_off, -1);
+	// Pass biasSigmaInit to reset the covariance matrix
+	setBiasEstimate(&state, g_off, params.biasSigmaInit);
 }
 
 void vqf_update_gyro_sanity(float *g, float *m)
