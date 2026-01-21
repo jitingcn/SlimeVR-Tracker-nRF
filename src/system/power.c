@@ -452,7 +452,6 @@ static void sys_system_reboot(void) // TODO: add timeout
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
 #endif
-	sensor_fusion_update_bias(NULL);
 	sensor_retained_write();
 	// Set system reboot
 	LOG_INF("Rebooting nRF");
