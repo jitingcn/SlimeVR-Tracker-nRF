@@ -418,8 +418,8 @@ static void sys_system_off(void) // TODO: add timeout
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
 #endif
-	sensor_fusion_update_bias(NULL);
-	sensor_retained_write();
+	// sensor_fusion_update_bias(NULL);
+	// sensor_retained_write();
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
 #if IMU_INT_EXISTS
