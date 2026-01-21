@@ -51,6 +51,16 @@ static sensor_debug_state_t debug_state = {
 	.output_every_n = 2  // Default: output every 2 accel samples
 };
 
+// Sensor range tracking state - records min/max values during runtime (not persisted)
+static sensor_range_stats_t range_stats = {
+	.gyro_max = {-INFINITY, -INFINITY, -INFINITY},
+	.gyro_min = {INFINITY, INFINITY, INFINITY},
+	.accel_max = {-INFINITY, -INFINITY, -INFINITY},
+	.accel_min = {INFINITY, INFINITY, INFINITY},
+	.sample_count = 0,
+	.initialized = false
+};
+
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(imu_spi), okay)
 #define SENSOR_IMU_SPI_EXISTS true
 #define SENSOR_IMU_SPI_NODE DT_NODELABEL(imu_spi)
@@ -114,6 +124,9 @@ static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
 
+static float accel_actual_range;  // Actual accelerometer full scale range (g)
+static float gyro_actual_range;   // Actual gyroscope full scale range (deg/s)
+
 static float sensor_actual_time;
 static int16_t sensor_fifo_threshold;
 static int64_t sensor_data_time; // ticks
@@ -163,6 +176,8 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 static int sensor_scan(void);
 static int sensor_init(void);
 static void sensor_loop(void);
+static void sensor_update_range_stats_gyro(float g[3]);
+static void sensor_update_range_stats_accel(float a[3]);
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
 
@@ -734,7 +749,6 @@ int sensor_init(void)
 	// set FS/range
 	float accel_range = CONFIG_SENSOR_ACCEL_FS;
 	float gyro_range = CONFIG_SENSOR_GYRO_FS;
-	float accel_actual_range, gyro_actual_range;
 	sensor_imu->update_fs(accel_range, gyro_range, &accel_actual_range, &gyro_actual_range);
 	LOG_INF("Accelerometer range: %.2fg", (double)accel_actual_range);
 	LOG_INF("Gyroscope range: %.2fdps", (double)gyro_actual_range);
@@ -1018,6 +1032,9 @@ void sensor_loop(void)
 							debug_cal_g_sum[i] += g[i];
 					}
 
+					// Update range statistics with raw gyro data (before fusion correction)
+					sensor_update_range_stats_gyro(g);
+
 					// Process fusion
 					sensor_fusion->update_gyro(g, gyro_actual_time);
 
@@ -1059,6 +1076,9 @@ void sensor_loop(void)
 					float ay = raw_a[1];
 					float az = raw_a[2];
 					float a[] = {ax, ay, az};
+
+					// Update range statistics with calibrated accel data
+					sensor_update_range_stats_accel(a);
 
 					// Process fusion
 					sensor_fusion->update_accel(a, accel_actual_time);
@@ -1475,4 +1495,127 @@ bool sensor_debug_is_active(void)
 		return true;
 	}
 	return false;
+}
+
+// Sensor range tracking functions
+const sensor_range_stats_t* sensor_get_range_stats(void)
+{
+	return &range_stats;
+}
+
+void sensor_reset_range_stats(void)
+{
+	for (int i = 0; i < 3; i++) {
+		range_stats.gyro_max[i] = -INFINITY;
+		range_stats.gyro_min[i] = INFINITY;
+		range_stats.accel_max[i] = -INFINITY;
+		range_stats.accel_min[i] = INFINITY;
+	}
+	range_stats.sample_count = 0;
+	range_stats.initialized = false;
+	LOG_INF("Range statistics reset");
+}
+
+// Internal function to update range statistics with new gyro data
+static void sensor_update_range_stats_gyro(float g[3])
+{
+	if (!range_stats.initialized) {
+		range_stats.initialized = true;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (g[i] > range_stats.gyro_max[i]) {
+			range_stats.gyro_max[i] = g[i];
+		}
+		if (g[i] < range_stats.gyro_min[i]) {
+			range_stats.gyro_min[i] = g[i];
+		}
+	}
+}
+
+// Internal function to update range statistics with new accel data
+static void sensor_update_range_stats_accel(float a[3])
+{
+	if (!range_stats.initialized) {
+		range_stats.initialized = true;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (a[i] > range_stats.accel_max[i]) {
+			range_stats.accel_max[i] = a[i];
+		}
+		if (a[i] < range_stats.accel_min[i]) {
+			range_stats.accel_min[i] = a[i];
+		}
+	}
+	range_stats.sample_count++;
+}
+
+void sensor_print_range_stats(void)
+{
+	if (!range_stats.initialized) {
+		printk("Range statistics not initialized (no data collected yet)\n");
+		return;
+	}
+
+	printk("\n=== Sensor Range Statistics ===\n");
+	printk("Total samples: %llu\n", range_stats.sample_count);
+
+	printk("\nGyroscope (deg/s):\n");
+	printk("  X: min=%.2f, max=%.2f, peak=%.2f\n",
+		(double)range_stats.gyro_min[0],
+		(double)range_stats.gyro_max[0],
+		(double)fmaxf(fabsf(range_stats.gyro_min[0]), fabsf(range_stats.gyro_max[0])));
+	printk("  Y: min=%.2f, max=%.2f, peak=%.2f\n",
+		(double)range_stats.gyro_min[1],
+		(double)range_stats.gyro_max[1],
+		(double)fmaxf(fabsf(range_stats.gyro_min[1]), fabsf(range_stats.gyro_max[1])));
+	printk("  Z: min=%.2f, max=%.2f, peak=%.2f\n",
+		(double)range_stats.gyro_min[2],
+		(double)range_stats.gyro_max[2],
+		(double)fmaxf(fabsf(range_stats.gyro_min[2]), fabsf(range_stats.gyro_max[2])));
+
+	// Calculate overall peak gyro value
+	float gyro_peak = 0;
+	for (int i = 0; i < 3; i++) {
+		float axis_peak = fmaxf(fabsf(range_stats.gyro_min[i]), fabsf(range_stats.gyro_max[i]));
+		if (axis_peak > gyro_peak) {
+			gyro_peak = axis_peak;
+		}
+	}
+	// Use actual range if available, otherwise fall back to config value
+	float gyro_fs = (gyro_actual_range > 0) ? gyro_actual_range : (float)CONFIG_SENSOR_GYRO_FS;
+	printk("  Overall peak: %.2f deg/s (FS=%.0f)\n", (double)gyro_peak, (double)gyro_fs);
+	if (gyro_peak > gyro_fs * 0.9f) {
+		printk("  WARNING: Peak value exceeds 90%% of full scale!\n");
+	}
+
+	printk("\nAccelerometer (g):\n");
+	printk("  X: min=%.3f, max=%.3f, peak=%.3f\n",
+		(double)range_stats.accel_min[0],
+		(double)range_stats.accel_max[0],
+		(double)fmaxf(fabsf(range_stats.accel_min[0]), fabsf(range_stats.accel_max[0])));
+	printk("  Y: min=%.3f, max=%.3f, peak=%.3f\n",
+		(double)range_stats.accel_min[1],
+		(double)range_stats.accel_max[1],
+		(double)fmaxf(fabsf(range_stats.accel_min[1]), fabsf(range_stats.accel_max[1])));
+	printk("  Z: min=%.3f, max=%.3f, peak=%.3f\n",
+		(double)range_stats.accel_min[2],
+		(double)range_stats.accel_max[2],
+		(double)fmaxf(fabsf(range_stats.accel_min[2]), fabsf(range_stats.accel_max[2])));
+
+	// Calculate overall peak accel value
+	float accel_peak = 0;
+	for (int i = 0; i < 3; i++) {
+		float axis_peak = fmaxf(fabsf(range_stats.accel_min[i]), fabsf(range_stats.accel_max[i]));
+		if (axis_peak > accel_peak) {
+			accel_peak = axis_peak;
+		}
+	}
+	// Use actual range if available, otherwise fall back to config value
+	float accel_fs = (accel_actual_range > 0) ? accel_actual_range : (float)CONFIG_SENSOR_ACCEL_FS;
+	printk("  Overall peak: %.3f g (FS=%.0f)\n", (double)accel_peak, (double)accel_fs);
+	if (accel_peak > accel_fs * 0.9f) {
+		printk("  WARNING: Peak value exceeds 90%% of full scale!\n");
+	}
+
+	printk("================================\n");
 }
