@@ -242,6 +242,7 @@ void icm45_shutdown(void)
 
 void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
 {
+	// ICM45686 only supports 32G and 4000dps in high-res mode
 	*accel_actual_range = 32; // always 32g in hires
 	*gyro_actual_range = 4000; // always 4000dps in hires
 }
@@ -249,8 +250,9 @@ void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_ra
 int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
 	int ODR;
-	uint8_t ACCEL_UI_FS_SEL = ACCEL_UI_FS_SEL_16G;
-	uint8_t GYRO_UI_FS_SEL = GYRO_UI_FS_SEL_2000DPS;
+	// ICM45686 only supports 32G and 4000dps in high-res mode
+	uint8_t ACCEL_UI_FS_SEL = ACCEL_UI_FS_SEL_32G;
+	uint8_t GYRO_UI_FS_SEL = GYRO_UI_FS_SEL_4000DPS;
 	uint8_t ACCEL_MODE;
 	uint8_t GYRO_MODE;
 	uint8_t ACCEL_ODR;
