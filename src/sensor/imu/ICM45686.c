@@ -21,6 +21,135 @@ static float clock_scale = 1; // ODR is scaled by clock_rate/clock_reference
 
 LOG_MODULE_REGISTER(ICM45686, LOG_LEVEL_DBG);
 
+// IREG helpers for runtime verification.
+// Note: ICM45686 host access requires writing IREG_ADDR_15_8/IREG_ADDR_7_0 then reading IREG_DATA.
+// In this codebase we only expose ICM45686_IREG_ADDR_15_8 (0x7C) and ICM45686_IREG_DATA (0x7E).
+// The low byte (IREG_ADDR_7_0) is auto-incremented and accessible as 0x7D.
+#define ICM45686_IREG_ADDR_7_0 0x7D
+
+static int icm45686_ireg_read8(uint16_t ireg_addr, uint8_t *out)
+{
+	uint8_t addr_hi = (uint8_t)(ireg_addr >> 8);
+	uint8_t addr_lo = (uint8_t)(ireg_addr & 0xFF);
+	int err = 0;
+
+	// Read must also be in a single burst-write for address set to avoid unintended prefetch.
+	// Write (IREG_ADDR_15_8, IREG_ADDR_7_0) in one burst, then read IREG_DATA.
+	uint8_t addr_buf[2] = {addr_hi, addr_lo};
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, addr_buf, sizeof(addr_buf));
+	k_busy_wait(5);
+
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, out);
+	k_busy_wait(5);
+	return err;
+}
+
+static int icm45686_ireg_write8(uint16_t ireg_addr, uint8_t value)
+{
+	// IMPORTANT:
+	// Datasheet note in [`ICM45686.h`](SlimeVR-Tracker-nRF/src/sensor/imu/ICM45686.h:69) says:
+	// "The above programming steps must be performed in a single burst-write transaction"
+	// to avoid unintended read prefetch.
+	// So we write (IREG_ADDR_15_8, IREG_ADDR_7_0, IREG_DATA) in one SPI burst.
+	uint8_t addr_hi = (uint8_t)(ireg_addr >> 8);
+	uint8_t addr_lo = (uint8_t)(ireg_addr & 0xFF);
+	uint8_t buf[3] = {addr_hi, addr_lo, value};
+	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, buf, sizeof(buf));
+	k_busy_wait(5);
+	return err;
+}
+
+static void icm45686_set_src_ctrl(uint8_t gyro_sel, uint8_t accel_sel)
+{
+	// GYRO_SRC_CTRL: IPREG_SYS1_REG_166 (0x00A6) bits [6:5]
+	// ACCEL_SRC_CTRL: IPREG_SYS2_REG_123 (0x007B) bits [1:0]
+	// Encoding (per user guide):
+	// 0: Interpolator and FIR filter off
+	// 1: Interpolator off and FIR filter on
+	// 2: Interpolator on and FIR filter on
+	const uint16_t IREG_SYS1_GYRO_SRC_CTRL = 0xA400u + 0x00A6u;
+	const uint16_t IREG_SYS2_ACCEL_SRC_CTRL = 0xA500u + 0x007Bu;
+
+	gyro_sel &= 0x03;   // Limit to 2 bits
+	accel_sel &= 0x03;  // Limit to 2 bits
+
+	uint8_t gyro_reg = 0, accel_reg = 0;
+	int err = 0;
+
+	err |= icm45686_ireg_read8(IREG_SYS1_GYRO_SRC_CTRL, &gyro_reg);
+	err |= icm45686_ireg_read8(IREG_SYS2_ACCEL_SRC_CTRL, &accel_reg);
+	if (err)
+	{
+		LOG_WRN("SRC_CTRL pre-read failed (err=%d)", err);
+		return;
+	}
+
+	uint8_t gyro_new = (uint8_t)((gyro_reg & ~(0x03u << 5)) | (uint8_t)(gyro_sel << 5));
+	uint8_t accel_new = (uint8_t)((accel_reg & ~0x03u) | accel_sel);
+
+	LOG_INF("SRC_CTRL set: GYRO 0x%02X->0x%02X (sel=%u), ACCEL 0x%02X->0x%02X (sel=%u)",
+		gyro_reg, gyro_new, gyro_sel, accel_reg, accel_new, accel_sel);
+
+	err |= icm45686_ireg_write8(IREG_SYS1_GYRO_SRC_CTRL, gyro_new);
+	err |= icm45686_ireg_write8(IREG_SYS2_ACCEL_SRC_CTRL, accel_new);
+	if (err)
+		LOG_WRN("SRC_CTRL write failed (err=%d)", err);
+
+	uint8_t gyro_rb = 0, accel_rb = 0;
+	int rerr = 0;
+	rerr |= icm45686_ireg_read8(IREG_SYS1_GYRO_SRC_CTRL, &gyro_rb);
+	rerr |= icm45686_ireg_read8(IREG_SYS2_ACCEL_SRC_CTRL, &accel_rb);
+	if (!rerr)
+		LOG_INF("SRC_CTRL post-read: GYRO=0x%02X (sel=%u) ACCEL=0x%02X (sel=%u)",
+			gyro_rb, (gyro_rb >> 5) & 0x03, accel_rb, accel_rb & 0x03);
+	else
+		LOG_WRN("SRC_CTRL post-read failed (err=%d)", rerr);
+}
+
+static void icm45686_set_ui_lpfbw_sel(uint8_t gyro_sel, uint8_t accel_sel)
+{
+	// Gyro UI LPF BW: IPREG_SYS1_REG_172 (0x00AC) bits [2:0]
+	// Accel UI LPF BW: IPREG_SYS2_REG_131 (0x0083) bits [2:0]
+	// 0=bypass, 1=ODR/4, 2=ODR/8, 3=ODR/16, 4=ODR/32, 5=ODR/64, 6=ODR/128, 7=ODR/128
+	const uint16_t IREG_SYS1_GYRO_UI_LPFBW = 0xA400u + 0x00ACu;
+	const uint16_t IREG_SYS2_ACCEL_UI_LPFBW = 0xA500u + 0x0083u;
+
+	gyro_sel &= 0x07;
+	accel_sel &= 0x07;
+
+	uint8_t gyro_reg = 0, accel_reg = 0;
+	int err = 0;
+	err |= icm45686_ireg_read8(IREG_SYS1_GYRO_UI_LPFBW, &gyro_reg);
+	err |= icm45686_ireg_read8(IREG_SYS2_ACCEL_UI_LPFBW, &accel_reg);
+	if (err)
+	{
+		LOG_WRN("UI_LPFBW pre-read failed (err=%d)", err);
+		return;
+	}
+
+	uint8_t gyro_new = (uint8_t)((gyro_reg & ~0x07u) | gyro_sel);
+	uint8_t accel_new = (uint8_t)((accel_reg & ~0x07u) | accel_sel);
+
+	LOG_INF("UI_LPFBW set: GYRO 0x%02X->0x%02X (sel=%u), ACCEL 0x%02X->0x%02X (sel=%u)",
+		gyro_reg, gyro_new, gyro_sel, accel_reg, accel_new, accel_sel);
+
+	err |= icm45686_ireg_write8(IREG_SYS1_GYRO_UI_LPFBW, gyro_new);
+	err |= icm45686_ireg_write8(IREG_SYS2_ACCEL_UI_LPFBW, accel_new);
+	if (err)
+		LOG_WRN("UI_LPFBW write failed (err=%d)", err);
+
+	uint8_t gyro_rb = 0, accel_rb = 0;
+	int rerr = 0;
+	rerr |= icm45686_ireg_read8(IREG_SYS1_GYRO_UI_LPFBW, &gyro_rb);
+	rerr |= icm45686_ireg_read8(IREG_SYS2_ACCEL_UI_LPFBW, &accel_rb);
+	if (!rerr)
+		LOG_INF("UI_LPFBW post-read: GYRO=0x%02X (sel=%u) ACCEL=0x%02X (sel=%u)",
+			gyro_rb, gyro_rb & 0x07, accel_rb, accel_rb & 0x07);
+	else
+		LOG_WRN("UI_LPFBW post-read failed (err=%d)", rerr);
+}
+
+
 int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
 	// setup interface for SPI
@@ -77,6 +206,12 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
 	err |= icm45_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
+
+	// Configure SRC_CTRL: 0=off, 1=AAF only, 2=AAF+Interpolator
+	icm45686_set_src_ctrl(1u, 1u);
+
+	// Configure UI LPF bandwidth: 0=bypass, 1=ODR/4, 2=ODR/8, 3=ODR/16, etc.
+	icm45686_set_ui_lpfbw_sel(0u, 0u);
 
 	// Finally enable FIFO
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG0, 0x40 | 0b000111); // set FIFO streaming mode (not stop-on-full), set FIFO depth to 2K bytes (see AN-000364)
