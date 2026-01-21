@@ -101,6 +101,10 @@ static int64_t last_temp_time = -1000;
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
+static int64_t last_retained_save_time = 0;
+
+// Periodic retained save interval (ms) for crash recovery
+#define RETAINED_SAVE_INTERVAL_MS 5000
 
 static float max_gyro_speed_square;
 static bool mag_use_oneshot;
@@ -1294,6 +1298,14 @@ void sensor_loop(void)
 			// Handle magnetometer calibration
 			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
 				sensor_request_calibration_mag();
+
+			// Periodic retained save for crash recovery
+			if (now - last_retained_save_time >= RETAINED_SAVE_INTERVAL_MS)
+			{
+				sensor_retained_write();
+				last_retained_save_time = now;
+				LOG_DBG("Periodic retained save completed");
+			}
 
 
 #if DEBUG
