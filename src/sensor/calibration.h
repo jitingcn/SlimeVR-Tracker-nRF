@@ -80,6 +80,10 @@ bool sensor_boot_cal_is_completed(void);
 void sensor_boot_cal_get_doffset(float offset[3]);
 void sensor_boot_cal_reset(void); // Reset boot calibration state (call before reboot/shutdown, not before WoM)
 
+// Runtime periodic calibration functions
+void sensor_runtime_calibration_check(bool is_resting);
+void sensor_runtime_cal_get_status(int64_t *last_cal_time, int64_t *rest_duration);
+
 // Test function for comparing calibration methods
 void sensor_tcal_test_methods(float temp);
 #endif
