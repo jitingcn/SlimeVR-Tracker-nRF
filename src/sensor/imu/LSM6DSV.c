@@ -196,6 +196,8 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	uint8_t ODR_G;
 
 	// Calculate accel
+	// Note: freq_scale adjusts the actual output rate (e.g., 960Hz * 0.96 = ~923Hz)
+	// but does NOT affect ODR register selection - we select based on nominal rate
 	if (accel_time <= 0 || accel_time == INFINITY) // off, standby interpreted as off
 	{
 		OP_MODE_XL = OP_MODE_XL_HP;
@@ -206,7 +208,7 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	{
 		OP_MODE_XL = OP_MODE_XL_HP;
 		ODR = 1 / accel_time;
-		ODR /= freq_scale; // scale by internal freq adjustment
+		// Do NOT apply freq_scale here - it's used for actual_time calculation only
 	}
 
 	if (ODR == 0)
@@ -276,6 +278,7 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	accel_time /= freq_scale; // scale by internal freq adjustment
 
 	// Calculate gyro
+	// Note: freq_scale adjusts the actual output rate but does NOT affect ODR register selection
 	if (gyro_time <= 0) // off
 	{
 		OP_MODE_G = OP_MODE_G_HP;
@@ -293,7 +296,7 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 		OP_MODE_G = OP_MODE_G_HP;
 		ODR_G = 0; // the compiler complains unless I do this
 		ODR = 1 / gyro_time;
-		ODR /= freq_scale; // scale by internal freq adjustment
+		// Do NOT apply freq_scale here - it's used for actual_time calculation only
 	}
 
 	if (ODR == 0)
