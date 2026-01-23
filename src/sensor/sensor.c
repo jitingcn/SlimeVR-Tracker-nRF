@@ -1430,24 +1430,30 @@ void sensor_loop(void)
 #endif
 
 					// Compact output format with raw, calibrated, and fused data
-					printk("[%.2fs] RAW: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f] T:%.2fC | ",
+					printk("[%.2fs] RAW: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f] T:%.2fC\n",
 						(double)elapsed_sec,
 						(double)avg_raw_a[0], (double)avg_raw_a[1], (double)avg_raw_a[2],
 						(double)avg_raw_g[0], (double)avg_raw_g[1], (double)avg_raw_g[2],
 						(double)temp);
 
-					printk("CAL: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f] | ",
+					printk("     CAL: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f]\n",
 						(double)a[0], (double)a[1], (double)a[2],
 						(double)avg_cal_g[0], (double)avg_cal_g[1], (double)avg_cal_g[2]);
 
 #if CONFIG_SENSOR_USE_VQF
-					printk("VQF: Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f] Rest:%c Bias[%.2f,%.2f,%.2f]°/s\n",
+					printk("     VQF: Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 						(double)q[0], (double)q[1], (double)q[2], (double)q[3],
-						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2],
+						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2]);
+					printk("     Rest:%c RestDev[G:%.3f,A:%.3f] Bias[%.3f,%.3f,%.3f]°/s Sigma:%.3f°/s Delta:%.2f°\n",
 						vqf_info.rest_detected ? 'Y' : 'N',
-						(double)vqf_info.bias[0], (double)vqf_info.bias[1], (double)vqf_info.bias[2]);
+						(double)vqf_info.rest_deviations[0], (double)vqf_info.rest_deviations[1],
+						(double)vqf_info.bias[0], (double)vqf_info.bias[1], (double)vqf_info.bias[2],
+						(double)vqf_info.bias_sigma, (double)vqf_info.delta);
+					printk("     MagDist:%c MagRefNorm:%.3f MagRefDip:%.2f°\n",
+						vqf_info.mag_dist_detected ? 'Y' : 'N',
+						(double)vqf_info.mag_ref_norm, (double)vqf_info.mag_ref_dip);
 #else
-					printk("Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
+					printk("     Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 						(double)q[0], (double)q[1], (double)q[2], (double)q[3],
 						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2]);
 #endif
