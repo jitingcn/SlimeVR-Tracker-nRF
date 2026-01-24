@@ -642,7 +642,7 @@ static void power_thread(void)
 			power_init = true;
 		}
 
-		if (battery_discharged || docked)
+		if ((battery_discharged && !device_plugged) || docked) // TODO: docked may or may not also mean device_plugged due to charging
 		{
 			if (battery_discharged)
 			{
