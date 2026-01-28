@@ -2601,24 +2601,25 @@ void sensor_tcal_boot_calibration_check(void)
 /**
  * Perform boot calibration (called by calibration thread)
  * Returns 0 on success, non-zero on failure
+ *
+ * Note: This is an automatic calibration - no LED changes to keep it
+ * transparent to the user. LED state is preserved throughout.
  */
 static int sensor_perform_boot_calibration(void)
 {
 	LOG_INF("Boot Cal: Starting boot calibration");
-	set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
+	// Note: No LED changes for automatic boot calibration - keep it transparent
 
 	// Get current temperature
 	float current_temp = sensor_get_current_imu_temperature();
 	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
 		LOG_ERR("Boot Cal: Invalid temperature");
-		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		return -1;
 	}
 
 	// Wait for device to be stationary
 	if (!wait_for_motion(false, 6)) {
 		LOG_WRN("Boot Cal: Device not stationary");
-		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		retained->bootCalState.attempt_count++;
 
 		if (retained->bootCalState.attempt_count >= BOOT_CAL_MAX_ATTEMPTS) {
@@ -2628,7 +2629,6 @@ static int sensor_perform_boot_calibration(void)
 		return -1;
 	}
 
-	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
 	k_msleep(500); // Delay before beginning acquisition
 
 	// Attempt to collect bias
@@ -2640,7 +2640,6 @@ static int sensor_perform_boot_calibration(void)
 	if (err) {
 		// Collection failed - check if we should trigger a full calibration
 		retained->bootCalState.attempt_count++;
-		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 
 		if (retained->bootCalState.attempt_count >= BOOT_CAL_MAX_ATTEMPTS) {
 			LOG_WRN("Boot Cal: Maximum attempts (%d) reached", BOOT_CAL_MAX_ATTEMPTS);
@@ -2665,7 +2664,6 @@ static int sensor_perform_boot_calibration(void)
 	err = sensor_tcal_calculate_doffset(measured_bias, avg_temp);
 	if (err) {
 		LOG_ERR("Boot Cal: Failed to calculate D_offset");
-		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		retained->bootCalState.completed = true;
 		return err;
 	}
@@ -2680,7 +2678,7 @@ static int sensor_perform_boot_calibration(void)
 	LOG_INF("Boot Cal: Completed successfully at %.2fC (uptime: %lld ms)", (double)avg_temp, runtime_cal_last_time);
 	sensor_fusion_update_bias(NULL);
 
-	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
+	// Note: No LED flash for automatic boot calibration - keep it transparent
 	return 0;
 }
 
@@ -2731,10 +2729,14 @@ void sensor_boot_cal_reset(void)
  *
  * Uses shorter sampling time (3 seconds) compared to normal calibration (4-6 seconds)
  * for quicker response while maintaining reasonable accuracy
+ *
+ * Note: This is an automatic calibration - no LED changes to keep it
+ * transparent to the user. LED state is preserved throughout.
  */
 static int sensor_perform_runtime_calibration(void)
 {
 	LOG_INF("Runtime Cal: Starting quick zero bias calibration (~3 seconds)");
+	// Note: No LED changes for automatic runtime calibration - keep it transparent
 
 	// Get current temperature
 	float current_temp = sensor_get_current_imu_temperature();
