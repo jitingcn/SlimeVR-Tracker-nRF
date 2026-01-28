@@ -130,7 +130,7 @@ void vqf_get_gyro_bias(float *g_off)
 
 void vqf_set_gyro_bias(float *g_off)
 {
-	setBiasEstimate(&state, g_off, 0.0005f); // 0.0005 rad/s ~= 0.03 deg/s
+	setBiasEstimate(&state, g_off, -1);
 }
 
 void vqf_update_gyro_sanity(float *g, float *m)
