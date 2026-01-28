@@ -374,6 +374,8 @@ int sensor_calibration_validate(float *a_bias, float *g_bias, bool write)
 	if (!v_epsilon(a_bias, zero, 0.5) || !v_epsilon(g_bias, zero, 50.0)) // check accel is <0.5G and gyro <50dps
 	{
 		sensor_calibration_clear(a_bias, g_bias, write);
+		// Validation failure: do NOT call any fusion function
+		// Let fusion keep its current bias estimate to avoid residual drift
 		LOG_WRN("Invalidated calibration");
 		LOG_WRN("The IMU may be damaged or calibration was not completed properly");
 		return -1;
@@ -447,10 +449,18 @@ void sensor_calibration_clear(float *a_bias, float *g_bias, bool write)
 		LOG_INF("Clearing stored calibration data");
 		sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, a_bias, sizeof(accelBias));
 		sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, g_bias, sizeof(gyroBias));
-		// Only update fusion bias when actually persisting changes
-		// Avoid calling this when calibration was interrupted (write=false)
-		// as it would cause fusion to lose its bias estimate
-		sensor_fusion_update_bias(NULL);
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+		// Also clear boot/runtime calibration D_offset since ZRO is being reset
+		retained->bootCalState.doffset_valid = false;
+		retained->bootCalState.doffset[0] = 0.0f;
+		retained->bootCalState.doffset[1] = 0.0f;
+		retained->bootCalState.doffset[2] = 0.0f;
+		LOG_INF("Clearing D_offset along with ZRO calibration");
+#endif
+		// Note: Caller is responsible for calling sensor_fusion_update_bias() or
+		// sensor_fusion_invalidate() as appropriate:
+		// - sensor_fusion_update_bias(): for internal/automatic calibration (preserves quaternion)
+		// - sensor_fusion_invalidate(): for manual reset commands (resets quaternion)
 	}
 }
 
@@ -1934,10 +1944,17 @@ void sensor_tcal_clear_poly(void)
 		sizeof(retained->tempCalCorrectionOffset)
 	);
 
-	// Update fusion bias while preserving orientation
-	sensor_fusion_update_bias(NULL);
+	// Also clear boot/runtime calibration D_offset since T-Cal is being reset
+	retained->bootCalState.doffset_valid = false;
+	retained->bootCalState.doffset[0] = 0.0f;
+	retained->bootCalState.doffset[1] = 0.0f;
+	retained->bootCalState.doffset[2] = 0.0f;
+	LOG_INF("Clearing D_offset along with T-Cal data");
 
-	printk("All polynomial temperature calibration data has been cleared.\n");
+	// Manual command: invalidate fusion to force quaternion recalculation
+	sensor_fusion_invalidate();
+
+	printk("All polynomial temperature calibration data and D_offset have been cleared.\n");
 }
 
 // Public function for 'tcal remove <index>'

@@ -599,6 +599,8 @@ void cmd_sens_reset(void)
 void cmd_reset_zro(void)
 {
 	sensor_calibration_clear(NULL, NULL, true);
+	// Manual command: invalidate fusion to force quaternion recalculation
+	sensor_fusion_invalidate();
 }
 
 void cmd_reset_acc(void)
@@ -622,6 +624,13 @@ void cmd_reset_tcal(void)
 void cmd_reset_bat(void)
 {
 	sys_reset_battery_tracker();
+}
+
+void cmd_fusion_reset(void)
+{
+	printk("Resetting fusion (invalidating quaternion).\n");
+	sensor_fusion_invalidate();
+	printk("Fusion reset complete.\n");
 }
 
 void cmd_bat_debug(void)
@@ -733,6 +742,7 @@ static void console_thread(void)
 	uint8_t command_reset_arg_tcal[] = "tcal";
 #endif
 	uint8_t command_reset_arg_bat[] = "bat";
+	uint8_t command_reset_arg_fusion[] = "fusion";
 	uint8_t command_reset_arg_all[] = "all";
 
 	while (1) {
@@ -1071,6 +1081,8 @@ static void console_thread(void)
 #endif
 			else if (arg && memcmp(arg, command_reset_arg_bat, sizeof(command_reset_arg_bat)) == 0) {
 				cmd_reset_bat();
+			} else if (arg && memcmp(arg, command_reset_arg_fusion, sizeof(command_reset_arg_fusion)) == 0) {
+				cmd_fusion_reset();
 			} else if (arg && memcmp(arg, command_reset_arg_all, sizeof(command_reset_arg_all)) == 0) {
 				sys_clear();
 			} else {

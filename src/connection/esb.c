@@ -1583,6 +1583,11 @@ static void esb_thread(void)
 					cmd_ping_start();
 					break;
 
+				case ESB_PONG_FLAG_FUSION_RESET:
+					LOG_INF("Executing remote command: FUSION_RESET");
+					cmd_fusion_reset();
+					break;
+
 				default:
 					LOG_WRN("Unknown remote command: 0x%02X", received_remote_command);
 					break;
