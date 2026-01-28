@@ -96,12 +96,12 @@ static int sensor_calibrate_mag(void);
 // sessions when temperature curves may differ or fixed zero bias changes.
 
 // Runtime calibration constants
-#define RUNTIME_CAL_REST_TIME_MS 5000         // 5 seconds of rest before triggering
+#define RUNTIME_CAL_REST_TIME_MS 8000         // 8 seconds of rest before triggering
 #define RUNTIME_CAL_COOLDOWN_MS 60000         // 1 minute cooldown between runtime calibrations
 #define RUNTIME_CAL_MIN_UPTIME_MS 60000       // Wait at least 60s after boot before runtime cal
 #define RUNTIME_CAL_TEMP_CHANGE_MIN 1.0f      // Minimum temperature change (°C) to trigger recalibration
 #define RUNTIME_CAL_SAMPLE_TIME_MS 3000       // 3 seconds sampling time for runtime calibration
-#define RUNTIME_CAL_FAILURE_COOLDOWN_MS 15000 // 15 seconds cooldown after calibration failure
+#define RUNTIME_CAL_FAILURE_COOLDOWN_MS 30000 // 30 seconds cooldown after calibration failure
 
 // Runtime calibration state (not persisted)
 static int64_t runtime_cal_last_time = 0;      // Last time runtime calibration was performed
@@ -2481,7 +2481,7 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 // Calculate D_offset = measured - (curve + existing correction offset)
 // Must account for Correction offset to avoid double-compensation
 // Apply a minimum threshold to filter out noise - values below threshold are set to 0
-#define BOOT_CAL_DOFFSET_MIN_THRESHOLD 0.01f // dps - ignore tiny corrections
+#define BOOT_CAL_DOFFSET_MIN_THRESHOLD 0.001f // dps - ignore tiny corrections
 
 	for (int axis = 0; axis < 3; axis++) {
 		float effective_curve = curve_bias[axis] + retained->tempCalCorrectionOffset[axis];
