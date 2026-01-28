@@ -819,14 +819,14 @@ static void console_thread(void)
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
-				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
+				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 			} else {
 				// Tokenize the argument string by space to get the subcommand
 				char *subcmd = strtok((char *)arg, " ");
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
-					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
+					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status_poly();
 					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
@@ -950,8 +950,33 @@ static void console_thread(void)
 							printk("Status: No calibration data available (auto-cal will trigger)\n");
 						}
 					}
+				} else if (strcmp(subcmd, "boot") == 0) {
+					char *boot_arg = strtok(NULL, " ");
+					if (boot_arg == NULL) {
+						// Show current boot calibration status
+						printk("Boot Calibration Status:\n");
+						printk("  Enabled: %s\n", retained->bootCalState.enabled ? "yes" : "no");
+						printk("  Completed: %s\n", retained->bootCalState.completed ? "yes" : "no");
+						printk("  Attempts: %u\n", retained->bootCalState.attempt_count);
+						printk("  D_offset valid: %s\n", retained->bootCalState.doffset_valid ? "yes" : "no");
+						if (retained->bootCalState.doffset_valid) {
+							printk("  D_offset: [%.5f, %.5f, %.5f] dps\n",
+								(double)retained->bootCalState.doffset[0],
+								(double)retained->bootCalState.doffset[1],
+								(double)retained->bootCalState.doffset[2]);
+						}
+						printk("\nUsage: tcal boot <on|off>\n");
+					} else if (strcmp(boot_arg, "on") == 0) {
+						sensor_boot_cal_set_enabled(true);
+						printk("Boot calibration enabled. Will calibrate on next boot.\n");
+					} else if (strcmp(boot_arg, "off") == 0) {
+						sensor_boot_cal_set_enabled(false);
+						printk("Boot calibration disabled.\n");
+					} else {
+						printk("Error: Invalid argument '%s'. Use: tcal boot <on|off>\n", boot_arg);
+					}
 				} else {
-					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off>\n", subcmd);
+					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off|boot on|boot off>\n", subcmd);
 				}
 			}
 		}

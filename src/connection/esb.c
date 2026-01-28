@@ -826,6 +826,15 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_PING:
 								cmd_name = "PING";
 								break;
+							case ESB_PONG_FLAG_FUSION_RESET:
+								cmd_name = "FUSION_RESET";
+								break;
+							case ESB_PONG_FLAG_TCAL_BOOT_ON:
+								cmd_name = "TCAL_BOOT_ON";
+								break;
+							case ESB_PONG_FLAG_TCAL_BOOT_OFF:
+								cmd_name = "TCAL_BOOT_OFF";
+								break;
 							}
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
 								LOG_INF(
@@ -1586,6 +1595,24 @@ static void esb_thread(void)
 				case ESB_PONG_FLAG_FUSION_RESET:
 					LOG_INF("Executing remote command: FUSION_RESET");
 					cmd_fusion_reset();
+					break;
+
+				case ESB_PONG_FLAG_TCAL_BOOT_ON:
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+					LOG_INF("Executing remote command: TCAL_BOOT_ON");
+					sensor_boot_cal_set_enabled(true);
+#else
+					LOG_WRN("Remote command: TCAL_BOOT_ON not supported (T-Cal disabled in config)");
+#endif
+					break;
+
+				case ESB_PONG_FLAG_TCAL_BOOT_OFF:
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+					LOG_INF("Executing remote command: TCAL_BOOT_OFF");
+					sensor_boot_cal_set_enabled(false);
+#else
+					LOG_WRN("Remote command: TCAL_BOOT_OFF not supported (T-Cal disabled in config)");
+#endif
 					break;
 
 				default:

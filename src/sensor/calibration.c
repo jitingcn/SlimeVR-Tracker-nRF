@@ -83,8 +83,8 @@ static int sensor_calibrate_mag(void);
 // =============================================================================
 
 // Boot calibration constants
-#define BOOT_CAL_TIME_WINDOW_START_MS 5000 // 5 seconds after boot
-#define BOOT_CAL_TIME_WINDOW_END_MS 30000  // 30 seconds after boot
+#define BOOT_CAL_TIME_WINDOW_START_MS 15000 // 15 seconds after boot
+#define BOOT_CAL_TIME_WINDOW_END_MS 50000  // 50 seconds after boot
 #define BOOT_CAL_MAX_ATTEMPTS 3            // Maximum retry attempts
 #define BOOT_CAL_MIN_CURVE_POINTS 2        // Minimum calibration points (MLS needs at least 2)
 
@@ -104,6 +104,7 @@ static int sensor_calibrate_mag(void);
 #define RUNTIME_CAL_FAILURE_COOLDOWN_MS 30000 // 30 seconds cooldown after calibration failure
 
 // Runtime calibration state (not persisted)
+static bool runtime_cal_enabled = false;       // Runtime calibration enabled (default: disabled)
 static int64_t runtime_cal_last_time = 0;      // Last time runtime calibration was performed
 static int64_t runtime_cal_rest_start = 0;     // When rest period started
 static bool runtime_cal_rest_tracking = false; // Currently tracking rest period
@@ -2725,7 +2726,6 @@ void sensor_boot_cal_get_doffset(float offset[3])
 // Reset boot calibration state (call before reboot/shutdown, not before WoM)
 void sensor_boot_cal_reset(void)
 {
-	retained->bootCalState.enabled = true;
 	retained->bootCalState.completed = false;
 	retained->bootCalState.attempt_count = 0;
 	retained->bootCalState.doffset_valid = false;
@@ -2805,6 +2805,11 @@ static int sensor_perform_runtime_calibration(void)
  */
 void sensor_runtime_calibration_check(bool is_resting)
 {
+	// Skip if runtime calibration is disabled
+	if (!runtime_cal_enabled) {
+		return;
+	}
+
 	// Skip if boot calibration hasn't completed yet
 	if (!retained->bootCalState.completed) {
 		return;
