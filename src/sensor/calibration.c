@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "system/system.h"
+#include "system/watchdog.h"
 #include "util.h"
 
 #include <math.h>
@@ -1008,6 +1009,8 @@ static bool wait_for_motion(bool motion, int samples)
 	LOG_INF("Accelerometer: %.5f %.5f %.5f", (double)last_a[0], (double)last_a[1], (double)last_a[2]);
 	for (int i = 0; i < samples + counts; i++) {
 		k_msleep(500);
+		/* Feed watchdog during long wait periods */
+		watchdog_feed(WDT_CHANNEL_CALIBRATION);
 		if (sensor_wait_accel(a, K_MSEC(1000))) {
 			return false;
 		}
@@ -1159,6 +1162,7 @@ static int sensor_offsetBias_internal(
 
 	// Collect samples with smart stop conditions
 	// Main loop runs at gyro ODR, accel checked periodically
+	int wdt_feed_counter = 0;
 	while (true) {
 		int64_t elapsed = k_uptime_get() - sampling_start_time;
 
@@ -1166,6 +1170,13 @@ static int sensor_offsetBias_internal(
 		if (elapsed >= max_sample_time_ms) {
 			LOG_INF("Max sampling time reached (%lld ms)", elapsed);
 			break;
+		}
+
+		// Feed watchdog periodically during long sampling (~every 1 second based on gyro ODR)
+		wdt_feed_counter++;
+		if (wdt_feed_counter >= (int)effective_gyro_odr) {
+			watchdog_feed(WDT_CHANNEL_CALIBRATION);
+			wdt_feed_counter = 0;
 		}
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
@@ -1359,6 +1370,9 @@ int sensor_6_sideBias(float a_inv[][3])
 		// 1. Wait for device to be stationary
 		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR); // Indicate searching for stationary state
 		while (1) {
+			/* Feed watchdog during user interaction wait */
+			watchdog_feed(WDT_CHANNEL_CALIBRATION);
+
 			if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 				return -2; // Timeout, magneto state not handled here
 			}
@@ -1432,6 +1446,8 @@ int sensor_6_sideBias(float a_inv[][3])
 
 			if (sample_idx % 50 == 0) {
 				printk(".");
+				/* Feed watchdog periodically during sampling */
+				watchdog_feed(WDT_CHANNEL_CALIBRATION);
 			}
 		}
 
@@ -1508,6 +1524,9 @@ static int sensor_calibration_request(int id)
 
 static void calibration_thread(void)
 {
+	/* Register calibration thread with watchdog - use long timeout for lengthy operations */
+	watchdog_register_thread(WDT_CHANNEL_CALIBRATION, 0);
+
 	sensor_calibration_read();
 	// TODO: be able to block the sensor while doing certain operations
 	// TODO: reset fusion on calibration finished
@@ -1559,6 +1578,10 @@ static void calibration_thread(void)
 			}
 			break;
 		}
+
+		/* Feed watchdog at end of each loop iteration */
+		watchdog_feed(WDT_CHANNEL_CALIBRATION);
+
 		if (requested < 0) {
 			k_msleep(5);
 		} else {

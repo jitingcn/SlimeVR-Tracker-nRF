@@ -24,6 +24,7 @@
 #include "sensor/calibration.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
+#include "system/watchdog.h"
 #include "connection.h"
 #include "zephyr/sys/time_units.h"
 
@@ -1090,6 +1091,10 @@ void esb_pair(void)
 			esb_flush_rx();
 			esb_flush_tx();
 			pair_ack_pending = false; // Reset before sending
+
+			/* Feed ESB watchdog during pairing to prevent timeout */
+			watchdog_feed(WDT_CHANNEL_ESB);
+
 			if (esb_send_pair_step(0)) {
 				k_msleep(100);
 				continue;
@@ -1376,6 +1381,9 @@ static void esb_thread(void)
 	int64_t start_time = k_uptime_get();
 #endif
 
+	/* Register ESB thread with watchdog */
+	watchdog_register_thread(WDT_CHANNEL_ESB, 0);
+
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
 
@@ -1604,6 +1612,9 @@ static void esb_thread(void)
 				);
 			}
 		}
+
+		/* Feed watchdog at end of each loop iteration */
+		watchdog_feed(WDT_CHANNEL_ESB);
 
 		k_msleep(100);
 	}

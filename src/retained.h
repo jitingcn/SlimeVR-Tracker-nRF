@@ -109,7 +109,25 @@ struct retained_data {
 	 * including this field.
 	 */
 	uint32_t crc;
+
+	/* ==== FIELDS BELOW ARE NOT INCLUDED IN CRC CALCULATION ==== */
+	/* These fields are intentionally placed after the CRC so they can
+	 * be modified without invalidating the CRC. This is important for
+	 * watchdog state which must persist across unexpected resets.
+	 */
+
+	// Watchdog state (persists across WDT resets, outside CRC validation)
+	struct {
+		uint8_t reset_count;           // WDT consecutive reset count
+		uint8_t last_failed_channel;   // Last channel that failed to feed
+		uint32_t last_reset_uptime;    // System uptime at last WDT reset (ms)
+		uint32_t total_wdt_resets;     // Cumulative WDT reset count (for debugging)
+		uint32_t magic;                // Magic number to validate watchdog state
+	} watchdog_state;
 };
+
+/* Magic number to validate watchdog state */
+#define WATCHDOG_STATE_MAGIC 0x57445447  /* "WDTG" in ASCII */
 
 /* Up to 4 KB of retained data allowed right now.
  */

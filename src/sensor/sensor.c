@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "system/system.h"
+#include "system/watchdog.h"
 #include "util.h"
 #include "connection/connection.h"
 #include "calibration.h"
@@ -908,6 +909,10 @@ void sensor_loop(void)
 		return;
 	main_running = true;
 	sys_interface_resume(); // make sure interfaces are enabled
+
+	/* Register sensor thread with watchdog */
+	watchdog_register_thread(WDT_CHANNEL_SENSOR, 0);
+
 	int err = sensor_init(); // Initialize IMUs and Fusion // TODO: run as thread before loop
 	// TODO: handle imu init error, maybe restart device?
 	// TODO: on failure to init, disable sensor interface
@@ -1531,6 +1536,9 @@ void sensor_loop(void)
 			}
 #endif
 		}
+
+		/* Feed watchdog at end of each loop iteration */
+		watchdog_feed(WDT_CHANNEL_SENSOR);
 
 		main_running = false;
 		int64_t time_delta = k_uptime_get() - time_begin;

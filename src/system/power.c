@@ -7,6 +7,7 @@
 #include "system.h"
 #include "led.h"
 #include "connection/esb.h"
+#include "watchdog.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -564,8 +565,27 @@ static void update_battery(int16_t battery_pptt)
 // TODO: call into other thread for handling the system state
 static void power_thread(void)
 {
+	static bool boot_success_checked = false;
+	static bool watchdog_registered = false;
+
+	/* Register power thread with watchdog (watchdog is initialized via SYS_INIT) */
+	if (!watchdog_registered) {
+		watchdog_registered = true;
+		watchdog_register_thread(WDT_CHANNEL_POWER, 0);
+	}
+
 	while (1)
 	{
+		/* After 60 seconds of successful operation, mark boot as successful.
+		 * This is long enough to ensure the system is truly stable before
+		 * clearing the WDT reset counter, allowing multiple WDT resets to
+		 * accumulate and eventually trigger DFU mode if there's a persistent issue.
+		 */
+		if (!boot_success_checked && k_uptime_get() > 60000) {
+			boot_success_checked = true;
+			watchdog_mark_boot_success();
+		}
+
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 		pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
@@ -678,6 +698,9 @@ static void power_thread(void)
 		else
 			set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 //			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SYSTEM);
+
+		/* Feed watchdog at end of each loop iteration */
+		watchdog_feed(WDT_CHANNEL_POWER);
 
 		k_msleep(100);
 	}

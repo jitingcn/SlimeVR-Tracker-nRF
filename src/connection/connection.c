@@ -25,6 +25,7 @@
 #include "esb.h"
 #include "build_defines.h"
 #include "hid.h"
+#include "system/watchdog.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -329,10 +330,16 @@ static int64_t last_sensor_quat_time = 0;
 void connection_thread(void)
 {
 	uint8_t esb_packet[17];
+
+	/* Register connection thread with watchdog */
+	watchdog_register_thread(WDT_CHANNEL_CONNECTION, 0);
+
 	// Adaptive PING interval based on connection state
 	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1) {
 		int64_t now = k_uptime_get();
+
+		watchdog_feed(WDT_CHANNEL_CONNECTION);
 
 		// Adjust PING interval based on connection health
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
