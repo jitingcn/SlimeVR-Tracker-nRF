@@ -113,11 +113,18 @@ static void print_sensor(void)
 		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching"
 	);
 	if (retained->mag_reg != 0xFF) {
-		printk(
-			"Interface: %s%s\n",
-			(retained->mag_reg & 0x80) ? "SPI" : "I2C",
-			(retained->mag_addr & 0x80) ? ", external" : ""
-		);
+		const char *mag_interface;
+		if (retained->mag_addr & 0x80) {
+			// External magnetometer (via IMU I2CM or passthrough)
+			if (retained->imu_reg & 0x80) {
+				mag_interface = "EXT (SPI IMU I2CM)";
+			} else {
+				mag_interface = "I2C (passthrough)";
+			}
+		} else {
+			mag_interface = (retained->mag_reg & 0x80) ? "SPI" : "I2C";
+		}
+		printk("Interface: %s\n", mag_interface);
 	}
 	printk("Address: 0x%02X%02X\n", retained->mag_addr, retained->mag_reg);
 #endif

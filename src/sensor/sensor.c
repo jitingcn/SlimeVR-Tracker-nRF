@@ -786,8 +786,12 @@ int sensor_init(void)
 // 55-66ms to wait, get chip ids, and setup icm (50ms spent waiting for accel and gyro to start)
 	if (mag_available && mag_enabled)
 	{
-		// TODO: need to flag passthrough enabled
-		sensor_imu->ext_passthrough(true); // reenable passthrough
+		// Only enable passthrough for I2C IMU with external magnetometer
+		// SPI IMU with external magnetometer uses I2CM (EXT interface), not passthrough
+		if ((sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80))
+		{
+			sensor_imu->ext_passthrough(true); // reenable passthrough for I2C IMU
+		}
 		err = sensor_mag->init(mag_initial_time, &mag_actual_time); // configure with ~200Hz ODR
 #if SENSOR_MAG_SPI_EXISTS
 		LOG_INF("Requested SPI frequency: %.2fMHz", (double)sensor_mag_spi_dev.config.frequency / 1000000.0);
