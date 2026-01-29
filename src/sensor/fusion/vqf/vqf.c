@@ -50,11 +50,10 @@ static void set_params()
 	init_params(&params);
 	params.biasClip = 4.0f;
 	params.tauMag = 10.0f; // best result for VQF from paper
-	// best result from optimizer
 	params.biasForgettingTime = 120.0f;
-	params.biasSigmaInit = 1.0f;
+	params.biasSigmaInit = 2.0f;
 	params.biasSigmaMotion = 0.3f;
-	params.biasSigmaRest = 0.08f;
+	params.biasSigmaRest = 0.05f;
 	params.biasVerticalForgettingFactor = 0.00001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
