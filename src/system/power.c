@@ -55,14 +55,15 @@ static bool adc_malfunction_detected = false;
 
 // ADC oscillation detection: track rapid large changes in battery SOC
 // Normal battery discharge/charge should not oscillate rapidly
-#define ADC_OSCILLATION_WINDOW 10      // Time window in seconds to track oscillations
+#define ADC_OSCILLATION_WINDOW 15      // Time window in seconds to track oscillations
 #define ADC_OSCILLATION_THRESHOLD 3    // Number of large jumps within window to flag as unstable
 static uint8_t adc_oscillation_count = 0;
 static int64_t adc_oscillation_window_start = 0;
 
 // Once ADC malfunction is detected, require stable readings for this many seconds before clearing
-#define ADC_RECOVERY_STABLE_TIME_MS 30000  // 30 seconds of stable readings to recover
+#define ADC_RECOVERY_STABLE_TIME_MS 60000  // 60 seconds of stable readings to recover
 static int64_t adc_malfunction_stable_start = 0;
+static bool adc_soc_jumped_this_cycle = false;  // Flag: SOC had a large change this cycle
 
 // VBUS detection can be unreliable on some boards (stays high after USB disconnect)
 // Track if VBUS detection seems unreliable based on SOC oscillation while VBUS is detected
@@ -538,8 +539,8 @@ static void update_battery(int16_t battery_pptt)
 		// Normal plugging/unplugging should not cause rapid back-and-forth oscillations
 		int64_t now = k_uptime_get();
 
-		// Any large SOC change resets the recovery timer - readings are still unstable
-		adc_malfunction_stable_start = 0;
+		// Mark that SOC jumped this cycle - recovery timer will be reset in power_thread
+		adc_soc_jumped_this_cycle = true;
 
 		if (now - adc_oscillation_window_start > ADC_OSCILLATION_WINDOW * 1000)
 		{
@@ -685,8 +686,11 @@ static void power_thread(void)
 		// Track previous oscillation count to detect new oscillations
 		uint8_t prev_oscillation_count = adc_oscillation_count;
 
+		// Reset per-cycle flag before update_battery
+		adc_soc_jumped_this_cycle = false;
+
 		// Update battery SOC early - this also runs ADC oscillation detection
-		// which may set adc_malfunction_detected flag
+		// which may set adc_malfunction_detected flag and adc_soc_jumped_this_cycle
 		update_battery(battery_pptt);
 
 		// VBUS reliability check #1: If SOC oscillates while VBUS claims to be connected,
@@ -696,7 +700,13 @@ static void power_thread(void)
 			if (!vbus_unreliable)
 			{
 				vbus_unreliable = true;
+#ifdef POWER_USBREGSTATUS_VBUSDETECT_Msk
+				uint32_t usbregstatus = NRF_POWER->USBREGSTATUS;
+				LOG_WRN("VBUS marked unreliable: SOC oscillation while VBUS=1, voltage=%dmV, USBREGSTATUS=0x%02x",
+						battery_mV, usbregstatus);
+#else
 				LOG_WRN("VBUS detection marked unreliable: SOC oscillation while VBUS detected");
+#endif
 			}
 		}
 
@@ -707,28 +717,13 @@ static void power_thread(void)
 			LOG_INF("VBUS detection restored: VBUS now reads as disconnected");
 		}
 
-		// Voltage-based charging detection
-		bool voltage_suggests_charging = battery_mV > 4300 && !abnormal_reading;
+		// Voltage-based charging detection (for ADC sanity check, not VBUS validation)
+		bool voltage_suggests_charging = battery_mV > 4200 && !abnormal_reading;
 
-		// VBUS reliability check #2: If VBUS claims connected but voltage is normal (not charging level),
-		// VBUS is likely stuck. Real charging should show voltage > 4.3V.
-		// Only trust VBUS if voltage confirms it (> 4.3V) or if it's marked reliable
-		bool usb_plugged = usb_plugged_raw && !vbus_unreliable && voltage_suggests_charging;
-
-		// Also: If VBUS is raw high but voltage is consistently normal, mark VBUS as unreliable
-		// (This catches the case where VBUS is stuck but there's no SOC oscillation)
-		if (usb_plugged_raw && !vbus_unreliable && !voltage_suggests_charging && battery_mV > 3000 && battery_mV < 4200)
-		{
-			// VBUS claims connected but voltage is in normal battery range (3.0V - 4.2V)
-			// Real charging would show > 4.3V. Mark VBUS as suspect.
-			adc_suspicious_count++;
-			if (adc_suspicious_count >= ADC_SANITY_CHECK_THRESHOLD)
-			{
-				vbus_unreliable = true;
-				LOG_WRN("VBUS detection marked unreliable: VBUS high but voltage %.2fV (expected >4.3V for charging)",
-						(double)battery_mV / 1000.0);
-			}
-		}
+		// Trust VBUS unless it's been marked unreliable due to SOC oscillation
+		// Normal charging: VBUS = true, voltage stable (may be 4.1V-4.3V depending on charge stage)
+		// VBUS stuck: VBUS = true, but SOC oscillates (already caught by oscillation check above)
+		bool usb_plugged = usb_plugged_raw && !vbus_unreliable;
 
 		bool hw_confirms_charging = charging || charged || usb_plugged;
 
@@ -751,21 +746,35 @@ static void power_thread(void)
 			// Start or continue recovery timer
 			if (adc_malfunction_detected || vbus_unreliable)
 			{
-				int64_t now = k_uptime_get();
-				if (adc_malfunction_stable_start == 0)
+				// If SOC jumped this cycle, reset recovery timer
+				if (adc_soc_jumped_this_cycle)
 				{
-					adc_malfunction_stable_start = now;
-					LOG_INF("Recovery started, waiting for %d ms of stable readings",
-							ADC_RECOVERY_STABLE_TIME_MS);
-				}
-				else if (now - adc_malfunction_stable_start >= ADC_RECOVERY_STABLE_TIME_MS)
-				{
-					adc_malfunction_detected = false;
-					vbus_unreliable = false;
+					if (adc_malfunction_stable_start != 0)
+					{
+						// Was in recovery, now reset due to new oscillation
+						LOG_INF("Recovery reset: SOC still oscillating");
+					}
 					adc_malfunction_stable_start = 0;
-					adc_suspicious_count = 0;
-					adc_oscillation_count = 0;
-					LOG_INF("Recovery complete after %d ms of stable readings", ADC_RECOVERY_STABLE_TIME_MS);
+				}
+				else
+				{
+					// No SOC jump this cycle - readings are stable
+					int64_t now = k_uptime_get();
+					if (adc_malfunction_stable_start == 0)
+					{
+						adc_malfunction_stable_start = now;
+						LOG_INF("Recovery started, waiting for %d ms of stable readings",
+								ADC_RECOVERY_STABLE_TIME_MS);
+					}
+					else if (now - adc_malfunction_stable_start >= ADC_RECOVERY_STABLE_TIME_MS)
+					{
+						adc_malfunction_detected = false;
+						vbus_unreliable = false;
+						adc_malfunction_stable_start = 0;
+						adc_suspicious_count = 0;
+						adc_oscillation_count = 0;
+						LOG_INF("Recovery complete after %d ms of stable readings", ADC_RECOVERY_STABLE_TIME_MS);
+					}
 				}
 			}
 			else if (adc_suspicious_count > 0)
@@ -782,7 +791,7 @@ static void power_thread(void)
 		{
 			if (!plugged && voltage_suggests_charging)
 				plugged = true;
-			else if ((plugged && battery_mV <= 4250) || abnormal_reading)
+			else if ((plugged && battery_mV <= 4000) || abnormal_reading)
 				plugged = false;
 		}
 		else
@@ -827,6 +836,14 @@ static void power_thread(void)
 				LOG_ERR("Battery voltage reading is abnormal");
 				set_status(SYS_STATUS_SYSTEM_ERROR, true);
 			}
+#ifdef POWER_USBREGSTATUS_VBUSDETECT_Msk
+			// Log USB power status at boot for debugging
+			uint32_t usbregstatus = NRF_POWER->USBREGSTATUS;
+			LOG_INF("USBREGSTATUS=0x%02x (VBUS=%d, OUTPUTRDY=%d)",
+					usbregstatus,
+					(usbregstatus & POWER_USBREGSTATUS_VBUSDETECT_Msk) ? 1 : 0,
+					(usbregstatus & POWER_USBREGSTATUS_OUTPUTRDY_Msk) ? 1 : 0);
+#endif
 			set_regulator(SYS_REGULATOR_DCDC); // Switch to DCDC
 			power_init = true;
 		}
@@ -846,9 +863,13 @@ static void power_thread(void)
 		else if (!battery_available || (battery_low && current_battery_pptt > 1000)) // hysteresis alrerady provided
 			battery_low = false;
 
-		sys_update_battery_tracker_voltage(battery_mV, device_plugged);
-		if (samples == BATTERY_SAMPLES || device_plugged)
-			sys_update_battery_tracker(current_battery_pptt, device_plugged);
+		// Skip battery tracker updates during ADC malfunction - data is unreliable
+		if (!adc_malfunction_detected)
+		{
+			sys_update_battery_tracker_voltage(battery_mV, device_plugged);
+			if (samples == BATTERY_SAMPLES || device_plugged)
+				sys_update_battery_tracker(current_battery_pptt, device_plugged);
+		}
 		calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
 
 		connection_update_battery(battery_available, device_plugged, device_charged, calibrated_battery_pptt, battery_mV);
