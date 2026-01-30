@@ -225,6 +225,28 @@ config SENSOR_GYRO_ODR
         A higher rate will increase the time to read and process sensor data.
         A lower rate is recommended for IMUs with poor gyrometer rate noise density. (Ex. BMI270, LSM6DS3TR-C)
 
+config SENSOR_GYRO_OVERSAMPLING
+    int "Gyroscope oversampling factor"
+    default 1
+    range 1 16
+    help
+        Number of gyroscope samples to average before fusion.
+        Set to 1 to disable oversampling.
+        For example, set SENSOR_GYRO_ODR=1600 and SENSOR_GYRO_OVERSAMPLING=4
+        to achieve effective 400Hz with noise reduction from 4x oversampling.
+        The effective gyro rate for fusion will be ODR / oversampling factor.
+
+config SENSOR_ACCEL_OVERSAMPLING
+    int "Accelerometer oversampling factor"
+    default 1
+    range 1 16
+    help
+        Number of accelerometer samples to average before fusion.
+        Set to 1 to disable oversampling.
+        For example, set SENSOR_ACCEL_ODR=1000 and SENSOR_ACCEL_OVERSAMPLING=10
+        to achieve effective 100Hz with noise reduction from 10x oversampling.
+        The effective accel rate for fusion will be ODR / oversampling factor.
+
 config SENSOR_ACCEL_FS
     int "Accelerometer full scale (g)"
     default 16
@@ -234,7 +256,7 @@ config SENSOR_ACCEL_FS
 
 config SENSOR_GYRO_FS
     int "Gyrometer full scale (dps)"
-    default 2000
+    default 4000
     help
         Requested gyrometer full scale. Actual scale will be raised to the nearest supported scale.
         A lower scale may improve noise performance, but is more likely to saturate.
@@ -305,41 +327,7 @@ config SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
         and improves over time as more points are added at different
         temperatures.
 
-choice
-    prompt "Temperature Calibration Method"
-    default SENSOR_TCAL_METHOD_AUTO
-    depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-    help
-        Choose the temperature calibration method:
-        - Polynomial: Uses global curve fitting (legacy method)
-        - Interpolation: Uses local linear interpolation (more accurate)
-        - Auto: Automatically chooses the best method based on data points
-
-config SENSOR_TCAL_METHOD_POLYNOMIAL
-    bool "Polynomial Fitting (Legacy)"
-    help
-        Use polynomial fitting for temperature calibration.
-        Fits a global polynomial curve through all calibration points.
-        May have larger errors in some temperature ranges.
-
-config SENSOR_TCAL_METHOD_INTERPOLATE
-    bool "Linear Interpolation"
-    help
-        Use linear interpolation for temperature calibration.
-        Interpolates between nearby calibration points.
-        More accurate with dense calibration points.
-
-config SENSOR_TCAL_METHOD_AUTO
-    bool "Auto (Hybrid Strategy)"
-    help
-        Automatically choose the best calibration method:
-        - Uses polynomial when data points are sparse (<5 points)
-        - Uses interpolation when data points are dense (>=5 points)
-        - Adapts to data quality for optimal accuracy
-
-endchoice
-
-menu "Polynomial Temperature Calibration Settings"
+menu "Temperature Calibration Settings"
 depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
 
 config SENSOR_POLY_DEGREE

@@ -24,6 +24,7 @@
 #include "sensor/calibration.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
+#include "system/watchdog.h"
 #include "connection.h"
 #include "zephyr/sys/time_units.h"
 
@@ -825,6 +826,15 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_PING:
 								cmd_name = "PING";
 								break;
+							case ESB_PONG_FLAG_FUSION_RESET:
+								cmd_name = "FUSION_RESET";
+								break;
+							case ESB_PONG_FLAG_TCAL_BOOT_ON:
+								cmd_name = "TCAL_BOOT_ON";
+								break;
+							case ESB_PONG_FLAG_TCAL_BOOT_OFF:
+								cmd_name = "TCAL_BOOT_OFF";
+								break;
 							}
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
 								LOG_INF(
@@ -1090,6 +1100,10 @@ void esb_pair(void)
 			esb_flush_rx();
 			esb_flush_tx();
 			pair_ack_pending = false; // Reset before sending
+
+			/* Feed ESB watchdog during pairing to prevent timeout */
+			watchdog_feed(WDT_CHANNEL_ESB);
+
 			if (esb_send_pair_step(0)) {
 				k_msleep(100);
 				continue;
@@ -1376,6 +1390,9 @@ static void esb_thread(void)
 	int64_t start_time = k_uptime_get();
 #endif
 
+	/* Register ESB thread with watchdog */
+	watchdog_register_thread(WDT_CHANNEL_ESB, 0);
+
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
 
@@ -1575,6 +1592,29 @@ static void esb_thread(void)
 					cmd_ping_start();
 					break;
 
+				case ESB_PONG_FLAG_FUSION_RESET:
+					LOG_INF("Executing remote command: FUSION_RESET");
+					cmd_fusion_reset();
+					break;
+
+				case ESB_PONG_FLAG_TCAL_BOOT_ON:
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+					LOG_INF("Executing remote command: TCAL_BOOT_ON");
+					sensor_boot_cal_set_enabled(true);
+#else
+					LOG_WRN("Remote command: TCAL_BOOT_ON not supported (T-Cal disabled in config)");
+#endif
+					break;
+
+				case ESB_PONG_FLAG_TCAL_BOOT_OFF:
+#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+					LOG_INF("Executing remote command: TCAL_BOOT_OFF");
+					sensor_boot_cal_set_enabled(false);
+#else
+					LOG_WRN("Remote command: TCAL_BOOT_OFF not supported (T-Cal disabled in config)");
+#endif
+					break;
+
 				default:
 					LOG_WRN("Unknown remote command: 0x%02X", received_remote_command);
 					break;
@@ -1604,6 +1644,9 @@ static void esb_thread(void)
 				);
 			}
 		}
+
+		/* Feed watchdog at end of each loop iteration */
+		watchdog_feed(WDT_CHANNEL_ESB);
 
 		k_msleep(100);
 	}

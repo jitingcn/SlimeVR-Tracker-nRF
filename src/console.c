@@ -113,11 +113,18 @@ static void print_sensor(void)
 		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching"
 	);
 	if (retained->mag_reg != 0xFF) {
-		printk(
-			"Interface: %s%s\n",
-			(retained->mag_reg & 0x80) ? "SPI" : "I2C",
-			(retained->mag_addr & 0x80) ? ", external" : ""
-		);
+		const char *mag_interface;
+		if (retained->mag_addr & 0x80) {
+			// External magnetometer (via IMU I2CM or passthrough)
+			if (retained->imu_reg & 0x80) {
+				mag_interface = "EXT (SPI IMU I2CM)";
+			} else {
+				mag_interface = "I2C (passthrough)";
+			}
+		} else {
+			mag_interface = (retained->mag_reg & 0x80) ? "SPI" : "I2C";
+		}
+		printk("Interface: %s\n", mag_interface);
 	}
 	printk("Address: 0x%02X%02X\n", retained->mag_addr, retained->mag_reg);
 #endif
@@ -225,6 +232,23 @@ static void print_sensor(void)
 #endif
 
 	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
+
+	// Display runtime range statistics summary
+	const sensor_range_stats_t *stats = sensor_get_range_stats();
+	if (stats->initialized) {
+		float gyro_peak = 0;
+		float accel_peak = 0;
+		for (int i = 0; i < 3; i++) {
+			float g_peak = fmaxf(fabsf(stats->gyro_min[i]), fabsf(stats->gyro_max[i]));
+			float a_peak = fmaxf(fabsf(stats->accel_min[i]), fabsf(stats->accel_max[i]));
+			if (g_peak > gyro_peak) gyro_peak = g_peak;
+			if (a_peak > accel_peak) accel_peak = a_peak;
+		}
+		printk("\nRuntime range peaks (this session):\n");
+		printk("  Gyro: %.2f deg/s\n", (double)gyro_peak);
+		printk("  Accel: %.3f g\n", (double)accel_peak);
+		printk("  Samples: %llu (use 'range' for details)\n", stats->sample_count);
+	}
 }
 
 static void print_sens_calibration_info(void)
@@ -489,7 +513,9 @@ static void print_help(void)
 	printk("Other:\n");
 	printk("  meow                       Meow!\n");
 	printk("  help                       Show this help message\n");
-	printk("  debug [duration]           Start sensor debug mode (default 10s)\n");
+	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 10s)\n");
+	printk("  range                      Show sensor range statistics (min/max values)\n");
+	printk("  range reset                Reset sensor range statistics\n");
 	printk("\n");
 	printk("Debug Commands:\n");
 	printk("  reset zro                  Reset ZRO calibration\n");
@@ -580,6 +606,8 @@ void cmd_sens_reset(void)
 void cmd_reset_zro(void)
 {
 	sensor_calibration_clear(NULL, NULL, true);
+	// Manual command: invalidate fusion to force quaternion recalculation
+	sensor_fusion_invalidate();
 }
 
 void cmd_reset_acc(void)
@@ -603,6 +631,13 @@ void cmd_reset_tcal(void)
 void cmd_reset_bat(void)
 {
 	sys_reset_battery_tracker();
+}
+
+void cmd_fusion_reset(void)
+{
+	printk("Resetting fusion (invalidating quaternion).\n");
+	sensor_fusion_invalidate();
+	printk("Fusion reset complete.\n");
 }
 
 void cmd_bat_debug(void)
@@ -670,6 +705,7 @@ static void console_thread(void)
 	uint8_t command_calibrate[] = "calibrate";
 	uint8_t command_help[] = "help";
 	uint8_t command_debug[] = "debug";
+	uint8_t command_range[] = "range";
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	uint8_t command_6_side[] = "6-side";
@@ -713,6 +749,7 @@ static void console_thread(void)
 	uint8_t command_reset_arg_tcal[] = "tcal";
 #endif
 	uint8_t command_reset_arg_bat[] = "bat";
+	uint8_t command_reset_arg_fusion[] = "fusion";
 	uint8_t command_reset_arg_all[] = "all";
 
 	while (1) {
@@ -789,14 +826,14 @@ static void console_thread(void)
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
-				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
+				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 			} else {
 				// Tokenize the argument string by space to get the subcommand
 				char *subcmd = strtok((char *)arg, " ");
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
-					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off>\n");
+					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status_poly();
 					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
@@ -920,8 +957,33 @@ static void console_thread(void)
 							printk("Status: No calibration data available (auto-cal will trigger)\n");
 						}
 					}
+				} else if (strcmp(subcmd, "boot") == 0) {
+					char *boot_arg = strtok(NULL, " ");
+					if (boot_arg == NULL) {
+						// Show current boot calibration status
+						printk("Boot Calibration Status:\n");
+						printk("  Enabled: %s\n", retained->bootCalState.enabled ? "yes" : "no");
+						printk("  Completed: %s\n", retained->bootCalState.completed ? "yes" : "no");
+						printk("  Attempts: %u\n", retained->bootCalState.attempt_count);
+						printk("  D_offset valid: %s\n", retained->bootCalState.doffset_valid ? "yes" : "no");
+						if (retained->bootCalState.doffset_valid) {
+							printk("  D_offset: [%.5f, %.5f, %.5f] dps\n",
+								(double)retained->bootCalState.doffset[0],
+								(double)retained->bootCalState.doffset[1],
+								(double)retained->bootCalState.doffset[2]);
+						}
+						printk("\nUsage: tcal boot <on|off>\n");
+					} else if (strcmp(boot_arg, "on") == 0) {
+						sensor_boot_cal_set_enabled(true);
+						printk("Boot calibration enabled. Will calibrate on next boot.\n");
+					} else if (strcmp(boot_arg, "off") == 0) {
+						sensor_boot_cal_set_enabled(false);
+						printk("Boot calibration disabled.\n");
+					} else {
+						printk("Error: Invalid argument '%s'. Use: tcal boot <on|off>\n", boot_arg);
+					}
 				} else {
-					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off>\n", subcmd);
+					printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off|boot on|boot off>\n", subcmd);
 				}
 			}
 		}
@@ -1007,18 +1069,24 @@ static void console_thread(void)
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
 			print_meow();
 		} else if (memcmp(line, command_debug, sizeof(command_debug)) == 0) {
-			uint32_t duration = 3; // Default 3 seconds
+			uint32_t duration = 1; // Default 1 second
 			if (arg) {
 				char *endptr;
 				long dur = strtol((char *)arg, &endptr, 10);
-				if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 30) {
+				if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 60) {
 					duration = (uint32_t)dur;
 				} else {
-					printk("Invalid duration. Using default 3 seconds.\n");
+					printk("Invalid duration (1-60s). Using default 1 seconds.\n");
 				}
 			}
 			sensor_debug_start(duration);
-			printk("Sensor debug started for %u seconds.\n", duration);
+		} else if (memcmp(line, command_range, sizeof(command_range)) == 0) {
+			if (arg && strcmp((char *)arg, "reset") == 0) {
+				sensor_reset_range_stats();
+				printk("Sensor range statistics have been reset.\n");
+			} else {
+				sensor_print_range_stats();
+			}
 		} else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
 			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0) {
 				cmd_reset_zro();
@@ -1045,6 +1113,8 @@ static void console_thread(void)
 #endif
 			else if (arg && memcmp(arg, command_reset_arg_bat, sizeof(command_reset_arg_bat)) == 0) {
 				cmd_reset_bat();
+			} else if (arg && memcmp(arg, command_reset_arg_fusion, sizeof(command_reset_arg_fusion)) == 0) {
+				cmd_fusion_reset();
 			} else if (arg && memcmp(arg, command_reset_arg_all, sizeof(command_reset_arg_all)) == 0) {
 				sys_clear();
 			} else {

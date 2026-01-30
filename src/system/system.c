@@ -3,6 +3,7 @@
 #include "sensor/calibration.h"
 #include "connection/connection.h"
 #include "connection/esb.h"
+#include "watchdog.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
@@ -380,6 +381,10 @@ static void button_thread(void)
 {
 	int num_presses = 0;
 	int64_t last_press = 0;
+
+	/* Register button thread with watchdog */
+	watchdog_register_thread(WDT_CHANNEL_BUTTON, 0);
+
 	while (1) {
 		if (press_time && k_uptime_get() - press_time > 50) // debounce
 		{
@@ -426,6 +431,10 @@ static void button_thread(void)
 				k_thread_abort(button_thread_id);
 			}
 		}
+
+		/* Feed watchdog at end of each loop iteration */
+		watchdog_feed(WDT_CHANNEL_BUTTON);
+
 		k_msleep(20);
 	}
 }

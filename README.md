@@ -3,9 +3,8 @@ Firmware for Nordic nRF52 / nRF54L Series SoC.
 
 Please see https://docs.slimevr.dev/smol-slimes for more information and usage.
 
-## Hardware
-- https://github.com/SlimeVR/SlimeVR-Tracker-nRF-PCB
-- https://oshwlab.com/sctanf/slimenrf3
+## Note
+This repository only tested with Promicro Stacked Slime and Styria boards, other boards may require additional configuration.
 
 ## License
 Unless otherwise specified, all code in this repository is dual-licensed under either:

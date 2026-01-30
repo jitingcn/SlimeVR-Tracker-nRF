@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "system/system.h"
+#include "system/watchdog.h"
 #include "util.h"
 #include "connection/connection.h"
 #include "calibration.h"
@@ -41,14 +42,24 @@ typedef struct {
 	bool enabled;
 	int64_t start_time;
 	int64_t duration_ms;
-	int64_t last_output_time;
-	uint32_t output_interval_ms;
-	uint32_t sample_count;
+	uint32_t accel_count;         // Count accel samples since last output
+	uint32_t output_every_n;      // Output every N accel samples
+	uint32_t output_count;        // Total output count
 } sensor_debug_state_t;
 
 static sensor_debug_state_t debug_state = {
 	.enabled = false,
-	.output_interval_ms = 100  // Default 100ms
+	.output_every_n = 2  // Default: output every 2 accel samples
+};
+
+// Sensor range tracking state - records min/max values during runtime (not persisted)
+static sensor_range_stats_t range_stats = {
+	.gyro_max = {-INFINITY, -INFINITY, -INFINITY},
+	.gyro_min = {INFINITY, INFINITY, INFINITY},
+	.accel_max = {-INFINITY, -INFINITY, -INFINITY},
+	.accel_min = {INFINITY, INFINITY, INFINITY},
+	.sample_count = 0,
+	.initialized = false
 };
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(imu_spi), okay)
@@ -101,6 +112,10 @@ static int64_t last_temp_time = -1000;
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
+static int64_t last_retained_save_time = 0;
+
+// Periodic retained save interval (ms) for crash recovery
+#define RETAINED_SAVE_INTERVAL_MS 5000
 
 static float max_gyro_speed_square;
 static bool mag_use_oneshot;
@@ -109,6 +124,25 @@ static bool mag_skip_oneshot;
 static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
+
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+// Gyroscope oversampling state for noise reduction
+// Accumulates gyro samples and averages them before fusion
+static float gyro_oversample_sum[3] = {0};
+static int gyro_oversample_count = 0;
+static float gyro_effective_time; // Effective time step for fusion after oversampling
+#endif
+
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+// Accelerometer oversampling state for noise reduction
+// Accumulates accel samples and averages them before fusion
+static float accel_oversample_sum[3] = {0};
+static int accel_oversample_count = 0;
+static float accel_effective_time; // Effective time step for fusion after oversampling
+#endif
+
+static float accel_actual_range;  // Actual accelerometer full scale range (g)
+static float gyro_actual_range;   // Actual gyroscope full scale range (deg/s)
 
 static float sensor_actual_time;
 static int16_t sensor_fifo_threshold;
@@ -159,6 +193,8 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 static int sensor_scan(void);
 static int sensor_init(void);
 static void sensor_loop(void);
+static void sensor_update_range_stats_gyro(float g[3]);
+static void sensor_update_range_stats_accel(float a[3]);
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
 
@@ -550,16 +586,43 @@ uint8_t sensor_setup_WOM(void)
 
 void sensor_fusion_invalidate(void)
 {
-	main_imu_restart(); // reinitialize fusion
+	main_imu_restart(); // reinitialize fusion (resets quaternion to identity)
 	if (sensor_fusion_init)
 	{ // clear fusion gyro offset
-		float g_off[3] = {0};
-		sensor_fusion->set_gyro_bias(g_off);
+		sensor_fusion_update_bias(NULL);
 		sensor_retained_write();
 	}
 	else
 	{ // TODO: always clearing the fusion?
 		retained->fusion_id = 0; // Invalidate retained fusion data
+		retained_update();
+	}
+}
+
+void sensor_fusion_update_bias(float *g_off)
+{
+	// Lightweight bias update that preserves quaternion orientation
+	// Use this after calibration changes that only affect bias/offset values
+	// Pass NULL or a float[3] with the new bias values
+	if (sensor_fusion_init)
+	{
+		float bias[3] = {0};
+		if (g_off != NULL)
+		{
+			// Use provided bias values
+			bias[0] = g_off[0];
+			bias[1] = g_off[1];
+			bias[2] = g_off[2];
+		}
+		sensor_fusion->set_gyro_bias(bias);
+		sensor_retained_write();
+		LOG_INF("Fusion bias updated: [%.3f, %.3f, %.3f]",
+			(double)bias[0], (double)bias[1], (double)bias[2]);
+	}
+	else
+	{
+		// If fusion is not initialized yet, just invalidate retained data
+		retained->fusion_id = 0;
 		retained_update();
 	}
 }
@@ -702,7 +765,6 @@ int sensor_init(void)
 	// set FS/range
 	float accel_range = CONFIG_SENSOR_ACCEL_FS;
 	float gyro_range = CONFIG_SENSOR_GYRO_FS;
-	float accel_actual_range, gyro_actual_range;
 	sensor_imu->update_fs(accel_range, gyro_range, &accel_actual_range, &gyro_actual_range);
 	LOG_INF("Accelerometer range: %.2fg", (double)accel_actual_range);
 	LOG_INF("Gyroscope range: %.2fdps", (double)gyro_actual_range);
@@ -723,8 +785,12 @@ int sensor_init(void)
 // 55-66ms to wait, get chip ids, and setup icm (50ms spent waiting for accel and gyro to start)
 	if (mag_available && mag_enabled)
 	{
-		// TODO: need to flag passthrough enabled
-		sensor_imu->ext_passthrough(true); // reenable passthrough
+		// Only enable passthrough for I2C IMU with external magnetometer
+		// SPI IMU with external magnetometer uses I2CM (EXT interface), not passthrough
+		if ((sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80))
+		{
+			sensor_imu->ext_passthrough(true); // reenable passthrough for I2C IMU
+		}
 		err = sensor_mag->init(mag_initial_time, &mag_actual_time); // configure with ~200Hz ODR
 #if SENSOR_MAG_SPI_EXISTS
 		LOG_INF("Requested SPI frequency: %.2fMHz", (double)sensor_mag_spi_dev.config.frequency / 1000000.0);
@@ -735,6 +801,28 @@ int sensor_init(void)
 // 0-1ms to setup mmc
 	}
 	LOG_INF("Initialized sensors");
+
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	// Initialize gyro oversampling state
+	gyro_oversample_count = 0;
+	for (int i = 0; i < 3; i++)
+		gyro_oversample_sum[i] = 0;
+	// Calculate effective time step for fusion after oversampling
+	gyro_effective_time = gyro_actual_time * CONFIG_SENSOR_GYRO_OVERSAMPLING;
+	LOG_INF("Gyro oversampling: %dx, effective rate: %.2fHz",
+		CONFIG_SENSOR_GYRO_OVERSAMPLING, 1.0 / (double)gyro_effective_time);
+#endif
+
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	// Initialize accel oversampling state
+	accel_oversample_count = 0;
+	for (int i = 0; i < 3; i++)
+		accel_oversample_sum[i] = 0;
+	// Calculate effective time step for fusion after oversampling
+	accel_effective_time = accel_actual_time * CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+	LOG_INF("Accel oversampling: %dx, effective rate: %.2fHz",
+		CONFIG_SENSOR_ACCEL_OVERSAMPLING, 1.0 / (double)accel_effective_time);
+#endif
 
 	// Setup fusion
 	sensor_retained_read(); // TODO: useless
@@ -748,7 +836,19 @@ int sensor_init(void)
 	}
 	else
 	{
-		sensor_fusion->init(gyro_actual_time, accel_actual_time, mag_initial_time); // TODO: using initial time since mag are not polled at the actual rate
+		// Determine effective gyro time step for fusion
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+		float fusion_gyro_time = gyro_effective_time;
+#else
+		float fusion_gyro_time = gyro_actual_time;
+#endif
+		// Determine effective accel time step for fusion
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+		float fusion_accel_time = accel_effective_time;
+#else
+		float fusion_accel_time = accel_actual_time;
+#endif
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, mag_initial_time); // TODO: using initial time since mag are not polled at the actual rate
 	}
 
 	sensor_calibration_update_sensor_ids(sensor_imu_id);
@@ -812,6 +912,10 @@ void sensor_loop(void)
 		return;
 	main_running = true;
 	sys_interface_resume(); // make sure interfaces are enabled
+
+	/* Register sensor thread with watchdog */
+	watchdog_register_thread(WDT_CHANNEL_SENSOR, 0);
+
 	int err = sensor_init(); // Initialize IMUs and Fusion // TODO: run as thread before loop
 	// TODO: handle imu init error, maybe restart device?
 	// TODO: on failure to init, disable sensor interface
@@ -862,24 +966,41 @@ void sensor_loop(void)
 #endif
 
 			// Read gyroscope (FIFO)
+			// Buffer size calculation:
+			// - Worst case is ICM 20 byte packet
+			// - At 1600Hz gyro ODR with 6ms update interval: 1600 * 0.006 = ~10 packets
+			// - At 1000Hz ODR with 33ms low power update: 1000 * 0.033 = ~33 packets
+			// - At 1000Hz ODR with 100ms low power 2 update: 1000 * 0.100 = ~100 packets
+			// - With 4x oversampling at 1600Hz: effectively same as 400Hz but with 4x raw packets
 #if CONFIG_SENSOR_USE_LOW_POWER_2
-			uint8_t* rawData = (uint8_t*)k_malloc(1900);  // Limit FIFO read to 2048 bytes (worst case is ICM 20 byte packet at 1000Hz and 100ms update time)
+			uint8_t* rawData = (uint8_t*)k_malloc(2048);  // Increased for oversampling: worst case ~100 packets * 20 bytes = 2000 bytes
 			if (rawData == NULL)
 			{
 				LOG_ERR("Failed to allocate memory for FIFO buffer");
 				set_status(SYS_STATUS_SENSOR_ERROR, true);
 				main_ok = false;
 			}
-			uint16_t packets = sensor_imu->fifo_read(rawData, 1900); // TODO: name this better?
+			uint16_t packets = sensor_imu->fifo_read(rawData, 2048);
+#elif CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+			// With oversampling, we read more raw gyro samples per update interval
+			// E.g., 1600Hz * 6ms = ~10 packets, but need margin for timing jitter
+			uint8_t* rawData = (uint8_t*)k_malloc(1536);  // ~75 packets * 20 bytes, enough for 4x oversampling
+			if (rawData == NULL)
+			{
+				LOG_ERR("Failed to allocate memory for FIFO buffer");
+				set_status(SYS_STATUS_SENSOR_ERROR, true);
+				main_ok = false;
+			}
+			uint16_t packets = sensor_imu->fifo_read(rawData, 1536);
 #else
-			uint8_t* rawData = (uint8_t*)k_malloc(1024);  // Limit FIFO read to 768 bytes (worst case is ICM 20 byte packet at 1000Hz and 33ms update time)
+			uint8_t* rawData = (uint8_t*)k_malloc(1024);  // Standard: ~50 packets * 20 bytes
 			if (rawData == NULL)
 			{
 				LOG_ERR("Failed to allocate memory for FIFO buffer");
 				set_status(SYS_STATUS_SENSOR_ERROR, true);
 				main_ok = false;
 			}
-			uint16_t packets = sensor_imu->fifo_read(rawData, 1024); // TODO: name this better?
+			uint16_t packets = sensor_imu->fifo_read(rawData, 1024);
 #endif
 
 			// Debug info
@@ -960,11 +1081,73 @@ void sensor_loop(void)
 #endif
 					// Accumulate raw gyro for debug
 					if (sensor_debug_is_active()) {
-						for (int i = 0; i < 3; i++)
-							debug_raw_g_sum[i] += raw_g[i];
+						for (int j = 0; j < 3; j++)
+							debug_raw_g_sum[j] += raw_g[j];
 						debug_g_samples++;
 					}
 
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+					// Gyroscope oversampling: accumulate raw samples BEFORE calibration
+					// This is the optimal position because:
+					// 1. Noise reduction is most effective on raw data before any processing
+					// 2. Calibration (bias/sensitivity) are linear operations, so order doesn't affect result mathematically
+					// 3. More efficient: calibration operations run once per averaged sample instead of per raw sample
+					for (int j = 0; j < 3; j++)
+						gyro_oversample_sum[j] += raw_g[j];
+					gyro_oversample_count++;
+
+					// When we have enough samples, compute average and then apply calibration
+					if (gyro_oversample_count >= CONFIG_SENSOR_GYRO_OVERSAMPLING)
+					{
+						float g_avg[3];
+						for (int j = 0; j < 3; j++)
+						{
+							g_avg[j] = gyro_oversample_sum[j] / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+							gyro_oversample_sum[j] = 0; // Reset accumulator
+						}
+						gyro_oversample_count = 0;
+
+						// Now apply calibration to the averaged data
+						sensor_calibration_process_gyro(g_avg);
+
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+						// Apply sensitivity scaling
+						if (retained) {
+							g_avg[0] *= retained->gyroSensScale[0];
+							g_avg[1] *= retained->gyroSensScale[1];
+							g_avg[2] *= retained->gyroSensScale[2];
+						}
+#endif
+
+						// Accumulate calibrated gyro for debug (after zero bias and sensitivity calibration)
+						if (sensor_debug_is_active()) {
+							for (int j = 0; j < 3; j++)
+								debug_cal_g_sum[j] += g_avg[j];
+						}
+
+						// Update range statistics with calibrated gyro data
+						sensor_update_range_stats_gyro(g_avg);
+
+						// Process fusion with averaged and calibrated gyro data
+						sensor_fusion->update_gyro(g_avg, gyro_effective_time);
+						g_count++;
+
+						if (mag_available && mag_enabled)
+						{
+							// Get fusion's corrected gyro data (or get gyro bias from fusion) and use it here
+							float g_off[3] = {};
+							sensor_fusion->get_gyro_bias(g_off);
+							for (int j = 0; j < 3; j++)
+								g_off[j] = g_avg[j] - g_off[j];
+
+							// Get the highest gyro speed
+							float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1] + g_off[2] * g_off[2];
+							if (gyro_speed_square > max_gyro_speed_square)
+								max_gyro_speed_square = gyro_speed_square;
+						}
+					}
+#else
+					// No oversampling: apply calibration directly
 					sensor_calibration_process_gyro(raw_g);
 					float gx = raw_g[0];
 					float gy = raw_g[1];
@@ -982,11 +1165,14 @@ void sensor_loop(void)
 
 					// Accumulate calibrated gyro for debug (after zero bias and sensitivity calibration)
 					if (sensor_debug_is_active()) {
-						for (int i = 0; i < 3; i++)
-							debug_cal_g_sum[i] += g[i];
+						for (int j = 0; j < 3; j++)
+							debug_cal_g_sum[j] += g[j];
 					}
 
-					// Process fusion
+					// Update range statistics with calibrated gyro data
+					sensor_update_range_stats_gyro(g);
+
+					// Process fusion directly
 					sensor_fusion->update_gyro(g, gyro_actual_time);
 
 					g_count++;
@@ -996,14 +1182,15 @@ void sensor_loop(void)
 						// Get fusion's corrected gyro data (or get gyro bias from fusion) and use it here
 						float g_off[3] = {};
 						sensor_fusion->get_gyro_bias(g_off);
-						for (int i = 0; i < 3; i++)
-							g_off[i] = g[i] - g_off[i];
+						for (int j = 0; j < 3; j++)
+							g_off[j] = g[j] - g_off[j];
 
 						// Get the highest gyro speed
 						float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1] + g_off[2] * g_off[2];
 						if (gyro_speed_square > max_gyro_speed_square)
 							max_gyro_speed_square = gyro_speed_square;
 					}
+#endif
 				}
 
 				if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0)
@@ -1019,6 +1206,49 @@ void sensor_loop(void)
 						debug_a_samples++;
 					}
 
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+					// Accelerometer oversampling: accumulate raw samples BEFORE calibration
+					// This is the optimal position because:
+					// 1. Noise reduction is most effective on raw data before any processing
+					// 2. Calibration (bias/scale) are linear operations, so order doesn't affect result mathematically
+					// 3. More efficient: calibration operations run once per averaged sample instead of per raw sample
+					for (int j = 0; j < 3; j++)
+						accel_oversample_sum[j] += raw_a[j];
+					accel_oversample_count++;
+
+					// When we have enough samples, compute average and then apply calibration
+					if (accel_oversample_count >= CONFIG_SENSOR_ACCEL_OVERSAMPLING)
+					{
+						float a_avg[3];
+						for (int j = 0; j < 3; j++)
+						{
+							a_avg[j] = accel_oversample_sum[j] / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+							accel_oversample_sum[j] = 0; // Reset accumulator
+						}
+						accel_oversample_count = 0;
+
+						// Now apply calibration to the averaged data
+						// Always call sensor_calibration_process_accel to update sample buffers
+						// This is needed for calibration routines (e.g., wait_for_motion) even without 6-side calibration
+						sensor_calibration_process_accel(a_avg);
+
+						float ax = a_avg[0];
+						float ay = a_avg[1];
+						float az = a_avg[2];
+						float a[] = {ax, ay, az};
+
+						// Update range statistics with calibrated accel data
+						sensor_update_range_stats_accel(a);
+
+						// Process fusion with averaged and calibrated accel data
+						sensor_fusion->update_accel(a, accel_effective_time);
+
+						for (int i = 0; i < 3; i++)
+							a_sum[i] += a[i];
+						a_count++;
+					}
+#else
+					// No oversampling: apply calibration directly
 					// Always call sensor_calibration_process_accel to update sample buffers
 					// This is needed for calibration routines (e.g., wait_for_motion) even without 6-side calibration
 					sensor_calibration_process_accel(raw_a);
@@ -1028,12 +1258,16 @@ void sensor_loop(void)
 					float az = raw_a[2];
 					float a[] = {ax, ay, az};
 
+					// Update range statistics with calibrated accel data
+					sensor_update_range_stats_accel(a);
+
 					// Process fusion
 					sensor_fusion->update_accel(a, accel_actual_time);
 
 					for (int i = 0; i < 3; i++)
 						a_sum[i] += a[i];
 					a_count++;
+#endif
 				}
 
 				processed_packets++;
@@ -1107,8 +1341,19 @@ void sensor_loop(void)
 			}
 
 			// Also check if expected number of timesteps when using FIFO threshold, if FIFO threshold is being used
+			// With gyro oversampling enabled, the expected fusion timesteps is reduced by the oversampling factor
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+			int expected_timesteps = sensor_fifo_threshold / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+			// Allow some tolerance for partial accumulation at boundaries
+			if (sensor_fifo_threshold && processed_timesteps &&
+			    (processed_timesteps < expected_timesteps - 1 || processed_timesteps > expected_timesteps + 1))
+				LOG_WRN("Expected ~%d timestep%s (oversampling %dx), got %d",
+					expected_timesteps, expected_timesteps == 1 ? "" : "s",
+					CONFIG_SENSOR_GYRO_OVERSAMPLING, processed_timesteps);
+#else
 			if (sensor_fifo_threshold && processed_timesteps && processed_timesteps != sensor_fifo_threshold)
 				LOG_WRN("Expected %d timestep%s, got %d", sensor_fifo_threshold, sensor_fifo_threshold == 1 ? "" : "s", processed_timesteps);
+#endif
 
 			// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
 //			sensor_fusion->update_gyro_sanity(g, m);
@@ -1161,13 +1406,14 @@ void sensor_loop(void)
 				sys_interface_suspend();
 			}
 
-			// Debug mode output - after all fusion processing is complete
-			if (sensor_debug_is_active()) {
-				int64_t current_time = k_uptime_get();
-				if (current_time - debug_state.last_output_time >= debug_state.output_interval_ms) {
-					debug_state.last_output_time = current_time;
-					debug_state.sample_count++;
+			// Debug mode output - based on accel sample count, not time interval
+			if (sensor_debug_is_active() && debug_a_samples > 0) {
+				debug_state.accel_count += debug_a_samples;
+				if (debug_state.accel_count >= debug_state.output_every_n) {
+					debug_state.accel_count = 0;
+					debug_state.output_count++;
 
+					int64_t current_time = k_uptime_get();
 					float elapsed_sec = (float)(current_time - debug_state.start_time) / 1000.0f;
 
 					// Calculate average raw and calibrated data
@@ -1192,24 +1438,30 @@ void sensor_loop(void)
 #endif
 
 					// Compact output format with raw, calibrated, and fused data
-					printk("[%.1fs] RAW: A[%.2f,%.2f,%.2f] G[%.1f,%.1f,%.1f] T:%.1fC | ",
+					printk("[%.2fs] RAW: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f] T:%.2fC\n",
 						(double)elapsed_sec,
 						(double)avg_raw_a[0], (double)avg_raw_a[1], (double)avg_raw_a[2],
 						(double)avg_raw_g[0], (double)avg_raw_g[1], (double)avg_raw_g[2],
 						(double)temp);
 
-					printk("CAL: A[%.2f,%.2f,%.2f] G[%.1f,%.1f,%.1f] | ",
+					printk("     CAL: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f]\n",
 						(double)a[0], (double)a[1], (double)a[2],
 						(double)avg_cal_g[0], (double)avg_cal_g[1], (double)avg_cal_g[2]);
 
 #if CONFIG_SENSOR_USE_VQF
-					printk("VQF: Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f] Rest:%c Bias[%.2f,%.2f,%.2f]°/s\n",
+					printk("     VQF: Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 						(double)q[0], (double)q[1], (double)q[2], (double)q[3],
-						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2],
+						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2]);
+					printk("     Rest:%c RestDev[G:%.3f,A:%.3f] Bias[%.3f,%.3f,%.3f]°/s Sigma:%.3f°/s Delta:%.2f°\n",
 						vqf_info.rest_detected ? 'Y' : 'N',
-						(double)vqf_info.bias[0], (double)vqf_info.bias[1], (double)vqf_info.bias[2]);
+						(double)vqf_info.rest_deviations[0], (double)vqf_info.rest_deviations[1],
+						(double)vqf_info.bias[0], (double)vqf_info.bias[1], (double)vqf_info.bias[2],
+						(double)vqf_info.bias_sigma, (double)vqf_info.delta);
+					printk("     MagDist:%c MagRefNorm:%.3f MagRefDip:%.2f°\n",
+						vqf_info.mag_dist_detected ? 'Y' : 'N',
+						(double)vqf_info.mag_ref_norm, (double)vqf_info.mag_ref_dip);
 #else
-					printk("Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
+					printk("     Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 						(double)q[0], (double)q[1], (double)q[2], (double)q[3],
 						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2]);
 #endif
@@ -1223,7 +1475,7 @@ void sensor_loop(void)
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
 			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005f) : q_epsilon(q, last_q, 0.05f);
-			int64_t min_interval = 2000;
+			int64_t min_interval = 1000;
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 			if (send_quat_data || send_lin_accel_data || force_send_by_time)
@@ -1250,6 +1502,10 @@ void sensor_loop(void)
 			// Check for boot calibration (higher priority than auto calibration)
 			sensor_tcal_boot_calibration_check();
 
+			// Check for runtime periodic calibration (when device is resting for extended period)
+			// This helps maintain accuracy during long usage sessions by updating D_offset
+			sensor_runtime_calibration_check(resting);
+
 			// Check for automatic temperature calibration (only when device is resting)
 			if (resting) {
 				float current_temp = temp;
@@ -1266,6 +1522,14 @@ void sensor_loop(void)
 			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
 				sensor_request_calibration_mag();
 
+			// Periodic retained save for crash recovery
+			if (now - last_retained_save_time >= RETAINED_SAVE_INTERVAL_MS)
+			{
+				sensor_retained_write();
+				last_retained_save_time = now;
+				LOG_DBG("Periodic retained save completed");
+			}
+
 
 #if DEBUG
 			if (valid_acquisition)
@@ -1275,6 +1539,9 @@ void sensor_loop(void)
 			}
 #endif
 		}
+
+		/* Feed watchdog at end of each loop iteration */
+		watchdog_feed(WDT_CHANNEL_SENSOR);
 
 		main_running = false;
 		int64_t time_delta = k_uptime_get() - time_begin;
@@ -1367,7 +1634,21 @@ void main_imu_wakeup(void)
 void main_imu_restart(void)
 {
 	if (main_ok) // only restart fusion if initialized
-		sensor_fusion->init(gyro_actual_time, accel_actual_time, 6 / 1000.0f); // TODO: using default initial time
+	{
+		// Determine effective gyro time step for fusion (must match sensor_init logic)
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+		float fusion_gyro_time = gyro_effective_time;
+#else
+		float fusion_gyro_time = gyro_actual_time;
+#endif
+		// Determine effective accel time step for fusion
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+		float fusion_accel_time = accel_effective_time;
+#else
+		float fusion_accel_time = accel_actual_time;
+#endif
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, 6 / 1000.0f); // TODO: using default initial time
+	}
 }
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
@@ -1406,17 +1687,20 @@ void sensor_debug_start(uint32_t duration_sec)
 	debug_state.enabled = true;
 	debug_state.start_time = k_uptime_get();
 	debug_state.duration_ms = duration_sec * 1000;
-	debug_state.last_output_time = 0;
-	debug_state.sample_count = 0;
+	debug_state.accel_count = 0;
+	debug_state.output_count = 0;
+	// output_every_n is already set to 5 by default
 
-	LOG_INF("Debug mode started for %u seconds", duration_sec);
+	float accel_odr = sensor_get_accel_odr();
+	LOG_INF("Debug mode started for %u seconds (accel ODR: %.1fHz, output every %u samples)",
+		duration_sec, (double)accel_odr, debug_state.output_every_n);
 }
 
 void sensor_debug_stop(void)
 {
 	if (debug_state.enabled) {
 		debug_state.enabled = false;
-		LOG_INF("Debug mode stopped. %u samples captured", debug_state.sample_count);
+		LOG_INF("Debug mode stopped. %u outputs generated", debug_state.output_count);
 	}
 }
 
@@ -1431,4 +1715,127 @@ bool sensor_debug_is_active(void)
 		return true;
 	}
 	return false;
+}
+
+// Sensor range tracking functions
+const sensor_range_stats_t* sensor_get_range_stats(void)
+{
+	return &range_stats;
+}
+
+void sensor_reset_range_stats(void)
+{
+	for (int i = 0; i < 3; i++) {
+		range_stats.gyro_max[i] = -INFINITY;
+		range_stats.gyro_min[i] = INFINITY;
+		range_stats.accel_max[i] = -INFINITY;
+		range_stats.accel_min[i] = INFINITY;
+	}
+	range_stats.sample_count = 0;
+	range_stats.initialized = false;
+	LOG_INF("Range statistics reset");
+}
+
+// Internal function to update range statistics with new gyro data
+static void sensor_update_range_stats_gyro(float g[3])
+{
+	if (!range_stats.initialized) {
+		range_stats.initialized = true;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (g[i] > range_stats.gyro_max[i]) {
+			range_stats.gyro_max[i] = g[i];
+		}
+		if (g[i] < range_stats.gyro_min[i]) {
+			range_stats.gyro_min[i] = g[i];
+		}
+	}
+}
+
+// Internal function to update range statistics with new accel data
+static void sensor_update_range_stats_accel(float a[3])
+{
+	if (!range_stats.initialized) {
+		range_stats.initialized = true;
+	}
+	for (int i = 0; i < 3; i++) {
+		if (a[i] > range_stats.accel_max[i]) {
+			range_stats.accel_max[i] = a[i];
+		}
+		if (a[i] < range_stats.accel_min[i]) {
+			range_stats.accel_min[i] = a[i];
+		}
+	}
+	range_stats.sample_count++;
+}
+
+void sensor_print_range_stats(void)
+{
+	if (!range_stats.initialized) {
+		printk("Range statistics not initialized (no data collected yet)\n");
+		return;
+	}
+
+	printk("\n=== Sensor Range Statistics ===\n");
+	printk("Total samples: %llu\n", range_stats.sample_count);
+
+	printk("\nGyroscope (deg/s):\n");
+	printk("  X: min=%.2f, max=%.2f, peak=%.2f\n",
+		(double)range_stats.gyro_min[0],
+		(double)range_stats.gyro_max[0],
+		(double)fmaxf(fabsf(range_stats.gyro_min[0]), fabsf(range_stats.gyro_max[0])));
+	printk("  Y: min=%.2f, max=%.2f, peak=%.2f\n",
+		(double)range_stats.gyro_min[1],
+		(double)range_stats.gyro_max[1],
+		(double)fmaxf(fabsf(range_stats.gyro_min[1]), fabsf(range_stats.gyro_max[1])));
+	printk("  Z: min=%.2f, max=%.2f, peak=%.2f\n",
+		(double)range_stats.gyro_min[2],
+		(double)range_stats.gyro_max[2],
+		(double)fmaxf(fabsf(range_stats.gyro_min[2]), fabsf(range_stats.gyro_max[2])));
+
+	// Calculate overall peak gyro value
+	float gyro_peak = 0;
+	for (int i = 0; i < 3; i++) {
+		float axis_peak = fmaxf(fabsf(range_stats.gyro_min[i]), fabsf(range_stats.gyro_max[i]));
+		if (axis_peak > gyro_peak) {
+			gyro_peak = axis_peak;
+		}
+	}
+	// Use actual range if available, otherwise fall back to config value
+	float gyro_fs = (gyro_actual_range > 0) ? gyro_actual_range : (float)CONFIG_SENSOR_GYRO_FS;
+	printk("  Overall peak: %.2f deg/s (FS=%.0f)\n", (double)gyro_peak, (double)gyro_fs);
+	if (gyro_peak > gyro_fs * 0.9f) {
+		printk("  WARNING: Peak value exceeds 90%% of full scale!\n");
+	}
+
+	printk("\nAccelerometer (g):\n");
+	printk("  X: min=%.3f, max=%.3f, peak=%.3f\n",
+		(double)range_stats.accel_min[0],
+		(double)range_stats.accel_max[0],
+		(double)fmaxf(fabsf(range_stats.accel_min[0]), fabsf(range_stats.accel_max[0])));
+	printk("  Y: min=%.3f, max=%.3f, peak=%.3f\n",
+		(double)range_stats.accel_min[1],
+		(double)range_stats.accel_max[1],
+		(double)fmaxf(fabsf(range_stats.accel_min[1]), fabsf(range_stats.accel_max[1])));
+	printk("  Z: min=%.3f, max=%.3f, peak=%.3f\n",
+		(double)range_stats.accel_min[2],
+		(double)range_stats.accel_max[2],
+		(double)fmaxf(fabsf(range_stats.accel_min[2]), fabsf(range_stats.accel_max[2])));
+
+	// Calculate overall peak accel value
+	float accel_peak = 0;
+	for (int i = 0; i < 3; i++) {
+		float axis_peak = fmaxf(fabsf(range_stats.accel_min[i]), fabsf(range_stats.accel_max[i]));
+		if (axis_peak > accel_peak) {
+			accel_peak = axis_peak;
+		}
+	}
+	// Use actual range if available, otherwise fall back to config value
+	float accel_fs = (accel_actual_range > 0) ? accel_actual_range : (float)CONFIG_SENSOR_ACCEL_FS;
+	printk("  Overall peak: %.3f g (FS=%.0f)\n", (double)accel_peak, (double)accel_fs);
+	if (accel_peak > accel_fs * 0.9f) {
+		printk("  WARNING: Peak value exceeds 90%% of full scale!\n");
+	}
+
+	printk("================================\n");
 }
