@@ -589,8 +589,7 @@ void sensor_fusion_invalidate(void)
 	main_imu_restart(); // reinitialize fusion (resets quaternion to identity)
 	if (sensor_fusion_init)
 	{ // clear fusion gyro offset
-		float g_off[3] = {0};
-		sensor_fusion->set_gyro_bias(g_off);
+		sensor_fusion_update_bias(NULL);
 		sensor_retained_write();
 	}
 	else
@@ -1635,7 +1634,21 @@ void main_imu_wakeup(void)
 void main_imu_restart(void)
 {
 	if (main_ok) // only restart fusion if initialized
-		sensor_fusion->init(gyro_actual_time, accel_actual_time, 6 / 1000.0f); // TODO: using default initial time
+	{
+		// Determine effective gyro time step for fusion (must match sensor_init logic)
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+		float fusion_gyro_time = gyro_effective_time;
+#else
+		float fusion_gyro_time = gyro_actual_time;
+#endif
+		// Determine effective accel time step for fusion
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+		float fusion_accel_time = accel_effective_time;
+#else
+		float fusion_accel_time = accel_actual_time;
+#endif
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, 6 / 1000.0f); // TODO: using default initial time
+	}
 }
 
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
