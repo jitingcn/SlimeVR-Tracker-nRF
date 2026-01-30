@@ -47,6 +47,27 @@ static bool power_init = false;
 static bool device_plugged = false;
 static bool device_charged = false;
 
+// ADC sanity check: track consecutive high voltage readings without any hardware charging indication
+// This helps detect ADC malfunction that causes false charging state
+#define ADC_SANITY_CHECK_THRESHOLD 10  // Number of consecutive suspicious readings before flagging
+static uint8_t adc_suspicious_count = 0;
+static bool adc_malfunction_detected = false;
+
+// ADC oscillation detection: track rapid large changes in battery SOC
+// Normal battery discharge/charge should not oscillate rapidly
+#define ADC_OSCILLATION_WINDOW 10      // Time window in seconds to track oscillations
+#define ADC_OSCILLATION_THRESHOLD 3    // Number of large jumps within window to flag as unstable
+static uint8_t adc_oscillation_count = 0;
+static int64_t adc_oscillation_window_start = 0;
+
+// Once ADC malfunction is detected, require stable readings for this many seconds before clearing
+#define ADC_RECOVERY_STABLE_TIME_MS 30000  // 30 seconds of stable readings to recover
+static int64_t adc_malfunction_stable_start = 0;
+
+// VBUS detection can be unreliable on some boards (stays high after USB disconnect)
+// Track if VBUS detection seems unreliable based on SOC oscillation while VBUS is detected
+static bool vbus_unreliable = false;
+
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
 static void sys_WOM(bool force);
@@ -494,6 +515,11 @@ bool vin_read(void) // blocking
 	return plugged;
 }
 
+bool sys_adc_malfunction_detected(void)
+{
+	return adc_malfunction_detected;
+}
+
 static void disable_DFU_thread(void)
 {
 #if ADAFRUIT_BOOTLOADER
@@ -507,6 +533,32 @@ static void update_battery(int16_t battery_pptt)
 	if (average_pptt >= 0 && NRFX_ABS(battery_pptt - average_pptt) > 1000)
 	{
 		LOG_INF("Change to battery SOC: %5.2f%% -> %5.2f%%", (double)average_pptt / 100.0, (double)battery_pptt / 100.0);
+
+		// ADC oscillation detection: track rapid large changes
+		// Normal plugging/unplugging should not cause rapid back-and-forth oscillations
+		int64_t now = k_uptime_get();
+
+		// Any large SOC change resets the recovery timer - readings are still unstable
+		adc_malfunction_stable_start = 0;
+
+		if (now - adc_oscillation_window_start > ADC_OSCILLATION_WINDOW * 1000)
+		{
+			// Reset window
+			adc_oscillation_window_start = now;
+			adc_oscillation_count = 1;
+		}
+		else
+		{
+			adc_oscillation_count++;
+			if (adc_oscillation_count >= ADC_OSCILLATION_THRESHOLD && !adc_malfunction_detected)
+			{
+				adc_malfunction_detected = true;
+				LOG_ERR("ADC malfunction detected: rapid SOC oscillation (%d jumps in %lld ms)",
+						adc_oscillation_count, now - adc_oscillation_window_start);
+				// set_status(SYS_STATUS_SYSTEM_ERROR, true);
+			}
+		}
+
 		memset(last_pptt, -1, sizeof(last_pptt)); // reset array
 		samples = 1;
 	}
@@ -623,29 +675,145 @@ static void power_thread(void)
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
 		bool battery_available = battery_mV > 1500 && !abnormal_reading; // Keep working without the battery connected, otherwise it is obviously too dead to boot system
 		bool battery_discharged = battery_available && (average_pptt >= 0 ? average_pptt : battery_pptt) == 0;
-		// Separate detection of vin
-		if (!plugged && battery_mV > 4300 && !abnormal_reading)
-			plugged = true;
-		else if ((plugged && battery_mV <= 4250) || abnormal_reading)
-			plugged = false;
+
 #ifdef POWER_USBREGSTATUS_VBUSDETECT_Msk
-		bool usb_plugged = NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk;
+		bool usb_plugged_raw = NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk;
 #else
-		bool usb_plugged = false;
+		bool usb_plugged_raw = false;
 #endif
 
-		if (!device_plugged && (charging || charged || plugged || usb_plugged))
+		// Track previous oscillation count to detect new oscillations
+		uint8_t prev_oscillation_count = adc_oscillation_count;
+
+		// Update battery SOC early - this also runs ADC oscillation detection
+		// which may set adc_malfunction_detected flag
+		update_battery(battery_pptt);
+
+		// VBUS reliability check #1: If SOC oscillates while VBUS claims to be connected,
+		// VBUS detection is likely stuck/unreliable (common issue after USB disconnect)
+		if (usb_plugged_raw && adc_oscillation_count > prev_oscillation_count)
+		{
+			if (!vbus_unreliable)
+			{
+				vbus_unreliable = true;
+				LOG_WRN("VBUS detection marked unreliable: SOC oscillation while VBUS detected");
+			}
+		}
+
+		// If VBUS goes low, it's working again - clear unreliable flag
+		if (!usb_plugged_raw && vbus_unreliable)
+		{
+			vbus_unreliable = false;
+			LOG_INF("VBUS detection restored: VBUS now reads as disconnected");
+		}
+
+		// Voltage-based charging detection
+		bool voltage_suggests_charging = battery_mV > 4300 && !abnormal_reading;
+
+		// VBUS reliability check #2: If VBUS claims connected but voltage is normal (not charging level),
+		// VBUS is likely stuck. Real charging should show voltage > 4.3V.
+		// Only trust VBUS if voltage confirms it (> 4.3V) or if it's marked reliable
+		bool usb_plugged = usb_plugged_raw && !vbus_unreliable && voltage_suggests_charging;
+
+		// Also: If VBUS is raw high but voltage is consistently normal, mark VBUS as unreliable
+		// (This catches the case where VBUS is stuck but there's no SOC oscillation)
+		if (usb_plugged_raw && !vbus_unreliable && !voltage_suggests_charging && battery_mV > 3000 && battery_mV < 4200)
+		{
+			// VBUS claims connected but voltage is in normal battery range (3.0V - 4.2V)
+			// Real charging would show > 4.3V. Mark VBUS as suspect.
+			adc_suspicious_count++;
+			if (adc_suspicious_count >= ADC_SANITY_CHECK_THRESHOLD)
+			{
+				vbus_unreliable = true;
+				LOG_WRN("VBUS detection marked unreliable: VBUS high but voltage %.2fV (expected >4.3V for charging)",
+						(double)battery_mV / 1000.0);
+			}
+		}
+
+		bool hw_confirms_charging = charging || charged || usb_plugged;
+
+		if (voltage_suggests_charging && !hw_confirms_charging)
+		{
+			// Voltage is high but no hardware confirmation - possibly ADC issue
+			adc_suspicious_count++;
+			adc_malfunction_stable_start = 0; // Reset recovery timer
+			if (adc_suspicious_count >= ADC_SANITY_CHECK_THRESHOLD && !adc_malfunction_detected)
+			{
+				adc_malfunction_detected = true;
+				LOG_ERR("ADC malfunction detected: voltage %.2fV with no charging indication",
+						(double)battery_mV / 1000.0);
+				// set_status(SYS_STATUS_SYSTEM_ERROR, true);
+			}
+		}
+		else if (!voltage_suggests_charging)
+		{
+			// Voltage is normal (not suggesting charging) - readings might be stable now
+			// Start or continue recovery timer
+			if (adc_malfunction_detected || vbus_unreliable)
+			{
+				int64_t now = k_uptime_get();
+				if (adc_malfunction_stable_start == 0)
+				{
+					adc_malfunction_stable_start = now;
+					LOG_INF("Recovery started, waiting for %d ms of stable readings",
+							ADC_RECOVERY_STABLE_TIME_MS);
+				}
+				else if (now - adc_malfunction_stable_start >= ADC_RECOVERY_STABLE_TIME_MS)
+				{
+					adc_malfunction_detected = false;
+					vbus_unreliable = false;
+					adc_malfunction_stable_start = 0;
+					adc_suspicious_count = 0;
+					adc_oscillation_count = 0;
+					LOG_INF("Recovery complete after %d ms of stable readings", ADC_RECOVERY_STABLE_TIME_MS);
+				}
+			}
+			else if (adc_suspicious_count > 0)
+			{
+				// Not in malfunction state, but had some suspicious readings - slowly decay
+				adc_suspicious_count = 0;
+			}
+		}
+		// else: voltage_suggests_charging && hw_confirms_charging
+		// This means USB is plugged and voltage is high - normal charging, do nothing special
+
+		// When ADC malfunction is detected, don't trust voltage-based plugged detection
+		if (!adc_malfunction_detected)
+		{
+			if (!plugged && voltage_suggests_charging)
+				plugged = true;
+			else if ((plugged && battery_mV <= 4250) || abnormal_reading)
+				plugged = false;
+		}
+		else
+		{
+			// ADC malfunction: only trust hardware signals for charging state
+			plugged = false;
+		}
+
+		// When ADC malfunction is detected, don't trust ANY charging signals
+		// (hardware pins and even USB VBUS detection may be unreliable due to electrical issues)
+		// Note: For boards without CHG/STBY pins (like promicro), voltage is the only charging indicator
+		bool effective_charging = adc_malfunction_detected ? false : charging;
+		bool effective_charged = adc_malfunction_detected ? false : charged;
+		bool effective_plugged = adc_malfunction_detected ? false : plugged;
+		// Keep usb_plugged as the last resort - it's internal to nRF chip
+		// But if ADC is unstable, electrical issues may affect USB detection too
+		// Only trust usb_plugged if ADC readings have been stable
+		bool effective_usb_plugged = adc_malfunction_detected ? false : usb_plugged;
+
+		if (!device_plugged && (effective_charging || effective_charged || effective_plugged || effective_usb_plugged))
 		{
 			device_plugged = true;
 			set_status(SYS_STATUS_PLUGGED, true);
 		}
-		else if (device_plugged && !(charging || charged || plugged || usb_plugged))
+		else if (device_plugged && !(effective_charging || effective_charged || effective_plugged || effective_usb_plugged))
 		{
 			device_plugged = false;
 			set_status(SYS_STATUS_PLUGGED, false);
 		}
 
-		device_charged = charged; // TODO: timer on device_plugged could be used to infer charged state
+		device_charged = effective_charged; // TODO: timer on device_plugged could be used to infer charged state
 
 		if (!power_init)
 		{
@@ -673,9 +841,6 @@ static void power_thread(void)
 			sys_request_system_off(true);
 		}
 
-		// will update average_pptt, and current_battery_pptt
-		update_battery(battery_pptt);
-
 		if (battery_available && !battery_low && current_battery_pptt < 1000)
 			battery_low = true;
 		else if (!battery_available || (battery_low && current_battery_pptt > 1000)) // hysteresis alrerady provided
@@ -688,11 +853,12 @@ static void power_thread(void)
 
 		connection_update_battery(battery_available, device_plugged, device_charged, calibrated_battery_pptt, battery_mV);
 
-		if (charging)
+		// Use effective charging states for LED (respects ADC malfunction detection)
+		if (effective_charging)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (charged)
+		else if (effective_charged)
 			set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (plugged || usb_plugged)
+		else if (effective_plugged || effective_usb_plugged)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (battery_low)
 			set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_SYSTEM);
