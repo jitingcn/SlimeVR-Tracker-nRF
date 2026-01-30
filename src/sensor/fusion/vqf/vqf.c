@@ -48,16 +48,16 @@ void vqf_update_sensor_ids(int imu)
 static void set_params()
 {
 	init_params(&params);
-	params.biasClip = 4.0f;
+	params.biasClip = 3.0f;
 	params.tauMag = 10.0f; // best result for VQF from paper
 	params.biasForgettingTime = 120.0f;
 	params.biasSigmaInit = 2.0f;
-	params.biasSigmaMotion = 0.3f;
-	params.biasSigmaRest = 0.05f;
+	params.biasSigmaMotion = 0.25f;
+	params.biasSigmaRest = 0.03f;
 	params.biasVerticalForgettingFactor = 0.00001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.5f;
+	params.restFilterTau = 1.2f;
 	params.restMinT = 3.0f;
 	params.restThAcc = 0.3f;
 	params.restThGyr = 1.0f;
