@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 board:
-  name: foxsnacklite_uf2
+  name: foxsnackeco_uf2
   vendor: foxapplication
   socs:
     - name: nrf52840
