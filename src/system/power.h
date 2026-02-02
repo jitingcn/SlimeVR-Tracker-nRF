@@ -9,6 +9,5 @@ void sys_request_system_off(bool);
 void sys_request_system_reboot(bool);
 
 bool vin_read(void);
-bool sys_adc_malfunction_detected(void);
 
 #endif
