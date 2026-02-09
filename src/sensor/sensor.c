@@ -1273,9 +1273,6 @@ void sensor_loop(void)
 				processed_packets++;
 			}
 
-			// If sensors have asymmetric packets in FIFO, timesteps will not match packet count
-			int processed_timesteps = MAX(g_count, a_count);
-
 			// Free the FIFO buffer
 			k_free(rawData);
 
@@ -1340,20 +1337,69 @@ void sensor_loop(void)
 				packet_errors = 0;
 			}
 
-			// Also check if expected number of timesteps when using FIFO threshold, if FIFO threshold is being used
-			// With gyro oversampling enabled, the expected fusion timesteps is reduced by the oversampling factor
+			// Check if expected number of timesteps when using FIFO threshold
+			// When accel and gyro have different ODRs, check them separately based on their expected rates
+			// The FIFO threshold is calculated based on the faster sensor, which determines interrupt timing
+			if (sensor_fifo_threshold && (g_count || a_count))
+			{
+				// Calculate expected samples based on actual sensor rates
+				// sensor_fifo_threshold is based on sensor_actual_time = MIN(accel_actual_time, gyro_actual_time)
+				// So we need to calculate expected samples for each sensor independently
+				float expected_gyro_samples = sensor_update_time_ms / 1000.0f / gyro_actual_time;
+				float expected_accel_samples = sensor_update_time_ms / 1000.0f / accel_actual_time;
+
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-			int expected_timesteps = sensor_fifo_threshold / CONFIG_SENSOR_GYRO_OVERSAMPLING;
-			// Allow some tolerance for partial accumulation at boundaries
-			if (sensor_fifo_threshold && processed_timesteps &&
-			    (processed_timesteps < expected_timesteps - 1 || processed_timesteps > expected_timesteps + 1))
-				LOG_WRN("Expected ~%d timestep%s (oversampling %dx), got %d",
-					expected_timesteps, expected_timesteps == 1 ? "" : "s",
-					CONFIG_SENSOR_GYRO_OVERSAMPLING, processed_timesteps);
+				// With gyro oversampling, expected fusion timesteps is reduced by oversampling factor
+				float expected_gyro_timesteps_f = expected_gyro_samples / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+				// Only warn if actual count is significantly off (more than ±50% or at least ±1)
+				// This handles fractional expected values better
+				if (g_count) {
+					int min_expected = (int)expected_gyro_timesteps_f; // floor
+					int max_expected = (int)(expected_gyro_timesteps_f + 0.99f); // ceiling
+					if (g_count < min_expected - 1 || g_count > max_expected + 1)
+						LOG_WRN("Expected ~%.1f gyro timestep%s (oversampling %dx), got %d",
+							(double)expected_gyro_timesteps_f,
+							expected_gyro_timesteps_f == 1.0f ? "" : "s",
+							CONFIG_SENSOR_GYRO_OVERSAMPLING, g_count);
+				}
 #else
-			if (sensor_fifo_threshold && processed_timesteps && processed_timesteps != sensor_fifo_threshold)
-				LOG_WRN("Expected %d timestep%s, got %d", sensor_fifo_threshold, sensor_fifo_threshold == 1 ? "" : "s", processed_timesteps);
+				// Check gyro samples: allow reasonable tolerance for timing variations
+				// Since FIFO threshold uses floor(), actual samples can range from floor to floor+1
+				if (g_count) {
+					int min_expected = (int)expected_gyro_samples; // floor
+					int max_expected = (int)(expected_gyro_samples + 0.99f); // ceiling
+					if (g_count < min_expected - 1 || g_count > max_expected + 1)
+						LOG_WRN("Expected ~%.1f gyro sample%s, got %d",
+							(double)expected_gyro_samples,
+							expected_gyro_samples == 1.0f ? "" : "s", g_count);
+				}
 #endif
+
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+				// With accel oversampling, expected fusion timesteps is reduced by oversampling factor
+				float expected_accel_timesteps_f = expected_accel_samples / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+				// Only warn if actual count is significantly off
+				if (a_count) {
+					int min_expected = (int)expected_accel_timesteps_f; // floor
+					int max_expected = (int)(expected_accel_timesteps_f + 0.99f); // ceiling
+					if (a_count < min_expected - 1 || a_count > max_expected + 1)
+						LOG_WRN("Expected ~%.1f accel timestep%s (oversampling %dx), got %d",
+							(double)expected_accel_timesteps_f,
+							expected_accel_timesteps_f == 1.0f ? "" : "s",
+							CONFIG_SENSOR_ACCEL_OVERSAMPLING, a_count);
+				}
+#else
+				// Check accel samples: allow reasonable tolerance for timing variations
+				if (a_count) {
+					int min_expected = (int)expected_accel_samples; // floor
+					int max_expected = (int)(expected_accel_samples + 0.99f); // ceiling
+					if (a_count < min_expected - 1 || a_count > max_expected + 1)
+						LOG_WRN("Expected ~%.1f accel sample%s, got %d",
+							(double)expected_accel_samples,
+							expected_accel_samples == 1.0f ? "" : "s", a_count);
+				}
+#endif
+			}
 
 			// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
 //			sensor_fusion->update_gyro_sanity(g, m);
