@@ -208,7 +208,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	err |= icm45_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
 
 	// Configure SRC_CTRL: 0=off, 1=AAF only, 2=AAF+Interpolator
-	icm45686_set_src_ctrl(1u, 1u);
+	icm45686_set_src_ctrl(0u, 0u);
 
 	// Configure UI LPF bandwidth: 0=bypass, 1=ODR/4, 2=ODR/8, 3=ODR/16, etc.
 	icm45686_set_ui_lpfbw_sel(0u, 0u);
