@@ -2286,7 +2286,7 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 
 	// Check minimum global point count
 	if (quality->point_count < BOOT_CAL_MIN_CURVE_POINTS) {
-		LOG_WRN("Boot Cal: Insufficient points (%u < %d)", quality->point_count, BOOT_CAL_MIN_CURVE_POINTS);
+		LOG_DBG("T-Cal: Insufficient points (%u < %d)", quality->point_count, BOOT_CAL_MIN_CURVE_POINTS);
 		return false;
 	}
 
@@ -2326,8 +2326,8 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 
 	// MLS needs at least 2 points with significant weight for linear fit
 	if (points_with_weight < MLS_MIN_POINTS_FOR_FIT) {
-		LOG_WRN(
-			"Boot Cal: Only %d point(s) with significant weight at %.2fC (need %d within %.1fC bandwidth)",
+		LOG_DBG(
+			"T-Cal: Only %d point(s) with significant weight at %.2fC (need %d within %.1fC bandwidth)",
 			points_with_weight,
 			(double)current_temp,
 			MLS_MIN_POINTS_FOR_FIT,
@@ -2340,7 +2340,7 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 	static bool logged_quality = false;
 	if (!logged_quality) {
 		LOG_INF(
-			"Boot Cal: Quality check passed - %d points with weight at %.2fC (range: [%.2fC, %.2fC])",
+			"T-Cal: Quality check passed - %d points with weight at %.2fC (range: [%.2fC, %.2fC])",
 			points_with_weight,
 			(double)current_temp,
 			(double)quality->temp_min,
@@ -2614,23 +2614,36 @@ void sensor_tcal_boot_calibration_check(void)
 		return; // Invalid temperature
 	}
 
-	// Note: We no longer require T-Cal quality check here
-	// Boot calibration can now work with or without T-Cal data
-	// - With T-Cal: D_offset = measured - T-Cal(temp)
-	// - Without T-Cal: D_offset = measured - static gyroBias
-	// This allows runtime bias tracking even before any T-Cal data is collected
+	// Check T-Cal quality before proceeding
+	// Boot calibration is only useful with sufficient T-Cal data
+	// Skip if we have insufficient calibration points (<=4)
+	tcal_quality_t quality;
+	bool has_tcal = sensor_tcal_assess_quality(current_temp, &quality);
 
 	// Log entry info (only once)
 	static bool logged_entry = false;
 	if (!logged_entry) {
-		tcal_quality_t quality;
-		bool has_tcal = sensor_tcal_assess_quality(current_temp, &quality);
-		if (has_tcal) {
+		if (has_tcal && quality.point_count > BOOT_CAL_MIN_CURVE_POINTS) {
 			LOG_INF("Boot Cal: Will use T-Cal data (%u points) for D_offset calculation", quality.point_count);
+		} else if (quality.point_count > 0 && quality.point_count <= BOOT_CAL_MIN_CURVE_POINTS) {
+			LOG_INF("Boot Cal: Insufficient T-Cal points (%u <= %d), skipping boot calibration", quality.point_count, BOOT_CAL_MIN_CURVE_POINTS);
+			retained->bootCalState.completed = true; // Mark as completed to avoid repeated checks
+			return; // Skip boot calibration
 		} else {
-			LOG_INF("Boot Cal: No T-Cal data, will use static gyroBias as baseline");
+			LOG_INF("Boot Cal: No T-Cal data, skipping boot calibration");
+			retained->bootCalState.completed = true; // Mark as completed to avoid repeated checks
+			return; // Skip boot calibration
 		}
 		logged_entry = true;
+	} else {
+		// Check already logged, but still need to verify quality for this iteration
+		if (!has_tcal || quality.point_count <= BOOT_CAL_MIN_CURVE_POINTS) {
+			// Skip silently - already logged on first check
+			if (!retained->bootCalState.completed) {
+				retained->bootCalState.completed = true;
+			}
+			return;
+		}
 	}
 
 	// Log entry into time window (only once)
