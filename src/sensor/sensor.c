@@ -462,6 +462,10 @@ int sensor_request_scan(bool force)
 	if (sensor_sensor_init && !force)
 		return 0; // already initialized
 	main_imu_suspend();
+
+	/* Pause watchdog before aborting thread to prevent timeout */
+	watchdog_pause(WDT_CHANNEL_SENSOR);
+
 	k_thread_abort(&sensor_thread_id); // stop the sensor thread // TODO: may need to handle fusion state
 	LOG_INF("Aborted sensor thread");
 	main_suspended = false;
