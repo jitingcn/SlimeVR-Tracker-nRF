@@ -30,6 +30,10 @@
 #include <math.h>
 #include <hal/nrf_gpio.h>
 
+#if CONFIG_CMSIS_DSP
+#include <arm_math.h>
+#endif
+
 #include "fusion/fusions.h"
 #include "sensors.h"
 
@@ -1113,19 +1117,31 @@ void sensor_loop(void)
 					// 1. Noise reduction is most effective on raw data before any processing
 					// 2. Calibration (bias/sensitivity) are linear operations, so order doesn't affect result mathematically
 					// 3. More efficient: calibration operations run once per averaged sample instead of per raw sample
+#if CONFIG_CMSIS_DSP
+					// CMSIS-DSP optimized vector accumulation
+					arm_add_f32(gyro_oversample_sum, raw_g, gyro_oversample_sum, 3);
+#else
 					for (int j = 0; j < 3; j++)
 						gyro_oversample_sum[j] += raw_g[j];
+#endif
 					gyro_oversample_count++;
 
 					// When we have enough samples, compute average and then apply calibration
 					if (gyro_oversample_count >= CONFIG_SENSOR_GYRO_OVERSAMPLING)
 					{
 						float g_avg[3];
+#if CONFIG_CMSIS_DSP
+						// CMSIS-DSP optimized vector scaling (averaging) and reset
+						float scale = 1.0f / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+						arm_scale_f32(gyro_oversample_sum, scale, g_avg, 3);
+						arm_fill_f32(0.0f, gyro_oversample_sum, 3);
+#else
 						for (int j = 0; j < 3; j++)
 						{
 							g_avg[j] = gyro_oversample_sum[j] / CONFIG_SENSOR_GYRO_OVERSAMPLING;
 							gyro_oversample_sum[j] = 0; // Reset accumulator
 						}
+#endif
 						gyro_oversample_count = 0;
 
 						// Now apply calibration to the averaged data
@@ -1233,19 +1249,31 @@ void sensor_loop(void)
 					// 1. Noise reduction is most effective on raw data before any processing
 					// 2. Calibration (bias/scale) are linear operations, so order doesn't affect result mathematically
 					// 3. More efficient: calibration operations run once per averaged sample instead of per raw sample
+#if CONFIG_CMSIS_DSP
+					// CMSIS-DSP optimized vector accumulation
+					arm_add_f32(accel_oversample_sum, raw_a, accel_oversample_sum, 3);
+#else
 					for (int j = 0; j < 3; j++)
 						accel_oversample_sum[j] += raw_a[j];
+#endif
 					accel_oversample_count++;
 
 					// When we have enough samples, compute average and then apply calibration
 					if (accel_oversample_count >= CONFIG_SENSOR_ACCEL_OVERSAMPLING)
 					{
 						float a_avg[3];
+#if CONFIG_CMSIS_DSP
+						// CMSIS-DSP optimized vector scaling (averaging) and reset
+						float scale = 1.0f / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+						arm_scale_f32(accel_oversample_sum, scale, a_avg, 3);
+						arm_fill_f32(0.0f, accel_oversample_sum, 3);
+#else
 						for (int j = 0; j < 3; j++)
 						{
 							a_avg[j] = accel_oversample_sum[j] / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
 							accel_oversample_sum[j] = 0; // Reset accumulator
 						}
+#endif
 						accel_oversample_count = 0;
 
 						// Now apply calibration to the averaged data

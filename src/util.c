@@ -23,10 +23,25 @@
 #include <math.h>
 #include <zephyr/kernel.h>
 
+#if CONFIG_CMSIS_DSP
+#include <arm_math.h>
+#endif
+
 #include "util.h"
 
 void q_normalize(const float *q, float *out)
 {
+#if CONFIG_CMSIS_DSP
+	float mag_sq;
+	arm_dot_prod_f32(q, q, 4, &mag_sq);
+	if (mag_sq == 0) {
+		return;
+	}
+	float mag;
+	arm_sqrt_f32(mag_sq, &mag);
+	float inv_mag = 1.0f / mag;
+	arm_scale_f32(q, inv_mag, out, 4);
+#else
 	float mag = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
 	if (mag == 0) {
 		return;
@@ -35,13 +50,19 @@ void q_normalize(const float *q, float *out)
 	out[1] = q[1] / mag;
 	out[2] = q[2] / mag;
 	out[3] = q[3] / mag;
+#endif
 }
 
 void q_multiply(const float* x, const float* y, float* out) {
+#if CONFIG_CMSIS_DSP
+	// arm_quaternion_product_f32 requires the number of quaternions as 4th parameter
+	arm_quaternion_product_f32(x, y, out, 1);
+#else
 	out[0] = x[0] * y[0] - x[1] * y[1] - x[2] * y[2] - x[3] * y[3];
 	out[1] = x[1] * y[0] + x[0] * y[1] - x[3] * y[2] + x[2] * y[3];
 	out[2] = x[2] * y[0] + x[3] * y[1] + x[0] * y[2] - x[1] * y[3];
 	out[3] = x[3] * y[0] - x[2] * y[1] + x[1] * y[2] + x[0] * y[3];
+#endif
 }
 
 void q_conj(const float* q, float* out) {
@@ -52,10 +73,14 @@ void q_conj(const float* q, float* out) {
 }
 
 void q_negate(const float* q, float* out) {
+#if CONFIG_CMSIS_DSP
+	arm_negate_f32(q, out, 4);
+#else
 	out[0] = -q[0];
 	out[1] = -q[1];
 	out[2] = -q[2];
 	out[3] = -q[3];
+#endif
 }
 
 float q_diff_mag(const float *x, const float *y)
@@ -63,7 +88,13 @@ float q_diff_mag(const float *x, const float *y)
 	/* same as quatmultiply(quatconj(x), y, z), where s is scalar of z
 	 * to handle possible inverted quaternions, it should be enough to make sure s is positive
 	 */
+#if CONFIG_CMSIS_DSP
+	float s;
+	arm_dot_prod_f32(x, y, 4, &s);
+	s = fabsf(s);
+#else
 	float s = fabsf(x[0]*y[0] + x[1]*y[1] + x[2]*y[2] + x[3]*y[3]);
+#endif
 	if (s > 1)
 		return 0;
 	return 2 * acosf(s);
@@ -124,8 +155,15 @@ void a_to_lin_a(const float *q, const float *a, float *lin_a)
 	vec_gravity[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]);
 	vec_gravity[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
 	vec_gravity[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
+
+#if CONFIG_CMSIS_DSP
+	float temp[3];
+	arm_sub_f32(a, vec_gravity, temp, 3);
+	arm_scale_f32(temp, CONST_EARTH_GRAVITY, lin_a, 3);
+#else
 	for (int i = 0; i < 3; i++)
 		lin_a[i] = (a[i] - vec_gravity[i]) * CONST_EARTH_GRAVITY; // vector to m/s^2
+#endif
 }
 
 // http://marc-b-reynolds.github.io/quaternions/2017/05/02/QuatQuantPart1.html#fnref:pos:3
