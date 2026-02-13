@@ -165,9 +165,6 @@ static bool mag_enabled = false;
 #if CONFIG_SENSOR_USE_XIOFUSION
 static const sensor_fusion_t *sensor_fusion = &sensor_fusion_fusion; // TODO: change from server
 int fusion_id = FUSION_FUSION;
-#elif CONFIG_SENSOR_USE_NXPSENSORFUSION
-static const sensor_fusion_t *sensor_fusion = &sensor_fusion_motionsense; // TODO: change from server
-int fusion_id = FUSION_MOTIONSENSE;
 #elif CONFIG_SENSOR_USE_VQF
 static const sensor_fusion_t *sensor_fusion = &sensor_fusion_vqf; // TODO: change from server
 int fusion_id = FUSION_VQF;
