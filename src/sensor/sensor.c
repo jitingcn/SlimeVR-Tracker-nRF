@@ -60,6 +60,7 @@ static sensor_debug_state_t debug_state = {
 	.output_every_n = 2  // Default: output every 2 accel samples
 };
 
+#if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking state - records min/max values during runtime (not persisted)
 static sensor_range_stats_t range_stats = {
 	.gyro_max = {-INFINITY, -INFINITY, -INFINITY},
@@ -69,6 +70,7 @@ static sensor_range_stats_t range_stats = {
 	.sample_count = 0,
 	.initialized = false
 };
+#endif // CONFIG_SENSOR_RANGE_STATS
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(imu_spi), okay)
 #define SENSOR_IMU_SPI_EXISTS true
@@ -198,8 +200,10 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 static int sensor_scan(void);
 static int sensor_init(void);
 static void sensor_loop(void);
+#if CONFIG_SENSOR_RANGE_STATS
 static void sensor_update_range_stats_gyro(float g[3]);
 static void sensor_update_range_stats_accel(float a[3]);
+#endif // CONFIG_SENSOR_RANGE_STATS
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
 
@@ -1162,8 +1166,10 @@ void sensor_loop(void)
 								debug_cal_g_sum[j] += g_avg[j];
 						}
 
+#if CONFIG_SENSOR_RANGE_STATS
 						// Update range statistics with calibrated gyro data
 						sensor_update_range_stats_gyro(g_avg);
+#endif // CONFIG_SENSOR_RANGE_STATS
 
 						// Process fusion with averaged and calibrated gyro data
 						sensor_fusion->update_gyro(g_avg, gyro_effective_time);
@@ -1206,8 +1212,10 @@ void sensor_loop(void)
 							debug_cal_g_sum[j] += g[j];
 					}
 
+#if CONFIG_SENSOR_RANGE_STATS
 					// Update range statistics with calibrated gyro data
 					sensor_update_range_stats_gyro(g);
+#endif // CONFIG_SENSOR_RANGE_STATS
 
 					// Process fusion directly
 					sensor_fusion->update_gyro(g, gyro_actual_time);
@@ -1286,8 +1294,10 @@ void sensor_loop(void)
 						float az = a_avg[2];
 						float a[] = {ax, ay, az};
 
+#if CONFIG_SENSOR_RANGE_STATS
 						// Update range statistics with calibrated accel data
 						sensor_update_range_stats_accel(a);
+#endif // CONFIG_SENSOR_RANGE_STATS
 
 						// Process fusion with averaged and calibrated accel data
 						sensor_fusion->update_accel(a, accel_effective_time);
@@ -1307,8 +1317,10 @@ void sensor_loop(void)
 					float az = raw_a[2];
 					float a[] = {ax, ay, az};
 
+#if CONFIG_SENSOR_RANGE_STATS
 					// Update range statistics with calibrated accel data
 					sensor_update_range_stats_accel(a);
+#endif // CONFIG_SENSOR_RANGE_STATS
 
 					// Process fusion
 					sensor_fusion->update_accel(a, accel_actual_time);
@@ -1812,6 +1824,7 @@ bool sensor_debug_is_active(void)
 	return false;
 }
 
+#if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking functions
 const sensor_range_stats_t* sensor_get_range_stats(void)
 {
@@ -1934,3 +1947,4 @@ void sensor_print_range_stats(void)
 
 	printk("================================\n");
 }
+#endif // CONFIG_SENSOR_RANGE_STATS
