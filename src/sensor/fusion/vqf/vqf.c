@@ -53,15 +53,15 @@ static void set_params()
 	params.biasForgettingTime = 120.0f;
 	params.biasSigmaInit = 2.0f;
 	params.biasSigmaMotion = 0.25f;
-	params.biasSigmaRest = 0.02f;
+	params.biasSigmaRest = 0.04f;
 	params.biasVerticalForgettingFactor = 0.00001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 0.5f;
-	params.restMinT = 1.2f;
+	params.restFilterTau = 1.3f;
+	params.restMinT = 2.6f;
 	params.restThAcc = 0.3f;
-	params.restThGyr = 0.8f;
-	params.tauAcc = 3.0f;
+	params.restThGyr = 0.9f;
+	params.tauAcc = 4.2f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)
