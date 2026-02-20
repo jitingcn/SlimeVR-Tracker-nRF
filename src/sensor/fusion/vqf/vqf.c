@@ -85,9 +85,7 @@ void vqf_save(void *data)
 
 void vqf_update_gyro(float *g, float time)
 {
-	// TODO: The current `time` parameter comes from the sensor layer's sample period dt (seconds), not the IMU hardware timestamp.
-	// TODO: To enable vqf-c's updateGyrTs(), the driver/FIFO parsing chain must first provide a per-sample monotonic timestamp (us),
-	// then pass the real timestamp_us through here, instead of constructing a fake timestamp by accumulating dt.
+	ARG_UNUSED(time);
 	float g_rad[3] = {0};
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++)
@@ -95,10 +93,17 @@ void vqf_update_gyro(float *g, float time)
 	updateGyr(&params, &state, &coeffs, g_rad);
 }
 
+void vqf_update_gyro_ts(float *g, uint64_t timestamp_us)
+{
+	float g_rad[3] = {0};
+	for (int i = 0; i < 3; i++)
+		g_rad[i] = g[i] * DEG_TO_RAD;
+	updateGyrTs(&params, &state, &coeffs, g_rad, timestamp_us);
+}
+
 void vqf_update_accel(float *a, float time)
 {
-	// TODO: time unused?
-	// TODO: how to handle change in sample rate
+	ARG_UNUSED(time);
 	float a_m_s2[3] = {0};
 	// a is in g, convert to m/s^2
 	for (int i = 0; i < 3; i++)
@@ -108,10 +113,25 @@ void vqf_update_accel(float *a, float time)
 	updateAcc(&params, &state, &coeffs, a_m_s2);
 }
 
+void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
+{
+	float a_m_s2[3] = {0};
+	for (int i = 0; i < 3; i++)
+		a_m_s2[i] = a[i] * CONST_EARTH_GRAVITY;
+	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0)
+		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
+	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
+}
+
 void vqf_update_mag(float *m, float time)
 {
-	// TODO: time unused?
+	ARG_UNUSED(time);
 	updateMag(&params, &state, &coeffs, m);
+}
+
+void vqf_update_mag_ts(float *m, uint64_t timestamp_us)
+{
+	updateMagTs(&params, &state, &coeffs, m, timestamp_us);
 }
 
 void vqf_update(float *g, float *a, float *m, float time)
