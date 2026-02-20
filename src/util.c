@@ -55,8 +55,15 @@ void q_normalize(const float *q, float *out)
 
 void q_multiply(const float* x, const float* y, float* out) {
 #if CONFIG_CMSIS_DSP
-	// arm_quaternion_product_f32 requires the number of quaternions as 4th parameter
-	arm_quaternion_product_f32(x, y, out, 1);
+	// arm_quaternion_product_f32 requires the number of quaternions as 4th parameter.
+	// CMSIS-DSP quaternion product is not guaranteed to support in-place operation
+	// (out aliasing x or y). Use a temporary to make it safe.
+	float tmp[4];
+	arm_quaternion_product_f32(x, y, tmp, 1);
+	out[0] = tmp[0];
+	out[1] = tmp[1];
+	out[2] = tmp[2];
+	out[3] = tmp[3];
 #else
 	out[0] = x[0] * y[0] - x[1] * y[1] - x[2] * y[2] - x[3] * y[3];
 	out[1] = x[1] * y[0] + x[0] * y[1] - x[3] * y[2] + x[2] * y[3];
