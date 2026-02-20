@@ -85,7 +85,9 @@ void vqf_save(void *data)
 
 void vqf_update_gyro(float *g, float time)
 {
-	// TODO: time unused?
+	// TODO: The current `time` parameter comes from the sensor layer's sample period dt (seconds), not the IMU hardware timestamp.
+	// TODO: To enable vqf-c's updateGyrTs(), the driver/FIFO parsing chain must first provide a per-sample monotonic timestamp (us),
+	// then pass the real timestamp_us through here, instead of constructing a fake timestamp by accumulating dt.
 	float g_rad[3] = {0};
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++)
@@ -125,11 +127,18 @@ void vqf_update(float *g, float *a, float *m, float time)
 void vqf_get_gyro_bias(float *g_off)
 {
 	getBiasEstimate(&state, &coeffs, g_off);
+	// VQF internal unit is rad/s, fusion interface expects deg/s
+	for (int i = 0; i < 3; i++)
+		g_off[i] *= 180.0f / M_PI;
 }
 
 void vqf_set_gyro_bias(float *g_off)
 {
-	setBiasEstimate(&state, g_off, -1);
+	float g_off_rad[3];
+	// fusion interface receives values in deg/s, VQF requires rad/s
+	for (int i = 0; i < 3; i++)
+		g_off_rad[i] = g_off[i] * DEG_TO_RAD;
+	setBiasEstimate(&state, g_off_rad, -1);
 }
 
 void vqf_update_gyro_sanity(float *g, float *m)
