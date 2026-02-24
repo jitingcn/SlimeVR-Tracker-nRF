@@ -1,9 +1,6 @@
 [submodule "vqf-c"]
 	path = vqf-c
-	url = https://github.com/sctanf/vqf-c/
+	url = https://github.com/jitingcn/vqf-c
 [submodule "Fusion"]
 	path = Fusion
 	url = https://github.com/xioTechnologies/Fusion
-[submodule "NXP-ISSDK-SensorFusion"]
-	path = NXP-ISSDK-SensorFusion
-	url = https://github.com/sctanf/NXP-ISSDK-SensorFusion/

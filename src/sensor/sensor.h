@@ -65,6 +65,7 @@ void sensor_debug_start(uint32_t duration_sec);
 void sensor_debug_stop(void);
 bool sensor_debug_is_active(void);
 
+#if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking - records min/max values during runtime (not persisted)
 typedef struct {
 	float gyro_max[3];   // Maximum gyro values per axis (deg/s)
@@ -81,6 +82,7 @@ const sensor_range_stats_t* sensor_get_range_stats(void);
 void sensor_reset_range_stats(void);
 // Print range statistics to console
 void sensor_print_range_stats(void);
+#endif // CONFIG_SENSOR_RANGE_STATS
 
 typedef struct sensor_fusion {
 	void (*init)(float, float, float);  // gyro_time, accel_time, mag_time

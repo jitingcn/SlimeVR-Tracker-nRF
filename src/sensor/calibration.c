@@ -86,7 +86,7 @@ static int sensor_calibrate_mag(void);
 #define BOOT_CAL_TIME_WINDOW_START_MS 15000 // 15 seconds after boot
 #define BOOT_CAL_TIME_WINDOW_END_MS 50000  // 50 seconds after boot
 #define BOOT_CAL_MAX_ATTEMPTS 3            // Maximum retry attempts
-#define BOOT_CAL_MIN_CURVE_POINTS 2        // Minimum calibration points (MLS needs at least 2)
+#define BOOT_CAL_MIN_CURVE_POINTS 4        // Minimum calibration points
 
 // =============================================================================
 // Runtime Periodic Zero Bias Calibration
@@ -160,7 +160,7 @@ static void recalculate_tcal_correction_offset(void);
 #define MLS_BANDWIDTH 3.0f       // Temperature bandwidth (°C) - controls locality
 #define MLS_MIN_WEIGHT 0.01f     // Minimum weight threshold to consider a point
 #define MLS_MAX_POINTS 8         // Maximum points to consider for efficiency
-#define MLS_MIN_POINTS_FOR_FIT 2 // Minimum points with significant weight for MLS to be valid
+#define MLS_MIN_POINTS_FOR_FIT 4 // Minimum points with significant weight for MLS to be valid
 
 /**
  * Moving Least Squares (MLS) lookup function
@@ -2286,7 +2286,7 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 
 	// Check minimum global point count
 	if (quality->point_count < BOOT_CAL_MIN_CURVE_POINTS) {
-		LOG_WRN("Boot Cal: Insufficient points (%u < %d)", quality->point_count, BOOT_CAL_MIN_CURVE_POINTS);
+		LOG_DBG("T-Cal: Insufficient points (%u < %d)", quality->point_count, BOOT_CAL_MIN_CURVE_POINTS);
 		return false;
 	}
 
@@ -2326,8 +2326,8 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 
 	// MLS needs at least 2 points with significant weight for linear fit
 	if (points_with_weight < MLS_MIN_POINTS_FOR_FIT) {
-		LOG_WRN(
-			"Boot Cal: Only %d point(s) with significant weight at %.2fC (need %d within %.1fC bandwidth)",
+		LOG_DBG(
+			"T-Cal: Only %d point(s) with significant weight at %.2fC (need %d within %.1fC bandwidth)",
 			points_with_weight,
 			(double)current_temp,
 			MLS_MIN_POINTS_FOR_FIT,
@@ -2340,7 +2340,7 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality)
 	static bool logged_quality = false;
 	if (!logged_quality) {
 		LOG_INF(
-			"Boot Cal: Quality check passed - %d points with weight at %.2fC (range: [%.2fC, %.2fC])",
+			"T-Cal: Quality check passed - %d points with weight at %.2fC (range: [%.2fC, %.2fC])",
 			points_with_weight,
 			(double)current_temp,
 			(double)quality->temp_min,
@@ -2439,14 +2439,47 @@ static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp)
 
 /**
  * Calculate D_offset and store in runtime state (not persisted)
- * Uses unified strategy: MLS -> Polynomial -> Direct (no tcal)
+ * Uses unified strategy: MLS -> Polynomial -> Skip if insufficient quality
  *
- * When no T-Cal data is available, D_offset is calculated as the difference
- * between measured bias and the static gyroBias. This allows runtime bias
- * tracking even without temperature calibration.
+ * Skip D_offset calculation if:
+ * 1. No valid temperature calibration (< 5 points or current temp not covered)
+ * 2. Only basic single-point zero bias calibration exists
+ *
+ * This prevents using unreliable bias estimates from incomplete calibration.
+ * Requires more than 4 sampling points to ensure proper temperature coverage.
  */
 static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp)
 {
+	// Check temperature calibration quality first
+	tcal_quality_t quality;
+	bool has_valid_tcal = sensor_tcal_assess_quality(temp, &quality);
+
+	// Skip D_offset calculation if:
+	// 1. No T-Cal data at all (count == 0)
+	// 2. Not enough points (need > 4 points, i.e., at least 5 points)
+	// 3. Current temperature is not covered by calibration points
+	if (!has_valid_tcal || quality.point_count <= 4 || !quality.temp_in_range) {
+		LOG_INF("Boot Cal: Skipping D_offset calculation - insufficient T-Cal quality");
+		if (quality.point_count <= 4) {
+			LOG_INF("Boot Cal: Only %u calibration point(s), need more than 4 for reliable offset", quality.point_count);
+		}
+		if (!quality.temp_in_range && quality.point_count > 0) {
+			LOG_INF(
+				"Boot Cal: Current temp %.2fC outside calibrated range [%.2fC, %.2fC]",
+				(double)temp,
+				(double)quality.temp_min,
+				(double)quality.temp_max
+			);
+		}
+
+		// Mark D_offset as invalid - use existing ZRO calibration only
+		retained->bootCalState.doffset_valid = false;
+		retained->bootCalState.doffset[0] = 0.0f;
+		retained->bootCalState.doffset[1] = 0.0f;
+		retained->bootCalState.doffset[2] = 0.0f;
+		return 0; // Not an error, just skipped
+	}
+
 	// Calculate curve value at current temperature using unified strategy
 	float curve_bias[3];
 	bool offset_calculated = false;
@@ -2475,16 +2508,15 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 		LOG_INF("D_offset: Using polynomial method");
 	}
 
-	// Strategy 3: No T-Cal available - use static gyroBias as baseline
-	// In this case, D_offset represents the runtime bias drift from the
-	// originally calibrated static bias. This allows runtime correction
-	// even without temperature calibration data.
+	// If neither method worked, this should not happen since we checked quality
+	// but handle it gracefully
 	if (!offset_calculated) {
-		// Use static gyroBias as the baseline curve
-		memcpy(curve_bias, retained->gyroBias, sizeof(curve_bias));
-		offset_calculated = true;
-		method_name = "Static bias";
-		LOG_INF("D_offset: No T-Cal data - using static gyroBias as baseline");
+		LOG_ERR("D_offset: Failed to calculate curve bias despite passing quality check");
+		retained->bootCalState.doffset_valid = false;
+		retained->bootCalState.doffset[0] = 0.0f;
+		retained->bootCalState.doffset[1] = 0.0f;
+		retained->bootCalState.doffset[2] = 0.0f;
+		return -1;
 	}
 
 	LOG_INF(
@@ -2582,23 +2614,36 @@ void sensor_tcal_boot_calibration_check(void)
 		return; // Invalid temperature
 	}
 
-	// Note: We no longer require T-Cal quality check here
-	// Boot calibration can now work with or without T-Cal data
-	// - With T-Cal: D_offset = measured - T-Cal(temp)
-	// - Without T-Cal: D_offset = measured - static gyroBias
-	// This allows runtime bias tracking even before any T-Cal data is collected
+	// Check T-Cal quality before proceeding
+	// Boot calibration is only useful with sufficient T-Cal data
+	// Skip if we have insufficient calibration points (<=4)
+	tcal_quality_t quality;
+	bool has_tcal = sensor_tcal_assess_quality(current_temp, &quality);
 
 	// Log entry info (only once)
 	static bool logged_entry = false;
 	if (!logged_entry) {
-		tcal_quality_t quality;
-		bool has_tcal = sensor_tcal_assess_quality(current_temp, &quality);
-		if (has_tcal) {
+		if (has_tcal && quality.point_count > BOOT_CAL_MIN_CURVE_POINTS) {
 			LOG_INF("Boot Cal: Will use T-Cal data (%u points) for D_offset calculation", quality.point_count);
+		} else if (quality.point_count > 0 && quality.point_count <= BOOT_CAL_MIN_CURVE_POINTS) {
+			LOG_INF("Boot Cal: Insufficient T-Cal points (%u <= %d), skipping boot calibration", quality.point_count, BOOT_CAL_MIN_CURVE_POINTS);
+			retained->bootCalState.completed = true; // Mark as completed to avoid repeated checks
+			return; // Skip boot calibration
 		} else {
-			LOG_INF("Boot Cal: No T-Cal data, will use static gyroBias as baseline");
+			LOG_INF("Boot Cal: No T-Cal data, skipping boot calibration");
+			retained->bootCalState.completed = true; // Mark as completed to avoid repeated checks
+			return; // Skip boot calibration
 		}
 		logged_entry = true;
+	} else {
+		// Check already logged, but still need to verify quality for this iteration
+		if (!has_tcal || quality.point_count <= BOOT_CAL_MIN_CURVE_POINTS) {
+			// Skip silently - already logged on first check
+			if (!retained->bootCalState.completed) {
+				retained->bootCalState.completed = true;
+			}
+			return;
+		}
 	}
 
 	// Log entry into time window (only once)

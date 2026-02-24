@@ -211,7 +211,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	icm45686_set_src_ctrl(1u, 1u);
 
 	// Configure UI LPF bandwidth: 0=bypass, 1=ODR/4, 2=ODR/8, 3=ODR/16, etc.
-	icm45686_set_ui_lpfbw_sel(0u, 0u);
+	icm45686_set_ui_lpfbw_sel(1u, 1u);
 
 	// Finally enable FIFO
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG0, 0x40 | 0b000111); // set FIFO streaming mode (not stop-on-full), set FIFO depth to 2K bytes (see AN-000364)

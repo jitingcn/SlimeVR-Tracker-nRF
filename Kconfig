@@ -352,6 +352,19 @@ config SENSOR_POLY_STEPS_PER_DEGREE
         For 0.5 C steps, enter 2.
         For 1.0 C steps, enter 1.
 
+config SENSOR_USE_BOOT_CALIBRATION
+    bool "Enable automatic boot calibration"
+    default n
+    depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+    help
+        Automatically perform boot calibration after device startup.
+        When enabled, the device will measure gyroscope bias at boot time
+        and calculate D_offset correction based on the temperature calibration
+        curve. This helps compensate for run-to-run bias drift.
+        Boot calibration occurs within 15-50 seconds after boot when the
+        device is stationary and requires at least 4 temperature calibration
+        points to be effective.
+
 endmenu
 
 config RADIO_TX_POWER

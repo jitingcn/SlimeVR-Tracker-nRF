@@ -233,6 +233,7 @@ static void print_sensor(void)
 
 	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
 
+#if CONFIG_SENSOR_RANGE_STATS
 	// Display runtime range statistics summary
 	const sensor_range_stats_t *stats = sensor_get_range_stats();
 	if (stats->initialized) {
@@ -249,6 +250,7 @@ static void print_sensor(void)
 		printk("  Accel: %.3f g\n", (double)accel_peak);
 		printk("  Samples: %llu (use 'range' for details)\n", stats->sample_count);
 	}
+#endif // CONFIG_SENSOR_RANGE_STATS
 }
 
 static void print_sens_calibration_info(void)
@@ -1081,13 +1083,17 @@ static void console_thread(void)
 			}
 			sensor_debug_start(duration);
 		} else if (memcmp(line, command_range, sizeof(command_range)) == 0) {
+#if CONFIG_SENSOR_RANGE_STATS
 			if (arg && strcmp((char *)arg, "reset") == 0) {
 				sensor_reset_range_stats();
 				printk("Sensor range statistics have been reset.\n");
 			} else {
 				sensor_print_range_stats();
 			}
-		} else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
+#else
+			printk("Sensor range statistics not enabled in configuration.\n");
+#endif // CONFIG_SENSOR_RANGE_STATS
+		}	else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
 			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0) {
 				cmd_reset_zro();
 			}

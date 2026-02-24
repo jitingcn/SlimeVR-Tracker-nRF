@@ -48,20 +48,20 @@ void vqf_update_sensor_ids(int imu)
 static void set_params()
 {
 	init_params(&params);
-	params.biasClip = 4.0f;
+	params.biasClip = 2.5f;
 	params.tauMag = 10.0f; // best result for VQF from paper
 	params.biasForgettingTime = 120.0f;
 	params.biasSigmaInit = 2.0f;
-	params.biasSigmaMotion = 0.3f;
-	params.biasSigmaRest = 0.05f;
+	params.biasSigmaMotion = 0.25f;
+	params.biasSigmaRest = 0.04f;
 	params.biasVerticalForgettingFactor = 0.00001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.5f;
-	params.restMinT = 3.0f;
+	params.restFilterTau = 1.3f;
+	params.restMinT = 2.6f;
 	params.restThAcc = 0.3f;
-	params.restThGyr = 1.0f;
-	params.tauAcc = 3.6f;
+	params.restThGyr = 0.9f;
+	params.tauAcc = 4.2f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)
@@ -85,7 +85,7 @@ void vqf_save(void *data)
 
 void vqf_update_gyro(float *g, float time)
 {
-	// TODO: time unused?
+	ARG_UNUSED(time);
 	float g_rad[3] = {0};
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++)
@@ -93,10 +93,17 @@ void vqf_update_gyro(float *g, float time)
 	updateGyr(&params, &state, &coeffs, g_rad);
 }
 
+void vqf_update_gyro_ts(float *g, uint64_t timestamp_us)
+{
+	float g_rad[3] = {0};
+	for (int i = 0; i < 3; i++)
+		g_rad[i] = g[i] * DEG_TO_RAD;
+	updateGyrTs(&params, &state, &coeffs, g_rad, timestamp_us);
+}
+
 void vqf_update_accel(float *a, float time)
 {
-	// TODO: time unused?
-	// TODO: how to handle change in sample rate
+	ARG_UNUSED(time);
 	float a_m_s2[3] = {0};
 	// a is in g, convert to m/s^2
 	for (int i = 0; i < 3; i++)
@@ -106,10 +113,25 @@ void vqf_update_accel(float *a, float time)
 	updateAcc(&params, &state, &coeffs, a_m_s2);
 }
 
+void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
+{
+	float a_m_s2[3] = {0};
+	for (int i = 0; i < 3; i++)
+		a_m_s2[i] = a[i] * CONST_EARTH_GRAVITY;
+	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0)
+		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
+	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
+}
+
 void vqf_update_mag(float *m, float time)
 {
-	// TODO: time unused?
+	ARG_UNUSED(time);
 	updateMag(&params, &state, &coeffs, m);
+}
+
+void vqf_update_mag_ts(float *m, uint64_t timestamp_us)
+{
+	updateMagTs(&params, &state, &coeffs, m, timestamp_us);
 }
 
 void vqf_update(float *g, float *a, float *m, float time)
@@ -125,11 +147,18 @@ void vqf_update(float *g, float *a, float *m, float time)
 void vqf_get_gyro_bias(float *g_off)
 {
 	getBiasEstimate(&state, &coeffs, g_off);
+	// VQF internal unit is rad/s, fusion interface expects deg/s
+	for (int i = 0; i < 3; i++)
+		g_off[i] *= 180.0f / M_PI;
 }
 
 void vqf_set_gyro_bias(float *g_off)
 {
-	setBiasEstimate(&state, g_off, -1);
+	float g_off_rad[3];
+	// fusion interface receives values in deg/s, VQF requires rad/s
+	for (int i = 0; i < 3; i++)
+		g_off_rad[i] = g_off[i] * DEG_TO_RAD;
+	setBiasEstimate(&state, g_off_rad, -1);
 }
 
 void vqf_update_gyro_sanity(float *g, float *m)

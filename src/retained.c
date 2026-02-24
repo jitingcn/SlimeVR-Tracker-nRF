@@ -78,8 +78,12 @@ bool retained_validate(void)
 		retained->min_battery_pptt = -1;
 		retained->battery_pptt_saved = -1;
 #if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-		// Initialize boot calibration state - default enabled
+		// Initialize boot calibration state
+		#ifdef CONFIG_SENSOR_USE_BOOT_CALIBRATION
 		retained->bootCalState.enabled = true;
+		#else
+		retained->bootCalState.enabled = false;
+		#endif
 		retained->bootCalState.completed = false;
 		retained->bootCalState.attempt_count = 0;
 		retained->bootCalState.doffset_valid = false;
