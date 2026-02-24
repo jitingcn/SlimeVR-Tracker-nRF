@@ -1557,7 +1557,7 @@ void sensor_loop(void)
 
 			// Update orientation
 			bool send_quat_data = !q_epsilon(q, last_q, 0.001f);
-			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05f);
+			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.03f);
 
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
