@@ -39,10 +39,6 @@
 
 #include "sensor.h"
 
-#if CONFIG_SENSOR_USE_VQF
-#include "fusion/vqf/vqf.h"
-#endif
-
 #define SPI_OP SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8)
 
 // Debug mode state
@@ -729,15 +725,7 @@ static void sensor_update_sensor_state(void)
 			LOG_INF("No motion from sensors in %dm", CONFIG_ACTIVE_TIMEOUT_DELAY / 60000);
 #if CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
 			// Queue power state request, it is possible for the request to be overridden so the thread may continue unaware
-#if CONFIG_SENSOR_USE_VQF
-			// Additional check: if using VQF, also require VQF to be in rest mode
-			if (vqf_get_rest_detected())
-			{
-				sys_request_WOM(true, false);
-			}
-#else
 			sys_request_WOM(true, false);
-#endif
 #elif CONFIG_SHUTDOWN_ON_ACTIVE_TIMEOUT && CONFIG_USER_SHUTDOWN
 			// Queue power state request, thread will be suspended when entering system_off
 			sys_request_system_off(false);
@@ -750,15 +738,7 @@ static void sensor_update_sensor_state(void)
 		{
 			LOG_INF("No motion from sensors in %llds", imu_timeout / 1000);
 			// Queue power state request
-#if CONFIG_SENSOR_USE_VQF
-			// Additional check: if using VQF, also require VQF to be in rest mode
-			if (vqf_get_rest_detected())
-			{
-				sys_request_WOM(false, false);
-			}
-#else
 			sys_request_WOM(false, false);
-#endif
 			sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED; // only try to suspend once
 		}
 #endif
