@@ -28,6 +28,7 @@
 const char* sensor_get_sensor_imu_name(void);
 const char* sensor_get_sensor_mag_name(void);
 const char* sensor_get_sensor_fusion_name(void);
+bool sensor_is_initialized(void);
 
 int sensor_get_sensor_temperature(float *);
 

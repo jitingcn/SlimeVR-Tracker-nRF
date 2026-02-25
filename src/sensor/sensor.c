@@ -226,6 +226,11 @@ const char *sensor_get_sensor_imu_name(void)
 	return dev_imu_names[sensor_imu_id];
 }
 
+bool sensor_is_initialized(void)
+{
+	return sensor_sensor_init;
+}
+
 const char *sensor_get_sensor_mag_name(void)
 {
 	if (sensor_mag_id < 0)
