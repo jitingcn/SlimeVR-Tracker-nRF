@@ -364,7 +364,7 @@ static int sensor_offsetBias_internal(
 );
 static int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_range);
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-static int sensor_6_sideBias(float a_inv[][3]);
+static int sensor_6_sideBias(float a_inv[][3], int *captured_count_out);
 #endif
 static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3]);
 
@@ -957,21 +957,47 @@ static void sensor_calibrate_imu()
 }
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+// Minimum poses required for partial calibration save (must be before sensor_calibrate_6_side)
+#define CALIB_MIN_POSES_FOR_PARTIAL 6
+
 static void sensor_calibrate_6_side(void)
 {
 	float a_inv[4][3];
+	int captured_count = 0;
 	LOG_INF("Calibrating main accelerometer 6-side offset");
 	LOG_INF("Rest the device on a stable surface");
 
 	sensor_calibration_clear_6_side(a_inv, false);
-	int err = sensor_6_sideBias(a_inv);
+	int err = sensor_6_sideBias(a_inv, &captured_count);
 	if (err) {
-		magneto_reset();
-		if (err == -1) {
-			LOG_INF("Motion detected");
+		if (err == -3) {
+			// Timeout occurred - check if we have enough samples for partial calibration
+			LOG_WRN("Calibration timeout after %d poses (minimum: %d)", captured_count, CALIB_MIN_POSES_FOR_PARTIAL);
+			if (captured_count >= CALIB_MIN_POSES_FOR_PARTIAL) {
+				// We have enough samples, try to calculate calibration from partial data
+				LOG_INF("Attempting partial calibration with %d poses...", captured_count);
+				wait_for_threads();
+				magneto_current_calibration(a_inv, ata, norm_sum, sample_count);
+				magneto_reset();
+				// Continue to validation below - err will be handled by validate function
+				err = 0; // Clear error to allow validation
+			} else {
+				// Not enough samples - discard and restore previous calibration
+				LOG_ERR("Insufficient poses for calibration, discarding data");
+				magneto_reset();
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
+				return; // Existing calibration is preserved in accBAinv
+			}
+		} else {
+			magneto_reset();
+			if (err == -1) {
+				LOG_INF("Motion detected");
+			}
+			a_inv[0][0] = NAN; // invalidate calibration
 		}
-		a_inv[0][0] = NAN; // invalidate calibration
-	} else {
+	}
+
+	if (!err) {
 		LOG_INF("Accelerometer matrix:");
 		for (int i = 0; i < 3; i++) {
 			LOG_INF(
@@ -1440,11 +1466,13 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 #define THRESHOLD_ACC 0.02f
 // Number of samples to collect for each orientation
 #define SAMPLES_PER_ORIENTATION 500
+// Timeout for waiting for new pose (90 seconds in milliseconds)
+#define CALIB_POSE_TIMEOUT_MS 90000
 typedef struct {
 	float x, y, z;
 } Vector3;
 
-int sensor_6_sideBias(float a_inv[][3])
+int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 {
 	float rawData[3];
 	float pre_acc[3] = {0};
@@ -1452,6 +1480,12 @@ int sensor_6_sideBias(float a_inv[][3])
 
 	Vector3 captured_dirs[CALIB_TARGET_SAMPLES];
 	int captured_count = 0;
+	int64_t last_new_pose_time = k_uptime_get(); // Track time of last new pose
+
+	// Initialize output parameter
+	if (captured_count_out) {
+		*captured_count_out = 0;
+	}
 
 	magneto_reset();
 
@@ -1463,9 +1497,17 @@ int sensor_6_sideBias(float a_inv[][3])
 
 		// 1. Wait for device to be stationary
 		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR); // Indicate searching for stationary state
+		bool pose_timeout = false;
 		while (1) {
 			/* Feed watchdog during user interaction wait */
 			watchdog_feed(WDT_CHANNEL_CALIBRATION);
+
+			/* Check for timeout - no new pose in CALIB_POSE_TIMEOUT_MS */
+			if ((k_uptime_get() - last_new_pose_time) > CALIB_POSE_TIMEOUT_MS) {
+				LOG_WRN("Timeout: No new pose detected for %d seconds", CALIB_POSE_TIMEOUT_MS / 1000);
+				pose_timeout = true;
+				break;
+			}
 
 			if (sensor_wait_accel(rawData, K_MSEC(1000))) {
 				return -2; // Timeout, magneto state not handled here
@@ -1525,6 +1567,18 @@ int sensor_6_sideBias(float a_inv[][3])
 			k_msleep(20);
 		}
 
+		// Check if we timed out waiting for a new pose
+		if (pose_timeout) {
+			if (captured_count_out) {
+				*captured_count_out = captured_count;
+			}
+			// Return -3 for timeout with captured_count available for partial save decision
+			return -3;
+		}
+
+		// Reset timeout counter when a new valid pose is found
+		last_new_pose_time = k_uptime_get();
+
 		LOG_INF("Capturing pose %d/%d...", captured_count + 1, CALIB_TARGET_SAMPLES);
 		set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
 
@@ -1561,6 +1615,10 @@ int sensor_6_sideBias(float a_inv[][3])
 		LOG_INF("Pose %d saved!", captured_count);
 
 		k_msleep(500);
+	}
+
+	if (captured_count_out) {
+		*captured_count_out = captured_count;
 	}
 
 	LOG_INF("Calculating calibration matrix...");
