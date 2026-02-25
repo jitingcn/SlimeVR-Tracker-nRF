@@ -997,7 +997,9 @@ static void console_thread(void)
 #endif
 #if SENSOR_MAG_EXISTS
 		else if (memcmp(line, command_mag, sizeof(command_mag)) == 0) {
+			// "mag" command now starts calibration (clear existing first)
 			sensor_calibration_clear_mag(NULL, true);
+			sensor_request_calibration_mag();
 		}
 #endif
 		else if (memcmp(line, command_set, sizeof(command_set)) == 0) {

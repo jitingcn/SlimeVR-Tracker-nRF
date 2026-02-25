@@ -50,6 +50,13 @@ static float magBAinv[4][3];
 static uint8_t magneto_progress;
 static uint8_t last_magneto_progress;
 static int64_t magneto_progress_time;
+static uint8_t magneto_sphere_coverage;  // 8-bit for 8 sphere octants
+static uint16_t magneto_octant_samples[8];  // Sample count per octant
+
+// Minimum samples and coverage for reliable calibration
+#define MAG_CAL_MIN_SAMPLES 200
+#define MAG_CAL_MIN_OCTANTS 6  // At least 6 of 8 octants covered
+#define MAG_CAL_MIN_PER_OCTANT 20  // Minimum samples per covered octant
 
 static double ata[100]; // init calibration
 static double norm_sum;
@@ -347,7 +354,7 @@ static void sensor_tcal_cache_invalidate(void)
 
 // helpers
 static bool wait_for_motion(bool motion, int samples);
-static int check_sides(const float *);
+static int check_mag_sphere_coverage(const float *m);
 static void magneto_reset(void);
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 static int isAccRest(float *, float *, float, int *, int);
@@ -628,10 +635,23 @@ void sensor_request_calibration_6_side(void)
 
 void sensor_request_calibration_mag(void)
 {
-	magneto_progress |= 1 << 7;
-	if (magneto_progress == 0b10111111) {
-		magneto_progress |= 1 << 6;
+	// If already collecting or complete, just mark as ready if coverage is met
+	if (magneto_progress & 0x80) {
+		// Already started, check if ready to apply
+		if (magneto_progress == 0b10111111) {
+			magneto_progress |= 1 << 6;
+		}
+		return;
 	}
+
+	// Start fresh calibration
+	magneto_progress = 0;
+	last_magneto_progress = 0;
+	magneto_progress_time = 0;
+	magneto_sphere_coverage = 0;
+	magneto_reset();  // Clear ata buffer and sample count
+	magneto_progress |= 1 << 7;  // Set collection active flag
+	LOG_INF("Magnetometer calibration started (rotate tracker in figure-8 pattern)");
 }
 
 static float aBuf[3] = {0};
@@ -1140,19 +1160,50 @@ static bool wait_for_motion(bool motion, int samples)
 	return false;
 }
 
-static int check_sides(const float *a)
+/**
+ * Check which octant of the sphere the magnetometer reading falls into.
+ * Returns the octant index (0-7) based on sign of X, Y, Z components:
+ *   0: -X-Y-Z, 1: +X-Y-Z, 2: -X+Y-Z, 3: +X+Y-Z
+ *   4: -X-Y+Z, 5: +X-Y+Z, 6: -X+Y+Z, 7: +X+Y+Z
+ * Returns -1 for invalid readings.
+ */
+static int check_mag_sphere_coverage(const float *m)
 {
-	return (-1.2f < a[0] && a[0] < -0.8f ? 1 << 0 : 0) | (1.2f > a[0] && a[0] > 0.8f ? 1 << 1 : 0)
-		 | // dumb check if all accel axes were reached for calibration, assume the user is intentionally doing this
-		   (-1.2f < a[1] && a[1] < -0.8f ? 1 << 2 : 0) | (1.2f > a[1] && a[1] > 0.8f ? 1 << 3 : 0)
-		 | (-1.2f < a[2] && a[2] < -0.8f ? 1 << 4 : 0) | (1.2f > a[2] && a[2] > 0.8f ? 1 << 5 : 0);
+	// Calculate magnitude to verify valid reading
+	float mag_sq = m[0]*m[0] + m[1]*m[1] + m[2]*m[2];
+	if (mag_sq < 1e-6f) {
+		return -1;  // Invalid reading
+	}
+
+	// Determine octant based on signs
+	int octant = 0;
+	if (m[0] >= 0) octant |= 1;
+	if (m[1] >= 0) octant |= 2;
+	if (m[2] >= 0) octant |= 4;
+
+	return octant;
+}
+
+/**
+ * Count number of bits set in a byte (population count)
+ */
+static int popcount8(uint8_t x)
+{
+	int count = 0;
+	while (x) {
+		count += x & 1;
+		x >>= 1;
+	}
+	return count;
 }
 
 static void magneto_reset(void)
 {
-	magneto_progress = 0; // reusing ata, so guarantee cleared mag progress
+	magneto_progress = 0;
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
+	magneto_sphere_coverage = 0;
+	memset(magneto_octant_samples, 0, sizeof(magneto_octant_samples));
 	memset(ata, 0, sizeof(ata));
 	norm_sum = 0;
 	sample_count = 0;
@@ -1633,32 +1684,49 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 }
 #endif
 
-// TODO: terrible name
+// Collect magnetometer sample for calibration using sphere coverage detection
 static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 {
 	magneto_sample(m[0], m[1], m[2], ata, &norm_sum, &sample_count); // 400us
-	uint8_t new_magneto_progress = magneto_progress;
-	new_magneto_progress |= check_sides(a);
-	if (new_magneto_progress > magneto_progress && new_magneto_progress == last_magneto_progress) {
-		if (k_uptime_get() > magneto_progress_time) {
-			magneto_progress = new_magneto_progress;
-			LOG_INF(
-				"Magnetometer calibration progress: %s %s %s %s %s %s",
-				(new_magneto_progress & 0x01) ? "-X" : "--",
-				(new_magneto_progress & 0x02) ? "+X" : "--",
-				(new_magneto_progress & 0x04) ? "-Y" : "--",
-				(new_magneto_progress & 0x08) ? "+Y" : "--",
-				(new_magneto_progress & 0x10) ? "-Z" : "--",
-				(new_magneto_progress & 0x20) ? "+Z" : "--"
-			);
+
+	// Update sphere coverage based on magnetometer direction
+	int octant = check_mag_sphere_coverage(m);
+	if (octant >= 0) {
+		magneto_octant_samples[octant]++;
+		uint8_t octant_bit = 1 << octant;
+		if (!(magneto_sphere_coverage & octant_bit)) {
+			magneto_sphere_coverage |= octant_bit;
+			int covered = popcount8(magneto_sphere_coverage);
+			LOG_INF("Magnetometer coverage: %d/8 octants, %d samples",
+			        covered, (int)sample_count);
 			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 		}
-	} else {
-		magneto_progress_time = k_uptime_get() + 1000;
-		last_magneto_progress = new_magneto_progress;
 	}
-	if (magneto_progress == 0b10111111) {
-		set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR); // Magnetometer calibration is ready to apply
+
+	// Check if calibration is ready:
+	// 1. Enough total samples
+	// 2. Enough octants covered
+	// 3. Each covered octant has minimum samples (balanced distribution)
+	int octant_count = popcount8(magneto_sphere_coverage);
+	if (sample_count >= MAG_CAL_MIN_SAMPLES && octant_count >= MAG_CAL_MIN_OCTANTS) {
+		// Check if all covered octants have minimum samples
+		bool balanced = true;
+		for (int i = 0; i < 8; i++) {
+			if ((magneto_sphere_coverage & (1 << i)) &&
+			    magneto_octant_samples[i] < MAG_CAL_MIN_PER_OCTANT) {
+				balanced = false;
+				break;
+			}
+		}
+
+		if (balanced) {
+			// Set bits 0-6 to indicate ready (bit 7 is already set from start)
+			// This makes magneto_progress = 0b11111111, triggering calibration calculation
+			magneto_progress |= 0b01111111;
+			LOG_INF("Magnetometer calibration ready: %d samples, %d/8 octants covered",
+			        (int)sample_count, octant_count);
+			set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
+		}
 	}
 }
 

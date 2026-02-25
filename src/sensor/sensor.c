@@ -1610,9 +1610,8 @@ void sensor_loop(void)
 				}
 			}
 #endif
-			// Handle magnetometer calibration
-			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
-				sensor_request_calibration_mag();
+			// Magnetometer calibration is now triggered only via console command (magcal)
+			// or remote ESB command (ESB_PONG_FLAG_MAG_CAL)
 
 			// Periodic retained save for crash recovery
 			if (now - last_retained_save_time >= RETAINED_SAVE_INTERVAL_MS)

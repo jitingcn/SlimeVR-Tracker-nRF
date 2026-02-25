@@ -787,6 +787,9 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_MAG_CLEAR:
 								cmd_name = "MAG_CLEAR";
 								break;
+							case ESB_PONG_FLAG_MAG_CAL:
+								cmd_name = "MAG_CAL";
+								break;
 							case ESB_PONG_FLAG_REBOOT:
 								cmd_name = "REBOOT";
 								break;
@@ -1469,6 +1472,16 @@ static void esb_thread(void)
 					sensor_calibration_clear_mag(NULL, true);
 #else
 					LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
+#endif
+					break;
+
+				case ESB_PONG_FLAG_MAG_CAL:
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
+					LOG_INF("Executing remote command: MAG_CAL");
+					sensor_calibration_clear_mag(NULL, true);
+					sensor_request_calibration_mag();
+#else
+					LOG_WRN("Remote command: MAG_CAL not supported (no magnetometer)");
 #endif
 					break;
 
