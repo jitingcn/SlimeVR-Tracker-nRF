@@ -29,6 +29,10 @@
 #include <math.h>
 #include <stdlib.h>
 
+#if CONFIG_CMSIS_DSP
+#include <arm_math.h>
+#endif
+
 #include "sensors_enum.h"
 #include "magneto/magneto1_4.h"
 #include "imu/BMI270.h"
@@ -421,21 +425,33 @@ void sensor_calibration_process_gyro(float g[3])
 	// D_offset is now applied regardless of whether T-Cal is used or not
 	// This allows runtime bias tracking even without temperature calibration
 	if (retained->bootCalState.doffset_valid) {
+#if CONFIG_CMSIS_DSP
+		arm_add_f32(calculated_offset, retained->bootCalState.doffset, calculated_offset, 3);
+#else
 		for (int axis = 0; axis < 3; axis++) {
 			calculated_offset[axis] += retained->bootCalState.doffset[axis];
 		}
+#endif
 	}
 
 	// Apply the calculated offset to gyro data
+#if CONFIG_CMSIS_DSP
+	arm_sub_f32(g, calculated_offset, g, 3);
+#else
 	for (int i = 0; i < 3; i++) {
 		g[i] -= calculated_offset[i];
 	}
+#endif
 
 	memcpy(last_gyro_tcal_offset, calculated_offset, sizeof(last_gyro_tcal_offset));
+#else
+#if CONFIG_CMSIS_DSP
+	arm_sub_f32(g, gyroBias, g, 3);
 #else
 	for (int i = 0; i < 3; i++) {
 		g[i] -= gyroBias[i];
 	}
+#endif
 #endif
 }
 
@@ -1119,11 +1135,19 @@ static void magneto_reset(void)
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 static int isAccRest(float *acc, float *pre_acc, float threshold, int *t, int restdelta)
 {
-	float delta_x = acc[0] - pre_acc[0];
-	float delta_y = acc[1] - pre_acc[1];
-	float delta_z = acc[2] - pre_acc[2];
+	float delta[3];
+	delta[0] = acc[0] - pre_acc[0];
+	delta[1] = acc[1] - pre_acc[1];
+	delta[2] = acc[2] - pre_acc[2];
 
-	float norm_diff = sqrt(delta_x * delta_x + delta_y * delta_y + delta_z * delta_z);
+#if CONFIG_CMSIS_DSP
+	float norm_sq;
+	arm_dot_prod_f32(delta, delta, 3, &norm_sq);
+	float norm_diff;
+	arm_sqrt_f32(norm_sq, &norm_diff);
+#else
+	float norm_diff = sqrtf(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
+#endif
 
 	if (norm_diff <= threshold) {
 		*t += restdelta;
@@ -1453,7 +1477,14 @@ int sensor_6_sideBias(float a_inv[][3])
 			if (rest == 1) {
 				// Device is stationary, now check if this pose is new
 				// Calculate current vector magnitude
+#if CONFIG_CMSIS_DSP
+				float norm_sq;
+				arm_dot_prod_f32(rawData, rawData, 3, &norm_sq);
+				float norm;
+				arm_sqrt_f32(norm_sq, &norm);
+#else
 				float norm = sqrtf(rawData[0] * rawData[0] + rawData[1] * rawData[1] + rawData[2] * rawData[2]);
+#endif
 				if (norm < 0.1f) {
 					continue; // Prevent division by zero (unlikely under gravity)
 				}
@@ -3532,9 +3563,17 @@ static int sensor_tcal_lut_lookup(float temp, float bias_out[3])
 	const float *bias_lo = mls_lut.entries[idx_lo].bias;
 	const float *bias_hi = mls_lut.entries[idx_hi].bias;
 
+#if CONFIG_CMSIS_DSP
+	// bias_out = bias_lo + frac * (bias_hi - bias_lo)
+	float diff[3];
+	arm_sub_f32(bias_hi, bias_lo, diff, 3);
+	arm_scale_f32(diff, frac, diff, 3);
+	arm_add_f32(bias_lo, diff, bias_out, 3);
+#else
 	for (int axis = 0; axis < 3; axis++) {
 		bias_out[axis] = bias_lo[axis] + frac * (bias_hi[axis] - bias_lo[axis]);
 	}
+#endif
 
 	return 0;
 }
