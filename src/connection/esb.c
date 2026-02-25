@@ -1570,7 +1570,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_AUTO_ON:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_AUTO_ON");
 					sensor_tcal_set_auto_calibration(true);
 #else
@@ -1579,7 +1579,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_AUTO_OFF:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_AUTO_OFF");
 					sensor_tcal_set_auto_calibration(false);
 #else
@@ -1598,7 +1598,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_BOOT_ON:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_BOOT_ON");
 					sensor_boot_cal_set_enabled(true);
 #else
@@ -1607,7 +1607,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_BOOT_OFF:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_BOOT_OFF");
 					sensor_boot_cal_set_enabled(false);
 #else

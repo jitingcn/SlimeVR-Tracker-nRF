@@ -52,7 +52,7 @@ void main_imu_resume(void);
 void main_imu_wakeup(void);
 void main_imu_restart(void);
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 float sensor_get_current_imu_temperature(void);
 #endif
 

@@ -73,7 +73,34 @@ static void sensor_calibrate_6_side(void);
 #endif
 static int sensor_calibrate_mag(void);
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+// =============================================================================
+// Offset-bias collection constants
+// =============================================================================
+#ifndef BIAS_COLLECT_TEMP_RANGE_THRESHOLD
+#define BIAS_COLLECT_TEMP_RANGE_THRESHOLD 1.0f // °C - stop early if temp changes this much
+#endif
+
+#ifndef BIAS_COLLECT_MAX_SAMPLE_TIME_MS
+#define BIAS_COLLECT_MAX_SAMPLE_TIME_MS 6000 // 6 seconds max
+#endif
+
+#ifndef BIAS_COLLECT_MIN_SAMPLE_TIME_MS
+#define BIAS_COLLECT_MIN_SAMPLE_TIME_MS 4000 // 4 seconds min
+#endif
+
+#ifndef BIAS_COLLECT_TEMP_CHECK_TIME_MS
+#define BIAS_COLLECT_TEMP_CHECK_TIME_MS 4000 // 4 seconds - prioritize sampling time over temp stability
+#endif
+
+#ifndef BIAS_COLLECT_GYRO_MOTION_THRESHOLD
+#define BIAS_COLLECT_GYRO_MOTION_THRESHOLD 2.0f // dps (range method)
+#endif
+
+#ifndef BIAS_COLLECT_ACCEL_MOTION_THRESHOLD
+#define BIAS_COLLECT_ACCEL_MOTION_THRESHOLD 0.12f // G (range method)
+#endif
+
+#if CONFIG_SENSOR_USE_TCAL
 
 #define TEMP_TO_IDX(temp) (int)((((float)temp) - CONFIG_SENSOR_POLY_TEMP_MIN) * CONFIG_SENSOR_POLY_STEPS_PER_DEGREE)
 #define IDX_TO_TEMP(idx) (float)(((float)(idx) / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE) + CONFIG_SENSOR_POLY_TEMP_MIN)
@@ -117,37 +144,13 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 static int sensor_perform_boot_calibration(void);
 static int sensor_perform_runtime_calibration(void);
 
-// =============================================================================
-// T-Cal Constants for sensor_offsetBias
-// =============================================================================
-
-// Temperature range threshold - stop collecting when exceeded
-#define TCAL_TEMP_RANGE_THRESHOLD 1.0f // °C - stop early if temp changes this much
-
-// Maximum sampling time before forcing finalization (ms)
-#define TCAL_MAX_SAMPLE_TIME_MS 6000 // 6 seconds max
-
-// Minimum sampling time before allowing finalization (ms)
-#define TCAL_MIN_SAMPLE_TIME_MS 4000 // 4 seconds min
-
-// Temperature check time - only check temp threshold after this time (ms)
-#define TCAL_TEMP_CHECK_TIME_MS 4000 // 4 seconds - prioritize sampling time over temp stability
-
-// Gyro motion threshold during collection (dps) - using range
-#define TCAL_GYRO_MOTION_THRESHOLD 2.0f
-
-// Accel motion threshold during collection (G) - using range
-#define TCAL_ACCEL_MOTION_THRESHOLD 0.12f
 
 // Auto-calibration control
 static bool tcal_auto_calibration_enabled = false;
 
 static float last_gyro_tcal_offset[3] = {0.0f, 0.0f, 0.0f};
 
-static int solve_linear_system(double *A, double *B, int n, double *x);
-static int polyfit(int degree, float coeffs_out[3][CONFIG_SENSOR_POLY_DEGREE + 1]);
-static void update_poly_tcal(void); // Function to calculate the curve
-static void recalculate_tcal_correction_offset(void);
+static void update_tcal_state(void); // Function to refresh T-Cal state
 
 // =============================================================================
 // T-Cal Moving Least Squares (MLS) Implementation
@@ -269,14 +272,14 @@ void sensor_calibration_process_accel(float a[3])
 void sensor_calibration_process_gyro(float g[3])
 {
 	sensor_sample_gyro(g);
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	float calculated_offset[3] = {0.0f, 0.0f, 0.0f};
 	float temp = sensor_get_current_imu_temperature();
 	bool offset_calculated = false;
 
 	// ==========================================================================
-	// Unified T-Cal Strategy: MLS -> Polynomial -> Static Bias
-	// D_offset is always applied when valid, regardless of which method is used
+	// Unified T-Cal Strategy: MLS -> Static Bias
+	// D_offset is always applied when valid
 	// ==========================================================================
 
 	if (!isnan(temp) && retained->tempCalState.count >= 1) {
@@ -286,31 +289,14 @@ void sensor_calibration_process_gyro(float g[3])
 				offset_calculated = true;
 			}
 		}
-
-		// Strategy 2: Fallback to Polynomial if MLS didn't work
-		if (!offset_calculated && retained->tempCalState.valid) {
-			for (int axis = 0; axis < 3; axis++) {
-				float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-				for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-					offset = offset * temp + retained->tempCalCoeffs[axis][i];
-				}
-				calculated_offset[axis] = offset;
-			}
-			offset_calculated = true;
-		}
 	}
 
-	// Strategy 3: Final fallback to static bias (when no T-Cal data available)
+	// Strategy 2: Final fallback to static bias (when no T-Cal data available)
 	if (!offset_calculated) {
 		for (int i = 0; i < 3; i++) {
 			calculated_offset[i] = gyroBias[i];
 		}
 		// Note: offset_calculated remains false but we still apply D_offset below
-	}
-
-	// Apply correction offset (from manual calibration with T-Cal coverage)
-	for (int axis = 0; axis < 3; axis++) {
-		calculated_offset[axis] += retained->tempCalCorrectionOffset[axis];
 	}
 
 	// Apply boot/runtime calibration D_offset
@@ -450,7 +436,7 @@ void sensor_calibration_clear(float *a_bias, float *g_bias, bool write)
 		LOG_INF("Clearing stored calibration data");
 		sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, a_bias, sizeof(accelBias));
 		sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, g_bias, sizeof(gyroBias));
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 		// Also clear boot/runtime calibration D_offset since ZRO is being reset
 		retained->bootCalState.doffset_valid = false;
 		retained->bootCalState.doffset[0] = 0.0f;
@@ -617,7 +603,7 @@ static void sensor_calibrate_imu()
 	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
 	k_msleep(500); // Delay before beginning acquisition
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	// Variables to store average temperature and temperature range from calibration
 	float avg_temp = NAN;
 	float temp_range = NAN;
@@ -644,7 +630,7 @@ static void sensor_calibrate_imu()
 
 	LOG_INF("Reading data");
 	sensor_calibration_clear(a_bias, g_bias, false);
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	int err = sensor_offsetBias(a_bias, g_bias, &avg_temp, &temp_range);
 #else
 	int err = sensor_offsetBias(a_bias, g_bias, NULL, NULL);
@@ -679,7 +665,7 @@ static void sensor_calibrate_imu()
 	// Always save gyroscope bias (ZRO is orientation-independent)
 	sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	// 2. Check if T-Cal coverage is good - if so, only calculate D_offset instead of saving point
 	sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
 	if (!isnan(avg_temp)) {
@@ -762,59 +748,12 @@ static void sensor_calibrate_imu()
 		}
 
 		if (has_good_coverage) {
-			// Calculate and apply D_offset instead of saving new point
-			LOG_INF("T-Cal: Calculating D_offset instead of saving new point (preserving curve)");
-
-			// Calculate curve value at current temperature using unified strategy
-			float curve_bias[3];
-			bool offset_calculated = false;
-
-			// Try MLS first
-			if (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
-				if (sensor_tcal_mls_lookup(avg_temp, curve_bias) == 0) {
-					offset_calculated = true;
-				}
-			}
-
-			// Fallback to polynomial if needed
-			if (!offset_calculated && retained->tempCalState.valid) {
-				for (int axis = 0; axis < 3; axis++) {
-					float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-					for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-						offset = offset * avg_temp + retained->tempCalCoeffs[axis][i];
-					}
-					curve_bias[axis] = offset;
-				}
-				offset_calculated = true;
-			}
-
-			if (offset_calculated) {
-				// Calculate D_offset = measured - curve
-				for (int axis = 0; axis < 3; axis++) {
-					retained->tempCalCorrectionOffset[axis] = g_bias[axis] - curve_bias[axis];
-				}
-
-				LOG_INF(
-					"T-Cal: Updated D_offset [%.5f, %.5f, %.5f]",
-					(double)retained->tempCalCorrectionOffset[0],
-					(double)retained->tempCalCorrectionOffset[1],
-					(double)retained->tempCalCorrectionOffset[2]
-				);
-
-				// Save correction offset to NVS
-				sys_write(
-					MAIN_GYRO_TCAL_CORRECTION_ID,
-					retained->tempCalCorrectionOffset,
-					retained->tempCalCorrectionOffset,
-					sizeof(retained->tempCalCorrectionOffset)
-				);
-
-				// Update fusion bias while preserving orientation
-				sensor_fusion_update_bias(NULL);
-			} else {
-				LOG_WRN("T-Cal: Failed to calculate D_offset, falling back to point save");
-				has_good_coverage = false; // Fall through to save point
-			}
+			// Polynomial fit correction offset was removed; keep the retained field for compatibility,
+			// but do not update/apply it. With good coverage, avoid saving redundant points.
+			LOG_INF(
+				"T-Cal: Coverage sufficient at %.2fC, skipping point save",
+				(double)avg_temp
+			);
 		}
 
 		if (!has_good_coverage) {
@@ -867,7 +806,7 @@ static void sensor_calibrate_imu()
 				retained->tempCalPoints[idx].temp = avg_temp;
 				memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
 				retained->tempCalState.valid = false; // Invalidate old curve
-				update_poly_tcal();
+				update_tcal_state();
 
 			} else {
 				LOG_WRN(
@@ -1107,7 +1046,7 @@ static int sensor_offsetBias_internal(
 
 	double gyro_sum[3] = {0};
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	double temp_sum = 0;
 	float temp_min = INFINITY, temp_max = -INFINITY;
 	float current_temp;
@@ -1123,7 +1062,9 @@ static int sensor_offsetBias_internal(
 
 	int64_t sampling_start_time = k_uptime_get();
 	int i = 0;
+#if CONFIG_SENSOR_USE_TCAL
 	bool temp_threshold_reached = false;
+#endif
 
 	// Accel motion check counter - check every N gyro samples to avoid blocking
 	float actual_gyro_odr = sensor_get_gyro_odr();
@@ -1190,7 +1131,7 @@ static int sensor_offsetBias_internal(
 			wdt_feed_counter = 0;
 		}
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 		// Check temperature threshold only after min_sample_time_ms
 		if (elapsed >= min_sample_time_ms && temp_threshold_reached) {
 			LOG_INF("Temperature threshold reached after %lld ms with %d samples", elapsed, i);
@@ -1213,7 +1154,7 @@ static int sensor_offsetBias_internal(
 				if (rawData[j] > max_a[j]) {
 					max_a[j] = rawData[j];
 				}
-				if (max_a[j] - min_a[j] > TCAL_ACCEL_MOTION_THRESHOLD) {
+				if (max_a[j] - min_a[j] > BIAS_COLLECT_ACCEL_MOTION_THRESHOLD) {
 					LOG_INF("Accel motion detected: axis %d range %.4f", j, (double)(max_a[j] - min_a[j]));
 					return -1;
 				}
@@ -1235,7 +1176,7 @@ static int sensor_offsetBias_internal(
 			if (rawData[j] > max_g[j]) {
 				max_g[j] = rawData[j];
 			}
-			if (max_g[j] - min_g[j] > TCAL_GYRO_MOTION_THRESHOLD) {
+			if (max_g[j] - min_g[j] > BIAS_COLLECT_GYRO_MOTION_THRESHOLD) {
 				LOG_INF("Gyro motion detected: axis %d range %.4f", j, (double)(max_g[j] - min_g[j]));
 				return -1;
 			}
@@ -1246,7 +1187,7 @@ static int sensor_offsetBias_internal(
 		gyro_sum[1] += (double)rawData[1];
 		gyro_sum[2] += (double)rawData[2];
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 		// Sample and accumulate temperature
 		current_temp = sensor_get_current_imu_temperature();
 		if (!isnan(current_temp) && current_temp > -10.0f && current_temp < 60.0f) {
@@ -1261,7 +1202,7 @@ static int sensor_offsetBias_internal(
 			}
 
 			// Check if temperature range threshold exceeded
-			if ((temp_max - temp_min) >= TCAL_TEMP_RANGE_THRESHOLD) {
+			if ((temp_max - temp_min) >= BIAS_COLLECT_TEMP_RANGE_THRESHOLD) {
 				temp_threshold_reached = true;
 			}
 		}
@@ -1298,7 +1239,7 @@ static int sensor_offsetBias_internal(
 		return -2;
 	}
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	if (avg_temp != NULL && valid_temp_count > 0) {
 		*avg_temp = (float)(temp_sum / valid_temp_count);
 		LOG_INF("T-Cal: Average temperature: %.2fC (%d samples)", (double)*avg_temp, valid_temp_count);
@@ -1332,7 +1273,7 @@ static int sensor_offsetBias_internal(
 
 /**
  * Standard sensor offset bias collection function
- * Uses default timing: TCAL_MAX_SAMPLE_TIME_MS max, TCAL_MIN_SAMPLE_TIME_MS min
+ * Uses default timing: BIAS_COLLECT_MAX_SAMPLE_TIME_MS max, BIAS_COLLECT_MIN_SAMPLE_TIME_MS min
  */
 int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_range)
 {
@@ -1341,8 +1282,8 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 		dest2,
 		avg_temp,
 		temp_range,
-		TCAL_MAX_SAMPLE_TIME_MS,
-		TCAL_MIN_SAMPLE_TIME_MS
+		BIAS_COLLECT_MAX_SAMPLE_TIME_MS,
+		BIAS_COLLECT_MIN_SAMPLE_TIME_MS
 	);
 }
 
@@ -1569,7 +1510,7 @@ static void calibration_thread(void)
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #endif
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 		case 3: // Boot calibration
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 			sensor_perform_boot_calibration();
@@ -1601,17 +1542,12 @@ static void calibration_thread(void)
 	}
 }
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 
-void sensor_tcal_status_poly(void)
+void sensor_tcal_status(void)
 {
-	printk("Polynomial Temperature Calibration Status:\n");
-	printk("  - Curve calculated: %s\n", retained->tempCalState.valid ? "Yes" : "No");
-	printk(
-		"  - Polynomial degree: %u (CONFIG_SENSOR_POLY_DEGREE=%d)\n",
-		retained->tempCalState.degree,
-		CONFIG_SENSOR_POLY_DEGREE
-	);
+	printk("Temperature Calibration Status (MLS):\n");
+	printk("  - MLS available: %s\n", retained->tempCalState.valid ? "Yes" : "No");
 	printk("  - Points collected: %u / %d\n", retained->tempCalState.count, TCAL_BUFFER_SIZE);
 
 	// Use quality assessment to get calibrated temperature range and error
@@ -1695,184 +1631,24 @@ void sensor_tcal_status_poly(void)
 	}
 }
 
-// Solves a system of linear equations A*x = b using Gaussian elimination with partial pivoting.
-
-// A: Pointer to the start of an n x n matrix (row-major order). Modified in place.
-// b: Pointer to the start of a vector of size n. Modified in place.
-// n: The dimension of the system.
-// x: Pointer to a vector of size n where the solution will be stored.
-
-static int solve_linear_system(double *A, double *b, int n, double *x)
-{
-	for (int i = 0; i < n; i++) {
-		// --- Partial Pivoting ---
-		// Find the row with the largest value in the current column i to use as the pivot.
-		int max_row = i;
-		for (int k = i + 1; k < n; k++) {
-			if (fabs(A[k * n + i]) > fabs(A[max_row * n + i])) {
-				max_row = k;
-			}
-		}
-
-		// Swap the entire max_row with the current row i in both matrix A and vector b.
-		for (int k = i; k < n; k++) {
-			double temp = A[i * n + k];
-			A[i * n + k] = A[max_row * n + k];
-			A[max_row * n + k] = temp;
-		}
-		double temp = b[i];
-		b[i] = b[max_row];
-		b[max_row] = temp;
-
-		// Check if the matrix is singular. A pivot element close to zero means no unique solution exists.
-		if (fabs(A[i * n + i]) < 1e-12) {
-			LOG_ERR("Matrix is singular. Cannot solve. Pivot at [%d,%d] is near zero.", i, i);
-			return -1;
-		}
-
-		// --- Forward Elimination ---
-		// For every row below the pivot row...
-		for (int k = i + 1; k < n; k++) {
-			// Calculate the factor to multiply the pivot row by.
-			double factor = A[k * n + i] / A[i * n + i];
-
-			// Subtract this multiple of the pivot row from the current row.
-			// This creates a zero in the current column for this row.
-			for (int j = i; j < n; j++) {
-				A[k * n + j] -= factor * A[i * n + j];
-			}
-			// Do the same for the result vector b.
-			b[k] -= factor * b[i];
-		}
-	}
-
-	// --- Back Substitution ---
-	// At this point, A is an upper-triangular matrix. We can solve for x from bottom to top.
-	for (int i = n - 1; i >= 0; i--) {
-		// Start with the known result for this row.
-		x[i] = b[i];
-
-		// Subtract the effect of the variables we've already solved for.
-		for (int j = i + 1; j < n; j++) {
-			x[i] -= A[i * n + j] * x[j];
-		}
-
-		// Divide by the diagonal element to get the final value for x[i].
-		x[i] = x[i] / A[i * n + i];
-	}
-
-	return 0; // Success
-}
-
-// Performs a polynomial least-squares fit.
-static int polyfit(int degree, float coeffs_out[3][CONFIG_SENSOR_POLY_DEGREE + 1])
-{
-	if (retained->tempCalState.count < degree + 1) {
-		LOG_WRN("T-Cal: Not enough points (%u) to fit a degree %d polynomial.", retained->tempCalState.count, degree);
-		return -1;
-	}
-
-	int n_coeffs = degree + 1;
-
-	// The Normal Equation for least squares is (X^T * X) * a = (X^T * y)
-	// Let A = (X^T * X) and b = (X^T * y). We solve A*a = b for the coefficients 'a'.
-
-	// Matrix A is a square matrix of size n_coeffs x n_coeffs.
-	// A[i][j] = sum of (t ^ (i+j)) over all data points.
-	double A[n_coeffs * n_coeffs];
-
-	// Vector b contains the results for each axis (X, Y, Z).
-	// b[i] = sum of (bias * (t ^ i)) over all data points.
-	double b_vectors[3][n_coeffs];
-
-	memset(A, 0, sizeof(A));
-	memset(b_vectors, 0, sizeof(b_vectors));
-
-	LOG_DBG("Polyfit: Using %u points to calculate degree %d curve.", retained->tempCalState.count, degree);
-
-	// 1. Build the A matrix and b vectors from the scattered data points.
-	for (int p_idx = 0; p_idx < TCAL_BUFFER_SIZE; ++p_idx) {
-		// Skip empty slots in the buffer
-		if (retained->tempCalPoints[p_idx].temp == 0.0f) {
-			continue;
-		}
-
-		double temp = retained->tempCalPoints[p_idx].temp;
-
-		// Pre-calculate powers of the current temperature 't' up to t^(2*degree).
-		double t_powers[2 * degree + 1];
-		t_powers[0] = 1.0; // t^0
-		for (int j = 1; j <= 2 * degree; j++) {
-			t_powers[j] = t_powers[j - 1] * temp;
-		}
-
-		// Sum the powers into the matrix A
-		for (int i = 0; i < n_coeffs; i++) {
-			for (int j = 0; j < n_coeffs; j++) {
-				A[i * n_coeffs + j] += t_powers[i + j];
-			}
-		}
-
-		// Sum the bias * powers into the vectors b
-		for (int i = 0; i < n_coeffs; i++) {
-			b_vectors[0][i] += (double)retained->tempCalPoints[p_idx].bias[0] * t_powers[i];
-			b_vectors[1][i] += (double)retained->tempCalPoints[p_idx].bias[1] * t_powers[i];
-			b_vectors[2][i] += (double)retained->tempCalPoints[p_idx].bias[2] * t_powers[i];
-		}
-	}
-
-	// 2. Solve the system A*x=b for each axis.
-	for (int axis = 0; axis < 3; axis++) {
-		// Create copies because the solver modifies the inputs in place.
-		double A_copy[n_coeffs * n_coeffs];
-		memcpy(A_copy, A, sizeof(A));
-		double b_copy[n_coeffs];
-		memcpy(b_copy, b_vectors[axis], sizeof(b_copy));
-
-		double solution[n_coeffs]; // The calculated coefficients will be stored here.
-
-		if (solve_linear_system(A_copy, b_copy, n_coeffs, solution) != 0) {
-			LOG_ERR("T-Cal: Failed to solve for polynomial coefficients. Matrix may be singular.");
-			return -1;
-		}
-
-		// Copy the double-precision solution to the float output array.
-		for (int i = 0; i < n_coeffs; i++) {
-			coeffs_out[axis][i] = (float)solution[i];
-		}
-	}
-
-	LOG_INF("Polynomial coefficients calculated successfully for degree %d.", degree);
-	return 0;
-}
-
-// Function to handle recalculating the curve after a point is added/removed
-static void update_poly_tcal(void)
+static void update_tcal_state(void)
 {
 	// Invalidate lookup cache since calibration data changed
 	sensor_tcal_cache_invalidate();
 
+	// Polynomial coefficients are no longer used; keep persisted storage zeroed
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
 	retained->tempCalState.degree = 0;
-	retained->tempCalState.valid = false;
 
-	if (retained->tempCalState.count < 2) {
-		LOG_INF("T-Cal: Not enough points (%u)...", retained->tempCalState.count);
+	// Mark MLS availability based on point count
+	retained->tempCalState.valid = (retained->tempCalState.count >= 1);
+
+	if (retained->tempCalState.valid) {
+		LOG_INF("T-Cal: MLS state refreshed with %u points", retained->tempCalState.count);
+		printk("T-Cal: MLS data refreshed successfully.\n");
 	} else {
-		int degree = retained->tempCalState.count - 1;
-		if (degree > CONFIG_SENSOR_POLY_DEGREE) {
-			degree = CONFIG_SENSOR_POLY_DEGREE;
-		}
-
-		LOG_INF("T-Cal: Recalculating curve with %u points", retained->tempCalState.count);
-
-		if (polyfit(degree, retained->tempCalCoeffs) == 0) {
-			retained->tempCalState.valid = true;
-			retained->tempCalState.degree = degree;
-			printk("T-Cal: New curve calculated successfully.\n");
-		} else {
-			printk("T-Cal: Failed to calculate new curve.\n");
-		}
+		LOG_INF("T-Cal: No points available");
+		printk("T-Cal: No points available.\n");
 	}
 
 	// Save updated state to NVS
@@ -1895,14 +1671,12 @@ static void update_poly_tcal(void)
 		sizeof(retained->tempCalCoeffs)
 	);
 
-	recalculate_tcal_correction_offset();
-
 	// Update fusion bias while preserving orientation
 	sensor_fusion_update_bias(NULL);
 }
 
 // Public function for 'tcal clear' and 'reset tcal'
-void sensor_tcal_clear_poly(void)
+void sensor_tcal_clear(void)
 {
 	if (sensor_calibration_request(0) != 0) {
 		LOG_ERR("Another calibration is running. Cannot clear T-Cal data.");
@@ -1913,13 +1687,12 @@ void sensor_tcal_clear_poly(void)
 	// Invalidate lookup cache since calibration data will be cleared
 	sensor_tcal_cache_invalidate();
 
-	LOG_INF("Clearing all manual polynomial T-Cal data.");
+	LOG_INF("Clearing all manual T-Cal data.");
 	memset(retained->tempCalPoints, 0, sizeof(retained->tempCalPoints));
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
 	memset(&retained->tempCalState, 0, sizeof(retained->tempCalState)); // Clear the whole state struct
-	memset(retained->tempCalCorrectionOffset, 0, sizeof(retained->tempCalCorrectionOffset));
 
-	// Save cleared state to NVS directly (don't call update_poly_tcal which recalculates the curve)
+	// Save cleared state to NVS directly (don't call update_tcal_state which refreshes runtime state)
 	sys_write(
 		MAIN_GYRO_TCAL_STATE_ID,
 		&retained->tempCalState,
@@ -1938,12 +1711,6 @@ void sensor_tcal_clear_poly(void)
 		retained->tempCalCoeffs,
 		sizeof(retained->tempCalCoeffs)
 	);
-	sys_write(
-		MAIN_GYRO_TCAL_CORRECTION_ID,
-		retained->tempCalCorrectionOffset,
-		retained->tempCalCorrectionOffset,
-		sizeof(retained->tempCalCorrectionOffset)
-	);
 
 	// Also clear boot/runtime calibration D_offset since T-Cal is being reset
 	retained->bootCalState.doffset_valid = false;
@@ -1955,7 +1722,7 @@ void sensor_tcal_clear_poly(void)
 	// Manual command: invalidate fusion to force quaternion recalculation
 	sensor_fusion_invalidate();
 
-	printk("All polynomial temperature calibration data and D_offset have been cleared.\n");
+	printk("All temperature calibration data and D_offset have been cleared.\n");
 }
 
 // Public function for 'tcal remove <index>'
@@ -1993,8 +1760,8 @@ void sensor_tcal_remove_point(int index_to_remove)
 		retained->tempCalState.count = new_count;
 		retained->tempCalState.valid = false;
 
-		printk("Point at index %d removed. Recalculating curve...\n", index_to_remove);
-		update_poly_tcal(); // Recalculate and save
+		printk("Point at index %d removed. Recalculating MLS state...\n", index_to_remove);
+		update_tcal_state(); // Refresh and save
 	} else {
 		printk("No data found at index %d. Nothing to remove.\n", index_to_remove);
 	}
@@ -2073,8 +1840,8 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 	}
 
 	// Prevent starting new calibration while previous one is still running
-	// Use calibration cooldown time (TCAL_MAX_SAMPLE_TIME_MS + margin)
-	const int64_t calibration_cooldown_ms = TCAL_MAX_SAMPLE_TIME_MS + 10000; // 5s sampling + 10s margin = 15s
+	// Use calibration cooldown time (BIAS_COLLECT_MAX_SAMPLE_TIME_MS + margin)
+	const int64_t calibration_cooldown_ms = BIAS_COLLECT_MAX_SAMPLE_TIME_MS + 10000; // 5s sampling + 10s margin = 15s
 	if ((now - last_calibration_time) < calibration_cooldown_ms) {
 		return;
 	}
@@ -2195,66 +1962,6 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 	} else {
 		LOG_DBG("T-Cal Auto: Calibration request rejected (already running), will retry later");
 	}
-}
-
-// Recalculates the T-Cal correction offset based on the current curve and anchor point.
-static void recalculate_tcal_correction_offset(void)
-{
-	float anchor_temp;
-	const float *anchor_bias;
-	bool anchor_found = false;
-
-	// Select the anchor point
-	if (!anchor_found && !isnan(retained->gyroTemp)) {
-		anchor_temp = retained->gyroTemp;
-		anchor_bias = retained->gyroBias;
-		anchor_found = true;
-	}
-
-	// Calculate the offset using the selected anchor
-	if (anchor_found && retained->tempCalState.valid) {
-		LOG_INF("Recalculating T-Cal correction offset using anchor temp %.2fC", (double)anchor_temp);
-
-		// 1. Evaluate the polynomial at the anchor temperature
-		float poly_bias_at_anchor[3];
-		for (int axis = 0; axis < 3; axis++) {
-			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-				offset = offset * anchor_temp + retained->tempCalCoeffs[axis][i];
-			}
-			poly_bias_at_anchor[axis] = offset;
-		}
-
-		// 2. Calculate the new correction vector: Correction = RealAnchorBias - CurveBiasAtAnchor
-		for (int i = 0; i < 3; i++) {
-			retained->tempCalCorrectionOffset[i] = anchor_bias[i] - poly_bias_at_anchor[i];
-		}
-
-		LOG_INF(
-			"New T-Cal correction offset: [%.5f, %.5f, %.5f]",
-			(double)retained->tempCalCorrectionOffset[0],
-			(double)retained->tempCalCorrectionOffset[1],
-			(double)retained->tempCalCorrectionOffset[2]
-		);
-
-	} else {
-		// If no valid anchor or curve exists, the offset must be zero.
-		if (!retained->tempCalState.valid) {
-			LOG_WRN("T-Cal curve not valid. Cannot calculate offset.");
-		}
-		if (!anchor_found) {
-			LOG_WRN("No valid anchor point found. Cannot calculate offset.");
-		}
-		memset(retained->tempCalCorrectionOffset, 0, sizeof(retained->tempCalCorrectionOffset));
-	}
-
-	// Always save the resulting correction offset (either new or zeroed out) to NVS
-	sys_write(
-		MAIN_GYRO_TCAL_CORRECTION_ID,
-		retained->tempCalCorrectionOffset,
-		retained->tempCalCorrectionOffset,
-		sizeof(retained->tempCalCorrectionOffset)
-	);
 }
 
 void sensor_calibration_get_last_gyro_offset(float offset[3])
@@ -2392,7 +2099,7 @@ static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp)
 
 /**
  * Collect bias for runtime calibration with shorter sampling time
- * Uses RUNTIME_CAL_SAMPLE_TIME_MS instead of TCAL_MAX_SAMPLE_TIME_MS
+ * Uses RUNTIME_CAL_SAMPLE_TIME_MS instead of BIAS_COLLECT_MAX_SAMPLE_TIME_MS
  * Does NOT save the point to calibration data
  */
 static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp)
@@ -2439,7 +2146,7 @@ static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp)
 
 /**
  * Calculate D_offset and store in runtime state (not persisted)
- * Uses unified strategy: MLS -> Polynomial -> Skip if insufficient quality
+ * Uses unified strategy: MLS -> Skip if insufficient quality
  *
  * Skip D_offset calculation if:
  * 1. No valid temperature calibration (< 5 points or current temp not covered)
@@ -2480,35 +2187,17 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 		return 0; // Not an error, just skipped
 	}
 
-	// Calculate curve value at current temperature using unified strategy
+	// Calculate curve value at current temperature using MLS
 	float curve_bias[3];
 	bool offset_calculated = false;
-	const char *method_name = "unknown";
+	const char *method_name = "MLS";
 
-	// Strategy 1: Try MLS (preferred - smooth, no discontinuities)
-	if (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
-		if (sensor_tcal_mls_lookup(temp, curve_bias) == 0) {
-			offset_calculated = true;
-			method_name = "MLS";
-			LOG_INF("D_offset: Using MLS method");
-		}
-	}
-
-	// Strategy 2: Fallback to Polynomial if MLS didn't work
-	if (!offset_calculated && retained->tempCalState.valid) {
-		for (int axis = 0; axis < 3; axis++) {
-			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-				offset = offset * temp + retained->tempCalCoeffs[axis][i];
-			}
-			curve_bias[axis] = offset;
-		}
+	if (sensor_tcal_mls_lookup(temp, curve_bias) == 0) {
 		offset_calculated = true;
-		method_name = "Polynomial";
-		LOG_INF("D_offset: Using polynomial method");
+		LOG_INF("D_offset: Using MLS method");
 	}
 
-	// If neither method worked, this should not happen since we checked quality
+	// If method failed, this should not happen since we checked quality
 	// but handle it gracefully
 	if (!offset_calculated) {
 		LOG_ERR("D_offset: Failed to calculate curve bias despite passing quality check");
@@ -2528,14 +2217,12 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 		(double)temp
 	);
 
-// Calculate D_offset = measured - (curve + existing correction offset)
-// Must account for Correction offset to avoid double-compensation
+// Calculate D_offset = measured - curve
 // Apply a minimum threshold to filter out noise - values below threshold are set to 0
 #define BOOT_CAL_DOFFSET_MIN_THRESHOLD 0.001f // dps - ignore tiny corrections
 
 	for (int axis = 0; axis < 3; axis++) {
-		float effective_curve = curve_bias[axis] + retained->tempCalCorrectionOffset[axis];
-		float doffset = measured_bias[axis] - effective_curve;
+		float doffset = measured_bias[axis] - curve_bias[axis];
 
 		// Apply threshold: if D_offset is too small, it's likely noise - don't correct
 		if (fabsf(doffset) < BOOT_CAL_DOFFSET_MIN_THRESHOLD) {
@@ -2547,12 +2234,6 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 
 	retained->bootCalState.doffset_valid = true;
 
-	LOG_INF(
-		"D_offset: Effective baseline (with correction): [%.5f, %.5f, %.5f]",
-		(double)(curve_bias[0] + retained->tempCalCorrectionOffset[0]),
-		(double)(curve_bias[1] + retained->tempCalCorrectionOffset[1]),
-		(double)(curve_bias[2] + retained->tempCalCorrectionOffset[2])
-	);
 	LOG_INF(
 		"D_offset: Calculated [%.5f, %.5f, %.5f] (stored in retained memory)",
 		(double)retained->bootCalState.doffset[0],
@@ -3013,109 +2694,33 @@ void sensor_tcal_test_methods(float temp)
 		printk("MLS Method: Not enough points (need >= %d)\n\n", MLS_MIN_POINTS_FOR_FIT);
 	}
 
-	// Method 2: Polynomial (fallback method)
-	if (retained->tempCalState.valid) {
-		float poly_bias[3];
-		for (int axis = 0; axis < 3; axis++) {
-			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-				offset = offset * temp + retained->tempCalCoeffs[axis][i];
-			}
-			poly_bias[axis] = offset;
-		}
-
-		printk("Polynomial Method (degree %u):\n", retained->tempCalState.degree);
-		printk("  Bias: [%.5f, %.5f, %.5f] dps\n", (double)poly_bias[0], (double)poly_bias[1], (double)poly_bias[2]);
-		printk("\n");
-
-		// Compare methods if both available
-		if (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
-			float mls_bias[3];
-			if (sensor_tcal_mls_lookup(temp, mls_bias) == 0) {
-				float diff[3];
-				float max_diff = 0.0f;
-				for (int i = 0; i < 3; i++) {
-					diff[i] = poly_bias[i] - mls_bias[i];
-					if (fabsf(diff[i]) > max_diff) {
-						max_diff = fabsf(diff[i]);
-					}
-				}
-				printk("Method Difference (Polynomial - MLS):\n");
-				printk("  Delta: [%.5f, %.5f, %.5f] dps\n", (double)diff[0], (double)diff[1], (double)diff[2]);
-				printk("  Max difference: %.5f dps\n", (double)max_diff);
-				printk("\n");
-			}
-		}
-	} else {
-		printk("Polynomial Method: Not available (curve not calculated)\n\n");
-	}
-
-	// Show correction offset and boot cal D_offset if active
-	bool has_corrections = false;
-	for (int i = 0; i < 3; i++) {
-		if (retained->tempCalCorrectionOffset[i] != 0.0f
-			|| (retained->bootCalState.doffset_valid && retained->bootCalState.doffset[i] != 0.0f)) {
-			has_corrections = true;
-			break;
-		}
-	}
-
-	if (has_corrections) {
+	// Show boot cal D_offset if active
+	if (retained->bootCalState.doffset_valid) {
 		printk("Additional Offsets:\n");
-		if (retained->tempCalCorrectionOffset[0] != 0.0f || retained->tempCalCorrectionOffset[1] != 0.0f
-			|| retained->tempCalCorrectionOffset[2] != 0.0f) {
-			printk(
-				"  Correction offset: [%.5f, %.5f, %.5f] dps\n",
-				(double)retained->tempCalCorrectionOffset[0],
-				(double)retained->tempCalCorrectionOffset[1],
-				(double)retained->tempCalCorrectionOffset[2]
-			);
-		}
-		if (retained->bootCalState.doffset_valid) {
-			printk(
-				"  Boot cal D_offset: [%.5f, %.5f, %.5f] dps\n",
-				(double)retained->bootCalState.doffset[0],
-				(double)retained->bootCalState.doffset[1],
-				(double)retained->bootCalState.doffset[2]
-			);
-		}
+		printk(
+			"  Boot cal D_offset: [%.5f, %.5f, %.5f] dps\n",
+			(double)retained->bootCalState.doffset[0],
+			(double)retained->bootCalState.doffset[1],
+			(double)retained->bootCalState.doffset[2]
+		);
 		printk("\n");
 	}
 
 	// Show final effective bias that would be applied
 	printk("Final Effective Bias (as applied to gyro data):\n");
 
-	// Calculate what would actually be used using unified strategy: MLS -> Polynomial -> Static
+	// Calculate what would actually be used using unified strategy: MLS -> Static
 	float final_bias[3] = {0.0f, 0.0f, 0.0f};
 	bool calculated = false;
 	const char *method_used = "static";
 
-	// Strategy 1: Try MLS (preferred)
-	if (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
-		if (sensor_tcal_mls_lookup(temp, final_bias) == 0) {
-			calculated = true;
-			method_used = "MLS";
-		}
-	}
-
-	// Strategy 2: Fallback to polynomial
-	if (!calculated && retained->tempCalState.valid) {
-		for (int axis = 0; axis < 3; axis++) {
-			float offset = retained->tempCalCoeffs[axis][retained->tempCalState.degree];
-			for (int i = retained->tempCalState.degree - 1; i >= 0; i--) {
-				offset = offset * temp + retained->tempCalCoeffs[axis][i];
-			}
-			final_bias[axis] = offset;
-		}
+	if (sensor_tcal_mls_lookup(temp, final_bias) == 0) {
 		calculated = true;
-		method_used = "Polynomial";
+		method_used = "MLS";
 	}
 
 	if (calculated) {
-		// Add correction offset
-		for (int i = 0; i < 3; i++) {
-			final_bias[i] += retained->tempCalCorrectionOffset[i];
-		}
+		// tempCalCorrectionOffset is retained for compatibility only; no longer used.
 
 		// Add boot cal D_offset if valid
 		if (retained->bootCalState.doffset_valid) {
@@ -3130,7 +2735,7 @@ void sensor_tcal_test_methods(float temp)
 			(double)final_bias[1],
 			(double)final_bias[2]
 		);
-		printk("  Method: %s (Unified Strategy: MLS -> Polynomial -> Static)\n", method_used);
+		printk("  Method: %s (Unified Strategy: MLS -> Static)\n", method_used);
 	} else {
 		printk(
 			"  Fallback to static bias: [%.5f, %.5f, %.5f] dps\n",

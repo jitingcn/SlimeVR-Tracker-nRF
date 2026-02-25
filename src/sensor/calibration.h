@@ -49,7 +49,7 @@ void sensor_request_calibration(void);
 void sensor_request_calibration_6_side(void);
 void sensor_request_calibration_mag(void);
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 
 // Quality assessment structure for T-Cal
 typedef struct {
@@ -62,8 +62,10 @@ typedef struct {
 } tcal_quality_t;
 
 void sensor_calibration_get_last_gyro_offset(float offset[3]);
-void sensor_tcal_clear_poly(void);
-void sensor_tcal_status_poly(void);
+
+// T-Cal maintenance/status
+void sensor_tcal_clear(void);
+void sensor_tcal_status(void);
 void sensor_tcal_remove_point(int index_to_remove);
 bool sensor_tcal_is_temp_outside_range(float temp, float *min_temp, float *max_temp);
 void sensor_tcal_check_auto_calibration(float current_temp);

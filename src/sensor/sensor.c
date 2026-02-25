@@ -181,7 +181,7 @@ static int sensor_mag_id = -1;
 static const sensor_imu_t *sensor_imu = &sensor_imu_none;
 static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 static float sensor_tcal_temp = 25.0f; // Default to 25C safety
 #endif
 
@@ -957,7 +957,7 @@ void sensor_loop(void)
 			if (mag_available && mag_enabled && mag_use_oneshot)
 				sensor_mag->mag_oneshot();
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 			// Read IMU temperature
 			temp = sensor_imu->temp_read();
 			// Only update if the value looks like a valid temperature (-10 to 60).
@@ -1585,7 +1585,7 @@ void sensor_loop(void)
 				}
 			}
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 			// Check for boot calibration (higher priority than auto calibration)
 			sensor_tcal_boot_calibration_check();
 
@@ -1738,7 +1738,7 @@ void main_imu_restart(void)
 	}
 }
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 // Public function to get the current IMU temperature
 float sensor_get_current_imu_temperature(void)
 {

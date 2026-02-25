@@ -191,15 +191,11 @@ static int sys_retained_init(void)
 			retained->gyroSensScale[1] = 1.0f;
 			retained->gyroSensScale[2] = 1.0f;
 		}
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 		sys_read(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, sizeof(retained->gyroTemp));
 		sys_read(MAIN_GYRO_TCAL_POINTS_ID, &retained->tempCalPoints, sizeof(retained->tempCalPoints));
 		sys_read(MAIN_GYRO_TCAL_COEFFS_ID, &retained->tempCalCoeffs, sizeof(retained->tempCalCoeffs));
-		sys_read(
-			MAIN_GYRO_TCAL_CORRECTION_ID,
-			&retained->tempCalCorrectionOffset,
-			sizeof(retained->tempCalCorrectionOffset)
-		);
+		// tempCalCorrectionOffset is retained for compatibility only; no longer used.
 		sys_read(MAIN_GYRO_TCAL_STATE_ID, &retained->tempCalState, sizeof(retained->tempCalState));
 #endif
 		sys_read(RF_CHANNEL_ID, &retained->rf_channel, sizeof(retained->rf_channel));
