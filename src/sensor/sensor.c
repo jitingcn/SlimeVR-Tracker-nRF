@@ -201,7 +201,7 @@ static void sensor_update_range_stats_gyro(float g[3]);
 static void sensor_update_range_stats_accel(float a[3]);
 #endif // CONFIG_SENSOR_RANGE_STATS
 static struct k_thread sensor_thread_id;
-static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
+static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 2048);
 
 K_THREAD_DEFINE(sensor_init_thread_id, 256, sensor_request_scan, true, NULL, NULL, 7, 0, 0);
 //crashing on nrf54l at 256
