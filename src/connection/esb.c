@@ -787,6 +787,9 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_MAG_CLEAR:
 								cmd_name = "MAG_CLEAR";
 								break;
+							case ESB_PONG_FLAG_MAG_CAL:
+								cmd_name = "MAG_CAL";
+								break;
 							case ESB_PONG_FLAG_REBOOT:
 								cmd_name = "REBOOT";
 								break;
@@ -1472,6 +1475,16 @@ static void esb_thread(void)
 #endif
 					break;
 
+				case ESB_PONG_FLAG_MAG_CAL:
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
+					LOG_INF("Executing remote command: MAG_CAL");
+					sensor_calibration_clear_mag(NULL, true);
+					sensor_request_calibration_mag();
+#else
+					LOG_WRN("Remote command: MAG_CAL not supported (no magnetometer)");
+#endif
+					break;
+
 				case ESB_PONG_FLAG_REBOOT:
 					LOG_WRN("Executing remote command: REBOOT");
 					sys_request_system_reboot(false);
@@ -1570,7 +1583,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_AUTO_ON:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_AUTO_ON");
 					sensor_tcal_set_auto_calibration(true);
 #else
@@ -1579,7 +1592,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_AUTO_OFF:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_AUTO_OFF");
 					sensor_tcal_set_auto_calibration(false);
 #else
@@ -1598,7 +1611,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_BOOT_ON:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_BOOT_ON");
 					sensor_boot_cal_set_enabled(true);
 #else
@@ -1607,7 +1620,7 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_BOOT_OFF:
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 					LOG_INF("Executing remote command: TCAL_BOOT_OFF");
 					sensor_boot_cal_set_enabled(false);
 #else

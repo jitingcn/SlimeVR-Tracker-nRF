@@ -121,31 +121,66 @@ void v_rotate(const float* v, const float* q, float* out)  // TODO: not the most
 }
 
 float v_diff_mag(const float* a, const float* b) {
+#if CONFIG_CMSIS_DSP
+	float diff[3];
+	arm_sub_f32(a, b, diff, 3);
+	float mag_sq;
+	arm_dot_prod_f32(diff, diff, 3, &mag_sq);
+	float mag;
+	arm_sqrt_f32(mag_sq, &mag);
+	return mag;
+#else
 	float x = a[0] - b[0];
 	float y = a[1] - b[1];
 	float z = a[2] - b[2];
 	return sqrtf(x * x + y * y + z * z);
+#endif
 }
 
 bool q_epsilon(const float *x, const float *y, float eps)
 {
+#if CONFIG_CMSIS_DSP
+	float s;
+	arm_dot_prod_f32(x, y, 4, &s);
+	s = fabsf(s);
+#else
 	float s = fabsf(x[0]*y[0] + x[1]*y[1] + x[2]*y[2] + x[3]*y[3]);
+#endif
 	if (s > 1)
 		return true;
 	return (2 * acosf(s)) < eps;
 }
 
 bool v_epsilon(const float* a, const float* b, float eps) {
+#if CONFIG_CMSIS_DSP
+	float diff[3];
+	arm_sub_f32(a, b, diff, 3);
+	float mag_sq;
+	arm_dot_prod_f32(diff, diff, 3, &mag_sq);
+	float mag;
+	arm_sqrt_f32(mag_sq, &mag);
+	return mag < eps;
+#else
 	float x = a[0] - b[0];
 	float y = a[1] - b[1];
 	float z = a[2] - b[2];
 	return sqrtf(x * x + y * y + z * z) < eps;
+#endif
 }
 
 float v_avg(const float* a) { return (a[0] + a[1] + a[2]) / 3; }
 
 // TODO: does this need to be moved?
 void apply_BAinv(float xyz[3], float BAinv[4][3]) {
+#if CONFIG_CMSIS_DSP
+	float temp[3];
+	arm_sub_f32(xyz, BAinv[0], temp, 3);
+	// Matrix-vector multiply: result = BAinv[1:3] * temp
+	// BAinv[1], BAinv[2], BAinv[3] are the rows of the 3x3 matrix
+	arm_dot_prod_f32(BAinv[1], temp, 3, &xyz[0]);
+	arm_dot_prod_f32(BAinv[2], temp, 3, &xyz[1]);
+	arm_dot_prod_f32(BAinv[3], temp, 3, &xyz[2]);
+#else
 	float temp[3];
 	for (int i = 0; i < 3; i++) {
 		temp[i] = xyz[i] - BAinv[0][i];
@@ -153,6 +188,7 @@ void apply_BAinv(float xyz[3], float BAinv[4][3]) {
 	xyz[0] = BAinv[1][0] * temp[0] + BAinv[1][1] * temp[1] + BAinv[1][2] * temp[2];
 	xyz[1] = BAinv[2][0] * temp[0] + BAinv[2][1] * temp[1] + BAinv[2][2] * temp[2];
 	xyz[2] = BAinv[3][0] * temp[0] + BAinv[3][1] * temp[1] + BAinv[3][2] * temp[2];
+#endif
 }
 
 // using xiofusion FusionAhrsGetLinearAcceleration as reference
@@ -178,7 +214,13 @@ void a_to_lin_a(const float *q, const float *a, float *lin_a)
 void q_fem(const float* q, float* out) {
 	float w = fabsf(q[0]);
 	float a = 1 - w * w;
+#if CONFIG_CMSIS_DSP
+	float sqrt_a;
+	arm_sqrt_f32(a + EPS, &sqrt_a);
+	float inv_sqrt_a = 1.0f / sqrt_a;
+#else
 	float inv_sqrt_a = 1 / sqrtf(a + EPS);  // inversesqrt
+#endif
 	float k = a * inv_sqrt_a;
 	float atan_term = (2 / M_PI) * atanf(k / w);
 	float sign_w = (q[0] == 0) ? 1 : copysignf(1, q[0]);
@@ -189,6 +231,21 @@ void q_fem(const float* q, float* out) {
 }
 
 void q_iem(const float* v, float* out) {
+#if CONFIG_CMSIS_DSP
+	float d;
+	arm_dot_prod_f32(v, v, 3, &d);
+	float sqrt_d;
+	arm_sqrt_f32(d + EPS, &sqrt_d);
+	float inv_sqrt_d = 1.0f / sqrt_d;
+	float a = (M_PI / 2) * d * inv_sqrt_d;
+	float s, c;
+	arm_sin_cos_f32(a, &s, &c);
+	float k = s * inv_sqrt_d;
+	out[0] = c;
+	out[1] = k * v[0];
+	out[2] = k * v[1];
+	out[3] = k * v[2];
+#else
 	float d = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
 	float inv_sqrt_d = 1 / sqrtf(d + EPS);  // inversesqrt
 	float a = (M_PI / 2) * d * inv_sqrt_d;
@@ -198,4 +255,5 @@ void q_iem(const float* v, float* out) {
 	out[1] = k * v[0];
 	out[2] = k * v[1];
 	out[3] = k * v[2];
+#endif
 }

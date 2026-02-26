@@ -204,7 +204,7 @@ static void print_sensor(void)
 		(double)retained->gyroBias[1],
 		(double)retained->gyroBias[2]
 	);
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	// Display the real-time calculated gyro offset
 	float current_gyro_offset[3];
 	sensor_calibration_get_last_gyro_offset(current_gyro_offset);
@@ -491,7 +491,7 @@ static void print_help(void)
 	printk("  sens <x>,<y>,<z>           Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
 	printk("  sens reset                 Reset gyro sensitivity calibration\n");
 #endif
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	// Update the help string to show the new command set
 	printk("  tcal <status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
 #endif
@@ -527,7 +527,7 @@ static void print_help(void)
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	printk("  reset sens                 Reset gyro sensitivity calibration\n");
 #endif
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	printk("  reset tcal                 Reset temperature calibration\n");
 #endif
 #if SENSOR_MAG_EXISTS
@@ -623,8 +623,8 @@ void cmd_reset_acc(void)
 
 void cmd_reset_tcal(void)
 {
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-	sensor_tcal_clear_poly();
+#if CONFIG_SENSOR_USE_TCAL
+	sensor_tcal_clear();
 #else
 	printk("Error: Temperature calibration not enabled.\n");
 #endif
@@ -732,7 +732,7 @@ static void console_thread(void)
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	uint8_t command_sens[] = "sens";
 #endif
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	uint8_t command_tcal[] = "tcal";
 #endif
 	// debug
@@ -747,7 +747,7 @@ static void console_thread(void)
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	uint8_t command_reset_arg_sens[] = "sens";
 #endif
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	uint8_t command_reset_arg_tcal[] = "tcal";
 #endif
 	uint8_t command_reset_arg_bat[] = "bat";
@@ -824,7 +824,7 @@ static void console_thread(void)
 			}
 		}
 #endif
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
@@ -837,7 +837,7 @@ static void console_thread(void)
 					// Handling case where arg might contain only spaces
 					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 				} else if (strcmp(subcmd, "status") == 0) {
-					sensor_tcal_status_poly();
+					sensor_tcal_status();
 					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
 				} else if (strcmp(subcmd, "clear") == 0) {
 					cmd_reset_tcal();
@@ -997,7 +997,9 @@ static void console_thread(void)
 #endif
 #if SENSOR_MAG_EXISTS
 		else if (memcmp(line, command_mag, sizeof(command_mag)) == 0) {
+			// "mag" command now starts calibration (clear existing first)
 			sensor_calibration_clear_mag(NULL, true);
+			sensor_request_calibration_mag();
 		}
 #endif
 		else if (memcmp(line, command_set, sizeof(command_set)) == 0) {
@@ -1112,7 +1114,7 @@ static void console_thread(void)
 				cmd_sens_reset();
 			}
 #endif
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 			else if (arg && memcmp(arg, command_reset_arg_tcal, sizeof(command_reset_arg_tcal)) == 0) {
 				cmd_reset_tcal();
 			}

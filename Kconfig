@@ -317,18 +317,16 @@ config SENSOR_SENS_REV
     help
        Number of rotations used in calculating sensitivity calibration.
 
-config SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
-    bool "Progressive Manual Polynomial Calibration"
+config SENSOR_USE_TCAL
+    bool "Enable temperature calibration (T-Cal)"
     default y
     help
-        Builds a polynomial temperature compensation curve incrementally.
-        Each time the standard 'calibrate' command is run, a new (temp, bias)
-        data point is added. The curve is automatically re-calculated
-        and improves over time as more points are added at different
-        temperatures.
+        Enable temperature calibration (T-Cal) support.
+        This controls whether the firmware collects/uses temperature-related
+        calibration data to compensate gyroscope bias drift.
 
 menu "Temperature Calibration Settings"
-depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+depends on SENSOR_USE_TCAL
 
 config SENSOR_POLY_DEGREE
     int "Polynomial degree"
@@ -355,7 +353,7 @@ config SENSOR_POLY_STEPS_PER_DEGREE
 config SENSOR_USE_BOOT_CALIBRATION
     bool "Enable automatic boot calibration"
     default n
-    depends on SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+    depends on SENSOR_USE_TCAL
     help
         Automatically perform boot calibration after device startup.
         When enabled, the device will measure gyroscope bias at boot time

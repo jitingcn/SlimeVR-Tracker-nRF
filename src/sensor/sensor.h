@@ -28,6 +28,7 @@
 const char* sensor_get_sensor_imu_name(void);
 const char* sensor_get_sensor_mag_name(void);
 const char* sensor_get_sensor_fusion_name(void);
+bool sensor_is_initialized(void);
 
 int sensor_get_sensor_temperature(float *);
 
@@ -52,7 +53,7 @@ void main_imu_resume(void);
 void main_imu_wakeup(void);
 void main_imu_restart(void);
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 float sensor_get_current_imu_temperature(void);
 #endif
 

@@ -77,7 +77,7 @@ bool retained_validate(void)
 		retained->max_battery_pptt = -1;
 		retained->min_battery_pptt = -1;
 		retained->battery_pptt_saved = -1;
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 		// Initialize boot calibration state
 		#ifdef CONFIG_SENSOR_USE_BOOT_CALIBRATION
 		retained->bootCalState.enabled = true;

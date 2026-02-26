@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 // A single point in temperature calibration data
 struct TempCalPoint {
 	float temp;    // The temperature for this point
@@ -80,7 +80,7 @@ struct retained_data {
 
 	uint8_t rf_channel; // RF channel (0-100), 0xFF means use default
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 	float gyroTemp;
 
 	#define TCAL_BUFFER_SIZE                                                                                               \
@@ -88,6 +88,7 @@ struct retained_data {
 		struct TempCalPoint tempCalPoints[TCAL_BUFFER_SIZE];
 	float tempCalCoeffs[3][CONFIG_SENSOR_POLY_DEGREE + 1];
 	float tempCalCorrectionOffset[3];
+
 	struct {
 		uint16_t count;
 		bool valid;

@@ -181,7 +181,7 @@ static int sensor_mag_id = -1;
 static const sensor_imu_t *sensor_imu = &sensor_imu_none;
 static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 static float sensor_tcal_temp = 25.0f; // Default to 25C safety
 #endif
 
@@ -201,7 +201,7 @@ static void sensor_update_range_stats_gyro(float g[3]);
 static void sensor_update_range_stats_accel(float a[3]);
 #endif // CONFIG_SENSOR_RANGE_STATS
 static struct k_thread sensor_thread_id;
-static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 1024);
+static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 2048);
 
 K_THREAD_DEFINE(sensor_init_thread_id, 256, sensor_request_scan, true, NULL, NULL, 7, 0, 0);
 //crashing on nrf54l at 256
@@ -224,6 +224,11 @@ const char *sensor_get_sensor_imu_name(void)
 	if (sensor_imu_id < 0)
 		return "None";
 	return dev_imu_names[sensor_imu_id];
+}
+
+bool sensor_is_initialized(void)
+{
+	return sensor_sensor_init;
 }
 
 const char *sensor_get_sensor_mag_name(void)
@@ -957,7 +962,7 @@ void sensor_loop(void)
 			if (mag_available && mag_enabled && mag_use_oneshot)
 				sensor_mag->mag_oneshot();
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 			// Read IMU temperature
 			temp = sensor_imu->temp_read();
 			// Only update if the value looks like a valid temperature (-10 to 60).
@@ -1557,7 +1562,7 @@ void sensor_loop(void)
 
 			// Update orientation
 			bool send_quat_data = !q_epsilon(q, last_q, 0.001f);
-			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.05f);
+			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.03f);
 
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
@@ -1585,7 +1590,7 @@ void sensor_loop(void)
 				}
 			}
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 			// Check for boot calibration (higher priority than auto calibration)
 			sensor_tcal_boot_calibration_check();
 
@@ -1605,9 +1610,8 @@ void sensor_loop(void)
 				}
 			}
 #endif
-			// Handle magnetometer calibration
-			if (mag_available && mag_enabled && last_sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER && sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER)
-				sensor_request_calibration_mag();
+			// Magnetometer calibration is now triggered only via console command (magcal)
+			// or remote ESB command (ESB_PONG_FLAG_MAG_CAL)
 
 			// Periodic retained save for crash recovery
 			if (now - last_retained_save_time >= RETAINED_SAVE_INTERVAL_MS)
@@ -1738,7 +1742,7 @@ void main_imu_restart(void)
 	}
 }
 
-#if CONFIG_SENSOR_USE_TCAL_MANUAL_POLYNOMIAL
+#if CONFIG_SENSOR_USE_TCAL
 // Public function to get the current IMU temperature
 float sensor_get_current_imu_temperature(void)
 {
