@@ -90,15 +90,12 @@ jobs:
         # packages and the '-t arm-zephyr-eabi' option to install the toolchain
         # only for the arm-zephyr-eabi (Cortex-M) architecture, since we don't
         # need the other toolchains (xtensa, riscv, etc.)
+        env:
+          ZEPHYR_SDK_VERSION: 0.17.4
         run: |
-          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.3/zephyr-sdk-0.17.3_linux-x86_64_minimal.tar.xz
-          tar xf zephyr-sdk-0.17.3_linux-x86_64_minimal.tar.xz -C ~/
-          ~/zephyr-sdk-0.17.3/setup.sh -c -t arm-zephyr-eabi
-
-      - name: 📂 Cloning Triggered Repository/Branch
-        run: |
-          cd zephyr-workspace
-          git clone --single-branch --recurse-submodules -b $GITHUB_REF_NAME $GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git
+          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${{ env.ZEPHYR_SDK_VERSION }}/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}_linux-x86_64_minimal.tar.xz
+          tar xf zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}_linux-x86_64_minimal.tar.xz -C ~/
+          ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}/setup.sh -c -t arm-zephyr-eabi
 
       - name: ♻️ Initialize Zephyr Workspace
         # Set up the Zephyr workspace and install the Python dependencies
@@ -121,9 +118,12 @@ jobs:
           sudo rm -rf Releases
           mkdir -p Releases
           REPO_DIR="${{ github.event.repository.name }}"
+          if [ ! -d "$REPO_DIR" ]; then
+            echo "Repo dir not found: $REPO_DIR; fallback to SlimeNRF-CI"
+            REPO_DIR="SlimeNRF-CI"
+          fi
           sudo rm -rf "$REPO_DIR/build"
           mkdir -p "$REPO_DIR/build"
-
           west build \
               --board ${{ matrix.boards.boardname }} \
               --pristine=always "$REPO_DIR" \
@@ -145,7 +145,7 @@ jobs:
 
       - name: 💾 Upload Artifact - ${{ matrix.boards.boardname }}
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           # Artifact name
           name: ${{ matrix.boards.filename }}
