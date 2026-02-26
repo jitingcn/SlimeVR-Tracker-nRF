@@ -869,7 +869,7 @@ static void sensor_calibrate_imu()
 			// Coverage is good if:
 			// 1. Closest point is within sampling interval (very close match)
 			// OR
-			// 2. Has both upper and lower bounds AND closest is within 2x sampling interval
+			// 2. Has both upper and lower bounds AND closest is within 1x sampling interval
 			if (closest_distance <= sampling_interval) {
 				// Very close to existing point - definitely good coverage
 				has_good_coverage = true;
@@ -878,7 +878,7 @@ static void sensor_calibrate_imu()
 					(double)avg_temp,
 					(double)closest_distance
 				);
-			} else if (has_lower_bound && has_upper_bound && closest_distance <= sampling_interval * 2.0f) {
+			} else if (has_lower_bound && has_upper_bound && closest_distance <= sampling_interval * 1.0f) {
 				// Bounded interpolation with reasonable distance
 				has_good_coverage = true;
 				LOG_INF(
@@ -901,7 +901,7 @@ static void sensor_calibrate_imu()
 						"T-Cal: Coverage insufficient at %.2fC (closest: %.2fC > threshold: %.2fC)",
 						(double)avg_temp,
 						(double)closest_distance,
-						(double)(sampling_interval * 2.0f)
+						(double)(sampling_interval * 1.0f)
 					);
 				}
 			}
