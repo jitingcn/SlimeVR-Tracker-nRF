@@ -55,19 +55,19 @@
 #endif
 
 #if defined(CONFIG_BOARD_SLIMENRF_R1) || defined(CONFIG_BOARD_SLIMENRF_R2) || defined(CONFIG_BOARD_SLIMENRF_R3)
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
 #define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f
 #endif
 
-#if defined(CONFIG_BOARD_PROMICRO_UF2)
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT mx, my, mz
-#define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.0f, 0.0f, -0.7071f
-#endif
-
+// default orientation for most boards with the sensor mounted flat on the PCB
+// with the top side as +X and front side as +Z and left side as +Y from your perspective
+// on stacked promicro with common breakout board
 #ifndef SENSOR_MAGNETOMETER_AXES_ALIGNMENT
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz // mag axes alignment to sensor body
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT mx, my, mz // mag axes alignment to sensor body
 #endif
+// not sure if this is needed or correct, it still seems weird in server without full reset, but leaving it for now
 #ifndef SENSOR_QUATERNION_CORRECTION
-#define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f // correction quat for sensor to mounting orientation
+#define SENSOR_QUATERNION_CORRECTION 1.0f, 0.0f, 0.0f, 0.0f
 #endif
 
 #endif
