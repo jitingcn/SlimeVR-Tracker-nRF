@@ -24,16 +24,16 @@ jobs:
       fail-fast: false
       matrix:
         boards: [
-                  {boardname: "promicro_uf2/nrf52840/i2c", fileformat: "uf2", filename: "SlimeNRF_ProMicro_StackedSmol_I2C_Tracker"},
-                  {boardname: "promicro_uf2/nrf52840/spi", fileformat: "uf2", filename: "SlimeNRF_ProMicro_StackedSmol_SPI_Tracker"},
-                  {boardname: "promicro_uf2/nrf52840/default_spi", fileformat: "uf2", filename: "SlimeNRF_ProMicro_SPI_Tracker"},
-                  {boardname: "styria_mini_uf2/nrf52840/spi", fileformat: "uf2", filename: "styria_mini_zephyr_spi_firmware"},
-                  {boardname: "styria_mini_uf2/nrf52840/i2c", fileformat: "uf2", filename: "styria_mini_zephyr_i2c_firmware"},
-                  {boardname: "foxsmol40_uf2/nrf52840", fileformat: "uf2", filename: "FoxApplication_FoxSmol40_Tracker" },
-                  {boardname: "foxsnacklite_uf2/nrf52840", fileformat: "uf2", filename: "FoxApplication_FoxSnackLite_Tracker" },
-                  {boardname: "foxsnackeco_uf2/nrf52840", fileformat: "uf2", filename: "FoxApplication_FoxSnackECO_Tracker" },
-                  {boardname: "foxsmolv1_spi_uf2/nrf52840", fileformat: "uf2", filename: "FoxApplication_FoxSmol_V1_SPI_Tracker" },
-                  {boardname: "mochi_uf2/nrf52833", fileformat: "uf2", filename: "MOCHI_UF2"},
+                  {boardname: "promicro_uf2/nrf52840/i2c", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_I2C"},
+                  {boardname: "promicro_uf2/nrf52840/spi", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_SPI"},
+                  {boardname: "promicro_uf2/nrf52840/default_spi", filename: "SlimeNRF_ProMicro_Tracker_SPI"},
+                  {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker_SPI"},
+                  {boardname: "styria_mini_uf2/nrf52840/i2c", filename: "Styria_Mini_Tracker_I2C"},
+                  {boardname: "foxsmol40_uf2/nrf52840", filename: "FoxApplication_FoxSmol40_Tracker" },
+                  {boardname: "foxsnacklite_uf2/nrf52840", filename: "FoxApplication_FoxSnackLite_Tracker" },
+                  {boardname: "foxsnackeco_uf2/nrf52840", filename: "FoxApplication_FoxSnackECO_Tracker" },
+                  {boardname: "foxsmolv1_spi_uf2/nrf52840", filename: "FoxApplication_FoxSmol_V1_SPI_Tracker" },
+                  {boardname: "mochi_uf2/nrf52833", filename: "MOCHI_UF2"},
 
                 ]
     if: always()
@@ -115,30 +115,42 @@ jobs:
           pip3 install -r zephyr/scripts/requirements.txt
 
       - name: 🔨 Build SlimeVR-Tracker-nRF - ${{ matrix.boards.boardname }}
-      # Receiver Firmware Build
         if: always()
         run: |
           cd zephyr-workspace
           sudo rm -rf Releases
-          mkdir Releases
-          sudo rm -rf ${{ github.event.repository.name }}/build
-          mkdir ${{ github.event.repository.name }}/build
+          mkdir -p Releases
+          REPO_DIR="${{ github.event.repository.name }}"
+          sudo rm -rf "$REPO_DIR/build"
+          mkdir -p "$REPO_DIR/build"
 
           west build \
               --board ${{ matrix.boards.boardname }} \
-              --pristine=always ${{ github.event.repository.name }} \
-              --build-dir ${{ github.event.repository.name }}/build \
+              --pristine=always "$REPO_DIR" \
+              --build-dir "$REPO_DIR/build" \
               -- \
               -DNCS_TOOLCHAIN_VERSION=NONE \
-              -DBOARD_ROOT=../${{ github.event.repository.name }}
+              -DBOARD_ROOT=../"$REPO_DIR"
 
-          mv ${{ github.event.repository.name }}/build/${{ github.event.repository.name }}/zephyr/zephyr.${{ matrix.boards.fileformat }} Releases/${{ matrix.boards.filename }}.${{ matrix.boards.fileformat }}
+          for ext in uf2 hex; do
+            src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.${ext}"
+            dst="Releases/${{ matrix.boards.filename }}.${ext}"
+            if [ -f "$src" ]; then
+              cp "$src" "$dst"
+              echo "Saved: $dst"
+            else
+              echo "Not found (skip): $src"
+            fi
+          done
 
       - name: 💾 Upload Artifact - ${{ matrix.boards.boardname }}
         if: always()
         uses: actions/upload-artifact@v4
         with:
           # Artifact name
-          name: ${{ matrix.boards.filename }}.${{ matrix.boards.fileformat }}
+          name: ${{ matrix.boards.filename }}
+          if-no-files-found: warn
           # A file, directory or wildcard pattern that describes what to upload
-          path: zephyr-workspace/Releases/${{ matrix.boards.filename }}.${{ matrix.boards.fileformat }}
+          path: |
+            zephyr-workspace/Releases/${{ matrix.boards.filename }}.uf2
+            zephyr-workspace/Releases/${{ matrix.boards.filename }}.hex
