@@ -1388,9 +1388,9 @@ void sensor_loop(void)
 			// The FIFO threshold is calculated based on the faster sensor, which determines interrupt timing
 			if (sensor_fifo_threshold && (g_count || a_count))
 			{
-				// Calculate expected samples based on actual sensor rates
-				// sensor_fifo_threshold is based on sensor_actual_time = MIN(accel_actual_time, gyro_actual_time)
-				// So we need to calculate expected samples for each sensor independently
+				// Calculate expected samples based on target update time and actual elapsed time
+				int64_t elapsed_ms = k_uptime_get() - time_begin;
+				// Expected samples based on target update interval (sensor_update_time_ms)
 				float expected_gyro_samples = sensor_update_time_ms / 1000.0f / gyro_actual_time;
 				float expected_accel_samples = sensor_update_time_ms / 1000.0f / accel_actual_time;
 
@@ -1403,10 +1403,9 @@ void sensor_loop(void)
 					int min_expected = (int)expected_gyro_timesteps_f; // floor
 					int max_expected = (int)(expected_gyro_timesteps_f + 0.99f); // ceiling
 					if (g_count < min_expected - 1 || g_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f gyro timestep%s (oversampling %dx), got %d",
+						LOG_WRN("Expected ~%.1f gyro timesteps (oversampling %dx), got %d (elapsed %lldms)",
 							(double)expected_gyro_timesteps_f,
-							expected_gyro_timesteps_f == 1.0f ? "" : "s",
-							CONFIG_SENSOR_GYRO_OVERSAMPLING, g_count);
+							CONFIG_SENSOR_GYRO_OVERSAMPLING, g_count, elapsed_ms);
 				}
 #else
 				// Check gyro samples: allow reasonable tolerance for timing variations
@@ -1415,9 +1414,8 @@ void sensor_loop(void)
 					int min_expected = (int)expected_gyro_samples; // floor
 					int max_expected = (int)(expected_gyro_samples + 0.99f); // ceiling
 					if (g_count < min_expected - 1 || g_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f gyro sample%s, got %d",
-							(double)expected_gyro_samples,
-							expected_gyro_samples == 1.0f ? "" : "s", g_count);
+						LOG_WRN("Expected ~%.1f gyro samples, got %d (elapsed %lldms)",
+							(double)expected_gyro_samples, g_count, elapsed_ms);
 				}
 #endif
 
@@ -1429,10 +1427,9 @@ void sensor_loop(void)
 					int min_expected = (int)expected_accel_timesteps_f; // floor
 					int max_expected = (int)(expected_accel_timesteps_f + 0.99f); // ceiling
 					if (a_count < min_expected - 1 || a_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f accel timestep%s (oversampling %dx), got %d",
+						LOG_WRN("Expected ~%.1f accel timesteps (oversampling %dx), got %d (elapsed %lldms)",
 							(double)expected_accel_timesteps_f,
-							expected_accel_timesteps_f == 1.0f ? "" : "s",
-							CONFIG_SENSOR_ACCEL_OVERSAMPLING, a_count);
+							CONFIG_SENSOR_ACCEL_OVERSAMPLING, a_count, elapsed_ms);
 				}
 #else
 				// Check accel samples: allow reasonable tolerance for timing variations
@@ -1440,9 +1437,8 @@ void sensor_loop(void)
 					int min_expected = (int)expected_accel_samples; // floor
 					int max_expected = (int)(expected_accel_samples + 0.99f); // ceiling
 					if (a_count < min_expected - 1 || a_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f accel sample%s, got %d",
-							(double)expected_accel_samples,
-							expected_accel_samples == 1.0f ? "" : "s", a_count);
+						LOG_WRN("Expected ~%.1f accel samples, got %d (elapsed %lldms)",
+							(double)expected_accel_samples, a_count, elapsed_ms);
 				}
 #endif
 			}
