@@ -59,6 +59,7 @@
 #endif
 
 #if defined(CONFIG_BOARD_PROMICRO_UF2)
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT mx, my, mz
 #define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.0f, 0.0f, -0.7071f
 #endif
 
