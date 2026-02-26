@@ -199,6 +199,7 @@ static int sys_retained_init(void)
 		sys_read(MAIN_GYRO_TCAL_STATE_ID, &retained->tempCalState, sizeof(retained->tempCalState));
 #endif
 		sys_read(RF_CHANNEL_ID, &retained->rf_channel, sizeof(retained->rf_channel));
+		sys_read(MAG_ENABLED_ID, &retained->mag_enabled, sizeof(retained->mag_enabled));
 		retained_update();
 	} else {
 		LOG_INF("Validated RAM");

@@ -94,6 +94,8 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_TCAL_BOOT_ON 0x16  // Enable T-Cal boot calibration
 #define ESB_PONG_FLAG_TCAL_BOOT_OFF 0x17 // Disable T-Cal boot calibration
 #define ESB_PONG_FLAG_MAG_CAL 0x18       // Trigger magnetometer calibration
+#define ESB_PONG_FLAG_MAG_ON 0x19        // Enable magnetometer
+#define ESB_PONG_FLAG_MAG_OFF 0x1A       // Disable magnetometer
 
 #define TDMA_NUM_TRACKERS 10
 #define TDMA_PACKETS_PER_SECOND 160 // Target TPS per tracker

@@ -107,10 +107,10 @@ static void print_sensor(void)
 	}
 	printk("Address: 0x%02X%02X\n", retained->imu_addr, retained->imu_reg);
 
-#if SENSOR_MAG_EXISTS
 	printk(
-		"\nMagnetometer: %s\n",
-		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching"
+		"\nMagnetometer: %s (%s)\n",
+		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching",
+		sensor_get_mag_enabled() ? "enabled" : "disabled"
 	);
 	if (retained->mag_reg != 0xFF) {
 		const char *mag_interface;
@@ -127,7 +127,6 @@ static void print_sensor(void)
 		printk("Interface: %s\n", mag_interface);
 	}
 	printk("Address: 0x%02X%02X\n", retained->mag_addr, retained->mag_reg);
-#endif
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("\nAccelerometer matrix:\n");
@@ -216,7 +215,6 @@ static void print_sensor(void)
 		(double)sensor_get_current_imu_temperature()
 	);
 #endif
-#if SENSOR_MAG_EXISTS
 	//	printk("Magnetometer bridge offset: %.5f %.5f %.5f\n", (double)retained->magBias[0],
 	//(double)retained->magBias[1], (double)retained->magBias[2]);
 	printk("Magnetometer matrix:\n");
@@ -229,7 +227,6 @@ static void print_sensor(void)
 			(double)retained->magBAinv[3][i]
 		);
 	}
-#endif
 
 	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
 
@@ -484,9 +481,10 @@ static void print_help(void)
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("  6-side                     Calibrate 6-side accelerometer\n");
 #endif
-#if SENSOR_MAG_EXISTS
-	printk("  mag                        Clear magnetometer calibration\n");
-#endif
+	printk("  mag                        Show magnetometer status\n");
+	printk("  mag on|off                 Enable/disable magnetometer\n");
+	printk("  mag clear                  Clear magnetometer calibration\n");
+	printk("  mag cal                    Start magnetometer calibration\n");
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	printk("  sens <x>,<y>,<z>           Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
 	printk("  sens reset                 Reset gyro sensitivity calibration\n");
@@ -530,9 +528,7 @@ static void print_help(void)
 #if CONFIG_SENSOR_USE_TCAL
 	printk("  reset tcal                 Reset temperature calibration\n");
 #endif
-#if SENSOR_MAG_EXISTS
 	printk("  reset mag                  Reset magnetometer calibration\n");
-#endif
 	printk("  reset bat                  Reset battery tracker\n");
 	printk("  reset all                  Clear all settings\n");
 	printk("\n");
@@ -713,9 +709,7 @@ static void console_thread(void)
 	uint8_t command_6_side[] = "6-side";
 #endif
 
-#if SENSOR_MAG_EXISTS
 	uint8_t command_mag[] = "mag";
-#endif
 
 	uint8_t command_set[] = "set";
 	uint8_t command_pair[] = "pair";
@@ -741,9 +735,7 @@ static void console_thread(void)
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	uint8_t command_reset_arg_acc[] = "acc";
 #endif
-#if SENSOR_MAG_EXISTS
 	uint8_t command_reset_arg_mag[] = "mag";
-#endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	uint8_t command_reset_arg_sens[] = "sens";
 #endif
@@ -995,13 +987,31 @@ static void console_thread(void)
 			sensor_request_calibration_6_side();
 		}
 #endif
-#if SENSOR_MAG_EXISTS
 		else if (memcmp(line, command_mag, sizeof(command_mag)) == 0) {
-			// "mag" command now starts calibration (clear existing first)
-			sensor_calibration_clear_mag(NULL, true);
-			sensor_request_calibration_mag();
+			if (arg == NULL) {
+				// No argument: show status
+				printk("Magnetometer: %s\n", sensor_get_mag_enabled() ? "enabled" : "disabled");
+				printk("Hardware: %s\n", sensor_get_sensor_mag_name());
+			} else {
+				char *subcmd = strtok((char *)arg, " ");
+				if (strcmp(subcmd, "on") == 0) {
+					printk("Enabling magnetometer\n");
+					sensor_set_mag_enabled(true);
+				} else if (strcmp(subcmd, "off") == 0) {
+					printk("Disabling magnetometer\n");
+					sensor_set_mag_enabled(false);
+				} else if (strcmp(subcmd, "clear") == 0) {
+					sensor_calibration_clear_mag(NULL, true);
+					printk("Magnetometer calibration cleared\n");
+				} else if (strcmp(subcmd, "cal") == 0 || strcmp(subcmd, "calibrate") == 0) {
+					sensor_calibration_clear_mag(NULL, true);
+					sensor_request_calibration_mag();
+					printk("Magnetometer calibration started\n");
+				} else {
+					printk("Usage: mag [on|off|clear|cal]\n");
+				}
+			}
 		}
-#endif
 		else if (memcmp(line, command_set, sizeof(command_set)) == 0) {
 			uint64_t addr = strtoull(arg, NULL, 16);
 			uint8_t buf[17];
@@ -1104,11 +1114,9 @@ static void console_thread(void)
 				cmd_reset_acc();
 			}
 #endif
-#if SENSOR_MAG_EXISTS
 			else if (arg && memcmp(arg, command_reset_arg_mag, sizeof(command_reset_arg_mag)) == 0) {
 				sensor_calibration_clear_mag(NULL, true);
 			}
-#endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 			else if (arg && memcmp(arg, command_reset_arg_sens, sizeof(command_reset_arg_sens)) == 0) {
 				cmd_sens_reset();

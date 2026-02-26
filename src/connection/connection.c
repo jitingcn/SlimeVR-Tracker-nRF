@@ -130,9 +130,7 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 }
 
 static int64_t mag_update_time = 0;
-#ifdef CONFIG_SENSOR_USE_MAG
 static int64_t last_mag_time = 0;
-#endif
 
 void connection_update_sensor_mag(float *m)
 {
@@ -417,14 +415,12 @@ void connection_thread(void)
 			continue;
 		}
 		// mag is higher priority (skip accel, quat is full precision)
-#ifdef CONFIG_SENSOR_USE_MAG
 		else if (mag_update_time && now - last_mag_time > 200) {
 			mag_update_time = 0; // data has been sent
 			last_mag_time = now;
 			connection_write_packet_4();
 			continue;
 		}
-#endif
 		// if time for info and precise quat not needed
 		else if (quat_update_time && !send_precise_quat && now - last_info_time > 100) {
 			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {

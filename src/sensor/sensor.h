@@ -44,6 +44,9 @@ void sensor_retained_write(void);
 void sensor_shutdown(void);
 uint8_t sensor_setup_WOM(void);
 
+void sensor_set_mag_enabled(bool enabled);
+bool sensor_get_mag_enabled(void);
+
 void sensor_fusion_invalidate(void);
 void sensor_fusion_update_bias(float *g_off);
 

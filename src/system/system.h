@@ -18,7 +18,8 @@
 #define BATT_STATS_CURVE_ID 29
 
 #define MAIN_SENSOR_DATA_ID 30
-#define RF_CHANNEL_ID 31 // RF channel storage
+#define RF_CHANNEL_ID 31
+#define MAG_ENABLED_ID 37
 
 #if CONFIG_SENSOR_USE_TCAL
 #define MAIN_GYRO_TEMP_ID 32

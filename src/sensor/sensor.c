@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "system/system.h"
+#include "system/power.h"
 #include "system/watchdog.h"
 #include "util.h"
 #include "connection/connection.h"
@@ -162,11 +163,9 @@ static bool sensor_sensor_scanning;
 static bool main_suspended;
 
 static bool mag_available;
-#if MAG_ENABLED
-static bool mag_enabled = true; // TODO: toggle from server
-#else
-static bool mag_enabled = false;
-#endif
+static bool mag_enabled; // initialized from retained->mag_enabled in sensor_scan()
+// set when mag toggle reboot is pending, prevents sensor_retained_write from saving fusion state
+static bool skip_fusion_save;
 
 #if CONFIG_SENSOR_USE_XIOFUSION
 static const sensor_fusion_t *sensor_fusion = &sensor_fusion_fusion; // TODO: change from server
@@ -473,6 +472,12 @@ int sensor_scan(void)
 	sensor_imu_id = imu_id;
 	sensor_mag_id = mag_id;
 
+	mag_enabled = retained->mag_enabled;
+	if (mag_enabled && !mag_available) {
+		LOG_WRN("Magnetometer enabled in settings but no hardware detected");
+	}
+	LOG_INF("Magnetometer: %s (available: %s)", mag_enabled ? "enabled" : "disabled", mag_available ? "yes" : "no");
+
 	sensor_sensor_init = true; // successfully initialized
 	sensor_sensor_scanning = false; // done
 	set_status(SYS_STATUS_SENSOR_ERROR, false); // clear error
@@ -572,6 +577,12 @@ void sensor_retained_write(void) // TODO: move to sys?
 	if (!sensor_fusion_init)
 		return;
 //	memcpy(retained->magBias, sensor_calibration_get_magBias(), sizeof(retained->magBias));
+	if (skip_fusion_save) {
+		// Mag toggle pending: invalidate fusion so it reinitializes after reboot
+		retained->fusion_id = 0;
+		retained_update();
+		return;
+	}
 	sensor_fusion->save(retained->fusion_data);
 	retained->fusion_id = fusion_id;
 	retained_update();
@@ -610,6 +621,27 @@ uint8_t sensor_setup_WOM(void)
 		LOG_ERR("Failed to configure IMU wake up");
 		return 0;
 	}
+}
+
+void sensor_set_mag_enabled(bool enabled)
+{
+	if (mag_enabled == enabled) {
+		LOG_INF("Magnetometer already %s", enabled ? "enabled" : "disabled");
+		return;
+	}
+
+	// Persist to retained memory + NVS, then reboot to let init code handle it
+	LOG_INF("%s magnetometer, rebooting...", enabled ? "Enabling" : "Disabling");
+	bool val = enabled;
+	sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+	// Tell sensor_retained_write() to invalidate fusion instead of saving it
+	skip_fusion_save = true;
+	sys_request_system_reboot(false);
+}
+
+bool sensor_get_mag_enabled(void)
+{
+	return mag_enabled;
 }
 
 void sensor_fusion_invalidate(void)

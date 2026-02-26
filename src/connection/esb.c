@@ -790,6 +790,12 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_MAG_CAL:
 								cmd_name = "MAG_CAL";
 								break;
+							case ESB_PONG_FLAG_MAG_ON:
+								cmd_name = "MAG_ON";
+								break;
+							case ESB_PONG_FLAG_MAG_OFF:
+								cmd_name = "MAG_OFF";
+								break;
 							case ESB_PONG_FLAG_REBOOT:
 								cmd_name = "REBOOT";
 								break;
@@ -1483,6 +1489,16 @@ static void esb_thread(void)
 #else
 					LOG_WRN("Remote command: MAG_CAL not supported (no magnetometer)");
 #endif
+					break;
+
+				case ESB_PONG_FLAG_MAG_ON:
+					LOG_INF("Executing remote command: MAG_ON");
+					sensor_set_mag_enabled(true);
+					break;
+
+				case ESB_PONG_FLAG_MAG_OFF:
+					LOG_INF("Executing remote command: MAG_OFF");
+					sensor_set_mag_enabled(false);
 					break;
 
 				case ESB_PONG_FLAG_REBOOT:

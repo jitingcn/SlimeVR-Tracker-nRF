@@ -80,6 +80,8 @@ struct retained_data {
 
 	uint8_t rf_channel; // RF channel (0-100), 0xFF means use default
 
+	bool mag_enabled;
+
 #if CONFIG_SENSOR_USE_TCAL
 	float gyroTemp;
 
