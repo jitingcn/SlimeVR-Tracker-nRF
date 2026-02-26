@@ -798,9 +798,9 @@ int sensor_init(void)
 	LOG_INF("Gyroscope range: %.2fdps", (double)gyro_actual_range);
 
 	// setup sensor, set ODR
-	float accel_initial_time = 1.0 / CONFIG_SENSOR_ACCEL_ODR; // configure with ~1000Hz ODR
-	float gyro_initial_time = 1.0 / CONFIG_SENSOR_GYRO_ODR; // configure with ~1000Hz ODR
-	float mag_initial_time = sensor_update_time_ms / 1000.0; // configure with ~200Hz ODR
+	float accel_initial_time = 1.0f / CONFIG_SENSOR_ACCEL_ODR; // configure with accel ODR from config
+	float gyro_initial_time = 1.0f / CONFIG_SENSOR_GYRO_ODR; // configure with gyro ODR from config
+	float mag_initial_time = 1.0f / CONFIG_SENSOR_MAG_ODR; // configure with mag ODR from config
 	err = sensor_imu->init(clock_actual_rate, accel_initial_time, gyro_initial_time, &accel_actual_time, &gyro_actual_time);
 	sensor_actual_time = MIN(accel_actual_time, gyro_actual_time);
 #if SENSOR_IMU_SPI_EXISTS
@@ -876,7 +876,7 @@ int sensor_init(void)
 #else
 		float fusion_accel_time = accel_actual_time;
 #endif
-		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, mag_initial_time); // TODO: using initial time since mag are not polled at the actual rate
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, mag_actual_time); // mag rate from sensor driver
 	}
 
 	sensor_calibration_update_sensor_ids(sensor_imu_id);
@@ -1358,9 +1358,9 @@ void sensor_loop(void)
 				float mz = raw_m[2];
 				float m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
 
-				// Process fusion
+				// Process fusion (time param unused for VQF, uses fixed rate from init)
 				if (mag_calibrated)
-					sensor_fusion->update_mag(m, sensor_update_time_ms / 1000.0); // TODO: use actual time?
+					sensor_fusion->update_mag(m, mag_actual_time);
 
 				v_rotate(m, q3, m); // magnetic field in local device frame, no other transformation will be done
 				connection_update_sensor_mag(m);
@@ -1472,9 +1472,10 @@ void sensor_loop(void)
 			sensor_update_sensor_state();
 
 			// Update magnetometer mode
+#if !CONFIG_SENSOR_MAG_FIXED_ODR
 			if (mag_available && mag_enabled)
 			{
-				// TODO: magnetometer might be better to limit to a lower (fixed) rate
+				// Dynamic magnetometer ODR adjustment based on gyro speed
 				float gyro_speed = sqrtf(max_gyro_speed_square);
 				float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
 				if (mag_target_time < 0.005f && mag_skip_oneshot) // only use continuous modes if oneshot is not available
@@ -1507,6 +1508,7 @@ void sensor_loop(void)
 				}
 				sys_interface_suspend();
 			}
+#endif // !CONFIG_SENSOR_MAG_FIXED_ODR
 
 			// Debug mode output - based on accel sample count, not time interval
 			if (sensor_debug_is_active() && debug_a_samples > 0) {

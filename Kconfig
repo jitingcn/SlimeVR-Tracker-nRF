@@ -267,6 +267,23 @@ config SENSOR_USE_MAG
     help
         Use magnetometer if it is present.
 
+config SENSOR_MAG_ODR
+    int "Magnetometer ODR (Hz)"
+    default 200
+    depends on SENSOR_USE_MAG
+    help
+        Requested magnetometer output data rate in Hz.
+        Common values: 100, 200. Higher rates may not be supported by all sensors.
+
+config SENSOR_MAG_FIXED_ODR
+    bool "Use fixed magnetometer ODR"
+    default y
+    depends on SENSOR_USE_MAG
+    help
+        If enabled, use a fixed magnetometer ODR instead of dynamic adjustment.
+        This ensures VQF fusion receives consistent timing information.
+        When disabled, ODR is dynamically adjusted based on gyroscope speed.
+
 config USE_SENSOR_CLOCK
     bool "Use external IMU clock"
     default y

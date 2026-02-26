@@ -104,7 +104,7 @@ int qmc_update_odr(float time, float *actual_time)
 	if (MD == MD_SUSPEND)
 	{
 		MODR = ODR_200Hz; // for oneshot
-		time = 0; // off
+		time = INFINITY; // signal oneshot mode available
 	}
 	else if (ODR > 100)
 	{
