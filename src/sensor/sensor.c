@@ -1562,11 +1562,11 @@ void sensor_loop(void)
 
 			// Update orientation
 			bool send_quat_data = !q_epsilon(q, last_q, 0.001f);
-			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.03f);
+			bool send_lin_accel_data = !v_epsilon(lin_a, last_lin_a, 0.08f);
 
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
-			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005f) : q_epsilon(q, last_q, 0.05f);
+			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.003f) : q_epsilon(q, last_q, 0.05f);
 			int64_t min_interval = 1000;
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
