@@ -379,6 +379,13 @@ int sensor_scan(void)
 			if (sensor_mag_dev.addr > 0x80) // marked as external
 			{
 				sensor_mag_dev.addr &= 0x7F;
+				// Check if address is still valid after clearing external marker
+				// 0x7F or out of valid I2C range (8-119) means invalid/failed scan marker
+				if (sensor_mag_dev.addr >= 0x7F || sensor_mag_dev.addr < 8)
+				{
+					sensor_mag_dev.addr = 0x00; // reset to trigger full scan
+					sensor_mag_dev_reg = 0xFF;
+				}
 			}
 			else
 			{
@@ -405,6 +412,13 @@ int sensor_scan(void)
 			if (sensor_mag_dev.addr > 0x80) // marked as external
 			{
 				sensor_mag_dev.addr &= 0x7F;
+				// Check if address is still valid after clearing external marker
+				// 0x7F or out of valid I2C range (8-119) means invalid/failed scan marker
+				if (sensor_mag_dev.addr >= 0x7F || sensor_mag_dev.addr < 8)
+				{
+					sensor_mag_dev.addr = 0x00; // reset to trigger full scan
+					sensor_mag_dev_reg = 0xFF;
+				}
 			}
 			else
 			{
