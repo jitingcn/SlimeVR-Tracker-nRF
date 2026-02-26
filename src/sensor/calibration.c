@@ -52,11 +52,16 @@ static uint8_t last_magneto_progress;
 static int64_t magneto_progress_time;
 static uint8_t magneto_sphere_coverage;  // 8-bit for 8 sphere octants
 static uint16_t magneto_octant_samples[8];  // Sample count per octant
+static int64_t magneto_last_saturated_warning;  // Throttle warnings for saturated octants
 
 // Minimum samples and coverage for reliable calibration
-#define MAG_CAL_MIN_SAMPLES 200
-#define MAG_CAL_MIN_OCTANTS 6  // At least 6 of 8 octants covered
-#define MAG_CAL_MIN_PER_OCTANT 20  // Minimum samples per covered octant
+// For ellipsoid fitting uniformity: enforcing both min and max per octant
+// ensures balanced sphere coverage and prevents over-sampling in any region
+#define MAG_CAL_MIN_SAMPLES 800
+#define MAG_CAL_MIN_OCTANTS 8  // At least 8 of 8 octants covered
+#define MAG_CAL_MIN_PER_OCTANT 100  // Minimum samples per covered octant
+#define MAG_CAL_MAX_PER_OCTANT 200  // Maximum samples per octant (hard limit for uniformity)
+#define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000  // Throttle "rotate device" warnings
 
 static double ata[100]; // init calibration
 static double norm_sum;
@@ -1205,6 +1210,7 @@ static void magneto_reset(void)
 	magneto_progress_time = 0;
 	magneto_sphere_coverage = 0;
 	memset(magneto_octant_samples, 0, sizeof(magneto_octant_samples));
+	magneto_last_saturated_warning = 0;
 	memset(ata, 0, sizeof(ata));
 	norm_sum = 0;
 	sample_count = 0;
@@ -1686,12 +1692,37 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 #endif
 
 // Collect magnetometer sample for calibration using sphere coverage detection
+// Uses hard limits per octant to ensure uniform sphere coverage for ellipsoid fitting
 static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 {
+	// Determine octant before sampling to check saturation
+	int octant = check_mag_sphere_coverage(m);
+
+	// Check if this octant is already saturated (reached max samples)
+	if (octant >= 0 && magneto_octant_samples[octant] >= MAG_CAL_MAX_PER_OCTANT) {
+		// Octant is saturated - reject sample and prompt user to rotate
+		int64_t now = k_uptime_get();
+		if (now - magneto_last_saturated_warning > MAG_CAL_SATURATED_WARNING_INTERVAL_MS) {
+			magneto_last_saturated_warning = now;
+			// Count how many octants still need samples
+			int octants_need_more = 0;
+			for (int i = 0; i < 8; i++) {
+				if (magneto_octant_samples[i] < MAG_CAL_MIN_PER_OCTANT) {
+					octants_need_more++;
+				}
+			}
+			LOG_INF("Mag cal: octant %d full (%d samples), rotate device! "
+			        "(%d octants need more data)",
+			        octant, MAG_CAL_MAX_PER_OCTANT, octants_need_more);
+			set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
+		}
+		return;  // Reject this sample to enforce uniform distribution
+	}
+
+	// Accept sample - add to Magneto accumulator
 	magneto_sample(m[0], m[1], m[2], ata, &norm_sum, &sample_count); // 400us
 
 	// Update sphere coverage based on magnetometer direction
-	int octant = check_mag_sphere_coverage(m);
 	if (octant >= 0) {
 		magneto_octant_samples[octant]++;
 		uint8_t octant_bit = 1 << octant;
