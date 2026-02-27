@@ -19,6 +19,7 @@
 #define LSM6DSV_CTRL2                      0x11
 #define LSM6DSV_CTRL3                      0x12
 #define LSM6DSV_CTRL6                      0x15
+#define LSM6DSV_CTRL7                      0x16
 #define LSM6DSV_CTRL8                      0x17
 #define LSM6DSV_CTRL9                      0x18
 

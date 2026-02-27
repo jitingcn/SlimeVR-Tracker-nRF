@@ -87,15 +87,35 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 	k_msleep(50);
 
 	// Now configure FS and other settings after sensors are powered and stable
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL6, gyro_fs); // set gyro FS
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, accel_fs); // set accel FS
+	// Configure gyro FS + LPF1 bandwidth in CTRL6
+	// LPF1_G_BW[2:0] (bits [6:4]): 010 = ~ODR/4 bandwidth (Table 63)
+	// FS_G[3:0] (bits [3:0]): gyro full-scale selection
+	uint8_t ctrl6_val = (0x02 << 4) | gyro_fs; // LPF1_G_BW=010, gyro FS
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL6, ctrl6_val);
 
-	// Read back to verify FS configuration
-	uint8_t ctrl6_readback = 0, ctrl8_readback = 0;
+	// Enable gyro digital LPF1 in CTRL7
+	// LPF1_G_EN (bit 0): 1 = enable gyro LPF1 filter
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL7, 0x01);
+
+	// Configure accel FS + LPF2 bandwidth in CTRL8
+	// HP_LPF2_XL_BW[2:0] (bits [7:5]): 000 = ODR/4 bandwidth (Table 68)
+	// FS_XL[1:0] (bits [1:0]): accel full-scale selection
+	uint8_t ctrl8_val = (0x00 << 5) | accel_fs; // HP_LPF2_XL_BW=000 (ODR/4), accel FS
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, ctrl8_val);
+
+	// Enable accel LPF2 (low-pass mode) in CTRL9
+	// LPF2_XL_EN (bit 3): 1 = enable second-stage LPF2
+	// HP_SLOPE_XL_EN (bit 4): 0 = low-pass filter path selected
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL9, 0x08); // LPF2_XL_EN=1
+
+	// Read back to verify FS + LPF configuration
+	uint8_t ctrl6_readback = 0, ctrl7_readback = 0, ctrl8_readback = 0, ctrl9_readback = 0;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL6, &ctrl6_readback);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL7, &ctrl7_readback);
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, &ctrl8_readback);
-	LOG_INF("CTRL6 (gyro FS) write=0x%02X readback=0x%02X, CTRL8 (accel FS) write=0x%02X readback=0x%02X",
-		gyro_fs, ctrl6_readback, accel_fs, ctrl8_readback);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL9, &ctrl9_readback);
+	LOG_INF("CTRL6 write=0x%02X rb=0x%02X, CTRL7 write=0x01 rb=0x%02X, CTRL8 write=0x%02X rb=0x%02X, CTRL9 write=0x08 rb=0x%02X",
+		ctrl6_val, ctrl6_readback, ctrl7_readback, ctrl8_val, ctrl8_readback, ctrl9_readback);
 
 	if (err)
 		LOG_ERR("Communication error during FS configuration");
