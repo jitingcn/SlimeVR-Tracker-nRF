@@ -1086,8 +1086,9 @@ static void console_thread(void)
 			uint32_t duration = 1; // Default 1 second
 			if (arg) {
 				char *endptr;
-				long dur = strtol((char *)arg, &endptr, 10);
-				if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 60) {
+				char *arg_char = (char *)arg;
+				long dur = strtol(arg_char, &endptr, 10);
+				if (endptr != arg_char && *endptr == '\0' && dur >= 1 && dur <= 60) {
 					duration = (uint32_t)dur;
 				} else {
 					printk("Invalid duration (1-60s). Using default 1 seconds.\n");
