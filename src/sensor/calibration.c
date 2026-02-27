@@ -50,18 +50,37 @@ static float magBAinv[4][3];
 static uint8_t magneto_progress;
 static uint8_t last_magneto_progress;
 static int64_t magneto_progress_time;
-static uint8_t magneto_sphere_coverage;  // 8-bit for 8 sphere octants
-static uint16_t magneto_octant_samples[8];  // Sample count per octant
-static int64_t magneto_last_saturated_warning;  // Throttle warnings for saturated octants
+// 12 reference directions for orientation tracking (icosahedron vertices, normalized)
+// Using accelerometer (gravity) avoids magnetometer hard iron offset issues
+#define MAG_CAL_NUM_REGIONS 12
+static const float orientation_refs[MAG_CAL_NUM_REGIONS][3] = {
+	// (0, ±1, ±φ) / √(1+φ²)  where φ = golden ratio
+	{ 0.0000f,  0.5257f,  0.8507f},
+	{ 0.0000f,  0.5257f, -0.8507f},
+	{ 0.0000f, -0.5257f,  0.8507f},
+	{ 0.0000f, -0.5257f, -0.8507f},
+	// (±1, ±φ, 0) / √(1+φ²)
+	{ 0.5257f,  0.8507f,  0.0000f},
+	{ 0.5257f, -0.8507f,  0.0000f},
+	{-0.5257f,  0.8507f,  0.0000f},
+	{-0.5257f, -0.8507f,  0.0000f},
+	// (±φ, 0, ±1) / √(1+φ²)
+	{ 0.8507f,  0.0000f,  0.5257f},
+	{ 0.8507f,  0.0000f, -0.5257f},
+	{-0.8507f,  0.0000f,  0.5257f},
+	{-0.8507f,  0.0000f, -0.5257f},
+};
+static uint16_t mag_region_samples[MAG_CAL_NUM_REGIONS];
+static uint16_t mag_region_coverage;  // Bitfield for covered regions
+static int64_t magneto_last_saturated_warning;
+static int64_t mag_cal_last_status_log;
 
-// Minimum samples and coverage for reliable calibration
-// For ellipsoid fitting uniformity: enforcing both min and max per octant
-// ensures balanced sphere coverage and prevents over-sampling in any region
-#define MAG_CAL_MIN_SAMPLES 800
-#define MAG_CAL_MIN_OCTANTS 8  // At least 8 of 8 octants covered
-#define MAG_CAL_MIN_PER_OCTANT 100  // Minimum samples per covered octant
-#define MAG_CAL_MAX_PER_OCTANT 200  // Maximum samples per octant (hard limit for uniformity)
-#define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000  // Throttle "rotate device" warnings
+// Calibration thresholds
+#define MAG_CAL_MIN_SAMPLES 1000
+#define MAG_CAL_MIN_REGIONS MAG_CAL_NUM_REGIONS
+#define MAG_CAL_MIN_PER_REGION 80
+#define MAG_CAL_MAX_PER_REGION 150
+#define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000
 
 static double ata[100]; // init calibration
 static double norm_sum;
@@ -360,7 +379,8 @@ static void sensor_tcal_cache_invalidate(void)
 
 // helpers
 static bool wait_for_motion(bool motion, int samples);
-static int check_mag_sphere_coverage(const float *m);
+static int check_orientation_region(const float *a);
+static int popcount16(uint16_t x);
 static void magneto_reset(void);
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 static int isAccRest(float *, float *, float, int *, int);
@@ -654,7 +674,8 @@ void sensor_request_calibration_mag(void)
 	magneto_progress = 0;
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
-	magneto_sphere_coverage = 0;
+	mag_region_coverage = 0;
+	mag_cal_last_status_log = 0;
 	magneto_reset();  // Clear ata buffer and sample count
 	magneto_progress |= 1 << 7;  // Set collection active flag
 	LOG_INF("Magnetometer calibration started (rotate tracker in figure-8 pattern)");
@@ -1074,8 +1095,30 @@ static int sensor_calibrate_mag(void)
 		return -1; // Timeout
 	}
 	sensor_sample_mag_magneto_sample(aBuf, m); // 400us
+
+	// Periodic status log every 1 second
+	int64_t now = k_uptime_get();
+	if (now - mag_cal_last_status_log >= 1000) {
+		mag_cal_last_status_log = now;
+		int region = check_orientation_region(aBuf);
+		int covered = popcount16(mag_region_coverage);
+		int min_samples = MAG_CAL_MAX_PER_REGION;
+		int needing_more = 0;
+		for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
+			if (mag_region_samples[i] < MAG_CAL_MIN_PER_REGION) {
+				needing_more++;
+				if (mag_region_samples[i] < min_samples) {
+					min_samples = mag_region_samples[i];
+				}
+			}
+		}
+		LOG_INF("Mag cal: region=%d | %d/%d covered | %d total | %d regions need data (min=%d/%d)",
+		        region, covered, MAG_CAL_NUM_REGIONS, (int)sample_count,
+		        needing_more, min_samples, MAG_CAL_MIN_PER_REGION);
+	}
+
 	if (magneto_progress != 0b11111111) {
-		return 0;
+		return 1;  // Still collecting - signal caller to use short sleep
 	}
 
 	float m_inv[4][3];
@@ -1167,33 +1210,50 @@ static bool wait_for_motion(bool motion, int samples)
 }
 
 /**
- * Check which octant of the sphere the magnetometer reading falls into.
- * Returns the octant index (0-7) based on sign of X, Y, Z components:
- *   0: -X-Y-Z, 1: +X-Y-Z, 2: -X+Y-Z, 3: +X+Y-Z
- *   4: -X-Y+Z, 5: +X-Y+Z, 6: -X+Y+Z, 7: +X+Y+Z
- * Returns -1 for invalid readings.
+ * Determine which orientation region the device is in based on accelerometer.
+ * Uses 12 icosahedron vertices as reference directions for optimal sphere coverage.
+ * Returns region index (0-11), or -1 for invalid readings.
+ *
+ * Using gravity direction avoids the magnetometer hard iron offset problem
+ * that made some regions unreachable with the previous approach.
  */
-static int check_mag_sphere_coverage(const float *m)
+static int check_orientation_region(const float *a)
 {
-	// Calculate magnitude to verify valid reading
-	float mag_sq = m[0]*m[0] + m[1]*m[1] + m[2]*m[2];
-	if (mag_sq < 1e-6f) {
-		return -1;  // Invalid reading
+	float mag_sq = a[0]*a[0] + a[1]*a[1] + a[2]*a[2];
+	if (mag_sq < 0.25f) {
+		return -1;  // Less than 0.5g - free fall or invalid
 	}
 
-	// Determine octant based on signs
-	int octant = 0;
-	if (m[0] >= 0) octant |= 1;
-	if (m[1] >= 0) octant |= 2;
-	if (m[2] >= 0) octant |= 4;
+	// Normalize accel vector
+	float inv_mag;
+#if CONFIG_CMSIS_DSP
+	arm_sqrt_f32(mag_sq, &inv_mag);
+	inv_mag = 1.0f / inv_mag;
+#else
+	inv_mag = 1.0f / sqrtf(mag_sq);
+#endif
+	float norm[3] = { a[0] * inv_mag, a[1] * inv_mag, a[2] * inv_mag };
 
-	return octant;
+	// Find nearest reference direction by maximum dot product
+	int best = 0;
+	float best_dot = -2.0f;
+	for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
+		float dot = norm[0] * orientation_refs[i][0]
+		          + norm[1] * orientation_refs[i][1]
+		          + norm[2] * orientation_refs[i][2];
+		if (dot > best_dot) {
+			best_dot = dot;
+			best = i;
+		}
+	}
+
+	return best;
 }
 
 /**
- * Count number of bits set in a byte (population count)
+ * Count number of bits set in a 16-bit value (population count)
  */
-static int popcount8(uint8_t x)
+static int popcount16(uint16_t x)
 {
 	int count = 0;
 	while (x) {
@@ -1208,8 +1268,8 @@ static void magneto_reset(void)
 	magneto_progress = 0;
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
-	magneto_sphere_coverage = 0;
-	memset(magneto_octant_samples, 0, sizeof(magneto_octant_samples));
+	mag_region_coverage = 0;
+	memset(mag_region_samples, 0, sizeof(mag_region_samples));
 	magneto_last_saturated_warning = 0;
 	memset(ata, 0, sizeof(ata));
 	norm_sum = 0;
@@ -1691,72 +1751,65 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 }
 #endif
 
-// Collect magnetometer sample for calibration using sphere coverage detection
-// Uses hard limits per octant to ensure uniform sphere coverage for ellipsoid fitting
+// Collect magnetometer sample for calibration using orientation-based coverage detection
+// Uses accelerometer (gravity) to track device orientation for uniform directional coverage
 static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 {
-	// Determine octant before sampling to check saturation
-	int octant = check_mag_sphere_coverage(m);
+	// Determine orientation region from accelerometer (gravity direction)
+	// This avoids the hard iron offset problem of using magnetometer for coverage
+	int region = check_orientation_region(a);
 
-	// Check if this octant is already saturated (reached max samples)
-	if (octant >= 0 && magneto_octant_samples[octant] >= MAG_CAL_MAX_PER_OCTANT) {
-		// Octant is saturated - reject sample and prompt user to rotate
+	// Check if this region is already saturated
+	if (region >= 0 && mag_region_samples[region] >= MAG_CAL_MAX_PER_REGION) {
 		int64_t now = k_uptime_get();
 		if (now - magneto_last_saturated_warning > MAG_CAL_SATURATED_WARNING_INTERVAL_MS) {
 			magneto_last_saturated_warning = now;
-			// Count how many octants still need samples
-			int octants_need_more = 0;
-			for (int i = 0; i < 8; i++) {
-				if (magneto_octant_samples[i] < MAG_CAL_MIN_PER_OCTANT) {
-					octants_need_more++;
+			int regions_need_more = 0;
+			for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
+				if (mag_region_samples[i] < MAG_CAL_MIN_PER_REGION) {
+					regions_need_more++;
 				}
 			}
-			LOG_INF("Mag cal: octant %d full (%d samples), rotate device! "
-			        "(%d octants need more data)",
-			        octant, MAG_CAL_MAX_PER_OCTANT, octants_need_more);
+			LOG_INF("Mag cal: region %d full (%d samples), rotate device! "
+			        "(%d regions need more data)",
+			        region, MAG_CAL_MAX_PER_REGION, regions_need_more);
 			set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
 		}
-		return;  // Reject this sample to enforce uniform distribution
+		return;  // Reject to enforce uniform distribution
 	}
 
 	// Accept sample - add to Magneto accumulator
 	magneto_sample(m[0], m[1], m[2], ata, &norm_sum, &sample_count); // 400us
 
-	// Update sphere coverage based on magnetometer direction
-	if (octant >= 0) {
-		magneto_octant_samples[octant]++;
-		uint8_t octant_bit = 1 << octant;
-		if (!(magneto_sphere_coverage & octant_bit)) {
-			magneto_sphere_coverage |= octant_bit;
-			int covered = popcount8(magneto_sphere_coverage);
-			LOG_INF("Magnetometer coverage: %d/8 octants, %d samples",
-			        covered, (int)sample_count);
+	// Update orientation coverage
+	if (region >= 0) {
+		mag_region_samples[region]++;
+		uint16_t region_bit = 1 << region;
+		if (!(mag_region_coverage & region_bit)) {
+			mag_region_coverage |= region_bit;
+			int covered = popcount16(mag_region_coverage);
+			LOG_INF("Mag cal coverage: %d/%d regions, %d samples",
+			        covered, MAG_CAL_NUM_REGIONS, (int)sample_count);
 			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 		}
 	}
 
-	// Check if calibration is ready:
-	// 1. Enough total samples
-	// 2. Enough octants covered
-	// 3. Each covered octant has minimum samples (balanced distribution)
-	int octant_count = popcount8(magneto_sphere_coverage);
-	if (sample_count >= MAG_CAL_MIN_SAMPLES && octant_count >= MAG_CAL_MIN_OCTANTS) {
-		// Check if all covered octants have minimum samples
+	// Check if calibration is ready
+	int region_count = popcount16(mag_region_coverage);
+	if (sample_count >= MAG_CAL_MIN_SAMPLES && region_count >= MAG_CAL_MIN_REGIONS) {
 		bool balanced = true;
-		for (int i = 0; i < 8; i++) {
-			if ((magneto_sphere_coverage & (1 << i)) &&
-			    magneto_octant_samples[i] < MAG_CAL_MIN_PER_OCTANT) {
+		for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
+			if ((mag_region_coverage & (1 << i)) &&
+			    mag_region_samples[i] < MAG_CAL_MIN_PER_REGION) {
 				balanced = false;
 				break;
 			}
 		}
 
 		if (balanced) {
-			// Set bits 0-6 to indicate ready (bit 7 is already set from start)
-			// This makes magneto_progress = 0b11111111, triggering calibration calculation
 			magneto_progress |= 0b01111111;
-			LOG_INF("Magnetometer calibration ready: %d samples, %d/8 octants covered",
-			        (int)sample_count, octant_count);
+			LOG_INF("Mag cal ready: %d samples, %d/%d regions covered",
+			        (int)sample_count, region_count, MAG_CAL_NUM_REGIONS);
 			set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
 		}
 	}
@@ -1891,6 +1944,8 @@ static void calibration_thread(void)
 
 		if (requested < 0) {
 			k_msleep(5);
+		} else if (requested > 0) {
+			k_msleep(20);  // Mag cal in progress - short sleep for fast sampling
 		} else {
 			k_msleep(100);
 		}
