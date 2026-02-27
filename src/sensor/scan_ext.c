@@ -22,6 +22,7 @@
 */
 #include <zephyr/logging/log.h>
 #include <zephyr/types.h>
+#include <string.h>
 
 #include "interface.h"
 
@@ -79,14 +80,29 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 					LOG_DBG("Read value: 0x%02X", id);
 					if (err)
 						break;
-					for (int l = 0; l < id_cnt; l++)
+					if (id == 0xFF || id == 0x00)
 					{
-						if (id == dev_id[id_ind + l])
+						LOG_DBG("Skipping bus idle value 0x%02X at address 0x%02X", id, addr);
+					}
+					else
+					{
+						for (int l = 0; l < id_cnt; l++)
 						{
-							*ext_dev_addr = addr;
-							*ext_dev_reg = reg;
-							LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)", addr, reg, id);
-							return dev_ids[fnd_id + l];
+							if (id == dev_id[id_ind + l])
+							{
+								// Verification read to prevent false positive from stale/corrupt data
+								uint8_t verify_id = 0;
+								int v_err = ext_ssi->ext_write_read(addr, &reg, 1, &verify_id, 1);
+								if (v_err || verify_id != id)
+								{
+									LOG_WRN("Verify failed at 0x%02X reg 0x%02X (expected 0x%02X, got 0x%02X, err %d)", addr, reg, id, verify_id, v_err);
+									break;
+								}
+								*ext_dev_addr = addr;
+								*ext_dev_reg = reg;
+								LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)", addr, reg, id);
+								return dev_ids[fnd_id + l];
+							}
 						}
 					}
 				}
