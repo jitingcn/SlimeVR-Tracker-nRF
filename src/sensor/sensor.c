@@ -468,7 +468,6 @@ int sensor_scan(void)
 	}
 
 	sensor_scan_write();
-	connection_update_sensor_ids(imu_id, mag_id);
 	sensor_imu_id = imu_id;
 	sensor_mag_id = mag_id;
 
@@ -477,6 +476,10 @@ int sensor_scan(void)
 		LOG_WRN("Magnetometer enabled in settings but no hardware detected");
 	}
 	LOG_INF("Magnetometer: %s (available: %s)", mag_enabled ? "enabled" : "disabled", mag_available ? "yes" : "no");
+
+	// Must be called after mag_enabled is set, so get_server_constant_mag_id()
+	// can correctly report SVR_MAG_STATUS_ENABLED / SVR_MAG_STATUS_DISABLED
+	connection_update_sensor_ids(imu_id, mag_id);
 
 	sensor_sensor_init = true; // successfully initialized
 	sensor_sensor_scanning = false; // done
@@ -642,6 +645,11 @@ void sensor_set_mag_enabled(bool enabled)
 bool sensor_get_mag_enabled(void)
 {
 	return mag_enabled;
+}
+
+void sensor_refresh_sensor_ids(void)
+{
+	connection_update_sensor_ids(sensor_imu_id, sensor_mag_id);
 }
 
 void sensor_fusion_invalidate(void)

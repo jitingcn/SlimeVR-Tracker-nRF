@@ -644,6 +644,7 @@ void sensor_calibration_clear_mag(float m_inv[][3], bool write)
 	if (write) {
 		LOG_INF("Clearing stored calibration data");
 		sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
+		sensor_refresh_sensor_ids(); // Refresh reported mag status after clear
 	}
 }
 
@@ -1174,6 +1175,7 @@ static int sensor_calibrate_mag(void)
 
 	LOG_INF("Finished calibration");
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
+	sensor_refresh_sensor_ids(); // Refresh reported mag status after calibration
 	return 0;
 }
 
