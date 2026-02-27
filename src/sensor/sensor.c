@@ -818,7 +818,15 @@ int sensor_init(void)
 	int err;
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
 	if (mag_available) // shutdown magnetometer first (in case of passthrough)
+	{
+		// Re-setup ext interface: scan may have left sensor hub in an inconsistent state
+		// (e.g. continuous mode active, or accel ODR not configured for one-shot triggers)
+		if ((sensor_mag_dev.addr & 0x80) && (sensor_imu_dev_reg & 0x80)) // SPI IMU with ext mag
+			sensor_imu->ext_setup();
+		else if ((sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80)) // I2C IMU with passthrough mag
+			sensor_imu->ext_passthrough(true);
 		sensor_mag->shutdown(); // TODO: is this needed?
+	}
 	sensor_imu->shutdown(); // TODO: is this needed?
 
 	// Clock already enabled during sensor scan, just ensure it's still on
