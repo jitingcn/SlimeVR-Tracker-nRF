@@ -1473,22 +1473,14 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_MAG_CLEAR:
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
 					LOG_INF("Executing remote command: MAG_CLEAR");
 					sensor_calibration_clear_mag(NULL, true);
-#else
-					LOG_WRN("Remote command: MAG_CLEAR not supported (no magnetometer)");
-#endif
 					break;
 
 				case ESB_PONG_FLAG_MAG_CAL:
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
 					LOG_INF("Executing remote command: MAG_CAL");
 					sensor_calibration_clear_mag(NULL, true);
 					sensor_request_calibration_mag();
-#else
-					LOG_WRN("Remote command: MAG_CAL not supported (no magnetometer)");
-#endif
 					break;
 
 				case ESB_PONG_FLAG_MAG_ON:
