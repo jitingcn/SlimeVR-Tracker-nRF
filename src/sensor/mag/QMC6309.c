@@ -159,23 +159,30 @@ void qmc_mag_oneshot(void)
 void qmc_mag_read(float m[3])
 {
 	int err = 0;
-	uint8_t status = 0; // Always check DRDY
-	int64_t timeout = (oneshot_trigger_time ? oneshot_trigger_time : k_uptime_get()) + 2; // 2ms timeout
-	while ((status & STAT_DATA_RDY_MASK) == 0) // wait for data ready flag
+	uint8_t status = STAT_DATA_RDY_MASK; // Assume data ready by default
+	if (oneshot_trigger_time) // Only poll DRDY in oneshot mode
 	{
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
-		if(k_uptime_get() > timeout)
+		status = 0;
+		int64_t timeout = oneshot_trigger_time + 10; // 10ms timeout for oneshot
+		while ((status & STAT_DATA_RDY_MASK) == 0) // wait for data ready flag
 		{
-			LOG_WRN("Data ready status timeout!");
-			break;
+			err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
+			if(k_uptime_get() > timeout)
+			{
+				LOG_WRN("Data ready status timeout!");
+				break;
+			}
 		}
 	}
+	// In continuous mode, skip DRDY polling - data should always be ready
+	// at configured ODR (e.g., 200Hz = 5ms) before loop interval (6ms).
+	// Each sensor hub read takes ~8-10ms at 100-120Hz accel ODR, so polling would
+	// waste an entire accel cycle per status check.
 	oneshot_trigger_time = 0;
 	if (status & STAT_OVERFLOW_MASK) // check overflow flag
 	{
 		if (lastOvfl == 0)
 		{
-			// TODO should we skip the reading to not confuse fusion?
 			LOG_INF("Magnetometer overflow");
 			lastOvfl = 1;
 		}
