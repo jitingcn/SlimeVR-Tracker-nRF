@@ -177,8 +177,8 @@ static void update_tcal_state(void); // Function to refresh T-Cal state
 // linear fitting for optimal balance of smoothness and responsiveness.
 
 // MLS Configuration
-#define MLS_BANDWIDTH 1.5f       // Temperature bandwidth (°C) - controls locality
-#define MLS_MIN_WEIGHT 0.05f     // Minimum weight threshold (~6.5°C distance cutoff)
+#define MLS_BANDWIDTH 2.5f       // Temperature bandwidth (°C) - controls locality
+#define MLS_MIN_WEIGHT 0.03f     // Minimum weight threshold (~6.5°C distance cutoff)
 #define MLS_MAX_POINTS 10        // Maximum points to consider for efficiency
 #define MLS_MIN_POINTS_FOR_FIT 4 // Minimum points with significant weight for MLS to be valid
 #define MLS_EXTRAP_POINTS 4      // Number of edge points for linear extrapolation (matches LUT)

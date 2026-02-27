@@ -52,16 +52,16 @@ static void set_params()
 	params.tauMag = 10.0f; // best result for VQF from paper
 	params.biasForgettingTime = 120.0f;
 	params.biasSigmaInit = 2.0f;
-	params.biasSigmaMotion = 0.25f;
-	params.biasSigmaRest = 0.04f;
+	params.biasSigmaMotion = 0.20f;
+	params.biasSigmaRest = 0.03f;
 	params.biasVerticalForgettingFactor = 0.00001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.3f;
-	params.restMinT = 2.6f;
-	params.restThAcc = 0.4f;
-	params.restThGyr = 0.9f;
-	params.tauAcc = 3.5f;
+	params.restFilterTau = 1.4f;
+	params.restMinT = 2.8f;
+	params.restThAcc = 0.25f;
+	params.restThGyr = 0.8f;
+	params.tauAcc = 3.6f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)
