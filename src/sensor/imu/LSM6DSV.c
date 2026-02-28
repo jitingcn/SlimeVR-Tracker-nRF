@@ -638,9 +638,16 @@ uint8_t lsm_setup_WOM(void)
 
 int lsm_ext_setup(void)
 {
+	// Reset I2C master state for clean device discovery (important after WOM wakeup)
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	k_usleep(350);
 	// Sensor hub requires the internal oscillator to be running.
-	// Start accelerometer at a low ODR to power it up before using I2C master.
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, (OP_MODE_XL_HP << 4) | ODR_15Hz);
+	// Start accelerometer at high ODR for fast I2C master one-shot transactions during scanning.
+	// Each one-shot is triggered by accel data-ready, so higher ODR = faster scans.
+	// lsm_init() will reconfigure ODR for normal operation.
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, (OP_MODE_XL_HP << 4) | ODR_480Hz);
 	k_msleep(5); // wait for oscillator startup
 	// enable internal pull-up for auxiliary I2C
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, 0x58); // SHUB_PU_EN, INT H_LACTIVE active low, PP_OD open-drain
@@ -724,7 +731,7 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	uint8_t tmp;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear current XLDA
 	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + 100; // 100ms timeout (covers 15Hz ODR = 67ms period)
+	int64_t timeout = k_uptime_get() + 10;
 	while (!(status & 0x01) && k_uptime_get() < timeout) // wait for new XLDA
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
@@ -785,7 +792,7 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	uint8_t tmp;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear current XLDA by reading accel data
 	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + 100; // 100ms timeout (covers lowest ODR 15Hz = 67ms period)
+	int64_t timeout = k_uptime_get() + 10; // 10ms timeout
 	while (!(status & 0x01) && k_uptime_get() < timeout) // wait for new XLDA (accelerometer data ready)
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
 	status = 0;

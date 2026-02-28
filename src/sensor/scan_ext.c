@@ -37,7 +37,9 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 		return -1;
 
 	uint16_t addr = 0;
+	bool full_scan = false;
 
+scan_loop:;
 	int addr_index = 0;
 	int reg_index = 0;
 	int id_index = 0;
@@ -54,7 +56,7 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 		for (int j = 0; j < addr_count; j++)
 		{
 			addr = dev_addr[addr_index + j];
-			if (*ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP && addr != *ext_dev_addr)
+			if (!full_scan && *ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP && addr != *ext_dev_addr)
 				continue; // if an address was provided try to scan it first
 			LOG_DBG("Scanning address: 0x%02X", addr);
 
@@ -90,7 +92,23 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 						{
 							if (id == dev_id[id_ind + l])
 							{
-								// Verification read to prevent false positive from stale/corrupt data
+								// Cross-register verification: read a DIFFERENT register
+								// to confirm a real device exists (not stale bus data).
+								// Some IMU I2C masters (e.g. LSM6DSV sensor hub) don't
+								// reliably signal NACK for non-existent slaves. Instead,
+								// SENSOR_HUB registers retain stale data from a previous
+								// transaction, causing all addresses/registers to return
+								// the same value. Real devices return different values on
+								// different registers; stale/ghost data returns the same.
+								uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
+								uint8_t cross_val = 0;
+								int c_err = ext_ssi->ext_write_read(addr, &cross_reg, 1, &cross_val, 1);
+								if (!c_err && cross_val == id)
+								{
+									LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data", addr, reg, cross_reg, id);
+									break;
+								}
+								// Re-read WHO_AM_I to confirm consistency
 								uint8_t verify_id = 0;
 								int v_err = ext_ssi->ext_write_read(addr, &reg, 1, &verify_id, 1);
 								if (v_err || verify_id != id)
@@ -125,12 +143,13 @@ int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uin
 		}
 	}
 
-	if ((*ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP) || *ext_dev_reg != 0xFF) // preferred address or register failed, try again with full scan
+	if (!full_scan && ((*ext_dev_addr >= SCAN_ADDR_START && *ext_dev_addr <= SCAN_ADDR_STOP) || *ext_dev_reg != 0xFF))
 	{
 		LOG_WRN("No device found at address: 0x%02X", *ext_dev_addr);
 		*ext_dev_addr = 0;
 		*ext_dev_reg = 0xFF;
-		return sensor_scan_ext(ext_ssi, ext_dev_addr, ext_dev_reg, dev_addr_count, dev_addr, dev_reg, dev_id, dev_ids);
+		full_scan = true;
+		goto scan_loop;
 	}
 
 	*ext_dev_addr = 0xFF; // no device found, mark as ignored
