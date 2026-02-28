@@ -412,9 +412,6 @@ static void sys_system_off(void) // TODO: add timeout
 {
 	LOG_INF("System off requested");
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
-	// Clear sensor addresses
-	sensor_scan_clear();
-	LOG_INF("Requested sensor scan on next boot");
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
