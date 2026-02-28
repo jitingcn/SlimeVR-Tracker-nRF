@@ -532,6 +532,14 @@ void sensor_scan_read(void) // TODO: move some of this to sys?
 		sensor_mag_dev.addr = retained->mag_addr;
 		sensor_mag_dev_reg = retained->mag_reg;
 	}
+	// If magnetometer is enabled but address indicates "not found/ignored" (>= 0x7F),
+	// reset to 0 so scan functions perform a full bus search instead of skipping
+	if (retained->mag_enabled && (sensor_mag_dev.addr & 0x7F) >= 0x7F)
+	{
+		LOG_INF("Magnetometer enabled but no valid address, will search");
+		sensor_mag_dev.addr = 0x00;
+		sensor_mag_dev_reg = 0xFF;
+	}
 	LOG_INF("IMU address: 0x%02X, register: 0x%02X", sensor_imu_dev.addr, sensor_imu_dev_reg);
 	LOG_INF("Magnetometer address: 0x%02X, register: 0x%02X", sensor_mag_dev.addr, sensor_mag_dev_reg);
 }
