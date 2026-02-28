@@ -116,6 +116,9 @@ static float last_lin_a[3] = {0}; // vector to hold last linear accelerometer
 static float temp; // sensor temperature
 static int64_t last_temp_time = -1000;
 
+static bool main_ok = false;
+static int packet_errors = 0;
+
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
@@ -493,6 +496,14 @@ int sensor_request_scan(bool force)
 {
 	if (sensor_sensor_init && !force)
 		return 0; // already initialized
+
+	// Protect against forced scan when sensor loop is healthy and actively producing data
+	if (force && sensor_sensor_init && main_ok && main_running && packet_errors == 0)
+	{
+		LOG_WRN("Forced scan requested but sensor loop is healthy, skipping to prevent disruption");
+		return 0;
+	}
+
 	main_imu_suspend();
 
 	/* Pause watchdog before aborting thread to prevent timeout */
@@ -968,10 +979,6 @@ int sensor_init(void)
 	sensor_fusion_init = true;
 	return 0;
 }
-
-static bool main_ok = false;
-
-static int packet_errors = 0;
 
 #define ACQUISITION_START_MS 1000
 #define STATUS_INTERVAL_MS 5000
