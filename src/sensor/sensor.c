@@ -54,7 +54,7 @@ typedef struct {
 
 static sensor_debug_state_t debug_state = {
 	.enabled = false,
-	.output_every_n = 2  // Default: output every 2 accel samples
+	.output_every_n = 4  // Default: output every 4 accel samples
 };
 
 #if CONFIG_SENSOR_RANGE_STATS
@@ -1133,6 +1133,9 @@ void sensor_loop(void)
 			float debug_cal_g_sum[3] = {0};
 			int debug_g_samples = 0;
 			int debug_a_samples = 0;
+			float debug_raw_m[3] = {0};
+			float debug_cal_m[3] = {0};
+			bool debug_mag_valid = false;
 			for (uint16_t i = 0; i < packets; i++)
 			{
 				float raw_a[3] = {0};
@@ -1401,6 +1404,12 @@ void sensor_loop(void)
 					memcpy(raw_m, uncalibrated_m, sizeof(uncalibrated_m));
 					mag_calibrated = false;
 				}
+				// Save mag data for debug output
+				if (sensor_debug_is_active()) {
+					memcpy(debug_raw_m, uncalibrated_m, sizeof(debug_raw_m));
+					memcpy(debug_cal_m, raw_m, sizeof(debug_cal_m));
+					debug_mag_valid = true;
+				}
 				float mx = raw_m[0];
 				float my = raw_m[1];
 				float mz = raw_m[2];
@@ -1599,6 +1608,12 @@ void sensor_loop(void)
 					printk("     CAL: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f]\n",
 						(double)a[0], (double)a[1], (double)a[2],
 						(double)avg_cal_g[0], (double)avg_cal_g[1], (double)avg_cal_g[2]);
+
+					if (debug_mag_valid) {
+						printk("     MAG: RAW[%.2f,%.2f,%.2f] CAL[%.2f,%.2f,%.2f]\n",
+							(double)debug_raw_m[0], (double)debug_raw_m[1], (double)debug_raw_m[2],
+							(double)debug_cal_m[0], (double)debug_cal_m[1], (double)debug_cal_m[2]);
+					}
 
 #if CONFIG_SENSOR_USE_VQF
 					printk("     VQF: Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
@@ -1838,7 +1853,7 @@ void sensor_debug_start(uint32_t duration_sec)
 	debug_state.duration_ms = duration_sec * 1000;
 	debug_state.accel_count = 0;
 	debug_state.output_count = 0;
-	// output_every_n is already set to 5 by default
+	// output_every_n is already set to 4 by default
 
 	float accel_odr = sensor_get_accel_odr();
 	LOG_INF("Debug mode started for %u seconds (accel ODR: %.1fHz, output every %u samples)",
