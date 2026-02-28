@@ -19,6 +19,16 @@ static uint8_t last_gyro_odr = 0xff;
 static const float clock_reference = 32000;
 static float clock_scale = 1; // ODR is scaled by clock_rate/clock_reference
 
+// I2CM pre-triggered continuous read mode state
+// When active, icm45_ext_write_read() reads cached I2CM_RD_DATA directly
+// instead of performing a full one-shot I2CM cycle (~500us)
+static bool ext_continuous_active = false;
+static uint8_t ext_cont_addr = 0;
+static uint8_t ext_cont_sub = 0;
+static uint8_t ext_cont_len = 0;
+static bool ext_scanning_mode = true;
+static void icm45_ext_stop_continuous(void);
+
 LOG_MODULE_REGISTER(ICM45686, LOG_LEVEL_DBG);
 
 // IREG helpers for runtime verification.
@@ -150,8 +160,55 @@ static void icm45686_set_ui_lpfbw_sel(uint8_t gyro_sel, uint8_t accel_sel)
 }
 
 
+// Bank read/write helpers for IREG-based register access with auto-increment
+static int icm45_bank_write(uint8_t bank, uint8_t reg, const uint8_t *buf, uint32_t num_bytes)
+{
+	if (num_bytes == 0)
+		return -1;
+	int err = 0;
+	uint8_t ireg_buf[3] = {bank, reg, buf[0]};
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
+	k_busy_wait(4);
+	for (uint32_t i = 1; i < num_bytes; i++)
+	{
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, buf[i]);
+		k_busy_wait(4);
+	}
+	return err;
+}
+
+static int icm45_bank_write_byte(uint8_t bank, uint8_t reg, uint8_t value)
+{
+	return icm45_bank_write(bank, reg, &value, 1);
+}
+
+static int icm45_bank_read(uint8_t bank, uint8_t reg, uint8_t *buf, uint32_t num_bytes)
+{
+	if (num_bytes == 0)
+		return -1;
+	int err = 0;
+	uint8_t ireg_buf[2] = {bank, reg};
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 2);
+	k_busy_wait(4);
+	for (uint32_t i = 0; i < num_bytes; i++)
+	{
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, &buf[i]);
+		k_busy_wait(4);
+	}
+	return err;
+}
+
+static int icm45_bank_read_byte(uint8_t bank, uint8_t reg, uint8_t *value)
+{
+	return icm45_bank_read(bank, reg, value, 1);
+}
+
 int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
+	// After init, switch to operational mode for immediate continuous I2CM reads
+	ext_scanning_mode = false;
+	ext_continuous_active = false;
+
 	// setup interface for SPI
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0);
 
@@ -182,6 +239,21 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_59;
 	ireg_buf[2] = 0xB6 & ~0x92; // disable internal pull resistors for AP pins (pin 7, 1, 14)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
+	// Re-enable I2CM pull-ups and mode after soft reset (if ext was configured during scan)
+	if (sensor_interface_ext_get() != NULL)
+	{
+		ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
+		ireg_buf[2] = ICM45686_BIT_AUX1_SCLK_PULL_EN | ICM45686_BIT_AUX1_SCLK_PULL_UP | ICM45686_BIT_AUX1_I2CM_MODE
+					| ICM45686_BIT_AUX1_CS_PULL_EN | ICM45686_BIT_AUX1_CS_PULL_UP;
+		err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
+		ireg_buf[1] = ICM45686_IPREG_BAR_REG_61;
+		ireg_buf[2] = 0x80 | ICM45686_BIT_AUX1_SDO_PULL_UP | ICM45686_BIT_AUX1_SDO_PULL_EN
+					| ICM45686_BIT_AUX1_SDI_PULL_UP | ICM45686_BIT_AUX1_SDI_PULL_EN;
+		err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x17);
+		// OSC_ID_OVRD must be 1 or 2 (if gyro is enabled) for I2CM operation
+		err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC1, 0x0F, 0x02);
+	}
 	ireg_buf[0] = ICM45686_IPREG_TOP1; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_SREG_CTRL;
 	ireg_buf[2] = 0x02; // set big endian
@@ -195,7 +267,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 
 	// Wait for gyro startup BEFORE configuring ODR
 	LOG_INF("Waiting 50ms for gyroscope startup...");
-	k_msleep(50); // Wait longer than datasheet minimum (30ms) to be safe
+	k_msleep(32); // Wait longer than datasheet minimum (30ms) to be safe
 
 	// Check sensor status
 	uint8_t status = 0;
@@ -224,6 +296,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 
 void icm45_shutdown(void)
 {
+	icm45_ext_stop_continuous();
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Don't need to wait for ICM to finish reset
@@ -582,6 +655,11 @@ uint8_t icm45_setup_DRDY(uint16_t threshold)
 
 uint8_t icm45_setup_WOM(void) // TODO: check if working
 {
+	// Disable FIFO streaming before entering WOM mode.
+	// Prevents stale data accumulation and FIFO trigger storm after wake.
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x00); // stop FIFO streaming
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG0, 0x00); // bypass mode flushes FIFO
+
 	uint8_t interrupts;
 	uint8_t ireg_buf[5];
 	int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_STATUS0, &interrupts); // clear reset done int flag // TODO: is this needed
@@ -610,11 +688,321 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
-int icm45_ext_passthrough(bool passthrough)
+/** Wait for I2CM to become idle */
+static int icm45_i2cm_wait_done(void)
+{
+	uint8_t status = 0;
+	int timeout = 1000;
+	do {
+		icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+		if (--timeout <= 0)
+			break;
+	} while (status & ICM45686_BIT_I2CM_STATUS_BUSY);
+	return (timeout > 0) ? 0 : -1;
+}
+
+/** Stop continuous I2CM read mode if active */
+static void icm45_ext_stop_continuous(void)
+{
+	if (!ext_continuous_active)
+		return;
+	icm45_i2cm_wait_done();
+	ext_continuous_active = false;
+}
+
+int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
+{
+	if (num_bytes > 6)
+	{
+		LOG_ERR("Unsupported write: %d bytes (max 6)", num_bytes);
+		return -1;
+	}
+
+	// Save continuous state before stopping (we'll restore it after write)
+	bool was_continuous = ext_continuous_active;
+	uint8_t saved_addr = ext_cont_addr;
+	uint8_t saved_sub = ext_cont_sub;
+	uint8_t saved_len = ext_cont_len;
+
+	// Stop continuous mode before writing (I2CM config will be changed)
+	icm45_ext_stop_continuous();
+
+	int retries = 2;
+	int err;
+	uint8_t dev_profile[2];
+	uint8_t status;
+	uint8_t dev_status;
+	int timeout;
+
+retry_write:
+	err = 0;
+	// DEV_PROFILE_0 = 0x00 (not used for write), DEV_PROFILE_1 = slave address
+	dev_profile[0] = 0x00;
+	dev_profile[1] = addr;
+	err |= icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2);
+	// Write data to WR_DATA registers
+	err |= icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_I2CM_WR_DATA_0, buf, num_bytes);
+	// Command: last transaction, write mode, num_bytes
+	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_COMMAND_0,
+								 ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_WRITE | num_bytes);
+	// Trigger transaction
+	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
+								 ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO);
+
+	// Wait for I2C transaction (Fast mode 400kHz: ~25us per byte + overhead)
+	k_busy_wait(30 * (num_bytes + 2));
+
+	status = 0;
+	timeout = 1000;
+	do {
+		err |= icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+		if (--timeout <= 0)
+		{
+			LOG_ERR("I2CM write timeout");
+			return -1;
+		}
+	} while (status & ICM45686_BIT_I2CM_STATUS_BUSY);
+
+	if (status & (ICM45686_BIT_I2CM_STATUS_SDA_ERR | ICM45686_BIT_I2CM_STATUS_SCL_ERR))
+	{
+		if (retries-- > 0)
+		{
+			LOG_WRN("I2CM bus error on write 0x%02X: 0x%02x, retrying", addr, status);
+			k_msleep(5);
+			goto retry_write;
+		}
+		LOG_ERR("I2CM bus error: 0x%02x", status);
+		return -1;
+	}
+
+	if (!(status & ICM45686_BIT_I2CM_STATUS_DONE))
+	{
+		LOG_ERR("I2CM write failed: status 0x%02x", status);
+		return -1;
+	}
+
+	err |= icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status);
+	if (dev_status & 0x01)
+	{
+		LOG_DBG("I2CM NACK on write to addr 0x%02x", addr);
+		return -1;
+	}
+
+	// Restore continuous I2CM read: re-setup DEV_PROFILE + COMMAND for the
+	// previously cached read and trigger it. This way the next ext_write_read
+	// finds fresh data ready without the full oneshot cycle.
+	if (was_continuous && !err)
+	{
+		uint8_t rd_profile[2] = {saved_sub, saved_addr};
+		icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2);
+		icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_COMMAND_0,
+							 ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | saved_len);
+		icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
+							 ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO);
+		ext_continuous_active = true;
+		ext_cont_addr = saved_addr;
+		ext_cont_sub = saved_sub;
+		ext_cont_len = saved_len;
+	}
+
+	return err;
+}
+
+int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
+{
+	if (num_write != 1 || num_read < 1 || num_read > 15)
+	{
+		LOG_ERR("Unsupported write_read: write=%d read=%d", num_write, num_read);
+		return -1;
+	}
+
+	uint8_t sub_addr = ((const uint8_t *)write_buf)[0];
+
+	// Fast path: if a pre-triggered I2CM read matches, just read cached RD_DATA.
+	// The I2C transaction was triggered at the end of the previous call and has
+	// completed in the background during FIFO processing (~6ms >> ~300us I2C).
+	if (ext_continuous_active && addr == ext_cont_addr &&
+	    sub_addr == ext_cont_sub && num_read == ext_cont_len)
+	{
+		// Wait only if I2CM is still busy (rare - only if called very quickly)
+		uint8_t status = 0;
+		icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+		if (status & ICM45686_BIT_I2CM_STATUS_BUSY)
+		{
+			// Transaction still in progress - wait briefly
+			int timeout = 200;
+			do {
+				icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+				if (--timeout <= 0)
+				{
+					LOG_WRN("I2CM continuous read timeout, falling back");
+					ext_continuous_active = false;
+					goto oneshot_read;
+				}
+			} while (status & ICM45686_BIT_I2CM_STATUS_BUSY);
+		}
+
+		if (!(status & ICM45686_BIT_I2CM_STATUS_DONE) ||
+		    (status & (ICM45686_BIT_I2CM_STATUS_SDA_ERR | ICM45686_BIT_I2CM_STATUS_SCL_ERR)))
+		{
+			LOG_WRN("I2CM continuous read error: 0x%02x, falling back", status);
+			ext_continuous_active = false;
+			goto oneshot_read;
+		}
+
+		// Read cached data from previous I2CM transaction
+		int err = icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read);
+
+		// Pre-trigger next I2CM read (DEV_PROFILE + COMMAND persist in IPREG_TOP1)
+		icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
+							 ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO);
+		return err;
+	}
+
+	// If continuous was active with different params, stop it
+	if (ext_continuous_active)
+		icm45_ext_stop_continuous();
+
+oneshot_read:;
+	// Full one-shot I2CM read with retry for transient bus errors
+	int retries = 2;
+	int err;
+	uint8_t dev_profile[2];
+	uint8_t status;
+	uint8_t dev_status;
+	int timeout;
+
+retry_read:
+	err = 0;
+	// DEV_PROFILE_0 = register address, DEV_PROFILE_1 = slave address
+	dev_profile[0] = sub_addr;
+	dev_profile[1] = addr;
+	err |= icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2);
+	// Command: last transaction, read-with-register mode, num_read bytes
+	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_COMMAND_0,
+								 ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | num_read);
+	// Trigger transaction
+	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
+								 ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO);
+
+	// Wait for I2C transaction (Fast mode 400kHz: ~25us per byte + overhead)
+	k_busy_wait(25 * num_read + 80);
+
+	status = 0;
+	timeout = 1000;
+	do {
+		err |= icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+		if (--timeout <= 0)
+		{
+			LOG_ERR("I2CM read timeout");
+			return -1;
+		}
+	} while (status & ICM45686_BIT_I2CM_STATUS_BUSY);
+
+	if (status & (ICM45686_BIT_I2CM_STATUS_SDA_ERR | ICM45686_BIT_I2CM_STATUS_SCL_ERR))
+	{
+		if (retries-- > 0)
+		{
+			LOG_WRN("I2CM bus error on read 0x%02X: 0x%02x, retrying", addr, status);
+			k_msleep(5);
+			goto retry_read;
+		}
+		LOG_ERR("I2CM bus error: 0x%02x", status);
+		return -1;
+	}
+
+	if (!(status & ICM45686_BIT_I2CM_STATUS_DONE))
+	{
+		LOG_ERR("I2CM read failed: status 0x%02x", status);
+		return -1;
+	}
+
+	err |= icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status);
+	if (dev_status & 0x01)
+	{
+		LOG_DBG("I2CM NACK from addr 0x%02x reg 0x%02x", addr, sub_addr);
+		return -1;
+	}
+
+	err |= icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read);
+
+	// In operational mode, pre-trigger next read for fast subsequent reads.
+	// DEV_PROFILE + COMMAND persist in IPREG_TOP1, so just writing GO is enough.
+	// The I2CM transaction (~300us) completes in the background during FIFO
+	// processing, so next read finds data ready without any wait.
+	if (!err && !ext_scanning_mode)
+	{
+		icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
+							 ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO);
+		ext_continuous_active = true;
+		ext_cont_addr = addr;
+		ext_cont_sub = sub_addr;
+		ext_cont_len = num_read;
+	}
+
+	return err;
+}
+
+const sensor_ext_ssi_t sensor_ext_icm45686 = {
+	icm45_ext_write,
+	icm45_ext_write_read,
+	15
+};
+
+int icm45_ext_setup(void)
 {
 	int err = 0;
+
+	// Stop continuous mode and enter scanning mode for device discovery
+	icm45_ext_stop_continuous();
+	ext_scanning_mode = true;
+
+	// --- Ensure gyroscope oscillator is available for I2CM ---
+	// I2CM with OSC_ID_OVRD=2 requires gyro oscillator. After WOM wake or
+	// shutdown, gyro may be off. Power on gyro standby to provide I2CM clock.
+	uint8_t pwr = 0;
+	ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, &pwr);
+	uint8_t gyro_mode = (pwr >> 2) & 0x03;
+	if (gyro_mode == GYRO_MODE_OFF) {
+		pwr = (pwr & ~(0x03 << 2)) | (GYRO_MODE_STANDBY << 2);
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, pwr);
+		k_msleep(1); // Wait for gyro oscillator to stabilize
+	}
+
+	uint8_t ireg_buf[3];
+	ireg_buf[0] = ICM45686_IPREG_BAR;
+
+	// Configure AUX1_SCLK pull-ups and I2CM mode (REG_60)
+	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
+	ireg_buf[2] = ICM45686_BIT_AUX1_SCLK_PULL_EN | ICM45686_BIT_AUX1_SCLK_PULL_UP | ICM45686_BIT_AUX1_I2CM_MODE
+				| ICM45686_BIT_AUX1_CS_PULL_EN | ICM45686_BIT_AUX1_CS_PULL_UP;
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
+
+	// Configure AUX1_SDO/SDI pull-ups (REG_61)
+	ireg_buf[1] = ICM45686_IPREG_BAR_REG_61;
+	ireg_buf[2] = 0x80 | ICM45686_BIT_AUX1_SDO_PULL_UP | ICM45686_BIT_AUX1_SDO_PULL_EN
+				| ICM45686_BIT_AUX1_SDI_PULL_UP | ICM45686_BIT_AUX1_SDI_PULL_EN;
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
+
+	// Enable AUX1 in I2CM Master mode
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x17);
+
+	// OSC_ID_OVRD must be 1 or 2 (if gyro is enabled) for I2CM operation (AN-000478)
+	err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC1, 0x0F, 0x02);
+
+	if (err)
+		LOG_ERR("Communication error");
+
+	sensor_interface_ext_configure(&sensor_ext_icm45686);
+	return err;
+}
+
+int icm45_ext_passthrough(bool passthrough)
+{
+	icm45_ext_stop_continuous();
+	int err = 0;
 	if (passthrough)
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x18); // AUX1_MODE_OVRD, AUX1 in I2CM Bypass
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x18); // AUX1 in I2CM Bypass
 	else
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x00); // disable overrides
 	if (err)
@@ -623,21 +1011,21 @@ int icm45_ext_passthrough(bool passthrough)
 }
 
 const sensor_imu_t sensor_imu_icm45686 = {
-	*icm45_init,
-	*icm45_shutdown,
+	icm45_init,
+	icm45_shutdown,
 
-	*icm45_update_fs,
-	*icm45_update_odr,
+	icm45_update_fs,
+	icm45_update_odr,
 
-	*icm45_fifo_read,
-	*icm45_fifo_process,
-	*icm45_accel_read,
-	*icm45_gyro_read,
-	*icm45_temp_read,
+	icm45_fifo_read,
+	icm45_fifo_process,
+	icm45_accel_read,
+	icm45_gyro_read,
+	icm45_temp_read,
 
-	*icm45_setup_DRDY,
-	*icm45_setup_WOM,
+	icm45_setup_DRDY,
+	icm45_setup_WOM,
 
-	*imu_none_ext_setup,
-	*icm45_ext_passthrough
+	icm45_ext_setup,
+	icm45_ext_passthrough
 };
