@@ -844,14 +844,14 @@ static void sensor_calibrate_imu()
 	// In 6-side calibration mode, save accelerometer bias (full calibration matrix used elsewhere)
 	sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, accelBias, sizeof(accelBias));
 #endif
-	// Always save gyroscope bias (ZRO is orientation-independent)
-	sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
 
 #if CONFIG_SENSOR_USE_TCAL
-	// 2. Check if T-Cal coverage is good - if so, only calculate D_offset instead of saving point
-	sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
-	if (!isnan(avg_temp)) {
-		// Check if current temperature has good T-Cal coverage
+	if (tcal_auto_calibration_enabled && !isnan(avg_temp)) {
+		// Auto temperature calibration enabled: save to tcal data points only, don't change gyro bias
+		sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
+		LOG_INF("T-Cal auto-calibration enabled: saving to tcal data only, not updating gyro bias");
+
+		// Check if T-Cal coverage is good - if so, skip saving a redundant point
 		tcal_quality_t quality;
 		bool has_good_coverage = false;
 
@@ -930,8 +930,6 @@ static void sensor_calibrate_imu()
 		}
 
 		if (has_good_coverage) {
-			// Polynomial fit correction offset was removed; keep the retained field for compatibility,
-			// but do not update/apply it. With good coverage, avoid saving redundant points.
 			LOG_INF(
 				"T-Cal: Coverage sufficient at %.2fC, skipping point save",
 				(double)avg_temp
@@ -939,7 +937,7 @@ static void sensor_calibrate_imu()
 		}
 
 		if (!has_good_coverage) {
-			// Normal path: save as new calibration point
+			// Save as new calibration point
 			LOG_INF(
 				"T-Cal: Saving calibration point at average temp %.2fC (range: %.2fC)",
 				(double)avg_temp,
@@ -997,7 +995,14 @@ static void sensor_calibrate_imu()
 				);
 			}
 		}
+	} else {
+		// Auto tcal not enabled or no valid temperature: save gyro bias to NVS only
+		sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
+		LOG_INF("Saving gyro bias to NVS (auto tcal not enabled)");
 	}
+#else
+	// No tcal support: always save gyro bias to NVS
+	sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, gyroBias, sizeof(gyroBias));
 #endif
 
 	LOG_INF("Finished calibration");
