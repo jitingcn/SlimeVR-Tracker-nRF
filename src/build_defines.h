@@ -34,6 +34,17 @@
 #define FW_VERSION_MINOR APP_VERSION_MINOR
 #define FW_VERSION_PATCH APP_PATCHLEVEL
 
+// Build-time VCS metadata (injected by CMake). Keep safe fallbacks for non-git builds.
+#ifndef FW_GIT_REPO_URL
+#define FW_GIT_REPO_URL "unknown"
+#endif
+#ifndef FW_GIT_BRANCH
+#define FW_GIT_BRANCH "unknown"
+#endif
+#ifndef FW_GIT_AUTHOR
+#define FW_GIT_AUTHOR "unknown"
+#endif
+
 static uint8_t get_server_constant_imu_id(int id) __attribute__((unused));
 static uint8_t get_server_constant_mag_id(int id) __attribute__((unused));
 static uint8_t get_server_constant_tracker_status(int status) __attribute__((unused));
