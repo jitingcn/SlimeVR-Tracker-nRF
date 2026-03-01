@@ -511,6 +511,7 @@ static void print_help(void)
 #endif
 	printk("\n");
 	printk("Other:\n");
+	printk("  ping                       Flash LED (same as remote PING command)\n");
 	printk("  meow                       Meow!\n");
 	printk("  help                       Show this help message\n");
 	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 10s)\n");
@@ -721,6 +722,7 @@ static void console_thread(void)
 	uint8_t command_dfu[] = "dfu";
 #endif
 
+	uint8_t command_ping[] = "ping";
 	uint8_t command_meow[] = "meow";
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -1080,6 +1082,9 @@ static void console_thread(void)
 #endif
 		}
 #endif
+		else if (memcmp(line, command_ping, sizeof(command_ping)) == 0) {
+			cmd_ping_start();
+		}
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
 			print_meow();
 		} else if (memcmp(line, command_debug, sizeof(command_debug)) == 0) {
