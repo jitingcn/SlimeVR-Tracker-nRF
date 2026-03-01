@@ -119,6 +119,13 @@ static int64_t last_temp_time = -1000;
 static bool main_ok = false;
 static int packet_errors = 0;
 
+// Detect a stuck/empty FIFO condition.
+// In some failure modes the IMU stops producing samples and we can end up spamming
+// "No packets in buffer" without raising an error.
+#define NO_PACKETS_TIMEOUT_MS 3000
+static int64_t no_packets_since_ms = 0;
+static bool no_packets_timeout_logged = false;
+
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
@@ -498,7 +505,7 @@ int sensor_request_scan(bool force)
 		return 0; // already initialized
 
 	// Protect against forced scan when sensor loop is healthy and actively producing data
-	if (force && sensor_sensor_init && main_ok && main_running && packet_errors == 0)
+	if (force && sensor_sensor_init && main_ok && main_running && packet_errors == 0 && !no_packets_timeout_logged)
 	{
 		LOG_WRN("Forced scan requested but sensor loop is healthy, skipping to prevent disruption");
 		return 0;
@@ -1478,12 +1485,29 @@ void sensor_loop(void)
 			}
 
 			// Check packet processing
-			if ((packets != 0 || k_uptime_get() > 100) && processed_packets == 0)
+			int64_t now_ms = k_uptime_get();
+			if ((packets != 0 || now_ms > 100) && processed_packets == 0)
 			{
 				if (packets)
+				{
 					LOG_WRN("No packets processed");
+					// Processing/parsing issue, not an empty FIFO condition.
+					no_packets_since_ms = 0;
+					no_packets_timeout_logged = false;
+				}
 				else
+				{
 					LOG_WRN("No packets in buffer");
+					// If FIFO stays empty for long enough, raise a sensor error state.
+					if (no_packets_since_ms == 0)
+						no_packets_since_ms = now_ms;
+					if (!no_packets_timeout_logged && (now_ms - no_packets_since_ms) >= NO_PACKETS_TIMEOUT_MS)
+					{
+						LOG_ERR("No packets in buffer for %lldms", (long long)(now_ms - no_packets_since_ms));
+						set_status(SYS_STATUS_SENSOR_ERROR, true);
+						no_packets_timeout_logged = true;
+					}
+				}
 				if (++packet_errors == 10)
 				{
 					LOG_ERR("Packet error threshold exceeded");
@@ -1498,6 +1522,8 @@ void sensor_loop(void)
 			else if (processed_packets == packets && packets > 0)
 			{
 				packet_errors = 0;
+				no_packets_since_ms = 0;
+				no_packets_timeout_logged = false;
 			}
 
 			// Check if expected number of timesteps when using FIFO threshold
