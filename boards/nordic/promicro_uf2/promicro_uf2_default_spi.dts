@@ -79,7 +79,7 @@
 	};
 
 	aliases {
-		// sw0 = &button0; // Uncomment to Enable SW0
+		sw0 = &button0;
 		pwm-led0 = &pwm_led0;
 	};
 
