@@ -28,36 +28,14 @@ jobs:
           path: zephyr-workspace/SlimeNRF-CI
           submodules: recursive
 
-      - name: 🧰 Install Dependencies + West
-        run: |
-          sudo apt-get update && sudo apt install --no-install-recommends \
-          git \
-          cmake \
-          ninja-build \
-          gperf \
-          ccache \
-          dfu-util \
-          device-tree-compiler \
-          wget \
-          python3-dev \
-          python3-pip \
-          python3-setuptools \
-          python3-tk \
-          python3-wheel \
-          python3-venv \
-          xz-utils \
-          file \
-          make \
-          gcc \
-          gcc-multilib \
-          g++-multilib \
-          libsdl2-dev \
-          libmagic1
-
-          python3 -m venv ~/.venv
-          source ~/.venv/bin/activate
-          echo "PATH=$PATH" >> $GITHUB_ENV
-          pip3 install west ninja
+      - name: 🧰 Cache + Install apt Dependencies
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: >-
+            git cmake ninja-build gperf dfu-util device-tree-compiler wget
+            python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
+            xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
+          version: 1.0
 
       - name: 📦 Cache Zephyr SDK
         id: cache-sdk
@@ -87,8 +65,23 @@ jobs:
             zephyr-workspace/tools
           key: west-workspace-${{ hashFiles('zephyr-workspace/SlimeNRF-CI/west.yml') }}
 
+      - name: 📦 Cache Python venv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: ~/.venv
+          key: venv-${{ hashFiles('zephyr-workspace/SlimeNRF-CI/west.yml') }}
+
+      - name: 🐍 Setup Python venv + West
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: |
+          python3 -m venv ~/.venv
+          ~/.venv/bin/pip install west ninja
+
       - name: ♻️ Initialize Zephyr Workspace
         run: |
+          echo "$HOME/.venv/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.venv/bin:$PATH"
           cd zephyr-workspace
           if [ ! -d ".west" ]; then
             west init -l SlimeNRF-CI
@@ -96,16 +89,18 @@ jobs:
           west update --narrow -o=--depth=1
           west zephyr-export
 
-      - name: 📦 Cache pip packages
+      - name: 📦 Cache pip requirements
+        id: cache-pip
         uses: actions/cache@v4
         with:
           path: ~/.venv
-          key: pip-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
+          key: venv-pip-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
 
-      - name: 🐍 Install Python Dependencies
+      - name: 🐍 Install Zephyr Python Requirements
+        if: steps.cache-pip.outputs.cache-hit != 'true'
         run: |
           cd zephyr-workspace
-          pip3 install -r zephyr/scripts/requirements.txt
+          ~/.venv/bin/pip install -r zephyr/scripts/requirements.txt
 
   build:
     needs: setup
@@ -131,17 +126,14 @@ jobs:
           path: zephyr-workspace/SlimeNRF-CI
           submodules: recursive
 
-      - name: 🧰 Install Dependencies + West
-        run: |
-          sudo apt-get update && sudo apt install --no-install-recommends \
-          git cmake ninja-build gperf ccache device-tree-compiler wget \
-          python3-dev python3-pip python3-setuptools python3-wheel python3-venv \
-          xz-utils file make gcc gcc-multilib g++-multilib libmagic1
-
-          python3 -m venv ~/.venv
-          source ~/.venv/bin/activate
-          echo "PATH=$PATH" >> $GITHUB_ENV
-          pip3 install west ninja
+      - name: 🧰 Cache + Install apt Dependencies
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: >-
+            git cmake ninja-build gperf dfu-util device-tree-compiler wget
+            python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
+            xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
+          version: 1.0
 
       - name: 📦 Restore Zephyr SDK
         uses: actions/cache/restore@v4
@@ -168,31 +160,22 @@ jobs:
           key: west-workspace-${{ hashFiles('zephyr-workspace/SlimeNRF-CI/west.yml') }}
           fail-on-cache-miss: true
 
-      - name: ♻️ Register Zephyr Workspace
-        run: |
-          cd zephyr-workspace
-          west zephyr-export
-
-      - name: 📦 Restore pip packages
+      - name: 📦 Restore Python venv
         uses: actions/cache/restore@v4
         with:
           path: ~/.venv
-          key: pip-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
+          key: venv-pip-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
+          restore-keys: |
+            venv-pip-
+            venv-
           fail-on-cache-miss: true
 
-      - name: 📦 Setup ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ccache
-          key: ccache-${{ matrix.boards.filename }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ matrix.boards.filename }}-
-
-      - name: ⚙️ Configure ccache
+      - name: ♻️ Register Zephyr Workspace
         run: |
-          ccache --set-config=max_size=400M
-          ccache --set-config=cache_dir=$HOME/.cache/ccache
-          ccache -z
+          echo "$HOME/.venv/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.venv/bin:$PATH"
+          cd zephyr-workspace
+          west zephyr-export
 
       - name: 🔨 Build SlimeVR-Tracker-nRF - ${{ matrix.boards.boardname }}
         if: always()
@@ -224,7 +207,6 @@ jobs:
               echo "Not found (skip): $src"
             fi
           done
-          ccache -s
 
       - name: 💾 Upload Artifact - ${{ matrix.boards.boardname }}
         if: always()
