@@ -504,11 +504,24 @@ int sensor_request_scan(bool force)
 	if (sensor_sensor_init && !force)
 		return 0; // already initialized
 
-	// Protect against forced scan when sensor loop is healthy and actively producing data
-	if (force && sensor_sensor_init && main_ok && main_running && packet_errors == 0 && !no_packets_timeout_logged)
+	// Protect against forced scan when sensor loop is healthy and actively producing data.
+	//
+	// NOTE: `main_running` only reflects whether the loop is currently inside the processing
+	// section of an iteration. When the loop is waiting for FIFO/interrupt, `main_running`
+	// becomes false even though the loop may be perfectly healthy. Using it here creates a
+	// race where forced scans can still slip through.
+	if (force && sensor_sensor_init && main_ok && packet_errors == 0 && !no_packets_timeout_logged && !main_suspended)
 	{
-		LOG_WRN("Forced scan requested but sensor loop is healthy, skipping to prevent disruption");
-		return 0;
+		// If we have produced/sent data recently, treat the loop as healthy and skip.
+		// `last_sensor_send_time` is updated even in resting mode (keepalive), so it's a good
+		// indicator that the loop is alive.
+		int64_t now = k_uptime_get();
+		int64_t since_last_send = now - last_sensor_send_time;
+		if (since_last_send >= 0 && since_last_send < 1500)
+		{
+			LOG_WRN("Forced scan requested but sensor loop is healthy (last send %lldms ago), skipping", (long long)since_last_send);
+			return 0;
+		}
 	}
 
 	main_imu_suspend();
