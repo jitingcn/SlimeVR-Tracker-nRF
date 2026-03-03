@@ -211,10 +211,35 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	info->rest_detected = getRestDetected(&state);
 	getRelativeRestDeviations(&params, &state, info->rest_deviations);
 	info->bias_sigma = getBiasEstimate(&state, &coeffs, info->bias);
+
+	// Heading correction state
 	info->delta = getDelta(&state);
+
+	// Magnetic disturbance / reference
 	info->mag_dist_detected = getMagDistDetected(&state);
 	info->mag_ref_norm = getMagRefNorm(&state);
 	info->mag_ref_dip = getMagRefDip(&state);
+
+	// Current magnetic field (after optional magCurrentTau LPF)
+	info->mag_norm = state.magNormDip[0];
+	info->mag_dip = state.magNormDip[1];
+
+	// Heading correction diagnostics (from last magnetometer update)
+	info->mag_dis_angle = state.lastMagDisAngle;
+	info->mag_corr_rate = state.lastMagCorrAngularRate;
+
+	// Disturbance rejection timers
+	info->mag_undisturbed_t = state.magUndisturbedT;
+	info->mag_reject_t = state.magRejectT;
+
+	// Candidate field tracking
+	info->mag_candidate_norm = state.magCandidateNorm;
+	info->mag_candidate_dip = state.magCandidateDip;
+	info->mag_candidate_t = state.magCandidateT;
+
+	// Filter gains
+	info->mag_k = coeffs.kMag;
+	info->mag_k_init = state.kMagInit;
 
 	// Convert bias from rad/s to °/s
 	for (int i = 0; i < 3; i++) {
@@ -222,29 +247,35 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	}
 	info->bias_sigma *= 180.0f / M_PI;
 
-	// Convert delta from rad to degrees
+	// Convert rad-based angles to degrees
 	info->delta *= 180.0f / M_PI;
-
-	// Convert mag_ref_dip from rad to degrees
 	info->mag_ref_dip *= 180.0f / M_PI;
+	info->mag_dip *= 180.0f / M_PI;
+	info->mag_dis_angle *= 180.0f / M_PI;
+
+	// Convert angular rates from rad/s to °/s
+	info->mag_corr_rate *= 180.0f / M_PI;
+
+	// Convert candidate dip from rad to degrees
+	info->mag_candidate_dip *= 180.0f / M_PI;
 }
 
 const sensor_fusion_t sensor_fusion_vqf = {
-	*vqf_init,
-	*vqf_load,
-	*vqf_save,
+	vqf_init,
+	vqf_load,
+	vqf_save,
 
-	*vqf_update_gyro,
-	*vqf_update_accel,
-	*vqf_update_mag,
-	*vqf_update,
+	vqf_update_gyro,
+	vqf_update_accel,
+	vqf_update_mag,
+	vqf_update,
 
-	*vqf_get_gyro_bias,
-	*vqf_set_gyro_bias,
+	vqf_get_gyro_bias,
+	vqf_set_gyro_bias,
 
-	*vqf_update_gyro_sanity,
-	*vqf_get_gyro_sanity,
+	vqf_update_gyro_sanity,
+	vqf_get_gyro_sanity,
 
-	*vqf_get_lin_a,
-	*vqf_get_quat
+	vqf_get_lin_a,
+	vqf_get_quat
 };

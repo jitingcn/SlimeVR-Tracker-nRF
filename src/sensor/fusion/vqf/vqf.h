@@ -55,15 +55,47 @@ bool vqf_get_rest_detected(void);
 void vqf_get_relative_rest_deviations(float *out);
 
 // Debug information structure
+//
+// Units:
+// - bias, bias_sigma: °/s
+// - delta, mag_*_dip, mag_*_dis_angle: degrees
+// - mag_*_corr_rate: °/s
+// - mag_*_t: seconds
+// - mag_*_norm: same unit as magnetometer input (depends on driver calibration)
 typedef struct {
     bool rest_detected;
     float rest_deviations[2];  // [gyr, acc]
-    float bias[3];             // rad/s
-    float bias_sigma;          // rad/s
-    float delta;               // rad
+    float bias[3];             // °/s
+    float bias_sigma;          // °/s
+
+    // Heading correction state
+    float delta;               // degrees
+
+    // Magnetic disturbance / reference
     bool mag_dist_detected;
     float mag_ref_norm;
-    float mag_ref_dip;
+    float mag_ref_dip;         // degrees
+
+    // Current magnetic field (after optional magCurrentTau LPF)
+    float mag_norm;
+    float mag_dip;             // degrees
+
+    // Heading correction diagnostics (from last magnetometer update)
+    float mag_dis_angle;       // degrees (lastMagDisAngle)
+    float mag_corr_rate;       // °/s (lastMagCorrAngularRate)
+
+    // Disturbance rejection timers
+    float mag_undisturbed_t;   // seconds
+    float mag_reject_t;        // seconds
+
+    // Candidate field tracking
+    float mag_candidate_norm;
+    float mag_candidate_dip;   // degrees
+    float mag_candidate_t;     // seconds
+
+    // Filter gains (useful to understand how strong mag correction is)
+    float mag_k;               // dimensionless (kMag)
+    float mag_k_init;          // dimensionless (kMagInit)
 } vqf_debug_info_t;
 
 void vqf_get_debug_info(vqf_debug_info_t *info);
