@@ -1060,42 +1060,11 @@ void sensor_loop(void)
 	/* Register sensor thread with watchdog */
 	watchdog_register_thread(WDT_CHANNEL_SENSOR, 0);
 
-	int err = sensor_init(); // Initialize IMUs and Fusion
+	int err = sensor_init(); // Initialize IMUs and Fusion // TODO: run as thread before loop
+	// TODO: handle imu init error, maybe restart device?
+	// TODO: on failure to init, disable sensor interface
 	if (err)
-	{
-		LOG_WRN("Sensor init failed (err %d), retrying with full rescan", err);
-		// Shutdown partially initialized hardware
-		if (mag_available)
-			sensor_mag->shutdown();
-		sensor_imu->shutdown();
-		// Clear retained and runtime sensor addresses for a fresh full scan
-		sensor_scan_clear();
-		sensor_imu_dev.addr = 0x00;
-		sensor_mag_dev.addr = 0x00;
-		sensor_imu_dev_reg = 0xFF;
-		sensor_mag_dev_reg = 0xFF;
-		sensor_sensor_init = false;
-
-		watchdog_pause(WDT_CHANNEL_SENSOR);
-		k_msleep(50); // Wait for sensor to stabilize after shutdown
-
-		// Attempt full rescan and reinit
-		err = sensor_scan();
-		if (!err)
-			err = sensor_init();
-
-		watchdog_register_thread(WDT_CHANNEL_SENSOR, 0);
-
-		if (err)
-		{
-			LOG_ERR("Sensor init retry failed");
-			set_status(SYS_STATUS_SENSOR_ERROR, true);
-		}
-		else
-		{
-			main_ok = true;
-		}
-	}
+		set_status(SYS_STATUS_SENSOR_ERROR, true); // TODO: only handles general init error
 	else
 		main_ok = true;
 	while (1)
