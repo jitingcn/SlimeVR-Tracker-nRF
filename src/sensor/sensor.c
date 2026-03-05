@@ -142,7 +142,9 @@ static int force_scan_request_count = 0;
 
 static float max_gyro_speed_square;
 static bool mag_use_oneshot;
+#if !CONFIG_SENSOR_MAG_FIXED_ODR
 static bool mag_skip_oneshot;
+#endif
 
 static float accel_actual_time;
 static float gyro_actual_time;
