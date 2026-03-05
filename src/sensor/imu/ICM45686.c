@@ -213,12 +213,6 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0);
 
 	int err = 0;
-
-	// Perform soft reset to ensure known state
-	LOG_INF("Performing soft reset...");
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
-	k_msleep(2); // Wait for reset to complete (datasheet: 1ms)
-
 	// Read WHO_AM_I to verify communication
 	uint8_t who_am_i = 0;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x72, &who_am_i); // WHO_AM_I register
@@ -232,28 +226,21 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 //		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_RTC_CONFIG, 0x23); // enable external CLKIN (0x20, default register value is 0x03)
 	}
 	uint8_t ireg_buf[3];
-	ireg_buf[0] = ICM45686_IPREG_BAR; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_58;
 	ireg_buf[2] = 0xD9 & ~0x48; // disable internal pull resistors for AP pins (pin 13, 12)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_59;
 	ireg_buf[2] = 0xB6 & ~0x92; // disable internal pull resistors for AP pins (pin 7, 1, 14)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
-	// Re-enable I2CM pull-ups and mode after soft reset (if ext was configured during scan)
-	if (sensor_interface_ext_get() != NULL)
-	{
-		ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
-		ireg_buf[2] = ICM45686_BIT_AUX1_SCLK_PULL_EN | ICM45686_BIT_AUX1_SCLK_PULL_UP | ICM45686_BIT_AUX1_I2CM_MODE
-					| ICM45686_BIT_AUX1_CS_PULL_EN | ICM45686_BIT_AUX1_CS_PULL_UP;
-		err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
-		ireg_buf[1] = ICM45686_IPREG_BAR_REG_61;
-		ireg_buf[2] = 0x80 | ICM45686_BIT_AUX1_SDO_PULL_UP | ICM45686_BIT_AUX1_SDO_PULL_EN
-					| ICM45686_BIT_AUX1_SDI_PULL_UP | ICM45686_BIT_AUX1_SDI_PULL_EN;
-		err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x17);
-		// OSC_ID_OVRD must be 1 or 2 (if gyro is enabled) for I2CM operation
-		err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC1, 0x0F, 0x02);
-	}
+	// Re-enable I2CM mode after soft reset (if ext was configured during scan)
+	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
+	ireg_buf[2] = ICM45686_BIT_AUX1_I2CM_MODE; // I2CM mode only, no internal pull-ups
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
+	// Enable AUX1 in I2CM Master mode
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_AUX_OVRD, 0x17);
+	// OSC_ID_OVRD must be 1 or 2 (if gyro is enabled) for I2CM operation
+	err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC1, 0x0F, 0x02);
+
 	ireg_buf[0] = ICM45686_IPREG_TOP1; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_SREG_CTRL;
 	ireg_buf[2] = 0x02; // set big endian
@@ -267,7 +254,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 
 	// Wait for gyro startup BEFORE configuring ODR
 	LOG_INF("Waiting 50ms for gyroscope startup...");
-	k_msleep(32); // Wait longer than datasheet minimum (30ms) to be safe
+	k_msleep(30); // datasheet minimum (30ms)
 
 	// Check sensor status
 	uint8_t status = 0;
@@ -293,7 +280,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	// Verify external CLKIN is actually working by checking FIFO output
 	if (clock_rate > 0)
 	{
-		k_msleep(10); // wait for FIFO samples to accumulate
+		k_msleep(6); // wait for FIFO samples to accumulate
 		uint8_t rawCount[2];
 		ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, rawCount, 2);
 		uint16_t fifo_count = (uint16_t)(rawCount[0] << 8 | rawCount[1]);
@@ -325,8 +312,8 @@ void icm45_shutdown(void)
 	icm45_ext_stop_continuous();
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Don't need to wait for ICM to finish reset
-//	k_msleep(1);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
+	k_msleep(2); // Wait for reset to complete (datasheet: 1ms) - ensures clean state for init
 	// TODO: not working
 //	uint8_t ireg_buf[3];
 //	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
@@ -998,16 +985,9 @@ int icm45_ext_setup(void)
 	uint8_t ireg_buf[3];
 	ireg_buf[0] = ICM45686_IPREG_BAR;
 
-	// Configure AUX1_SCLK pull-ups and I2CM mode (REG_60)
+	// Configure I2CM mode (REG_60)
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
-	ireg_buf[2] = ICM45686_BIT_AUX1_SCLK_PULL_EN | ICM45686_BIT_AUX1_SCLK_PULL_UP | ICM45686_BIT_AUX1_I2CM_MODE
-				| ICM45686_BIT_AUX1_CS_PULL_EN | ICM45686_BIT_AUX1_CS_PULL_UP;
-	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
-
-	// Configure AUX1_SDO/SDI pull-ups (REG_61)
-	ireg_buf[1] = ICM45686_IPREG_BAR_REG_61;
-	ireg_buf[2] = 0x80 | ICM45686_BIT_AUX1_SDO_PULL_UP | ICM45686_BIT_AUX1_SDO_PULL_EN
-				| ICM45686_BIT_AUX1_SDI_PULL_UP | ICM45686_BIT_AUX1_SDI_PULL_EN;
+	ireg_buf[2] = ICM45686_BIT_AUX1_I2CM_MODE;
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
 
 	// Enable AUX1 in I2CM Master mode
