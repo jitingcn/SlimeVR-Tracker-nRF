@@ -1709,16 +1709,18 @@ void sensor_loop(void)
 						(double)vqf_info.rest_deviations[0], (double)vqf_info.rest_deviations[1],
 						(double)vqf_info.bias[0], (double)vqf_info.bias[1], (double)vqf_info.bias[2],
 						(double)vqf_info.bias_sigma, (double)vqf_info.delta);
-					printk("     Mag: DisAng:%.2f° CorrRate:%.2f°/s\n",
-						(double)vqf_info.mag_dis_angle, (double)vqf_info.mag_corr_rate);
-					printk("     MagDist:%c MagRefNorm:%.3f MagRefDip:%.2f° MagNorm:%.3f MagDip:%.2f°\n",
-						vqf_info.mag_dist_detected ? 'Y' : 'N',
-						(double)vqf_info.mag_ref_norm, (double)vqf_info.mag_ref_dip,
-						(double)vqf_info.mag_norm, (double)vqf_info.mag_dip);
-					printk("     MagT: undist:%.2fs reject:%.2fs candT:%.2fs candNorm:%.3f candDip:%.2f°\n",
-						(double)vqf_info.mag_undisturbed_t, (double)vqf_info.mag_reject_t,
-						(double)vqf_info.mag_candidate_t,
-						(double)vqf_info.mag_candidate_norm, (double)vqf_info.mag_candidate_dip);
+					if (mag_enabled) {
+						printk("     Mag: DisAng:%.2f° CorrRate:%.2f°/s\n",
+							(double)vqf_info.mag_dis_angle, (double)vqf_info.mag_corr_rate);
+						printk("     MagDist:%c MagRefNorm:%.3f MagRefDip:%.2f° MagNorm:%.3f MagDip:%.2f°\n",
+							vqf_info.mag_dist_detected ? 'Y' : 'N',
+							(double)vqf_info.mag_ref_norm, (double)vqf_info.mag_ref_dip,
+							(double)vqf_info.mag_norm, (double)vqf_info.mag_dip);
+						printk("     MagT: undist:%.2fs reject:%.2fs candT:%.2fs candNorm:%.3f candDip:%.2f°\n",
+							(double)vqf_info.mag_undisturbed_t, (double)vqf_info.mag_reject_t,
+							(double)vqf_info.mag_candidate_t,
+							(double)vqf_info.mag_candidate_norm, (double)vqf_info.mag_candidate_dip);
+					}
 #else
 					printk("     Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 						(double)q[0], (double)q[1], (double)q[2], (double)q[3],
