@@ -314,23 +314,33 @@ void sys_clear(void)
 // return 0 if clock applied, -1 if failed (because there is no clk_en or clk_out)
 int set_sensor_clock(bool enable, float rate, float *actual_rate)
 {
+	*actual_rate = 0;
 #if CLK_EN_EXISTS
-	int ret = gpio_pin_set_dt(&clk_en, enable); // if enabling some external oscillator is available
-	LOG_INF("CLK_EN GPIO set to %d (ret=%d)", enable, ret);
-	//	*actual_rate = enable ? (float)NSEC_PER_SEC / clk_out.period : 0; // assume pwm period is the same as an
-	//equivalent external oscillator
-	*actual_rate = enable ? 32768 : 0; // default
+	int ret = gpio_pin_set_dt(&clk_en, enable);
+	if (ret) {
+		LOG_ERR("CLK_EN GPIO set to %d failed (ret=%d)", enable, ret);
+		return ret;
+	}
+	LOG_INF("CLK_EN GPIO set to %d", enable);
+	if (enable) {
+		k_msleep(2); // allow external oscillator to stabilize
+		*actual_rate = 32768;
+	}
 	return 0;
 #endif
-	*actual_rate = 0; // rate is 0 if there will be no clock source available
 	if (!device_is_ready(clk_out.dev)) {
+		LOG_WRN("Clock output device not ready");
 		return -1;
 	}
-	int err = pwm_set_dt(&clk_out, PWM_HZ(rate), enable ? PWM_HZ(rate * 2) : 0); // if clk_out is used
-	if (!err) {
-		*actual_rate = enable ? rate : 0; // the system probably could provide the correct rate
+	int err = pwm_set_dt(&clk_out, PWM_HZ(rate), enable ? PWM_HZ(rate * 2) : 0);
+	if (err) {
+		LOG_ERR("PWM clock output set failed (err=%d)", err);
+		return err;
 	}
-	return err;
+	if (enable) {
+		*actual_rate = rate;
+	}
+	return 0;
 }
 
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"

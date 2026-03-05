@@ -276,12 +276,6 @@ config SENSOR_MAG_FIXED_ODR
         This ensures VQF fusion receives consistent timing information.
         When disabled, ODR is dynamically adjusted based on gyroscope speed.
 
-config USE_SENSOR_CLOCK
-    bool "Use external IMU clock"
-    default y
-    help
-        Use external IMU clock if it is present.
-
 choice
 	prompt "Sensor fusion"
     default SENSOR_USE_VQF

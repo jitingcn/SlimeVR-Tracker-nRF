@@ -296,15 +296,13 @@ int sensor_scan(void)
 	sensor_sensor_scanning = true;
 
 	sensor_scan_read();
-	// Enable external clock for IMU (required for ICM45686 gyroscope)
+	// Enable external clock for IMU if hardware is available
 	float clock_actual_rate = 0;
-#if CONFIG_USE_SENSOR_CLOCK
-	set_sensor_clock(true, 32768, &clock_actual_rate);
-	if (clock_actual_rate != 0)
+	int clock_err = set_sensor_clock(true, 32768, &clock_actual_rate);
+	if (clock_err == 0 && clock_actual_rate != 0)
 	{
 		LOG_INF("Sensor clock enabled: %.2fHz", (double)clock_actual_rate);
 	}
-#endif
 
 	// Wait for sensors to power up and stabilize
 	k_msleep(50);
@@ -870,9 +868,7 @@ int sensor_init(void)
 
 	// Clock already enabled during sensor scan, just ensure it's still on
 	float clock_actual_rate = 0;
-#if CONFIG_USE_SENSOR_CLOCK
 	set_sensor_clock(true, 32768, &clock_actual_rate); // ensure clock source is still enabled
-#endif
 
 	// wait for sensor register reset // TODO: is this needed?
 	k_usleep(250);

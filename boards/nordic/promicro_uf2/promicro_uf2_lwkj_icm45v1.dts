@@ -26,7 +26,6 @@
 / {
 	zephyr,user {
 		int0-gpios = <&gpio1 4 0>;
-		/delete-property/ clk-gpios;
 	};
 };
 

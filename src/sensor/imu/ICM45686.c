@@ -289,6 +289,32 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG0, 0x40 | 0b000111); // set FIFO streaming mode (not stop-on-full), set FIFO depth to 2K bytes (see AN-000364)
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x0F); // begin FIFO stream, hires, a+g
+
+	// Verify external CLKIN is actually working by checking FIFO output
+	if (clock_rate > 0)
+	{
+		k_msleep(10); // wait for FIFO samples to accumulate
+		uint8_t rawCount[2];
+		ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, rawCount, 2);
+		uint16_t fifo_count = (uint16_t)(rawCount[0] << 8 | rawCount[1]);
+		if (fifo_count == 0)
+		{
+			LOG_WRN("External CLKIN not working, falling back to internal clock");
+			clock_scale = 1;
+			// Disable CLKIN: revert pad scenario and RTC config
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IOC_PAD_SCENARIO_OVRD, 0x00);
+			err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_RTC_CONFIG, 0x20, 0x00);
+			// Recalculate ODR without clock scaling
+			last_accel_odr = 0xff;
+			last_gyro_odr = 0xff;
+			err |= icm45_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
+		}
+		else
+		{
+			LOG_INF("External CLKIN verified: FIFO count=%d", fifo_count);
+		}
+	}
+
 	if (err)
 		LOG_ERR("Communication error");
 	return (err < 0 ? err : 0);

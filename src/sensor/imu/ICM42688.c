@@ -65,6 +65,34 @@ int icm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 	k_msleep(1); // fuck i dont wanna wait that long
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_CONFIG1, 0x10); // enable FIFO hires, a+g
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_CONFIG, 1<<6); // begin FIFO stream
+
+	// Verify external CLKIN is actually working by checking FIFO output
+	if (clock_rate > 0)
+	{
+		k_msleep(10); // wait for FIFO samples to accumulate
+		uint8_t rawCount[2];
+		ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_COUNTH, rawCount, 2);
+		uint16_t fifo_count = (uint16_t)(rawCount[0] << 8 | rawCount[1]);
+		if (fifo_count == 0)
+		{
+			LOG_WRN("External CLKIN not working, falling back to internal clock");
+			clock_scale = 1;
+			// Disable CLKIN: revert PIN9_FUNCTION and RTC_MODE
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_REG_BANK_SEL, 0x01);
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_INTF_CONFIG5, 0x00);
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_REG_BANK_SEL, 0x00);
+			err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_INTF_CONFIG1, 0x04, 0x00);
+			// Recalculate ODR without clock scaling
+			last_accel_odr = 0xff;
+			last_gyro_odr = 0xff;
+			err |= icm_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
+		}
+		else
+		{
+			LOG_INF("External CLKIN verified: FIFO count=%d", fifo_count);
+		}
+	}
+
 	if (err)
 		LOG_ERR("Communication error");
 	return (err < 0 ? err : 0);
@@ -283,7 +311,7 @@ int icm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 
 	// extra read packets by ODR time
 	if (accel_time == 0 && gyro_time != 0)
-		fifo_multiplier = fifo_multiplier_factor / gyro_time; 
+		fifo_multiplier = fifo_multiplier_factor / gyro_time;
 	else if (accel_time != 0 && gyro_time == 0)
 		fifo_multiplier = fifo_multiplier_factor / accel_time;
 	else if (gyro_time > accel_time)
@@ -451,7 +479,7 @@ const sensor_imu_t sensor_imu_icm42688 = {
 
 	*icm_setup_DRDY,
 	*icm_setup_WOM,
-	
+
 	*imu_none_ext_setup,
 	*imu_none_ext_passthrough
 };
