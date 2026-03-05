@@ -131,6 +131,12 @@ static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
 static int64_t last_retained_save_time = 0;
 
+// Track forced scan requests to allow override when requested 3 times within 1 minute
+#define FORCE_SCAN_WINDOW_MS 60000  // 1 minute window
+#define FORCE_SCAN_THRESHOLD 3       // 3 requests needed
+static int64_t force_scan_request_times[3] = {0};
+static int force_scan_request_count = 0;
+
 // Periodic retained save interval (ms) for crash recovery
 #define RETAINED_SAVE_INTERVAL_MS 5000
 
@@ -510,15 +516,44 @@ int sensor_request_scan(bool force)
 	// race where forced scans can still slip through.
 	if (force && sensor_sensor_init && main_ok && packet_errors == 0 && !no_packets_timeout_logged && !main_suspended)
 	{
-		// If we have produced/sent data recently, treat the loop as healthy and skip.
-		// `last_sensor_send_time` is updated even in resting mode (keepalive), so it's a good
-		// indicator that the loop is alive.
 		int64_t now = k_uptime_get();
-		int64_t since_last_send = now - last_sensor_send_time;
-		if (since_last_send >= 0 && since_last_send < 1500)
+		bool allow_force_scan = false;
+
+		// Track forced scan requests to allow override when requested 3 times within 1 minute
+		force_scan_request_times[force_scan_request_count % FORCE_SCAN_THRESHOLD] = now;
+		force_scan_request_count++;
+
+		// Check if we have FORCE_SCAN_THRESHOLD requests within FORCE_SCAN_WINDOW_MS
+		if (force_scan_request_count >= FORCE_SCAN_THRESHOLD)
 		{
-			LOG_WRN("Forced scan requested but sensor loop is healthy (last send %lldms ago), skipping", (long long)since_last_send);
-			return 0;
+			int64_t oldest_request = force_scan_request_times[force_scan_request_count % FORCE_SCAN_THRESHOLD];
+			int64_t time_window = now - oldest_request;
+
+			if (time_window >= 0 && time_window < FORCE_SCAN_WINDOW_MS)
+			{
+				LOG_INF("Forced scan allowed: %d requests within %lldms window", FORCE_SCAN_THRESHOLD, (long long)time_window);
+				allow_force_scan = true;
+				// Reset counter after allowing the scan
+				force_scan_request_count = 0;
+				for (int i = 0; i < FORCE_SCAN_THRESHOLD; i++)
+				{
+					force_scan_request_times[i] = 0;
+				}
+			}
+		}
+
+		// If not allowed by multiple requests, check sensor health
+		if (!allow_force_scan)
+		{
+			// If we have produced/sent data recently, treat the loop as healthy and skip.
+			// `last_sensor_send_time` is updated even in resting mode (keepalive), so it's a good
+			// indicator that the loop is alive.
+			int64_t since_last_send = now - last_sensor_send_time;
+			if (since_last_send >= 0 && since_last_send < 1500)
+			{
+				LOG_WRN("Forced scan requested but sensor loop is healthy (last send %lldms ago), skipping", (long long)since_last_send);
+				return 0;
+			}
 		}
 	}
 
