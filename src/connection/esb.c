@@ -57,7 +57,6 @@ static struct esb_payload rx_payload;
 // Normal data payload (16+1 bytes when used), length set per write
 static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0);
 static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
-static struct esb_payload ack_payload = ESB_CREATE_PAYLOAD(0);
 
 static uint8_t paired_addr[8] = {0};
 
@@ -128,7 +127,6 @@ static int64_t g_last_skew_update_time = 0;
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
 	uint8_t type;        // First byte of payload (packet type)
-	bool is_ack_payload; // Is this the small ack_payload after PING
 	bool noack;          // noack flag
 	uint8_t length;      // Packet length
 	int64_t timestamp;   // When it was sent
@@ -299,49 +297,6 @@ void clocks_request_stop(uint32_t delay_us)
 	);
 }
 
-void esb_write_ack(uint8_t type)
-{
-	// This small ACK packet is crucial for receiving the PONG ACK payload
-	// ESB requires a transmission to trigger ACK payload reception
-	if (!esb_initialized || !esb_paired) {
-		return;
-	}
-	// Check ESB TX FIFO before adding packet
-	if (esb_tx_full()) {
-		LOG_WRN("TX FIFO full when queuing ACK packet, skipping this ACK");
-		// Don't try to recover here - let the main error handler deal with it
-		// Forcing recovery for every ACK is too aggressive
-		return;
-	}
-
-	// small packet with no data, just to get ack result
-	ack_payload.pipe = 1 + (tracker_id % 7);
-	ack_payload.noack = false;
-	ack_payload.length = 1;
-	ack_payload.data[0] = 0x00; // Empty payload marker
-
-	// Record ack_payload for diagnostics
-	last_tx.type = type; // ack for last sent packet type
-	last_tx.is_ack_payload = true;
-	last_tx.noack = false;
-	last_tx.length = 1;
-	last_tx.timestamp = k_uptime_get();
-
-	int ack_status = esb_write_payload(&ack_payload);
-	if (ack_status != 0) {
-		const char *err_str = "unknown";
-		if (ack_status == -ENOMEM) {
-			err_str = "ENOMEM (ESB not ready)";
-			consecutive_enomem_errors++;
-		} else if (ack_status == -ENOSPC) {
-			err_str = "ENOSPC (FIFO full)";
-		}
-		LOG_ERR("esb_write_ack: failed to queue ACK packet (err=%d %s)", ack_status, err_str);
-	} else {
-		LOG_DBG("ACK packet queued to trigger PONG reception (type=0x%02X)", type);
-	}
-}
-
 void event_handler(struct esb_evt const *event)
 {
 	static uint32_t tx_success_count = 0;
@@ -353,7 +308,7 @@ void event_handler(struct esb_evt const *event)
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
-		if (esb_paired && last_tx.type != ESB_PING_TYPE) {
+		if (esb_paired) {
 			clocks_stop();
 		}
 		break;
@@ -419,7 +374,7 @@ void event_handler(struct esb_evt const *event)
 			);
 		}
 
-		if (esb_paired && last_tx.type != ESB_PING_TYPE) {
+		if (esb_paired) {
 			clocks_stop();
 		}
 		break;
@@ -1175,7 +1130,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	}
 	if (!clock_status) {
 		clocks_start();
-		k_usleep(400);
+		k_usleep(300);
 	}
 	if (data_length < 1) {
 		LOG_ERR("Invalid data length %u", data_length);
@@ -1216,7 +1171,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 
 	// Record this packet for TX_FAILED diagnostics
 	last_tx.type = data[0];
-	last_tx.is_ack_payload = false;
 	last_tx.noack = no_ack;
 	last_tx.length = data_length;
 	last_tx.timestamp = k_uptime_get();
@@ -1225,7 +1179,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	esb_flush_tx();
 	int queue_status = esb_write_payload(&tx_payload);
 
-	// if sending ping packet, we need send another small packet to get ack result asap
+	// Record ping history for RTT calculation
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
 		uint8_t this_ctr = tx_payload.data[2];
 		ping_history[ping_history_idx].counter = this_ctr;
@@ -1239,7 +1193,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
 
 		last_tx_time = k_uptime_get();
-		esb_write_ack(ESB_PING_TYPE);
 	} else if (tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
 		// PING failed to queue - this is critical!
 		const char *err_str = "unknown";
