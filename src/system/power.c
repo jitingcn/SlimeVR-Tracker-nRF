@@ -18,8 +18,10 @@
 #include <zephyr/device.h>
 #include <hal/nrf_spim.h>
 #include <hal/nrf_twim.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 
 #include "power.h"
+#include "clock_control.h"
 
 #define DFU_DBL_RESET_MEM 0x20007F7C
 #define DFU_DBL_RESET_APP 0x4ee5677e
@@ -195,6 +197,7 @@ static void configure_system_off(void)
 		LOG_WRN("Entering new power state while sensor error is raised");
 	if (get_status(SYS_STATUS_SYSTEM_ERROR))
 		LOG_WRN("Entering new power state while system error is raised");
+	clock_pre_shutdown();
 	main_imu_suspend();
 	sensor_shutdown();
 	set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);

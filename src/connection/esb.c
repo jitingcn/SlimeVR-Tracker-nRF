@@ -40,6 +40,7 @@
 #include <stdlib.h>
 #include "esb.h"
 #include "console.h"
+#include "system/clock_control.h"
 
 uint8_t last_reset = 0;
 // const nrfx_timer_t m_timer = NRFX_TIMER_INSTANCE(1);
@@ -1357,6 +1358,9 @@ static void esb_thread(void)
 
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
+
+	clocks_start();
+	clock_init_external();
 
 	while (1) {
 #if CONFIG_CONNECTION_OVER_HID
