@@ -68,7 +68,7 @@
 #endif
 // not sure if this is needed or correct, it still seems weird in server without full reset, but leaving it for now
 #ifndef SENSOR_QUATERNION_CORRECTION
-#define SENSOR_QUATERNION_CORRECTION 1.0f, 0.0f, 0.0f, 0.0f
+#define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.0f, 0.0f, -0.7071f
 #endif
 
 #endif
