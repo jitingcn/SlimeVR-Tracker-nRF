@@ -8,6 +8,7 @@
 #include "sensor/sensor_none.h"
 
 #define PACKET_SIZE 7
+LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
 
 // TODO: shared with LSM
 float accel_sensitivity = 16.0f / 32768.0f; // Default 16G (FS = ±16 g: 0.488 mg/LSB)
@@ -27,6 +28,25 @@ uint8_t last_gyro_odr = 0xff;
 
 static float freq_scale = 1; // ODR is scaled by INTERNAL_FREQ_FINE
 
+#define LSM6DSV_FIFO_MODE_BYPASS 0x00
+#define LSM6DSV_FIFO_MODE_CONTINUOUS 0x06
+#define LSM6DSV_UNKNOWN_TAG_RESYNC_THRESHOLD 4
+
+static uint8_t lsm_unknown_tag_count = 0;
+
+static int lsm_fifo_resync(const char *reason)
+{
+	LOG_WRN("Resyncing FIFO: %s", reason);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, LSM6DSV_FIFO_MODE_BYPASS);
+	k_usleep(350);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, LSM6DSV_FIFO_MODE_CONTINUOUS);
+	k_usleep(350);
+	lsm_unknown_tag_count = 0;
+	if (err)
+		LOG_ERR("FIFO resync failed");
+	return err;
+}
+
 // Sensor hub continuous read mode state
 // When active, lsm_ext_write_read() reads SENSOR_HUB registers directly
 // instead of performing a slow one-shot cycle (~8ms wait for XLDA)
@@ -38,8 +58,6 @@ static uint8_t ext_cont_len = 0;
 // Scanning mode: when true, one-shot reads never start continuous mode.
 // Set during ext_setup() for device scanning, cleared by lsm_init() for normal operation.
 static bool ext_scanning_mode = true;
-
-LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
 
 int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
@@ -89,8 +107,8 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 		LOG_ERR("Communication error during power-on");
 
 	// Wait for gyroscope startup AFTER powering on (Ton = 30ms typical, 45ms max)
-	LOG_INF("Waiting for gyroscope startup (50ms)...");
-	k_msleep(50);
+	LOG_INF("Waiting for gyroscope startup (30ms)...");
+	k_msleep(30);
 
 	// Now configure FS and other settings after sensors are powered and stable
 	// Configure gyro FS + LPF1 bandwidth in CTRL6
@@ -145,12 +163,13 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 	err |= lsm_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
 
 	// Enable FIFO in continuous mode
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, 0x06); // enable Continuous mode
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, LSM6DSV_FIFO_MODE_CONTINUOUS);
+	lsm_unknown_tag_count = 0;
 
 	// Read back to verify FIFO mode
 	uint8_t fifo_ctrl4_readback = 0;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, &fifo_ctrl4_readback);
-	LOG_INF("FIFO_CTRL4 write=0x06 readback=0x%02X", fifo_ctrl4_readback);
+	LOG_INF("FIFO_CTRL4 write=0x%02X readback=0x%02X", LSM6DSV_FIFO_MODE_CONTINUOUS, fifo_ctrl4_readback);
 
 	if (err)
 		LOG_ERR("Communication error during initialization");
@@ -162,6 +181,7 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 void lsm_shutdown(void)
 {
 	ext_continuous_active = false;
+	lsm_unknown_tag_count = 0;
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
@@ -468,14 +488,17 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 	if (rawStatus[1] & LSM6DSV_FIFO_OVR_LATCHED)
 	{
 		LOG_WRN("FIFO overflow detected - data may be lost");
+		lsm_fifo_resync("overflow detected");
+		return 0;
 	}
 
 	// Limit read to available buffer space
 	uint16_t limit = len / PACKET_SIZE;
 	if (count > limit)
 	{
-		LOG_WRN("FIFO buffer limit: dropping %d packets", count - limit);
-		count = limit;
+		LOG_WRN("FIFO buffer limit exceeded: count=%u limit=%u, resyncing FIFO", count, limit);
+		lsm_fifo_resync("software buffer limit exceeded");
+		return 0;
 	}
 
 	// Batch read all packets in one SPI transaction
@@ -485,9 +508,11 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 	if (err)
 	{
 		LOG_ERR("Failed to read FIFO data");
+		lsm_fifo_resync("FIFO data read failed");
 		return 0;
 	}
 
+	lsm_unknown_tag_count = 0;
 	return count;
 }
 
@@ -533,17 +558,22 @@ int lsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 
 	case LSM6DSV_TAG_FIFO_EMPTY:
 		// FIFO empty marker - skip silently
+		lsm_unknown_tag_count = 0;
 		return 1;
 
 	case LSM6DSV_TAG_TEMP:
 	case LSM6DSV_TAG_TIMESTAMP:
 	case LSM6DSV_TAG_CFG_CHANGE:
 		// Known non-sensor data tags - skip
+		lsm_unknown_tag_count = 0;
 		return 1;
 
 	default:
 		// Unknown or unsupported tag (compressed data, sensor hub, SFLP, etc.)
-		LOG_DBG("Skipping FIFO packet with tag 0x%02X", tag);
+		lsm_unknown_tag_count++;
+		LOG_DBG("Skipping FIFO packet with tag 0x%02X (unknown_count=%u)", tag, lsm_unknown_tag_count);
+		if (lsm_unknown_tag_count >= LSM6DSV_UNKNOWN_TAG_RESYNC_THRESHOLD)
+			lsm_fifo_resync("consecutive unknown FIFO tags");
 		return 1;
 	}
 }
