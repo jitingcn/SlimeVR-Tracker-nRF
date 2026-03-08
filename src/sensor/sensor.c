@@ -671,7 +671,7 @@ void sensor_shutdown(void) // Communicate all imus to shut down
 	if (mag_available || !err)
 	{
 		sys_interface_resume();
-		if (mag_available) // try to shutdown magnetometer first (in case of passthrough)
+		if (mag_available && mag_enabled) // only shutdown magnetometer when it is actively enabled
 			sensor_mag->shutdown();
 		if (!err)
 			sensor_imu->shutdown();
@@ -891,7 +891,7 @@ int sensor_init(void)
 {
 	int err;
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
-	if (mag_available) // shutdown magnetometer first (in case of passthrough)
+	if (mag_available && mag_enabled) // shutdown magnetometer first only when enabled
 	{
 		if ((sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80)) // I2C IMU with passthrough mag
 			sensor_imu->ext_passthrough(true);

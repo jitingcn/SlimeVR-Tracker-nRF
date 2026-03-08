@@ -54,6 +54,7 @@ static bool ext_continuous_active = false;
 static uint8_t ext_cont_addr = 0;
 static uint8_t ext_cont_sub = 0;
 static uint8_t ext_cont_len = 0;
+static void lsm_ext_stop_continuous(void);
 
 // Scanning mode: when true, one-shot reads never start continuous mode.
 // Set during ext_setup() for device scanning, cleared by lsm_init() for normal operation.
@@ -651,7 +652,23 @@ uint8_t lsm_setup_WOM(void)
 //	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, ODR_OFF); // set accel off
 //	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL2, ODR_OFF); // set gyro off
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, 0xE0 | FS_XL_8G); // set accel FS, set HP_LPF2_XL_BW to lowest bandwidth, enable HP_REF_MODE (set HP_LPF2_XL_BW)
+	// Enter a clean WOM state explicitly. This path is exercised right before system-off,
+	// and if FIFO / BDR / sensor-hub state is left running, wake-up can boot into a state
+	// where FIFO no longer starts producing packets reliably.
+	lsm_ext_stop_continuous();
+	lsm_unknown_tag_count = 0;
+	last_accel_mode = 0xff;
+	last_gyro_mode = 0xff;
+	last_accel_odr = 0xff;
+	last_gyro_odr = 0xff;
+
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_INT1_CTRL, 0x00); // disable FIFO/BDR interrupt routing
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MD1_CFG, 0x00); // clear previous wake routing first
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNCTIONS_ENABLE, 0x00); // clear embedded interrupt enables
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL3, 0x00); // stop FIFO batching for accel/gyro
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, LSM6DSV_FIFO_MODE_BYPASS); // flush FIFO / disable streaming
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL2, OP_MODE_G_HP << 4 | ODR_OFF); // gyro fully off in WOM
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL8, 0xE0 | FS_XL_8G); // set accel FS, set HP_LPF2_XL_BW to lowest bandwidth, enable HP_REF_MODE (set HP_LPF2_XL_BW)
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, OP_MODE_XL_LP1 << 4 | ODR_240Hz); // set accel low power mode 1, set accel ODR (enable accel)
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL9, 0x50); // enable HP_REF_MODE (set HP_REF_MODE_XL and HP_SLOPE_XL_EN)
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_TAP_CFG0, 0x10); // set SLOPE_FDS
