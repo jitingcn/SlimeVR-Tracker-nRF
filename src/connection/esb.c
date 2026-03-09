@@ -823,11 +823,11 @@ int esb_initialize(bool tx)
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 5;
+		config.retransmit_count = CONNECTION_ENABLE_ACK ? 2 : 3;
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		// config.use_fast_ramp_up = true;
+		config.use_fast_ramp_up = true;
 	} else {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
@@ -840,7 +840,7 @@ int esb_initialize(bool tx)
 		// config.tx_mode = ESB_TXMODE_AUTO;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
-		// config.use_fast_ramp_up = true;
+		config.use_fast_ramp_up = true;
 	}
 
 	err = esb_init(&config);
