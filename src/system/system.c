@@ -329,7 +329,9 @@ int set_sensor_clock(bool enable, float rate, float *actual_rate)
 	return 0;
 #endif
 	if (!device_is_ready(clk_out.dev)) {
-		LOG_WRN("Clock output device not ready");
+		if (enable) {
+			LOG_WRN("Clock output device not ready");
+		}
 		return -1;
 	}
 	int err = pwm_set_dt(&clk_out, PWM_HZ(rate), enable ? PWM_HZ(rate * 2) : 0);
