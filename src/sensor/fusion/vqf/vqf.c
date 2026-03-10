@@ -61,10 +61,10 @@ static void set_params()
 	params.restMinT = 2.8f;
 	params.restThAcc = 0.25f;
 	params.restThGyr = 0.8f;
-	params.tauMag = 9.0f;
+	params.tauMag = 7.0f;
 	params.magCurrentTau = 0.1f;
-	params.magNormTh = 0.08f;
-	params.magDipTh = 8.0f;
+	params.magNormTh = 0.1f;
+	params.magDipTh = 10.0f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)

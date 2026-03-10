@@ -78,8 +78,8 @@ static int64_t mag_cal_last_status_log;
 // Calibration thresholds
 #define MAG_CAL_MIN_SAMPLES 1000
 #define MAG_CAL_MIN_REGIONS MAG_CAL_NUM_REGIONS
-#define MAG_CAL_MIN_PER_REGION 80
-#define MAG_CAL_MAX_PER_REGION 150
+#define MAG_CAL_MIN_PER_REGION 90
+#define MAG_CAL_MAX_PER_REGION 120
 #define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000
 
 static double ata[100]; // init calibration
