@@ -1088,7 +1088,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	}
 	if (!clock_status) {
 		clocks_start();
-		k_usleep(300);
+		k_usleep(100);
 	}
 	if (data_length < 1) {
 		LOG_ERR("Invalid data length %u", data_length);
