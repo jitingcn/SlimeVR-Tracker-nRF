@@ -401,4 +401,15 @@ config CONNECTION_OVER_HID
         Use HID if available.
         Otherwise, use ESB only.
 
+config CLOCK_USE_LFXO
+    bool "Use external low-frequency crystal oscillator (LFXO)"
+    default y
+    help
+        Enable external 32.768 kHz crystal oscillator for LF clock.
+        This provides better TDMA timing precision.
+
+        Disable this option if your board does not have an external
+        LFXO crystal. Using LFXO without a crystal will cause the
+        system to hang or IMU detection to fail.
+
 source "Kconfig.zephyr"
