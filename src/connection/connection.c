@@ -23,6 +23,7 @@
 #include "globals.h"
 #include "util.h"
 #include "esb.h"
+#include "tdma.h"
 #include "build_defines.h"
 #include "hid.h"
 #include "system/watchdog.h"
@@ -86,6 +87,7 @@ uint8_t connection_get_id(void)
 void connection_set_id(uint8_t id)
 {
 	tracker_id = id;
+	tdma_init(id);
 }
 
 uint8_t connection_get_packet_sequence(void)
@@ -342,7 +344,7 @@ void connection_thread(void)
 		// Adjust PING interval based on connection health
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 			// During connection errors, slow down PING to every 2.5 seconds
-			ping_interval_ms = 2500;
+			ping_interval_ms = 2450;
 		} else {
 			// Normal operation - default interval
 			ping_interval_ms = PING_INTERVAL_MS;
@@ -353,32 +355,9 @@ void connection_thread(void)
 			continue;
 		}
 
-		// PING has highest priority
-		// This ensures connection recovery attempts continue even during errors
-		bool should_send_ping = false;
-		uint32_t server_time = esb_get_server_time();
-
-		if (server_time > 0) {
-			// TDMA scheduling: 10 trackers, 100ms slot each in 1000ms period
-			uint32_t slot_offset = (tracker_id % 10) * 100; // ms
-			uint32_t current_slot = server_time % 1000;
-
-			// Calculate slot difference with wrap-around handling
-			int32_t slot_diff = (int32_t)current_slot - (int32_t)slot_offset;
-			if (slot_diff < 0) {
-				slot_diff += 1000;
-			}
-
-			// Send if within slot window (+10ms) and minimum interval elapsed
-			if (slot_diff >= 0 && slot_diff <= 10 && now - last_ping_time >= (ping_interval_ms - 100)) {
-				should_send_ping = true;
-			}
-		} else {
-			// Fallback: not synced yet, use original time-based scheduling
-			if (now - last_ping_time >= ping_interval_ms) {
-				should_send_ping = true;
-			}
-		}
+		// PING has highest priority — always sent on schedule regardless of TDMA
+		// PINGs are low-volume (1/s) and essential for time sync + connection health
+		bool should_send_ping = (now - last_ping_time >= ping_interval_ms);
 
 		if (should_send_ping) {
 			uint8_t ping[ESB_PING_LEN] = {0};

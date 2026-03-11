@@ -401,6 +401,16 @@ config CONNECTION_OVER_HID
         Use HID if available.
         Otherwise, use ESB only.
 
+config CONNECTION_TDMA
+    bool "Enable TDMA transmit scheduling"
+    default y
+    help
+        Enable Time Division Multiple Access scheduling for ESB radio.
+        When enabled, each tracker transmits only within its assigned
+        time slot to avoid collisions with other trackers.
+        Requires server time synchronization via PING/PONG.
+        Can also be toggled at runtime via console command.
+
 config CLOCK_USE_LFXO
     bool "Use external low-frequency crystal oscillator (LFXO)"
     default y

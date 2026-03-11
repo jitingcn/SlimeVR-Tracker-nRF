@@ -4,7 +4,9 @@
 #include "sensor/sensor.h"
 #include "sensor/calibration.h"
 #include "connection/esb.h"
+#include "connection/tdma.h"
 #include "build_defines.h"
+#include "zephyr/sys/printk.h"
 
 #if CONFIG_USB_DEVICE_STACK
 #define USB DT_NODELABEL(usbd)
@@ -499,6 +501,7 @@ static void print_help(void)
 	printk("  set <address>              Manually set receiver\n");
 	printk("  pair                       Enter pairing mode\n");
 	printk("  clear                      Clear pairing data\n");
+	printk("  tdma <on|off>              Enable/disable TDMA scheduling\n");
 	printk("\n");
 	printk("RF Channel:\n");
 	printk("  channel <0-100>            Set RF channel (saved to NVS)\n");
@@ -1143,6 +1146,16 @@ static void console_thread(void)
 				sys_clear();
 			} else {
 				printk("Invalid argument\n");
+			}
+		} else if (memcmp(line, "tdma", 4) == 0) {
+			if (arg && strcmp((char *)arg, "on") == 0) {
+				tdma_set_enabled(true);
+				printk("TDMA enabled\n");
+			} else if (arg && strcmp((char *)arg, "off") == 0) {
+				tdma_set_enabled(false);
+				printk("TDMA disabled\n");
+			} else {
+				printk("TDMA: %s\n", tdma_is_enabled() ? "enabled" : "disabled");
 			}
 		} else {
 			printk("Unknown command\n");

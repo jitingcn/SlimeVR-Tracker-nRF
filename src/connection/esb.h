@@ -58,7 +58,7 @@ void esb_clear_pair(void);
 
 void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give packets some names
 
-#define PING_INTERVAL_MS 1000
+#define PING_INTERVAL_MS 997
 // Ping/Pong types for ACK payload validation
 #define ESB_PING_TYPE 0xF0
 #define ESB_PONG_TYPE 0xF1
@@ -97,13 +97,10 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_MAG_CAL 0x18       // Trigger magnetometer calibration
 #define ESB_PONG_FLAG_MAG_ON 0x19        // Enable magnetometer
 #define ESB_PONG_FLAG_MAG_OFF 0x1A       // Disable magnetometer
-
-#define TDMA_NUM_TRACKERS 10
-#define TDMA_PACKETS_PER_SECOND 160 // Target TPS per tracker
-#define TDMA_PACKET_INTERVAL_US (1000000 / TDMA_PACKETS_PER_SECOND)
-#define TDMA_SLOT_DURATION_US (TDMA_PACKET_INTERVAL_US / TDMA_NUM_TRACKERS)
-#define TDMA_GUARD_TIME_US 200
-#define TDMA_PREWARM_ADVANCE_US 1000
+#define ESB_PONG_FLAG_TCAL_ON 0x1B       // Enable T-Cal (temperature calibration)
+#define ESB_PONG_FLAG_TCAL_OFF 0x1C      // Disable T-Cal (temperature calibration)
+#define ESB_PONG_FLAG_TDMA_ON 0x1D       // Enable TDMA scheduling
+#define ESB_PONG_FLAG_TDMA_OFF 0x1E      // Disable TDMA scheduling
 
 bool esb_ready(void);
 

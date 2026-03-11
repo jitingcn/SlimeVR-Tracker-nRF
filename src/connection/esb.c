@@ -39,6 +39,7 @@
 
 #include <stdlib.h>
 #include "esb.h"
+#include "tdma.h"
 #include "console.h"
 #include "system/clock_control.h"
 
@@ -757,6 +758,18 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_TCAL_BOOT_OFF:
 								cmd_name = "TCAL_BOOT_OFF";
 								break;
+							case ESB_PONG_FLAG_TCAL_ON:
+								cmd_name = "TCAL_ON";
+								break;
+							case ESB_PONG_FLAG_TCAL_OFF:
+								cmd_name = "TCAL_OFF";
+								break;
+							case ESB_PONG_FLAG_TDMA_ON:
+								cmd_name = "TDMA_ON";
+								break;
+							case ESB_PONG_FLAG_TDMA_OFF:
+								cmd_name = "TDMA_OFF";
+								break;
 							}
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
 								LOG_INF(
@@ -827,7 +840,7 @@ int esb_initialize(bool tx)
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		config.retransmit_count = 2;
-		// config.tx_mode = ESB_TXMODE_AUTO;
+		config.tx_mode = ESB_TXMODE_MANUAL_START;
 		// config.payload_length = 32;
 		config.selective_auto_ack = true;
 		config.use_fast_ramp_up = true;
@@ -1137,8 +1150,12 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	last_tx.timestamp = k_uptime_get();
 
 	// Try to queue the packet
-	esb_flush_tx();
 	int queue_status = esb_write_payload(&tx_payload);
+	// only flush if tx full
+	if (queue_status == -ENOMEM) {
+		esb_flush_tx();
+		queue_status = esb_write_payload(&tx_payload);
+	}
 
 	// Record ping history for RTT calculation
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
@@ -1246,6 +1263,17 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		esb_write_queued++;
 	}
 
+	/*
+	 * TDMA slot gating for noack sensor-data packets.
+	 *
+	 * PING / ACK packets bypass TDMA (no_ack == false) so time-sync and
+	 * connection-health probes are never delayed.
+	 */
+#if CONFIG_CONNECTION_TDMA
+	if (no_ack) {
+		tdma_wait_for_slot();
+	}
+#endif
 	esb_start_tx();
 	send_data = true;
 }
@@ -1405,6 +1433,24 @@ static void esb_thread(void)
 				case ESB_PONG_FLAG_MAG_OFF:
 					LOG_INF("Executing remote command: MAG_OFF");
 					sensor_set_mag_enabled(false);
+					break;
+
+				case ESB_PONG_FLAG_TCAL_ON:
+					LOG_INF("TODO: Executing remote command: TCAL_ON");
+					break;
+
+				case ESB_PONG_FLAG_TCAL_OFF:
+					LOG_INF("TODO: Executing remote command: TCAL_OFF");
+					break;
+
+				case ESB_PONG_FLAG_TDMA_ON:
+					LOG_INF("Executing remote command: TDMA_ON");
+					tdma_set_enabled(true);
+					break;
+
+				case ESB_PONG_FLAG_TDMA_OFF:
+					LOG_INF("Executing remote command: TDMA_OFF");
+					tdma_set_enabled(false);
 					break;
 
 				case ESB_PONG_FLAG_REBOOT:
