@@ -213,6 +213,12 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0);
 
 	int err = 0;
+
+	// Perform soft reset to ensure known state
+	LOG_INF("Performing soft reset...");
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
+	k_msleep(2); // Wait for reset to complete (datasheet: 1ms)
+
 	// Read WHO_AM_I to verify communication
 	uint8_t who_am_i = 0;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x72, &who_am_i); // WHO_AM_I register
@@ -226,6 +232,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 //		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_RTC_CONFIG, 0x23); // enable external CLKIN (0x20, default register value is 0x03)
 	}
 	uint8_t ireg_buf[3];
+	ireg_buf[0] = ICM45686_IPREG_BAR; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_58;
 	ireg_buf[2] = 0xD9 & ~0x48; // disable internal pull resistors for AP pins (pin 13, 12)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
