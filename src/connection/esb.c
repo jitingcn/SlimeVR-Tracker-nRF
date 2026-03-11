@@ -786,6 +786,9 @@ void event_handler(struct esb_evt const *event)
 					}
 				}
 			} break;
+			case ESB_SENSOR_DATA_LEN: {
+				// received other tracker's sensor data, likely due to shared pipe, just ignore
+			} break;
 			default:
 				LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
 			} // end of rx_payload length switch

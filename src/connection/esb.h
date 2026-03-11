@@ -66,6 +66,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 // Ping/Pong packet sizes
 #define ESB_PING_LEN 13 // with CRC-8
 #define ESB_PONG_LEN 13 // with CRC-8
+#define ESB_SENSOR_DATA_LEN 17
 
 // Remote command flags for PONG data[7] (shared with receiver)
 #define ESB_PONG_FLAG_NORMAL 0x00
