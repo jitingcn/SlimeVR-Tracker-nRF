@@ -85,16 +85,19 @@ void clock_switch(nrf_clock_lfclk_t source)
 	nrf_clock_lf_src_set(NRF_CLOCK, source);
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
 
+	if (source == NRF_CLOCK_LFCLK_RC) {
+		// RC starts very quickly, just wait for the event without sleeping
+		while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {}
+	} else {
 	uint32_t waited_us = 0;
-	while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {
-		k_usleep(LFCLK_WAIT_STEP_US);
-		waited_us += LFCLK_WAIT_STEP_US;
+		while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {
+			k_usleep(LFCLK_WAIT_STEP_US);
+			waited_us += LFCLK_WAIT_STEP_US;
+		}
+		if (waited_us > 1000) {
+			LOG_INF("clock_switch: LFCLK start waited %u us", waited_us);
+		}
 	}
-	if (waited_us > 1000) {
-		LOG_INF("clock_switch: LFCLK start waited %u us", waited_us);
-	}
-
-	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
 
 	/* Verify the actual clock source matches what we requested */
 	nrf_clock_lfclk_t actual_source = nrf_clock_lf_actv_src_get(NRF_CLOCK);
