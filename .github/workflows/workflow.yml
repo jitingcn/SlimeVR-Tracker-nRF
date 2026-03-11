@@ -119,6 +119,7 @@ jobs:
                   {boardname: "foxsnackeco_uf2/nrf52840", filename: "FoxApplication_FoxSnackECO_Tracker"},
                   {boardname: "foxsmolv1_spi_uf2/nrf52840", filename: "FoxApplication_FoxSmol_V1_SPI_Tracker"},
                   {boardname: "mochi_uf2/nrf52833", filename: "Mochi_Tracker"},
+                  {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker"},
                 ]
     runs-on: ubuntu-latest
     steps:
