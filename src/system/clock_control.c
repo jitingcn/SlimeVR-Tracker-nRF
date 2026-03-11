@@ -23,88 +23,104 @@
 #include <zephyr/irq.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <hal/nrf_clock.h>
+#include <zephyr/logging/log.h>
 
-#define LFCLK_WAIT_STEP_US 100
-#define LFCLK_WAIT_TIMEOUT_US 500000
+// clock_control already has a log module defined in nrf_clock_control, so we define our own for this file
+LOG_MODULE_REGISTER(clock_switch, LOG_LEVEL_INF);
 
-/*
- * Track whether we have actually switched to an external LFCLK source.
- * This avoids doing redundant RC->RC switching in shutdown paths.
- */
-static bool lfclk_using_xtal = false;
+#define LFCLK_WAIT_STEP_US 300
+
+/* Helper to normalize XTAL variants for comparison */
+static inline nrf_clock_lfclk_t normalize_source(nrf_clock_lfclk_t source)
+{
+	/* XTAL_FULL_SWING and XTAL_LOW_SWING report as XTAL in actual source */
+	if (
+		source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING
+#ifdef NRF_CLOCK_LFCLK_XTAL_LOW_SWING
+		|| source == NRF_CLOCK_LFCLK_XTAL_LOW_SWING
+#endif
+	) {
+		return NRF_CLOCK_LFCLK_XTAL;
+	}
+	return source;
+}
 
 // Safely switch LF clock source
 void clock_switch(nrf_clock_lfclk_t source)
 {
+	LOG_INF("clock_switch: requesting source=%d", source);
+
 #if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
 	/*
 	 * Avoid switching to XTAL when the board does not have an external LFXO.
 	 * Note: switching to RC is always safe.
 	 */
-	if (!IS_ENABLED(CONFIG_CLOCK_USE_LFXO) &&
-	    (source == NRF_CLOCK_LFCLK_XTAL || source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING)) {
+	if (!IS_ENABLED(CONFIG_CLOCK_USE_LFXO)
+		&& (source == NRF_CLOCK_LFCLK_XTAL || source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING)) {
+		LOG_INF("clock_switch: skipping XTAL, CONFIG_CLOCK_USE_LFXO disabled");
 		return;
 	}
 #endif
 
-	/*
-	 * Keep the register update sequence atomic with respect to interrupts,
-	 * but do not keep interrupts disabled while waiting for the clock to stop/start.
-	 */
-	unsigned int key = irq_lock();
-	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
-	irq_unlock(key);
+	/* Check if already running with the requested source */
+	nrf_clock_lfclk_t current_source = nrf_clock_lf_actv_src_get(NRF_CLOCK);
+	nrf_clock_lfclk_t normalized_requested = normalize_source(source);
 
-	uint32_t waited_us = 0;
-	while (nrf_clock_lf_is_running(NRF_CLOCK) && (waited_us < LFCLK_WAIT_TIMEOUT_US)) {
-		k_busy_wait(LFCLK_WAIT_STEP_US);
-		waited_us += LFCLK_WAIT_STEP_US;
+	if (current_source == normalized_requested) {
+		LOG_INF("clock_switch: already running with source=%d", current_source);
+		return;
 	}
+
+	LOG_INF("clock_switch: %d -> %d", current_source, normalized_requested);
+
+	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
+
+	while (nrf_clock_lf_is_running(NRF_CLOCK) && nrf_clock_lf_actv_src_get(NRF_CLOCK) != NRF_CLOCK_LFCLK_RC) {}
 
 	/*
 	 * Start and wait for LFCLKSTARTED event, as used in sdk-nrf board init hooks.
 	 * This avoids returning early before the LF clock has actually started.
 	 */
-	key = irq_lock();
 	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
 	nrf_clock_lf_src_set(NRF_CLOCK, source);
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
-	irq_unlock(key);
 
-	waited_us = 0;
-	while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED) &&
-	       (waited_us < LFCLK_WAIT_TIMEOUT_US)) {
-		k_busy_wait(LFCLK_WAIT_STEP_US);
+	uint32_t waited_us = 0;
+	while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {
+		k_usleep(LFCLK_WAIT_STEP_US);
 		waited_us += LFCLK_WAIT_STEP_US;
 	}
-
-	const bool started = nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
-	if (started) {
-		lfclk_using_xtal = (source == NRF_CLOCK_LFCLK_XTAL) ||
-				  (source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING);
+	if (waited_us > 1000) {
+		LOG_INF("clock_switch: LFCLK start waited %u us", waited_us);
 	}
 
-	key = irq_lock();
 	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
-	irq_unlock(key);
+
+	/* Verify the actual clock source matches what we requested */
+	nrf_clock_lfclk_t actual_source = nrf_clock_lf_actv_src_get(NRF_CLOCK);
+	if (actual_source != normalized_requested) {
+		LOG_ERR("clock_switch: source mismatch! requested=%d, actual=%d", normalized_requested, actual_source);
+	} else {
+		LOG_INF("clock_switch: switched to source=%d successfully", actual_source);
+	}
 }
 
 // Switch to RC clock before shut down to avoid any problems with the bootloader
-void clock_pre_shutdown()
+void clock_pre_shutdown(void)
 {
-	if (!lfclk_using_xtal) {
-		return;
-	}
+	nrf_clock_lfclk_t current_source = nrf_clock_lf_actv_src_get(NRF_CLOCK);
 
-	clock_switch(NRF_CLOCK_LFCLK_RC);
+	if (current_source != NRF_CLOCK_LFCLK_RC) {
+		clock_switch(NRF_CLOCK_LFCLK_RC);
+	}
 }
 
 // Switch to external oscillator for LF clock for good TDMA precision
-void clock_init_external()
+void clock_init_external(void)
 {
 #if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
 	if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO)) {
-		clock_switch(NRF_CLOCK_LFCLK_XTAL_FULL_SWING);
+		clock_switch(NRF_CLOCK_LFCLK_XTAL);
 	}
 #endif
 }
