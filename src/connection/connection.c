@@ -29,16 +29,11 @@
 #include "system/watchdog.h"
 
 #include <zephyr/kernel.h>
-#include <zephyr/sys/atomic.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 
-#define PACKET_BUFFER_SIZE 5
-static uint8_t packet_buffer[PACKET_BUFFER_SIZE][16] = {0};
-static atomic_t write_idx = ATOMIC_INIT(0);
-static atomic_t read_idx = ATOMIC_INIT(0);
 static uint8_t packet_sequence = 0;
 static int64_t last_ping_time = 0;
 static uint32_t ping_interval_ms = PING_INTERVAL_MS;
@@ -57,7 +52,7 @@ uint32_t get_ping_interval_ms(void)
 }
 
 static void connection_thread(void);
-K_THREAD_DEFINE(connection_thread_id, 512, connection_thread, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(connection_thread_id, 768, connection_thread, NULL, NULL, NULL, 8, 0, 0);
 
 void connection_clocks_request_start(void)
 {
@@ -95,20 +90,103 @@ uint8_t connection_get_packet_sequence(void)
 	return packet_sequence;
 }
 
-static void write_packet_data(const uint8_t *data)
+/*
+ * Sub-packet data sizes (payload only, excluding type byte).
+ * These define how much data each sub-packet type contributes
+ * when embedded inside a composite packet.
+ */
+#define SUB_DATA_LEN_INFO   13  /* type 0: batt..patch (no rssi) */
+#define SUB_DATA_LEN_QUAT   14  /* type 1: q0-q3 + a0-a2 */
+#define SUB_DATA_LEN_COMPACT 13 /* type 2: batt+temp+q_buf+a (no rssi) */
+#define SUB_DATA_LEN_STATUS  2  /* type 3: svr_stat + status */
+#define SUB_DATA_LEN_MAG    14  /* type 4: q0-q3 + m0-m2 */
+
+/* Fill sub-packet payload (without type/id prefix) into buf, return bytes written */
+static int fill_sub_info(uint8_t *buf)
 {
-	atomic_val_t current_write = atomic_get(&write_idx);
-	atomic_val_t current_read = atomic_get(&read_idx);
+	buf[0] = batt;
+	buf[1] = batt_v;
+	buf[2] = sensor_temp;
+	buf[3] = FW_BOARD;
+	buf[4] = FW_MCU;
+	buf[5] = 0; /* resv */
+	buf[6] = imu_id;
+	buf[7] = mag_id;
+	uint16_t *fw = (uint16_t *)&buf[8];
+	fw[0] = ((BUILD_YEAR - 2020) & 127) << 9 | (BUILD_MONTH & 15) << 5 | (BUILD_DAY & 31);
+	buf[10] = FW_VERSION_MAJOR & 255;
+	buf[11] = FW_VERSION_MINOR & 255;
+	buf[12] = FW_VERSION_PATCH & 255;
+	return SUB_DATA_LEN_INFO;
+}
 
-	atomic_val_t next_write = (current_write + 1) % PACKET_BUFFER_SIZE;
-	if (next_write == current_read) {
-		LOG_WRN("Packet buffer full, dropping packet");
-		return;
+static int fill_sub_quat_accel(uint8_t *buf)
+{
+	uint16_t *b = (uint16_t *)buf;
+	b[0] = TO_FIXED_15(sensor_q[1]);
+	b[1] = TO_FIXED_15(sensor_q[2]);
+	b[2] = TO_FIXED_15(sensor_q[3]);
+	b[3] = TO_FIXED_15(sensor_q[0]);
+	b[4] = TO_FIXED_7(sensor_a[0]);
+	b[5] = TO_FIXED_7(sensor_a[1]);
+	b[6] = TO_FIXED_7(sensor_a[2]);
+	return SUB_DATA_LEN_QUAT;
+}
+
+static int fill_sub_compact_quat(uint8_t *buf)
+{
+	buf[0] = batt;
+	buf[1] = batt_v;
+	buf[2] = sensor_temp;
+	float v[3] = {0};
+	q_fem(sensor_q, v);
+	for (int i = 0; i < 3; i++)
+		v[i] = (v[i] + 1) / 2;
+	uint16_t v_buf[3] = {
+		SATURATE_UINT10((1 << 10) * v[0]),
+		SATURATE_UINT11((1 << 11) * v[1]),
+		SATURATE_UINT11((1 << 11) * v[2])
+	};
+	uint32_t *q_buf = (uint32_t *)&buf[3];
+	*q_buf = v_buf[0] | (v_buf[1] << 10) | (v_buf[2] << 21);
+	uint16_t *ab = (uint16_t *)&buf[7];
+	ab[0] = TO_FIXED_7(sensor_a[0]);
+	ab[1] = TO_FIXED_7(sensor_a[1]);
+	ab[2] = TO_FIXED_7(sensor_a[2]);
+	return SUB_DATA_LEN_COMPACT;
+}
+
+static int fill_sub_status(uint8_t *buf)
+{
+	buf[0] = tracker_svr_status;
+	buf[1] = tracker_status;
+	return SUB_DATA_LEN_STATUS;
+}
+
+static int fill_sub_mag(uint8_t *buf)
+{
+	uint16_t *b = (uint16_t *)buf;
+	b[0] = TO_FIXED_15(sensor_q[1]);
+	b[1] = TO_FIXED_15(sensor_q[2]);
+	b[2] = TO_FIXED_15(sensor_q[3]);
+	b[3] = TO_FIXED_15(sensor_q[0]);
+	b[4] = TO_FIXED_10(sensor_m[0]);
+	b[5] = TO_FIXED_10(sensor_m[1]);
+	b[6] = TO_FIXED_10(sensor_m[2]);
+	return SUB_DATA_LEN_MAG;
+}
+
+/* Return sub-packet data size for a given type */
+static int sub_data_len(uint8_t type)
+{
+	switch (type) {
+	case 0: return SUB_DATA_LEN_INFO;
+	case 1: return SUB_DATA_LEN_QUAT;
+	case 2: return SUB_DATA_LEN_COMPACT;
+	case 3: return SUB_DATA_LEN_STATUS;
+	case 4: return SUB_DATA_LEN_MAG;
+	default: return 0;
 	}
-
-	memcpy(packet_buffer[current_write], data, 16);
-
-	atomic_set(&write_idx, next_write);
 }
 
 void connection_update_sensor_ids(int imu, int mag)
@@ -202,124 +280,71 @@ void connection_update_status(int status)
 void connection_write_packet_0() // device info
 {
 	uint8_t data[16] = {0};
-	data[0] = 0; // packet 0
+	data[0] = 0;
 	data[1] = tracker_id;
-	data[2] = batt;
-	data[3] = batt_v;
-	data[4] = sensor_temp; // temp
-	data[5] = FW_BOARD;    // brd_id
-	data[6] = FW_MCU;      // mcu_id
-	data[7] = 0;           // resv
-	data[8] = imu_id;      // imu_id
-	data[9] = mag_id;      // mag_id
-	uint16_t *buf = (uint16_t *)&data[10];
-	buf[0] = ((BUILD_YEAR - 2020) & 127) << 9 | (BUILD_MONTH & 15) << 5 | (BUILD_DAY & 31); // fw_date
-	data[12] = FW_VERSION_MAJOR & 255;                                                      // fw_major
-	data[13] = FW_VERSION_MINOR & 255;                                                      // fw_minor
-	data[14] = FW_VERSION_PATCH & 255;                                                      // fw_patch
+	fill_sub_info(&data[2]);
 	data[15] = 0; // rssi (supplied by receiver)
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence++;
+	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
 }
 
 void connection_write_packet_1() // full precision quat and accel
 {
 	uint8_t data[16] = {0};
-	data[0] = 1; // packet 1
+	data[0] = 1;
 	data[1] = tracker_id;
-	uint16_t *buf = (uint16_t *)&data[2];
-	buf[0] = TO_FIXED_15(sensor_q[1]); // ±1.0
-	buf[1] = TO_FIXED_15(sensor_q[2]);
-	buf[2] = TO_FIXED_15(sensor_q[3]);
-	buf[3] = TO_FIXED_15(sensor_q[0]);
-	buf[4] = TO_FIXED_7(sensor_a[0]); // range is ±256m/s² or ±26.1g
-	buf[5] = TO_FIXED_7(sensor_a[1]);
-	buf[6] = TO_FIXED_7(sensor_a[2]);
+	fill_sub_quat_accel(&data[2]);
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence++;
+	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
 }
 
 void connection_write_packet_2() // reduced precision quat and accel with battery,
 								 // temp, and rssi
 {
 	uint8_t data[16] = {0};
-	data[0] = 2; // packet 2
+	data[0] = 2;
 	data[1] = tracker_id;
-	data[2] = batt;
-	data[3] = batt_v;
-	data[4] = sensor_temp; // temp
-	float v[3] = {0};
-	q_fem(sensor_q, v); // exponential map
-	for (int i = 0; i < 3; i++) {
-		v[i] = (v[i] + 1) / 2; // map -1-1 to 0-1
-	}
-	uint16_t v_buf[3]
-		= {SATURATE_UINT10((1 << 10) * v[0]),
-		   SATURATE_UINT11((1 << 11) * v[1]),
-		   SATURATE_UINT11((1 << 11) * v[2])}; // fill 32 bits
-	uint32_t *q_buf = (uint32_t *)&data[5];
-	*q_buf = v_buf[0] | (v_buf[1] << 10) | (v_buf[2] << 21);
-
-	//	v[0] = FIXED_10_TO_DOUBLE(*q_buf & 1023);
-	//	v[1] = FIXED_11_TO_DOUBLE((*q_buf >> 10) & 2047);
-	//	v[2] = FIXED_11_TO_DOUBLE((*q_buf >> 21) & 2047);
-	//	for (int i = 0; i < 3; i++)
-	//	v[i] = v[i] * 2 - 1;
-	//	float q[4] = {0};
-	//	q_iem(v, q); // inverse exponential map
-
-	uint16_t *buf = (uint16_t *)&data[9];
-	buf[0] = TO_FIXED_7(sensor_a[0]);
-	buf[1] = TO_FIXED_7(sensor_a[1]);
-	buf[2] = TO_FIXED_7(sensor_a[2]);
+	fill_sub_compact_quat(&data[2]);
 	data[15] = 0; // rssi (supplied by receiver)
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence++;
+	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
 }
 
 void connection_write_packet_3() // status
 {
 	uint8_t data[16] = {0};
-	data[0] = 3; // packet 3
+	data[0] = 3;
 	data[1] = tracker_id;
-	data[2] = tracker_svr_status;
-	data[3] = tracker_status;
+	fill_sub_status(&data[2]);
 	data[15] = 0; // rssi (supplied by receiver)
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence++;
+	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
 }
 
 void connection_write_packet_4() // full precision quat and magnetometer
 {
 	uint8_t data[16] = {0};
-	data[0] = 4; // packet 4
+	data[0] = 4;
 	data[1] = tracker_id;
-	uint16_t *buf = (uint16_t *)&data[2];
-	buf[0] = TO_FIXED_15(sensor_q[1]);
-	buf[1] = TO_FIXED_15(sensor_q[2]);
-	buf[2] = TO_FIXED_15(sensor_q[3]);
-	buf[3] = TO_FIXED_15(sensor_q[0]);
-	buf[4] = TO_FIXED_10(sensor_m[0]); // range is ±32G
-	buf[5] = TO_FIXED_10(sensor_m[1]);
-	buf[6] = TO_FIXED_10(sensor_m[2]);
+	fill_sub_mag(&data[2]);
 
-	write_packet_data(data);
-	hid_write_packet_n(data); // TODO:
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence++;
+	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
 }
-
-// TODO: get radio channel from receiver
-// TODO: new packet format
-
-// TODO: use timing from IMU to get actual delay in tracking
-// TODO: aware of sensor state? error status, timing/phase, maybe "send_precise_quat"
-
-// TODO: queuing, status is lowest priority, info low priority, existing data highest priority (from sensor loop)
-
-// TODO: queue packets directly for HID, or maintain separate loop while connected by USB
 
 static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
@@ -327,26 +352,74 @@ static int64_t last_status_time = 0;
 static int64_t last_sensor_quat_time = 0;
 #define SENSOR_QUAT_INTERVAL_MS 6
 
+/* Lookahead window: if a low-freq packet is within this many ms of being due,
+ * piggyback it onto the current transmission as a composite sub-packet. */
+#define COMPOSITE_LOOKAHEAD_MS 10
+
+/* Max sub-packet payload in a composite: ESB_MAX_PAYLOAD_LEN - 3 (header) - 1 (sequence) */
+#define COMPOSITE_MAX_SUB_DATA (ESB_MAX_PAYLOAD_LEN - 4)
+
+/*
+ * Build and send a composite packet (type 0x05) containing multiple sub-packets.
+ * types[] / lens[] describe the sub-packets to include; n is the count.
+ * Each sub-packet is: [type_byte][data...].
+ * Format: [0x05][tracker_id][sub_count][sub0_type][sub0_data...][sub1_type][sub1_data...]...[sequence]
+ */
+static void send_composite(const uint8_t *types, int n)
+{
+	uint8_t buf[ESB_MAX_PAYLOAD_LEN];
+	int pos = 0;
+
+	buf[pos++] = ESB_COMPOSITE_TYPE;
+	buf[pos++] = tracker_id;
+	buf[pos++] = (uint8_t)n;
+
+	for (int i = 0; i < n; i++) {
+		uint8_t t = types[i];
+		buf[pos++] = t;
+		switch (t) {
+		case 0: pos += fill_sub_info(&buf[pos]); break;
+		case 1: pos += fill_sub_quat_accel(&buf[pos]); break;
+		case 2: pos += fill_sub_compact_quat(&buf[pos]); break;
+		case 3: pos += fill_sub_status(&buf[pos]); break;
+		case 4: pos += fill_sub_mag(&buf[pos]); break;
+		default: break;
+		}
+	}
+
+	buf[pos++] = packet_sequence++;
+	esb_write(buf, no_ack, pos);
+}
+
+/*
+ * Try to append a sub-packet type to the pending composite list.
+ * Returns true if it fits within COMPOSITE_MAX_SUB_DATA.
+ */
+static bool composite_try_add(uint8_t *types, int *n, int *used, uint8_t type)
+{
+	int need = 1 + sub_data_len(type); /* 1 for type byte + data */
+	if (*used + need > COMPOSITE_MAX_SUB_DATA)
+		return false;
+	types[*n] = type;
+	(*n)++;
+	*used += need;
+	return true;
+}
+
 void connection_thread(void)
 {
-	uint8_t esb_packet[17];
-
 	/* Register connection thread with watchdog */
 	watchdog_register_thread(WDT_CHANNEL_CONNECTION, 0);
 
-	// Adaptive PING interval based on connection state
-	// TODO: checking for connection_update events from sensor_loop, here we will time and send them out
 	while (1) {
 		int64_t now = k_uptime_get();
 
 		watchdog_feed(WDT_CHANNEL_CONNECTION);
 
-		// Adjust PING interval based on connection health
+		/* Adaptive PING interval based on connection health */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-			// During connection errors, slow down PING to every 2.5 seconds
 			ping_interval_ms = 2450;
 		} else {
-			// Normal operation - default interval
 			ping_interval_ms = PING_INTERVAL_MS;
 		}
 
@@ -355,80 +428,142 @@ void connection_thread(void)
 			continue;
 		}
 
-		// PING has highest priority — always sent on schedule regardless of TDMA
-		// PINGs are low-volume (1/s) and essential for time sync + connection health
-		bool should_send_ping = (now - last_ping_time >= ping_interval_ms);
-
-		if (should_send_ping) {
+		/* PING has highest priority */
+		if (now - last_ping_time >= ping_interval_ms) {
 			uint8_t ping[ESB_PING_LEN] = {0};
 			ping[0] = ESB_PING_TYPE;
 			ping[1] = connection_get_id();
-			ping[2] = 0;               // ping counter, set in esb_write
-			memset(&ping[3], 0x00, 4); // reserved, should set to server time after sync
+			ping[2] = 0;
+			memset(&ping[3], 0x00, 4);
 			ping[7] = esb_get_ping_ack_flag();
-			memset(&ping[8], 0x00, 4);  // reserved
-			ping[ESB_PING_LEN - 1] = 0; // crc bit, set in esb_write
+			memset(&ping[8], 0x00, 4);
+			ping[ESB_PING_LEN - 1] = 0;
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
 			k_usleep(900);
 			continue;
 		}
 
-		// skip sensor data if connection error
+		/* Skip sensor data during connection error */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 			k_msleep(100);
 			continue;
 		}
 
-		atomic_val_t current_read = atomic_get(&read_idx);
-		atomic_val_t current_write = atomic_get(&write_idx);
+		/* Determine which data types are due or nearly due */
+		bool quat_ready = quat_update_time &&
+				  (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS);
+		bool mag_due = mag_update_time && (now - last_mag_time > 100);
+		bool info_due = (now - last_info_time > 100);
+		bool status_due = (now - last_status_time > 1000);
 
-		if (current_read != current_write) {
-			memcpy(esb_packet, packet_buffer[current_read], 16);
-			esb_packet[16] = packet_sequence++;
+		/* Lookahead: consider nearly-due low-freq packets for piggybacking */
+		bool info_soon = (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
+		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
+		bool mag_soon = mag_update_time && (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 
-			atomic_set(&read_idx, (current_read + 1) % PACKET_BUFFER_SIZE);
+		if (quat_ready) {
+			/* Count how many extras we can piggyback */
+			int extras = (mag_due || mag_soon ? 1 : 0)
+				   + (info_soon && !send_precise_quat ? 0 : (info_due || info_soon ? 1 : 0))
+				   + (status_due || status_soon ? 1 : 0);
 
-			esb_write(esb_packet, no_ack, sizeof(esb_packet)); // normal data: no ACK
-			k_usleep(280);
+			if (extras > 0) {
+				/* Build composite packet */
+				uint8_t types[5];
+				int n = 0, used = 0;
+
+				/* Primary: quat sub-packet */
+				if (mag_due || mag_soon) {
+					/* mag includes full quat, use type 4 instead of separate quat+mag */
+					composite_try_add(types, &n, &used, 4);
+					mag_update_time = 0;
+					last_mag_time = now;
+				} else if (!send_precise_quat && (info_due || info_soon)) {
+					/* compact quat (type 2) already contains batt/temp like info */
+					composite_try_add(types, &n, &used, 2);
+					last_info_time = now;
+				} else {
+					composite_try_add(types, &n, &used, 1);
+				}
+
+				/* Piggyback low-freq sub-packets if they fit */
+				if ((status_due || status_soon) && composite_try_add(types, &n, &used, 3))
+					last_status_time = now;
+				if ((info_due || info_soon) && now - last_info_time != now)
+					; /* info already handled via compact quat or not due */
+				else if ((info_due || info_soon) && composite_try_add(types, &n, &used, 0))
+					last_info_time = now;
+
+				if (n > 1) {
+					send_composite(types, n);
+				} else {
+					/* Only one sub-packet — send as standard packet instead */
+					uint8_t t = types[0];
+					if (t == 1)
+						connection_write_packet_1();
+					else if (t == 2)
+						connection_write_packet_2();
+					else if (t == 4)
+						connection_write_packet_4();
+					else
+						connection_write_packet_1();
+				}
+			} else {
+				/* No extras to piggyback — send standard quat packet */
+				if (!send_precise_quat && info_due) {
+					last_info_time = now;
+					connection_write_packet_2();
+				} else {
+					connection_write_packet_1();
+				}
+			}
+			quat_update_time = 0;
+			last_quat_time = now;
+			last_sensor_quat_time = now;
 			continue;
 		}
-		// mag is higher priority (skip accel, quat is full precision)
-		else if (mag_update_time && now - last_mag_time > 200) {
-			mag_update_time = 0; // data has been sent
+
+		/* No quat ready — handle standalone low-freq packets */
+		if (mag_due) {
+			/* Mag with optional status piggyback */
+			if (status_due || status_soon) {
+				uint8_t types[2];
+				int n = 0, used = 0;
+				composite_try_add(types, &n, &used, 4);
+				if (composite_try_add(types, &n, &used, 3))
+					last_status_time = now;
+				send_composite(types, n);
+			} else {
+				connection_write_packet_4();
+			}
+			mag_update_time = 0;
 			last_mag_time = now;
-			connection_write_packet_4();
 			continue;
 		}
-		// if time for info and precise quat not needed
-		else if (quat_update_time && !send_precise_quat && now - last_info_time > 100) {
-			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
-				quat_update_time = 0;
-				last_quat_time = now;
-				last_sensor_quat_time = now;
-				last_info_time = now;
-				connection_write_packet_2();
-				continue;
+
+		if (info_due) {
+			/* Info with optional status piggyback */
+			if (status_due || status_soon) {
+				uint8_t types[2];
+				int n = 0, used = 0;
+				composite_try_add(types, &n, &used, 0);
+				if (composite_try_add(types, &n, &used, 3))
+					last_status_time = now;
+				send_composite(types, n);
+			} else {
+				connection_write_packet_0();
 			}
-		}
-		// send quat otherwise
-		else if (quat_update_time) {
-			if (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS) {
-				quat_update_time = 0;
-				last_quat_time = now;
-				last_sensor_quat_time = now;
-				connection_write_packet_1();
-				continue;
-			}
-		} else if (now - last_info_time > 100) {
 			last_info_time = now;
-			connection_write_packet_0();
 			continue;
-		} else if (now - last_status_time > 1000) {
+		}
+
+		if (status_due) {
 			last_status_time = now;
 			connection_write_packet_3();
 			continue;
 		}
+
 		k_usleep(600);
 	}
 }

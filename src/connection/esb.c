@@ -353,13 +353,13 @@ void event_handler(struct esb_evt const *event)
 			event->tx_attempts
 		);
 
-		// Log TX statistics every 20 failures for debugging
+		// Log TX statistics every 100 failures for debugging
 		uint32_t now = k_uptime_get_32();
-		if (tx_failed_count % 20 == 0 || (now - last_log_time > get_ping_interval_ms())) {
+		if (tx_failed_count % 100 == 0 || (now - last_log_time > 5000)) {
 			last_log_time = now;
 			uint32_t total = tx_success_count + tx_failed_count;
 			uint32_t fail_rate = total > 0 ? (tx_failed_count * 100 / total) : 0;
-			LOG_WRN("TX Stats: success=%u failed=%u rate=%u%%", tx_success_count, tx_failed_count, fail_rate);
+			LOG_INF("TX Stats: success=%u failed=%u rate=%u%%", tx_success_count, tx_failed_count, fail_rate);
 		}
 
 		// Only count ping failures for connection timeout
@@ -839,9 +839,9 @@ int esb_initialize(bool tx)
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = 2;
+		config.retransmit_count = 1;
 		config.tx_mode = ESB_TXMODE_MANUAL_START;
-		// config.payload_length = 32;
+		// config.payload_length = 252; // config by CONFIG_ESB_MAX_PAYLOAD_LENGTH
 		config.selective_auto_ack = true;
 		config.use_fast_ramp_up = true;
 	} else {
@@ -854,7 +854,7 @@ int esb_initialize(bool tx)
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		// config.retransmit_count = 3;
 		// config.tx_mode = ESB_TXMODE_AUTO;
-		// config.payload_length = 32;
+		// config.payload_length = 252; // config by CONFIG_ESB_MAX_PAYLOAD_LENGTH
 		config.selective_auto_ack = true;
 		config.use_fast_ramp_up = true;
 	}
