@@ -270,7 +270,16 @@ BUILD_ASSERT(false, "No Clock Control driver");
 #endif
 
 static struct k_thread clocks_thread_id;
-static K_THREAD_STACK_DEFINE(clocks_thread_id_stack, 128);
+static K_THREAD_STACK_DEFINE(clocks_thread_id_stack, 512);
+
+// Wrapper function with correct signature for k_thread_entry_t
+static void clocks_start_wrapper(void *arg1, void *arg2, void *arg3)
+{
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+	(void)clocks_start();
+}
 
 void clocks_request_start(uint32_t delay_us)
 {
@@ -278,7 +287,7 @@ void clocks_request_start(uint32_t delay_us)
 		&clocks_thread_id,
 		clocks_thread_id_stack,
 		K_THREAD_STACK_SIZEOF(clocks_thread_id_stack),
-		(k_thread_entry_t)clocks_start,
+		clocks_start_wrapper,
 		NULL,
 		NULL,
 		NULL,
@@ -289,15 +298,24 @@ void clocks_request_start(uint32_t delay_us)
 }
 
 static struct k_thread clocks_stop_thread_id;
-static K_THREAD_STACK_DEFINE(clocks_stop_thread_id_stack, 128);
+static K_THREAD_STACK_DEFINE(clocks_stop_thread_id_stack, 512);
+
+// Wrapper function with correct signature for k_thread_entry_t
+static void clocks_stop_wrapper(void *arg1, void *arg2, void *arg3)
+{
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+	clocks_stop();
+}
 
 void clocks_request_stop(uint32_t delay_us)
 {
 	k_thread_create(
 		&clocks_stop_thread_id,
 		clocks_stop_thread_id_stack,
-		K_THREAD_STACK_SIZEOF(clocks_stop_thread_id),
-		(k_thread_entry_t)clocks_stop,
+		K_THREAD_STACK_SIZEOF(clocks_stop_thread_id_stack),
+		clocks_stop_wrapper,
 		NULL,
 		NULL,
 		NULL,
@@ -1104,7 +1122,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	}
 	if (!clock_status) {
 		clocks_start();
-		k_usleep(100);
+		k_usleep(50);
 	}
 	if (data_length < 1) {
 		LOG_ERR("Invalid data length %u", data_length);
@@ -1344,8 +1362,8 @@ static void esb_thread(void)
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
 
-	clocks_start();
-	clock_init_external();
+	clocks_request_start(0);
+	clock_init_external_async();
 
 	while (1) {
 #if CONFIG_CONNECTION_OVER_HID

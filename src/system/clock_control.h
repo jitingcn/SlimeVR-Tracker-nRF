@@ -19,6 +19,19 @@
 */
 #pragma once
 
-void clock_pre_shutdown();
+void clock_pre_shutdown(void);
 
-void clock_init_external();
+void clock_init_external(void);
+
+/**
+ * @brief Asynchronously switch to external LF clock (LFXO)
+ *
+ * This function spawns a new thread to perform the clock switch,
+ * which can take hundreds of milliseconds for LFXO to stabilize.
+ * Use this when you cannot afford to block the calling thread.
+ *
+ * Note: The spawned thread exits after the switch completes.
+ * Check logs for "clock_switch: switched to source=X successfully"
+ * to confirm completion.
+ */
+void clock_init_external_async(void);

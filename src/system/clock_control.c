@@ -127,3 +127,31 @@ void clock_init_external(void)
 	}
 #endif
 }
+
+// Async version of clock_init_external
+static struct k_thread clock_init_thread_id;
+static K_THREAD_STACK_DEFINE(clock_init_thread_stack, 512);
+
+static void clock_init_external_async_thread(void *arg1, void *arg2, void *arg3)
+{
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+	clock_init_external();
+}
+
+void clock_init_external_async(void)
+{
+	k_thread_create(
+		&clock_init_thread_id,
+		clock_init_thread_stack,
+		K_THREAD_STACK_SIZEOF(clock_init_thread_stack),
+		clock_init_external_async_thread,
+		NULL,
+		NULL,
+		NULL,
+		8,
+		0,
+		K_NO_WAIT
+	);
+}
