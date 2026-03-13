@@ -857,7 +857,7 @@ int esb_initialize(bool tx)
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = 1;
+		config.retransmit_count = 2;
 		config.tx_mode = ESB_TXMODE_MANUAL_START;
 		// config.payload_length = 252; // config by CONFIG_ESB_MAX_PAYLOAD_LENGTH
 		config.selective_auto_ack = true;
