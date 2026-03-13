@@ -37,12 +37,12 @@
  * Frame structure (repeats every TDMA_FRAME_TICKS):
  *   [Slot 0][Slot 1][Slot 2]...[Slot N-1]   (N = TDMA_NUM_TRACKERS)
  *
- * Each slot is TDMA_SLOT_TICKS long (~610μs with default 20 ticks).
+ * Each slot is TDMA_SLOT_TICKS long (~550μs with default 18 ticks).
  * Slot assignment: tracker_id % TDMA_NUM_TRACKERS
  *
- * At 20 ticks/slot, 10 trackers: frame = 200 ticks ≈ 6.1ms → ~163 TPS/tracker
+ * At 18 ticks/slot, 10 trackers: frame = 180 ticks ≈ 5.5ms → ~182 TPS/tracker
  *
- * NoACK sensor data TX at 2Mbps ≈ 200-250μs air time, fits easily in 610μs slot.
+ * NoACK sensor data TX at 2Mbps ≈ 200-250μs air time, fits easily in 550μs slot.
  *
  * Architecture:
  *   - Connection thread prepares packets and calls esb_write()
@@ -53,8 +53,8 @@
  */
 
 #define TDMA_NUM_TRACKERS  10
-#define TDMA_SLOT_TICKS    20  /* ~610μs at 32768Hz */
-#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 200 ticks ≈ 6.1ms */
+#define TDMA_SLOT_TICKS    18  /* ~550μs at 32768Hz */
+#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 180 ticks ≈ 5.5ms */
 
 /**
  * Initialize the TDMA module with this tracker's ID.
