@@ -239,7 +239,8 @@ void q_iem(const float* v, float* out) {
 	float inv_sqrt_d = 1.0f / sqrt_d;
 	float a = (M_PI / 2) * d * inv_sqrt_d;
 	float s, c;
-	arm_sin_cos_f32(a, &s, &c);
+	// arm_sin_cos_f32() expects theta in DEGREES, while 'a' is in radians.
+	arm_sin_cos_f32(a * (180.0f / M_PI), &s, &c);
 	float k = s * inv_sqrt_d;
 	out[0] = c;
 	out[1] = k * v[0];
