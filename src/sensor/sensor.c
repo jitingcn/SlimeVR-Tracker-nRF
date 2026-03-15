@@ -182,6 +182,7 @@ static bool main_suspended;
 
 static bool mag_available;
 static bool mag_enabled; // initialized from retained->mag_enabled in sensor_scan()
+static bool mag_calibrated; // true if magnetometer calibration data is valid
 // set when mag toggle reboot is pending, prevents sensor_retained_write from saving fusion state
 static bool skip_fusion_save;
 
@@ -719,6 +720,16 @@ void sensor_set_mag_enabled(bool enabled)
 bool sensor_get_mag_enabled(void)
 {
 	return mag_enabled;
+}
+
+bool sensor_get_mag_available(void)
+{
+	return mag_available;
+}
+
+bool sensor_get_mag_calibrated(void)
+{
+	return mag_calibrated;
 }
 
 void sensor_refresh_sensor_ids(void)
@@ -1458,7 +1469,7 @@ void sensor_loop(void)
 
 			if (mag_available && mag_enabled)
 			{
-				bool mag_calibrated = true;
+				mag_calibrated = true;
 				float uncalibrated_m[3] = {0};
 				memcpy(uncalibrated_m, raw_m, sizeof(uncalibrated_m)); // copy raw magnetometer data
 				sensor_calibration_process_mag(raw_m);

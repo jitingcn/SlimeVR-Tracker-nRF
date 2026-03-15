@@ -46,6 +46,8 @@ uint8_t sensor_setup_WOM(void);
 
 void sensor_set_mag_enabled(bool enabled);
 bool sensor_get_mag_enabled(void);
+bool sensor_get_mag_available(void);
+bool sensor_get_mag_calibrated(void);
 void sensor_refresh_sensor_ids(void);
 
 void sensor_fusion_invalidate(void);
