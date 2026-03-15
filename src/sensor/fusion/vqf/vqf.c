@@ -60,8 +60,8 @@ static void set_params()
 	params.restThAcc = 0.25f;
 	params.restThGyr = 0.7f;
 	params.magDistRejectionEnabled = true;
-	params.tauMag = 9.0f;
-	params.magCurrentTau = 0.06f;
+	params.tauMag = 10.0f;
+	params.magCurrentTau = 0.15f;
 	params.magNormTh = 0.1f;
 	params.magDipTh = 10.0f;
 }
