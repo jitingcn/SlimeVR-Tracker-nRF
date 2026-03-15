@@ -21,6 +21,8 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
+#include "sensor/fusion/vqf/vqf.h"
+#include "sensor/sensor.h"
 #include "util.h"
 #include "esb.h"
 #include "tdma.h"
@@ -221,6 +223,19 @@ void connection_update_sensor_mag(float *m)
 void connection_update_sensor_temp(float temp)
 {
 	// sensor_temp == zero means no data
+#if CONFIG_SENSOR_USE_VQF
+	if (sensor_get_mag_available() && sensor_get_mag_enabled() && sensor_get_mag_calibrated()) {
+		// temp hack to display vqf mag disturbance detection status
+		vqf_debug_info_t vqf_info;
+		vqf_get_debug_info(&vqf_info);
+		if (vqf_info.mag_dist_detected) {
+			sensor_temp = ((-temp - 25) * 2 + 128.5f); // invert temp to indicate mag disturbance
+			if (sensor_temp < 1) sensor_temp = 1;
+			if (sensor_temp > 255) sensor_temp = 255;
+			return;
+		}
+	}
+#endif
 	if (temp < -38.5f) {
 		sensor_temp = 1;
 	} else if (temp > 88.5f) {
