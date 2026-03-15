@@ -22,6 +22,7 @@
 */
 #ifndef SLIMENRF_UTILS
 #define SLIMENRF_UTILS
+#include "stdbool.h"
 
 #ifndef M_PI
 #define M_PI 3.141592653589793238462643383279502884f
