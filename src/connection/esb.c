@@ -132,7 +132,13 @@ static uint32_t g_skew_ref_local_ticks = 0;  // Local ticks at skew reference po
 // Minimum RTT tracking for asymmetric delay compensation
 // In ESB, return path (ACK) has fixed delay ≈ min_rtt/2
 // Forward path absorbs all retransmission overhead
-static uint32_t g_min_rtt_ticks = UINT32_MAX;
+// Init to ~305µs (10 ticks): conservative estimate for clean 2Mbps ESB RTT,
+// avoids wildly wrong first offset if first PONG has retransmissions.
+static uint32_t g_min_rtt_ticks = 10;
+
+// Warm-up counter: first few PONGs use faster EMA for quick convergence
+static uint32_t g_sync_update_count = 0;
+#define SYNC_WARM_UP_COUNT 5
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -594,7 +600,7 @@ void event_handler(struct esb_evt const *event)
 							LOG_DBG("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
 						}
 
-						if (rtt_us < 5000) {
+						if (rtt_us < 3000) {
 							// Asymmetric offset: ACK return path has fixed delay
 							int32_t return_delay_ticks = (int32_t)g_min_rtt_ticks / 2;
 							int32_t server_offset_ticks
@@ -608,6 +614,7 @@ void event_handler(struct esb_evt const *event)
 								g_server_ticks_offset = server_offset_ticks;
 								g_skew_ref_offset = server_offset_ticks;
 								g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
+								g_sync_update_count = 0;
 								g_time_initialized = true;
 								server_time_synced = true;
 								LOG_DBG("Server offset initialized: %d ticks", server_offset_ticks);
@@ -645,8 +652,26 @@ void event_handler(struct esb_evt const *event)
 										g_clock_skew_ppb = g_clock_skew_ppb + (raw_skew_ppb - g_clock_skew_ppb) / 4;
 									}
 
-									// Accept raw measurement as current offset
-									g_server_ticks_offset = server_offset_ticks;
+									/*
+									 * EMA-filtered offset update.
+									 *
+									 * Warm-up (first 5 PONGs): alpha=1/2 for fast convergence
+									 * after boot/reconnect. min_rtt may still be settling,
+									 * so aggressive tracking is better than slow convergence.
+									 *
+									 * Steady-state (after warm-up): alpha=1/4 for stability.
+									 * Smooths EVENT_IRQ jitter (~10-25 ticks) to ±6 ticks.
+									 * The >32000 reset path handles genuine large jumps.
+									 */
+									g_sync_update_count++;
+									int32_t offset_innovation = server_offset_ticks - (int32_t)g_server_ticks_offset;
+									if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
+										/* Warm-up: alpha=1/2 */
+										g_server_ticks_offset += (offset_innovation + 1) / 2;
+									} else {
+										/* Steady state: alpha=1/4 */
+										g_server_ticks_offset += (offset_innovation + 2) / 4;
+									}
 
 									// Refresh skew reference periodically to avoid uint32 wrap
 									if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
@@ -1013,6 +1038,8 @@ void esb_pair(void)
 	server_time_synced = false;
 	g_time_initialized = false;
 	g_last_sync_timestamp = 0;
+	g_min_rtt_ticks = 10;
+	g_sync_update_count = 0;
 	if (!paired_addr[0]) // zero, no receiver paired
 	{
 		LOG_INF("Pairing");
@@ -1122,7 +1149,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	}
 	if (!clock_status) {
 		clocks_start();
-		k_usleep(50);
 	}
 	if (data_length < 1) {
 		LOG_ERR("Invalid data length %u", data_length);
@@ -1141,7 +1167,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		if (!server_time_synced) {
 			LOG_DBG("Sending PING while time not synced - attempting to re-sync");
 		}
-		ping_send_time = k_uptime_get();
 		ping_pending = true;
 		ping_failed = false;
 		// Set sequence number
@@ -1175,20 +1200,11 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		queue_status = esb_write_payload(&tx_payload);
 	}
 
-	// Record ping history for RTT calculation
+	// Record ping history metadata (timing updated after TDMA wait, just before TX)
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
-		uint8_t this_ctr = tx_payload.data[2];
-		ping_history[ping_history_idx].counter = this_ctr;
-		ping_history[ping_history_idx].ping_ticks = sys_clock_tick_get_32();
-		LOG_DBG("PING sent (ctr=%u)", (unsigned)tx_payload.data[2]);
-		ping_pending = true;
+		ping_history[ping_history_idx].counter = tx_payload.data[2];
 		ping_ctr_sent = tx_payload.data[2];
-		ping_send_time = k_uptime_get();
-
-		// Record cycles for THIS counter in circular buffer (for accurate RTT calculation)
-		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
-
-		last_tx_time = k_uptime_get();
+		LOG_DBG("PING queued (ctr=%u)", (unsigned)tx_payload.data[2]);
 	} else if (tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
 		// PING failed to queue - this is critical!
 		const char *err_str = "unknown";
@@ -1292,6 +1308,17 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		tdma_wait_for_slot();
 	}
 #endif
+	/*
+	 * Record ping send timestamps here — after any TDMA wait — so that
+	 * ping_history[].ping_ticks and ping_send_time reflect the moment the
+	 * radio actually begins transmitting, not when the packet was queued.
+	 * This gives an accurate RTT baseline regardless of TDMA sleep duration.
+	 */
+	if (tx_payload.data[0] == ESB_PING_TYPE && queue_status == 0) {
+		ping_history[ping_history_idx].ping_ticks = sys_clock_tick_get_32();
+		ping_send_time = k_uptime_get();
+		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
+	}
 	esb_start_tx();
 	send_data = true;
 }
