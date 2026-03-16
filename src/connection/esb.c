@@ -1199,7 +1199,12 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		esb_flush_tx();
 		queue_status = esb_write_payload(&tx_payload);
 	}
-
+# if 0
+	if (no_ack) {
+		// manually repeat packet for noack packets for better reliability
+		queue_status = esb_write_payload(&tx_payload);
+	}
+#endif
 	// Record ping history metadata (timing updated after TDMA wait, just before TX)
 	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
 		ping_history[ping_history_idx].counter = tx_payload.data[2];
