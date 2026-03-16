@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /dts-v1/;
-#include "promicro_uf2.dts"
+#include "promicro_uf2_default_spi.dts"
 
 &pwm0_default {
 	group1 {
