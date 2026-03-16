@@ -138,7 +138,7 @@ int qmc_update_odr(float time, float *actual_time)
 	last_state = STAT;
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, ODR_MASK(MODR) | RNG_MASK(RNG_8G) | SET_RESET_ON);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_2) | OSR_MASK(OSR_8) | MD);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_2) | OSR_MASK(OSR_OFF) | MD);
 	if (err)
 		LOG_ERR("Communication error");
 
@@ -150,7 +150,7 @@ int qmc_update_odr(float time, float *actual_time)
 
 void qmc_mag_oneshot(void)
 {
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_2) | OSR_MASK(OSR_8) | MD_SINGLE);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_2) | OSR_MASK(OSR_OFF) | MD_SINGLE);
 	oneshot_trigger_time = k_uptime_get();
 	if (err)
 		LOG_ERR("Communication error");
@@ -208,15 +208,15 @@ void qmc_mag_process(uint8_t *raw_m, float m[3])
 }
 
 const sensor_mag_t sensor_mag_qmc6309 = {
-	*qmc_init,
-	*qmc_shutdown,
+	qmc_init,
+	qmc_shutdown,
 
-	*qmc_update_odr,
+	qmc_update_odr,
 
-	*qmc_mag_oneshot,
-	*qmc_mag_read,
-	*mag_none_temp_read,
+	qmc_mag_oneshot,
+	qmc_mag_read,
+	mag_none_temp_read,
 
-	*qmc_mag_process,
+	qmc_mag_process,
 	6, 6
 };
