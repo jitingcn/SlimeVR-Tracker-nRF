@@ -671,6 +671,17 @@ void sensor_request_calibration_mag(void)
 		return;
 	}
 
+	// LED sequence before calibration:
+	// 1. Flash LED to let user identify tracker
+	LOG_INF("Magnetometer calibration: identify tracker");
+	set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
+	k_msleep(2000);  // Wait for pattern to complete
+
+	// 2. Flash twice to indicate calibration is starting
+	//    SYS_LED_PATTERN_ONESHOT_PROGRESS: 200ms on + 200ms off, 2 times = 800ms
+	set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
+	k_msleep(800);
+
 	// Start fresh calibration
 	magneto_progress = 0;
 	last_magneto_progress = 0;
@@ -679,7 +690,7 @@ void sensor_request_calibration_mag(void)
 	mag_cal_last_status_log = 0;
 	magneto_reset();  // Clear ata buffer and sample count
 	magneto_progress |= 1 << 7;  // Set collection active flag
-	LOG_INF("Magnetometer calibration started (rotate tracker in figure-8 pattern)");
+	LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
 }
 
 static float aBuf[3] = {0};
