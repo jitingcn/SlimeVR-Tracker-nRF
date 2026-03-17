@@ -50,36 +50,50 @@ static float magBAinv[4][3];
 static uint8_t magneto_progress;
 static uint8_t last_magneto_progress;
 static int64_t magneto_progress_time;
-// 12 reference directions for orientation tracking (icosahedron vertices, normalized)
-// Using accelerometer (gravity) avoids magnetometer hard iron offset issues
-#define MAG_CAL_NUM_REGIONS 12
-static const float orientation_refs[MAG_CAL_NUM_REGIONS][3] = {
-	// (0, ±1, ±φ) / √(1+φ²)  where φ = golden ratio
-	{ 0.0000f,  0.5257f,  0.8507f},
-	{ 0.0000f,  0.5257f, -0.8507f},
-	{ 0.0000f, -0.5257f,  0.8507f},
-	{ 0.0000f, -0.5257f, -0.8507f},
-	// (±1, ±φ, 0) / √(1+φ²)
-	{ 0.5257f,  0.8507f,  0.0000f},
-	{ 0.5257f, -0.8507f,  0.0000f},
-	{-0.5257f,  0.8507f,  0.0000f},
-	{-0.5257f, -0.8507f,  0.0000f},
-	// (±φ, 0, ±1) / √(1+φ²)
-	{ 0.8507f,  0.0000f,  0.5257f},
-	{ 0.8507f,  0.0000f, -0.5257f},
-	{-0.8507f,  0.0000f,  0.5257f},
-	{-0.8507f,  0.0000f, -0.5257f},
-};
+// Orientation reference directions for magnetometer calibration coverage
+//
+// Goal: enforce uniform directional coverage while collecting magnetometer samples.
+// We still use accelerometer (gravity) for region detection (avoids hard-iron offsets).
+//
+// generate a Fibonacci sphere point set which provides
+// more uniform coverage and is easy to scale.
+#define MAG_CAL_NUM_REGIONS 42
+static float orientation_refs[MAG_CAL_NUM_REGIONS][3];
+static bool orientation_refs_initialized;
+
+// golden angle = pi * (3 - sqrt(5))
+#define MAG_CAL_GOLDEN_ANGLE 2.39996322972865332f
+
+static void mag_orientation_refs_init(void)
+{
+	if (orientation_refs_initialized) {
+		return;
+	}
+
+	for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
+		// y in (-1, 1), avoid poles by using i+0.5
+		float t = ((float)i + 0.5f) / (float)MAG_CAL_NUM_REGIONS;
+		float y = 1.0f - 2.0f * t;
+		float r = sqrtf(fmaxf(0.0f, 1.0f - y * y));
+		float theta = MAG_CAL_GOLDEN_ANGLE * (float)i;
+		orientation_refs[i][0] = r * cosf(theta);
+		orientation_refs[i][1] = y;
+		orientation_refs[i][2] = r * sinf(theta);
+	}
+
+	orientation_refs_initialized = true;
+}
+
 static uint16_t mag_region_samples[MAG_CAL_NUM_REGIONS];
-static uint16_t mag_region_coverage;  // Bitfield for covered regions
+static uint64_t mag_region_coverage;  // Bitfield for covered regions
 static int64_t magneto_last_saturated_warning;
 static int64_t mag_cal_last_status_log;
 
 // Calibration thresholds
-#define MAG_CAL_MIN_SAMPLES 1000
+#define MAG_CAL_MIN_PER_REGION 35
+#define MAG_CAL_MAX_PER_REGION 40
+#define MAG_CAL_MIN_SAMPLES (MAG_CAL_NUM_REGIONS * MAG_CAL_MIN_PER_REGION)
 #define MAG_CAL_MIN_REGIONS MAG_CAL_NUM_REGIONS
-#define MAG_CAL_MIN_PER_REGION 90
-#define MAG_CAL_MAX_PER_REGION 120
 #define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000
 
 static double ata[100]; // init calibration
@@ -380,7 +394,7 @@ static void sensor_tcal_cache_invalidate(void)
 // helpers
 static bool wait_for_motion(bool motion, int samples);
 static int check_orientation_region(const float *a);
-static int popcount16(uint16_t x);
+static int popcount64(uint64_t x);
 static void magneto_reset(void);
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 static int isAccRest(float *, float *, float, int *, int);
@@ -1118,7 +1132,7 @@ static int sensor_calibrate_mag(void)
 	if (now - mag_cal_last_status_log >= 1000) {
 		mag_cal_last_status_log = now;
 		int region = check_orientation_region(aBuf);
-		int covered = popcount16(mag_region_coverage);
+		int covered = popcount64(mag_region_coverage);
 		int min_samples = MAG_CAL_MAX_PER_REGION;
 		int needing_more = 0;
 		for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
@@ -1229,14 +1243,16 @@ static bool wait_for_motion(bool motion, int samples)
 
 /**
  * Determine which orientation region the device is in based on accelerometer.
- * Uses 12 icosahedron vertices as reference directions for optimal sphere coverage.
- * Returns region index (0-11), or -1 for invalid readings.
+ * Uses Fibonacci-sphere reference directions for improved sphere coverage.
+ * Returns region index (0..MAG_CAL_NUM_REGIONS-1), or -1 for invalid readings.
  *
  * Using gravity direction avoids the magnetometer hard iron offset problem
  * that made some regions unreachable with the previous approach.
  */
 static int check_orientation_region(const float *a)
 {
+	mag_orientation_refs_init();
+
 	float mag_sq = a[0]*a[0] + a[1]*a[1] + a[2]*a[2];
 	if (mag_sq < 0.25f) {
 		return -1;  // Less than 0.5g - free fall or invalid
@@ -1269,16 +1285,20 @@ static int check_orientation_region(const float *a)
 }
 
 /**
- * Count number of bits set in a 16-bit value (population count)
+ * Count number of bits set in a 64-bit value (population count)
  */
-static int popcount16(uint16_t x)
+static int popcount64(uint64_t x)
 {
+#if defined(__GNUC__) || defined(__clang__)
+	return __builtin_popcountll((unsigned long long)x);
+#else
 	int count = 0;
 	while (x) {
-		count += x & 1;
+		count += (int)(x & 1ull);
 		x >>= 1;
 	}
 	return count;
+#endif
 }
 
 static void magneto_reset(void)
@@ -1802,10 +1822,10 @@ static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 	// Update orientation coverage
 	if (region >= 0) {
 		mag_region_samples[region]++;
-		uint16_t region_bit = 1 << region;
+		uint64_t region_bit = 1ull << region;
 		if (!(mag_region_coverage & region_bit)) {
 			mag_region_coverage |= region_bit;
-			int covered = popcount16(mag_region_coverage);
+			int covered = popcount64(mag_region_coverage);
 			LOG_INF("Mag cal coverage: %d/%d regions, %d samples",
 			        covered, MAG_CAL_NUM_REGIONS, (int)sample_count);
 			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
@@ -1813,11 +1833,11 @@ static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 	}
 
 	// Check if calibration is ready
-	int region_count = popcount16(mag_region_coverage);
+	int region_count = popcount64(mag_region_coverage);
 	if (sample_count >= MAG_CAL_MIN_SAMPLES && region_count >= MAG_CAL_MIN_REGIONS) {
 		bool balanced = true;
 		for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
-			if ((mag_region_coverage & (1 << i)) &&
+			if ((mag_region_coverage & (1ull << i)) &&
 			    mag_region_samples[i] < MAG_CAL_MIN_PER_REGION) {
 				balanced = false;
 				break;
