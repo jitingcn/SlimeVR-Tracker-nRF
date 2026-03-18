@@ -1662,7 +1662,11 @@ void sensor_loop(void)
 				// Dynamic magnetometer ODR adjustment based on gyro speed
 				float gyro_speed = sqrtf(max_gyro_speed_square);
 				float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
-				if (mag_target_time < 0.005f && mag_skip_oneshot) // only use continuous modes if oneshot is not available
+				// Avoid oneshot mode when mag is on I2CM (EXT interface) - the DRDY
+				// polling loop through I2CM is extremely expensive (~4-5ms per read),
+				// consuming nearly all available loop time.
+				bool mag_via_i2cm = (sensor_mag_dev.addr & 0x80) && (sensor_imu_dev_reg & 0x80);
+				if (mag_target_time < 0.005f && (mag_skip_oneshot || mag_via_i2cm))
 					mag_target_time = 0.005f;
 				if (mag_target_time > 0.1f) // limit to 0.1 (minimum 10Hz)
 					mag_target_time = 0.1f;
@@ -1857,7 +1861,7 @@ void sensor_loop(void)
 				LOG_WRN("Last update steps took up to %lld ms", time_delta);
 				max_loop_time = 0;
 			}
-			if (mag_available && mag_enabled) {
+			if (mag_available && mag_enabled && sensor_debug_is_active()) {
 				// Report actual rate of mag samples fed into VQF (target: mag ODR, e.g. 50Hz)
 				LOG_INF("mag VQF updates: %u in last %dms (%.1fHz, target %.0fHz)",
 					mag_vqf_updates_since_status, STATUS_INTERVAL_MS,

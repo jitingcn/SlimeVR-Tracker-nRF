@@ -743,7 +743,7 @@ static void lsm_ext_stop_continuous(void)
 static int lsm_ext_start_continuous(uint8_t addr, uint8_t sub_addr, uint8_t num_bytes)
 {
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
-	uint8_t slv0[3] = {(addr << 1) | 0x01, sub_addr, 0xC0 | num_bytes};
+	uint8_t slv0[3] = {(addr << 1) | 0x01, sub_addr, 0xA0 | num_bytes}; // rw_0=1 for read, SHUB_ODR = 240Hz, num_bytes to read
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x04); // MASTER_ON only (continuous)
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
@@ -769,7 +769,7 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	// Configure transaction and begin one-shot (AN5922, page 80, One-shot write routine)
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
 	// SLV0_ADD format: bits[7:1]=slave_addr[6:0], bit0=rw_0 (0=write, 1=read)
-	uint8_t slv0[3] = {(addr << 1) | 0x00, buf[0], 0xC0 | 0x00}; // rw_0=0 for write, SHUB_ODR = 480Hz, reading no bytes
+	uint8_t slv0[3] = {(addr << 1) | 0x00, buf[0], 0xA0 | 0x00}; // rw_0=0 for write, SHUB_ODR = 240Hz, reading no bytes
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_DATAWRITE_SLV0, buf[1]);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x44); // WRITE_ONCE(0x40) + MASTER_ON(0x04)
@@ -829,7 +829,7 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	// One-shot read (AN5922, page 79, One-shot read routine)
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
 	// SLV0_ADD format: bits[7:1]=slave_addr[6:0], bit0=rw_0 (0=write, 1=read)
-	uint8_t slv0[3] = {(addr << 1) | 0x01, sub_addr, 0xC0 | num_read}; // rw_0=1 for read, SHUB_ODR = 480Hz, reading num_read bytes
+	uint8_t slv0[3] = {(addr << 1) | 0x01, sub_addr, 0xA0 | num_read}; // rw_0=1 for read, SHUB_ODR = 240Hz, reading num_read bytes
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x44); // WRITE_ONCE(0x40) + MASTER_ON(0x04)
 	// Wait for transaction (AN5922 One-shot read routine):
