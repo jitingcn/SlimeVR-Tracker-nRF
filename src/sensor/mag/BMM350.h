@@ -42,7 +42,7 @@ void bmm3_shutdown(void);
 int bmm3_update_odr(float time, float *actual_time);
 
 void bmm3_mag_oneshot(void);
-void bmm3_mag_read(float m[3]);
+bool bmm3_mag_read(float m[3]);
 float bmm3_temp_read(float bias[3]);
 
 void bmm3_mag_process(uint8_t *raw_m, float m[3]);

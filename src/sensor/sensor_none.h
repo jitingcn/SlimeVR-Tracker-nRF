@@ -49,7 +49,7 @@ void mag_none_shutdown(void);
 int mag_none_update_odr(float time, float *actual_time);
 
 void mag_none_mag_oneshot(void);
-void mag_none_mag_read(float m[3]);
+bool mag_none_mag_read(float m[3]);
 float mag_none_temp_read(float bias[3]);
 
 void mag_none_mag_process(uint8_t *raw_m, float m[3]);

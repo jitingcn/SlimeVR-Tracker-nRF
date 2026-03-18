@@ -119,7 +119,7 @@ const sensor_imu_t sensor_imu_none = {
 
 	*imu_none_setup_DRDY,
 	*imu_none_setup_WOM,
-	
+
 	*imu_none_ext_setup,
 	*imu_none_ext_passthrough
 };
@@ -148,10 +148,10 @@ void mag_none_mag_oneshot(void)
 	return;
 }
 
-void mag_none_mag_read(float m[3])
+bool mag_none_mag_read(float m[3])
 {
 	LOG_DBG("mag_none_mag_read, sensor has no magnetometer or magnetometer has no direct data register");
-	return;
+	return false;
 }
 
 float mag_none_temp_read(float bias[3])

@@ -123,7 +123,7 @@ void ist8308_mag_oneshot(void)
 		LOG_ERR("Communication error");
 }
 
-void ist8308_mag_read(float m[3])
+bool ist8308_mag_read(float m[3])
 {
 	int err = 0;
 	uint8_t status = oneshot_trigger_time ? 0x00 : 0x01;
@@ -140,6 +140,7 @@ void ist8308_mag_read(float m[3])
 	if (err)
 		LOG_ERR("Communication error");
 	ist8308_mag_process(rawData, m);
+	return true;
 }
 
 void ist8308_mag_process(uint8_t *raw_m, float m[3])

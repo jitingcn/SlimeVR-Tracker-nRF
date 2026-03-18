@@ -102,7 +102,7 @@ void ak_mag_oneshot(void)
 		LOG_ERR("Communication error");
 }
 
-void ak_mag_read(float m[3])
+bool ak_mag_read(float m[3])
 {
 	int err = 0;
 	uint8_t status = oneshot_trigger_time ? 0x00 : 0x01;
@@ -120,6 +120,7 @@ void ak_mag_read(float m[3])
 	if (err)
 		LOG_ERR("Communication error");
 	ak_mag_process(rawData, m);
+	return true;
 }
 
 float ak_temp_read(float bias[3])

@@ -25,7 +25,7 @@ void lis2_shutdown(void);
 int lis2_update_odr(float time, float *actual_time);
 
 void lis2_mag_oneshot(void);
-void lis2_mag_read(float m[3]);
+bool lis2_mag_read(float m[3]);
 float lis2_temp_read(float bias[3]);
 
 void lis2_mag_process(uint8_t *raw_m, float m[3]);

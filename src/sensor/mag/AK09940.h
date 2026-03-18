@@ -43,7 +43,7 @@ void ak_shutdown(void);
 int ak_update_odr(float time, float *actual_time);
 
 void ak_mag_oneshot(void);
-void ak_mag_read(float m[3]);
+bool ak_mag_read(float m[3]);
 float ak_temp_read(float bias[3]);
 
 void ak_mag_process(uint8_t *raw_m, float m[3]);

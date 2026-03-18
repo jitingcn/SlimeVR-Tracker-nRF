@@ -55,7 +55,7 @@ void mmc_shutdown(void);
 int mmc_update_odr(float time, float *actual_time);
 
 void mmc_mag_oneshot(void);
-void mmc_mag_read(float m[3]);
+bool mmc_mag_read(float m[3]);
 float mmc_temp_read(float bias[3]);
 
 void mmc_mag_process(uint8_t *raw_m, float m[3]);

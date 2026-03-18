@@ -184,7 +184,7 @@ void bmm1_mag_oneshot(void)
 		LOG_ERR("Communication error");
 }
 
-void bmm1_mag_read(float m[3])
+bool bmm1_mag_read(float m[3])
 {
 	int err = 0;
 	uint8_t status;
@@ -195,6 +195,7 @@ void bmm1_mag_read(float m[3])
 	if (err)
 		LOG_ERR("Communication error");
 	bmm1_mag_process(rawData, m);
+	return true;
 }
 
 void bmm1_mag_process(uint8_t *raw_m, float m[3])

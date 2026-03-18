@@ -42,7 +42,7 @@ void ist8306_shutdown(void);
 int ist8306_update_odr(float time, float *actual_time);
 
 void ist8306_mag_oneshot(void);
-void ist8306_mag_read(float m[3]);
+bool ist8306_mag_read(float m[3]);
 
 void ist8306_mag_process(uint8_t *raw_m, float m[3]);
 

@@ -38,7 +38,7 @@ void bmm1_shutdown(void);
 int bmm1_update_odr(float time, float *actual_time);
 
 void bmm1_mag_oneshot(void);
-void bmm1_mag_read(float m[3]);
+bool bmm1_mag_read(float m[3]);
 
 void bmm1_mag_process(uint8_t *raw_m, float m[3]);
 

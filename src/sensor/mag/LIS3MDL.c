@@ -155,7 +155,7 @@ void lis3_mag_oneshot(void)
 		LOG_ERR("Communication error");
 }
 
-void lis3_mag_read(float m[3])
+bool lis3_mag_read(float m[3])
 {
 	int err = 0;
 	uint8_t status;
@@ -166,6 +166,7 @@ void lis3_mag_read(float m[3])
 	if (err)
 		LOG_ERR("Communication error");
 	lis3_mag_process(rawData, m);
+	return true;
 }
 
 float lis3_temp_read(float bias[3])

@@ -43,7 +43,7 @@ void lis3_shutdown(void);
 int lis3_update_odr(float time, float *actual_time);
 
 void lis3_mag_oneshot(void);
-void lis3_mag_read(float m[3]);
+bool lis3_mag_read(float m[3]);
 float lis3_temp_read(float bias[3]);
 
 void lis3_mag_process(uint8_t *raw_m, float m[3]);
