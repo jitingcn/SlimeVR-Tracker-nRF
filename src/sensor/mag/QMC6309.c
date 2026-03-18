@@ -1,4 +1,5 @@
 #include <math.h>
+#include <string.h>
 
 #include <zephyr/logging/log.h>
 
@@ -64,6 +65,12 @@ static const float sensitivity = 1 / 4000.0f; // ~0.25 mgauss/LSB @ 8G range -> 
 static uint8_t last_state = 0xff;
 static bool lastOvfl = false;
 static int64_t oneshot_trigger_time = 0;
+// In Normal Mode, data registers are latched and hold stable values between
+// measurement cycles. Byte-level comparison detects when sensor hub (or direct
+// I2C at loop rate > mag ODR) reads the same sample twice, without requiring
+// a separate STAT_REG read that would break the sensor hub fast-path.
+static uint8_t last_rawData[6];
+static bool last_rawData_valid = false;
 
 LOG_MODULE_REGISTER(QMC6309, LOG_LEVEL_INF);
 
@@ -72,6 +79,7 @@ int qmc_init(float time, float *actual_time)
 	last_state = 0xff; // init state
 	lastOvfl = false;
 	oneshot_trigger_time = 0;
+	last_rawData_valid = false;
 	int err = qmc_update_odr(time, actual_time);
 	return (err < 0 ? err : 0);
 }
@@ -97,7 +105,7 @@ int qmc_update_odr(float time, float *actual_time)
 	}
 	else
 	{
-		MD = MD_CONTINUOUS;
+		MD = MD_NORMAL;
 		ODR = 1 / time;
 	}
 
@@ -156,46 +164,52 @@ void qmc_mag_oneshot(void)
 		LOG_ERR("Communication error");
 }
 
-void qmc_mag_read(float m[3])
+bool qmc_mag_read(float m[3])
 {
 	int err = 0;
-	uint8_t status = STAT_DATA_RDY_MASK; // Assume data ready by default
-	if (oneshot_trigger_time) // Only poll DRDY in oneshot mode
+	if (oneshot_trigger_time)
 	{
-		status = 0;
-		int64_t timeout = oneshot_trigger_time + 10; // 10ms timeout for oneshot
-		while ((status & STAT_DATA_RDY_MASK) == 0) // wait for data ready flag
+		// Oneshot mode: wait for DRDY with timeout
+		uint8_t status = 0;
+		int64_t timeout = oneshot_trigger_time + 10; // 10ms timeout
+		while ((status & STAT_DATA_RDY_MASK) == 0)
 		{
 			err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
-			if(k_uptime_get() > timeout)
+			if (k_uptime_get() > timeout)
 			{
 				LOG_WRN("Data ready status timeout!");
 				break;
 			}
 		}
-	}
-	// In continuous mode, skip DRDY polling - data should always be ready
-	// at configured ODR (e.g., 200Hz = 5ms) before loop interval (6ms).
-	// Each sensor hub read takes ~8-10ms at 100-120Hz accel ODR, so polling would
-	// waste an entire accel cycle per status check.
-	oneshot_trigger_time = 0;
-	if (status & STAT_OVERFLOW_MASK) // check overflow flag
-	{
-		if (lastOvfl == 0)
+		oneshot_trigger_time = 0;
+		if (err)
+		{
+			LOG_ERR("Communication error");
+			return false;
+		}
+		if ((status & STAT_OVERFLOW_MASK) && !lastOvfl)
 		{
 			LOG_INF("Magnetometer overflow");
 			lastOvfl = 1;
 		}
-	}
-	else
-	{
-		lastOvfl = 0;
+		else
+		{
+			lastOvfl = 0;
+		}
 	}
 	uint8_t rawData[6];
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
 	if (err)
 		LOG_ERR("Communication error");
+	// Normal Mode latches output until next ODR cycle. If the sensor hub (or
+	// direct I2C loop) reads faster than mag ODR, the registers are byte-identical
+	// until a new measurement arrives. Skip VQF to avoid over-feeding.
+	if (last_rawData_valid && memcmp(rawData, last_rawData, 6) == 0)
+		return false;
+	memcpy(last_rawData, rawData, 6);
+	last_rawData_valid = true;
 	qmc_mag_process(rawData, m);
+	return true;
 }
 
 void qmc_mag_process(uint8_t *raw_m, float m[3])

@@ -132,8 +132,21 @@ void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
 
 void vqf_update_mag(float *m, float time)
 {
-	ARG_UNUSED(time);
-	updateMag(&params, &state, &coeffs, m);
+	// Use the caller-supplied time step when valid so that VQF time accumulators
+	// (magCandidateT, magRejectT, etc.) and gain k run at the correct real-time
+	// rate even when the sensor loop runs faster or slower than the mag ODR.
+	//
+	// Build a synthetic cumulative microsecond timestamp from the elapsed time so
+	// updateMagTs can derive the correct dt internally (avoids calling the static
+	// updateMag_internal directly).
+	if (time > 0.0f && time < 10.0f) {
+		uint64_t synth_ts = state.lastMagTsUs + (uint64_t)(time * 1e6f);
+		if (synth_ts == 0)
+			synth_ts = 1; // avoid the "uninitialized" sentinel value
+		updateMagTs(&params, &state, &coeffs, m, synth_ts);
+	} else {
+		updateMag(&params, &state, &coeffs, m);
+	}
 }
 
 void vqf_update_mag_ts(float *m, uint64_t timestamp_us)

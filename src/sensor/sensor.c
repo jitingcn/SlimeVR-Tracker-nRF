@@ -145,6 +145,12 @@ static bool mag_use_oneshot;
 #if !CONFIG_SENSOR_MAG_FIXED_ODR
 static bool mag_skip_oneshot;
 #endif
+// Wall-clock tick of the most recent updateMag call, used to compute actual dt
+static int64_t last_mag_fusion_ticks = 0;
+// Last raw mag value fed to VQF, used to skip repeat sensor register reads
+// Time-gating for mag VQF updates: only feed update_mag once per mag ODR period.
+// (Loop runs at ~gyro-FIFO rate >> mag ODR; bitwise equality is unreliable because
+// some mag sensors return slightly different register values on repeated reads.)
 
 static float accel_actual_time;
 static float gyro_actual_time;
@@ -1037,6 +1043,8 @@ int sensor_init(void)
 	LOG_INF("Using %s", fusion_names[fusion_id]);
 	LOG_INF("Initialized fusion");
 	sensor_fusion_init = true;
+	last_mag_fusion_ticks = 0; // reset so first mag update uses nominal mag_actual_time as dt
+	// last_mag_fusion_ticks reset is sufficient; no extra state to clear.
 	return 0;
 }
 
@@ -1056,6 +1064,8 @@ static uint64_t total_accel_samples = 0;
 static uint64_t total_loop_time = 0;
 static uint64_t total_loop_iterations = 0;
 #endif
+// Count actual mag samples fed to VQF since last status report (always tracked)
+static uint32_t mag_vqf_updates_since_status = 0;
 
 void sensor_loop(void)
 {
@@ -1167,9 +1177,10 @@ void sensor_loop(void)
 #endif
 
 			// Read magnetometer
-			float raw_m[3];
+			float raw_m[3] = {0};
+			bool new_mag_data = false;
 			if (mag_available && mag_enabled)
-				sensor_mag->mag_read(raw_m); // reading mag last, and it will be processed last
+				new_mag_data = sensor_mag->mag_read(raw_m); // returns false if no new sample (DRDY not set)
 
 			if (reconfig) // TODO: get rid of reconfig?
 			{
@@ -1467,11 +1478,12 @@ void sensor_loop(void)
 				total_processed_packets += processed_packets;
 #endif
 
-			if (mag_available && mag_enabled)
+			if (mag_available && mag_enabled && new_mag_data)
 			{
 				mag_calibrated = true;
 				float uncalibrated_m[3] = {0};
 				memcpy(uncalibrated_m, raw_m, sizeof(uncalibrated_m)); // copy raw magnetometer data
+
 				sensor_calibration_process_mag(raw_m);
 				float zero_m[3] = {0};
 				if (v_epsilon(raw_m, zero_m, 1e-6)) // if the magnetometer is not calibrated, skip and send raw data
@@ -1490,9 +1502,30 @@ void sensor_loop(void)
 				float mz = raw_m[2];
 				float m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
 
-				// Process fusion (time param unused for VQF, uses fixed rate from init)
-				if (mag_calibrated)
-					sensor_fusion->update_mag(m, mag_actual_time);
+				// Time-gate mag VQF updates to the actual mag ODR.
+				// QMC6309 handles duplicate detection internally (Normal Mode latch),
+				// so new_mag_data=true already means a genuinely fresh sample for that driver.
+				// For other drivers that always return true, the time-gate below acts as a
+				// safety net;
+				// Oneshot mode is self-gated (DRDY wait in driver), so skip the check.
+				if (mag_calibrated) {
+					int64_t now_ticks = k_uptime_ticks();
+					float mag_dt = mag_actual_time; // nominal fallback
+					bool do_update = true;
+					if (!mag_use_oneshot && last_mag_fusion_ticks > 0) {
+						int64_t diff_ticks = now_ticks - last_mag_fusion_ticks;
+						if (diff_ticks > 0) {
+							mag_dt = (float)k_ticks_to_us_floor64(diff_ticks) * 1e-6f;
+						} else {
+							do_update = false;
+						}
+					}
+					if (do_update) {
+						last_mag_fusion_ticks = now_ticks;
+						sensor_fusion->update_mag(m, mag_dt);
+					}
+					mag_vqf_updates_since_status++;
+				}
 
 				v_rotate(m, q3, m); // magnetic field in local device frame, no other transformation will be done
 				connection_update_sensor_mag(m);
@@ -1823,6 +1856,14 @@ void sensor_loop(void)
 			{
 				LOG_WRN("Last update steps took up to %lld ms", time_delta);
 				max_loop_time = 0;
+			}
+			if (mag_available && mag_enabled) {
+				// Report actual rate of mag samples fed into VQF (target: mag ODR, e.g. 50Hz)
+				LOG_INF("mag VQF updates: %u in last %dms (%.1fHz, target %.0fHz)",
+					mag_vqf_updates_since_status, STATUS_INTERVAL_MS,
+					(double)mag_vqf_updates_since_status * 1000.0 / STATUS_INTERVAL_MS,
+					1.0 / (double)mag_actual_time);
+				mag_vqf_updates_since_status = 0;
 			}
 #if DEBUG
 			LOG_DBG("loop iterations: %llu, packets read: %llu, processed: %llu, gyro samples: %llu, accel samples: %llu, total acquisition time: %lld us, total loop time: %lld us", total_loop_iterations, total_read_packets, total_processed_packets, total_gyro_samples, total_accel_samples, k_ticks_to_us_near64(total_acquisition_time), k_ticks_to_us_near64(total_loop_time));
