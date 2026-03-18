@@ -61,14 +61,14 @@ static void set_params()
 	params.restThGyr = 0.7f;
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 12.0f;
-	params.magCurrentTau = 0.10f;
-	params.magNormTh = 0.1f;
+	params.magCurrentTau = 0.15f;
+	params.magNormTh = 0.10f;
 	params.magDipTh = 10.0f;
-	params.magNewFirstTime = 10.0f;
-	params.magNewMinGyr = 20.0f;
-	params.magMinUndisturbedTime = 1.0f;
-	params.magMaxRejectionTime = 90.0f;
-	params.magRejectionFactor = 3.0f;
+	params.magNewFirstTime = 5.0f;
+	params.magNewMinGyr = 15.0f;
+	params.magMinUndisturbedTime = 0.5f;
+	params.magMaxRejectionTime = 180.0f;
+	params.magRejectionFactor = 4.0f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)

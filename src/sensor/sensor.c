@@ -1506,24 +1506,23 @@ void sensor_loop(void)
 				// QMC6309 handles duplicate detection internally (Normal Mode latch),
 				// so new_mag_data=true already means a genuinely fresh sample for that driver.
 				// For other drivers that always return true, the time-gate below acts as a
-				// safety net;
-				// Oneshot mode is self-gated (DRDY wait in driver), so skip the check.
+				// safety net.
+				// Oneshot mode is self-gated (DRDY wait in driver), but we still measure
+				// actual elapsed time so VQF gets the correct dt (mag_actual_time=INFINITY
+				// for oneshot, which would otherwise force fallback to coeffs->magTs).
 				if (mag_calibrated) {
 					int64_t now_ticks = k_uptime_ticks();
-					float mag_dt = mag_actual_time; // nominal fallback
-					bool do_update = true;
-					if (!mag_use_oneshot && last_mag_fusion_ticks > 0) {
+					// Nominal fallback: use mag_actual_time if valid, else config-based rate.
+					// mag_actual_time is INFINITY in oneshot mode, so we need a real fallback.
+					float mag_dt = (mag_actual_time > 0.0f && mag_actual_time < 1.0f)
+						? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
+					if (last_mag_fusion_ticks > 0) {
 						int64_t diff_ticks = now_ticks - last_mag_fusion_ticks;
-						if (diff_ticks > 0) {
+						if (diff_ticks > 0)
 							mag_dt = (float)k_ticks_to_us_floor64(diff_ticks) * 1e-6f;
-						} else {
-							do_update = false;
-						}
 					}
-					if (do_update) {
-						last_mag_fusion_ticks = now_ticks;
-						sensor_fusion->update_mag(m, mag_dt);
-					}
+					last_mag_fusion_ticks = now_ticks;
+					sensor_fusion->update_mag(m, mag_dt);
 					mag_vqf_updates_since_status++;
 				}
 
@@ -1959,7 +1958,13 @@ void main_imu_restart(void)
 #else
 		float fusion_accel_time = accel_actual_time;
 #endif
-		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, 6 / 1000.0f); // TODO: using default initial time
+		// Use actual mag rate; guard against INFINITY (oneshot mode) with config-based fallback.
+		float fusion_mag_time = (mag_actual_time > 0.0f && mag_actual_time < 10.0f)
+			? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, fusion_mag_time);
+		// Reset mag timing so the first post-restart update uses the nominal fallback
+		// instead of a potentially stale diff (which could be > 10s → updateMag fallback path).
+		last_mag_fusion_ticks = 0;
 	}
 }
 
