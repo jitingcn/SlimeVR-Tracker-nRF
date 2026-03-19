@@ -229,10 +229,9 @@ void connection_update_sensor_temp(float temp)
 		vqf_debug_info_t vqf_info;
 		vqf_get_debug_info(&vqf_info);
 		if (vqf_info.mag_dist_detected) {
-			sensor_temp = ((-temp - 25) * 2 + 128.5f); // invert temp to indicate mag disturbance
-			if (sensor_temp < 1) sensor_temp = 1;
-			if (sensor_temp > 255) sensor_temp = 255;
-			return;
+			if (temp < 38.5f) {  // assume normal operating should be below 38.5C
+				temp = -temp; // invert temp to indicate mag disturbance, negative means disturbed, positive means normal
+			}
 		}
 	}
 #endif
