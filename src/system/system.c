@@ -561,7 +561,7 @@ void sys_reset_mode(uint8_t mode)
 #endif
 		LOG_INF("DFU requested");
 #if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = 0x57; // DFU_MAGIC_UF2_RESET
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 		sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER

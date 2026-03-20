@@ -22,7 +22,7 @@
 LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_INF);
 
 /* Adafruit bootloader DFU magic number (DFU_MAGIC_UF2_RESET) */
-#define ADAFRUIT_DFU_MAGIC 0x57
+#define ADAFRUIT_DFU_MAGIC ADAFRUIT_DFU_MAGIC_UF2_RESET
 
 /* Channel handles from task_wdt_add() */
 static int channel_ids[WDT_CHANNEL_COUNT];

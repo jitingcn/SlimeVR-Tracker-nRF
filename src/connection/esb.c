@@ -1517,7 +1517,7 @@ static void esb_thread(void)
 #if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
 					LOG_WRN("Executing remote command: DFU (enter bootloader)");
 #if CONFIG_BUILD_OUTPUT_UF2
-					NRF_POWER->GPREGRET = 0x57;
+					NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 					k_msleep(100);
 #endif
 					sys_request_system_reboot(false);

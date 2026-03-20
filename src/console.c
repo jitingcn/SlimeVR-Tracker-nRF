@@ -512,6 +512,9 @@ static void print_help(void)
 	printk("  reboot                     Soft reset the device\n");
 #if DFU_EXISTS
 	printk("  dfu                        Enter DFU bootloader\n");
+#if ADAFRUIT_BOOTLOADER
+	printk("  dfu ota                    Enter OTA DFU (BLE)\n");
+#endif
 #endif
 	printk("\n");
 	printk("Other:\n");
@@ -660,7 +663,7 @@ static void console_thread(void)
 	if (button_read()) // button held on usb connect, enter DFU
 	{
 #if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = 0x57;
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 		sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER
@@ -1078,8 +1081,26 @@ static void console_thread(void)
 #if DFU_EXISTS
 		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0) {
 #if ADAFRUIT_BOOTLOADER
-			NRF_POWER->GPREGRET = 0x57;
-			k_msleep(100); // Wait for register to be written
+			// Subcommands:
+			//   dfu      -> UF2 DFU (USB MSC/CDC)
+			//   dfu ota  -> OTA DFU (BLE)
+			char *mode = NULL;
+			if (arg) {
+				mode = strtok((char *)arg, " ");
+			}
+
+			if (mode && strcmp(mode, "ota") == 0) {
+				printk("Entering OTA DFU (BLE)...\n");
+				NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
+			} else if (mode == NULL) {
+				printk("Entering UF2 DFU...\n");
+				NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
+			} else {
+				printk("Error: Unknown DFU mode '%s'. Use: dfu [ota]\n", mode);
+				continue;
+			}
+
+			k_msleep(100); // Wait for GPREGRET to be written
 			sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER

@@ -27,6 +27,11 @@
 
 #include "retained.h"
 
+// Adafruit UF2 bootloader GPREGRET magic values.
+// See: Adafruit_nRF52_Bootloader/src/main.c (DFU_MAGIC_*).
+#define ADAFRUIT_DFU_MAGIC_UF2_RESET 0x57
+#define ADAFRUIT_DFU_MAGIC_OTA_RESET 0xA8
+
 #define USER_SHUTDOWN_ENABLED CONFIG_USER_SHUTDOWN // Allow user to use reset or sw0 to shutdown
 #define IGNORE_RESET CONFIG_IGNORE_RESET // If sw0 available, don't change any reset behavior
 #define WOM_USE_DCDC CONFIG_WOM_USE_DCDC // Use DCDC instead of LDO for WOM if it is more efficient
