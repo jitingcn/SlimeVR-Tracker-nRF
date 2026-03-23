@@ -48,27 +48,27 @@ static void set_params()
 	init_params(&params);
 	params.tauAcc = 3.2f;
 	params.biasClip = 2.5f;
-	params.biasForgettingTime = 80.0f;
+	params.biasForgettingTime = 100.0f;
 	params.biasSigmaInit = 1.5f;
-	params.biasSigmaMotion = 0.20f;
+	params.biasSigmaMotion = 0.15f;
 	params.biasSigmaRest = 0.03f;
 	params.biasVerticalForgettingFactor = 0.00001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.45f;
-	params.restMinT = 2.9f;
-	params.restThAcc = 0.25f;
-	params.restThGyr = 0.7f;
+	params.restFilterTau = 1.2f;
+	params.restMinT = 2.5f;
+	params.restThAcc = 0.15f;
+	params.restThGyr = 0.45f;
 	params.magDistRejectionEnabled = true;
-	params.tauMag = 12.0f;
-	params.magCurrentTau = 0.15f;
+	params.tauMag = 18.0f;
+	params.magCurrentTau = 0.3f;
 	params.magNormTh = 0.10f;
 	params.magDipTh = 10.0f;
 	params.magNewFirstTime = 5.0f;
 	params.magNewMinGyr = 15.0f;
 	params.magMinUndisturbedTime = 0.5f;
-	params.magMaxRejectionTime = 180.0f;
-	params.magRejectionFactor = 4.0f;
+	params.magMaxRejectionTime = 60.0f;
+	params.magRejectionFactor = 200.0f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)
