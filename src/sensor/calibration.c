@@ -1378,7 +1378,7 @@ static int sensor_offsetBias_internal(
 
 	// Record start temperature
 	current_temp = sensor_get_current_imu_temperature();
-	if (!isnan(current_temp) && current_temp > -10.0f && current_temp < 60.0f) {
+	if (!isnan(current_temp) && current_temp > -20.0f && current_temp < 60.0f) {
 		temp_min = current_temp;
 		temp_max = current_temp;
 	}
@@ -1514,7 +1514,7 @@ static int sensor_offsetBias_internal(
 #if CONFIG_SENSOR_USE_TCAL
 		// Sample and accumulate temperature
 		current_temp = sensor_get_current_imu_temperature();
-		if (!isnan(current_temp) && current_temp > -10.0f && current_temp < 60.0f) {
+		if (!isnan(current_temp) && current_temp > -20.0f && current_temp < 60.0f) {
 			temp_sum += (double)current_temp;
 			valid_temp_count++;
 
@@ -2346,7 +2346,7 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 	bool is_temp_rising = false;
 
 	// Validate current temperature reading
-	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
+	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
 		LOG_WRN("T-Cal Auto: Invalid temperature reading %.2fC - skipping", (double)current_temp);
 		return;
 	}
@@ -2772,7 +2772,7 @@ void sensor_tcal_boot_calibration_check(void)
 
 	// Get current temperature
 	float current_temp = sensor_get_current_imu_temperature();
-	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
+	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
 		return; // Invalid temperature
 	}
 
@@ -2837,7 +2837,7 @@ static int sensor_perform_boot_calibration(void)
 
 	// Get current temperature
 	float current_temp = sensor_get_current_imu_temperature();
-	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
+	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
 		LOG_ERR("Boot Cal: Invalid temperature");
 		return -1;
 	}
@@ -2964,7 +2964,7 @@ static int sensor_perform_runtime_calibration(void)
 
 	// Get current temperature
 	float current_temp = sensor_get_current_imu_temperature();
-	if (isnan(current_temp) || current_temp < -10.0f || current_temp > 60.0f) {
+	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
 		LOG_ERR("Runtime Cal: Invalid temperature");
 		// Apply failure cooldown to prevent immediate retry
 		runtime_cal_last_time = k_uptime_get() - RUNTIME_CAL_COOLDOWN_MS + RUNTIME_CAL_FAILURE_COOLDOWN_MS;
