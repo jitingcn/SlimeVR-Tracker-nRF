@@ -1860,12 +1860,14 @@ void sensor_loop(void)
 				LOG_WRN("Last update steps took up to %lld ms", time_delta);
 				max_loop_time = 0;
 			}
-			if (mag_available && mag_enabled && sensor_debug_is_active()) {
+			if (mag_available && mag_enabled) {
 				// Report actual rate of mag samples fed into VQF (target: mag ODR, e.g. 50Hz)
-				LOG_INF("mag VQF updates: %u in last %dms (%.1fHz, target %.0fHz)",
-					mag_vqf_updates_since_status, STATUS_INTERVAL_MS,
-					(double)mag_vqf_updates_since_status * 1000.0 / STATUS_INTERVAL_MS,
-					1.0 / (double)mag_actual_time);
+				if (sensor_debug_is_active()) {
+					LOG_INF("mag VQF updates: %u in last %dms (%.1fHz, target %.0fHz)",
+						mag_vqf_updates_since_status, STATUS_INTERVAL_MS,
+						(double)mag_vqf_updates_since_status * 1000.0 / STATUS_INTERVAL_MS,
+						1.0 / (double)mag_actual_time);
+				}
 				mag_vqf_updates_since_status = 0;
 			}
 #if DEBUG
