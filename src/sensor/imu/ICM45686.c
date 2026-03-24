@@ -222,7 +222,12 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	// Read WHO_AM_I to verify communication
 	uint8_t who_am_i = 0;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x72, &who_am_i); // WHO_AM_I register
-	LOG_INF("WHO_AM_I = 0x%02X (expected 0xE9)", who_am_i);
+	LOG_INF("WHO_AM_I = 0x%02X (expected 0xE9/0xE7)", who_am_i);
+	if (who_am_i != 0xE9 && who_am_i != 0xE7)
+	{
+		LOG_ERR("Invalid WHO_AM_I value");
+		return -1;
+	}
 
 	if (clock_rate > 0)
 	{
