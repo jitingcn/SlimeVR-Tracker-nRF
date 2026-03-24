@@ -1704,8 +1704,8 @@ int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_r
 #define THRESHOLD_ACC 0.02f
 // Number of samples to collect for each orientation
 #define SAMPLES_PER_ORIENTATION 500
-// Timeout for waiting for new pose (90 seconds in milliseconds)
-#define CALIB_POSE_TIMEOUT_MS 90000
+// Timeout for waiting for new pose (30 seconds in milliseconds)
+#define CALIB_POSE_TIMEOUT_MS 30000
 typedef struct {
 	float x, y, z;
 } Vector3;
