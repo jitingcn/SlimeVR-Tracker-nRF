@@ -131,23 +131,23 @@ static int sensor_calibrate_mag(void);
 #endif
 
 #ifndef BIAS_COLLECT_MAX_SAMPLE_TIME_MS
-#define BIAS_COLLECT_MAX_SAMPLE_TIME_MS 6000 // 6 seconds max
+#define BIAS_COLLECT_MAX_SAMPLE_TIME_MS 5000 // 5 seconds max
 #endif
 
 #ifndef BIAS_COLLECT_MIN_SAMPLE_TIME_MS
-#define BIAS_COLLECT_MIN_SAMPLE_TIME_MS 4000 // 4 seconds min
+#define BIAS_COLLECT_MIN_SAMPLE_TIME_MS 3000 // 3 seconds min
 #endif
 
 #ifndef BIAS_COLLECT_TEMP_CHECK_TIME_MS
-#define BIAS_COLLECT_TEMP_CHECK_TIME_MS 4000 // 4 seconds - prioritize sampling time over temp stability
+#define BIAS_COLLECT_TEMP_CHECK_TIME_MS 3000 // 3 seconds - prioritize sampling time over temp stability
 #endif
 
 #ifndef BIAS_COLLECT_GYRO_MOTION_THRESHOLD
-#define BIAS_COLLECT_GYRO_MOTION_THRESHOLD 2.0f // dps (range method)
+#define BIAS_COLLECT_GYRO_MOTION_THRESHOLD 1.5f // dps (range method)
 #endif
 
 #ifndef BIAS_COLLECT_ACCEL_MOTION_THRESHOLD
-#define BIAS_COLLECT_ACCEL_MOTION_THRESHOLD 0.12f // G (range method)
+#define BIAS_COLLECT_ACCEL_MOTION_THRESHOLD 0.06f // G (range method)
 #endif
 
 #if CONFIG_SENSOR_USE_TCAL
@@ -160,9 +160,9 @@ static int sensor_calibrate_mag(void);
 // =============================================================================
 
 // Boot calibration constants
-#define BOOT_CAL_TIME_WINDOW_START_MS 15000 // 15 seconds after boot
-#define BOOT_CAL_TIME_WINDOW_END_MS 50000  // 50 seconds after boot
-#define BOOT_CAL_MAX_ATTEMPTS 3            // Maximum retry attempts
+#define BOOT_CAL_TIME_WINDOW_START_MS 5000 // 5 seconds after boot
+#define BOOT_CAL_TIME_WINDOW_END_MS 30000  // 30 seconds after boot
+#define BOOT_CAL_MAX_ATTEMPTS 2            // Maximum retry attempts
 #define BOOT_CAL_MIN_CURVE_POINTS 4        // Minimum calibration points
 
 // =============================================================================
@@ -209,12 +209,68 @@ typedef enum {
 static tcal_temp_direction_t tcal_current_direction = TCAL_DIR_UNKNOWN;
 static float tcal_direction_ref_temp = NAN; // Reference temperature for direction detection
 
-// Hysteresis blending EMA factor
-// When a new measurement at the same temperature slot comes from the opposite
-// direction, we blend with the existing point to average out hysteresis.
-// 0.5 = equal weight (fast convergence), closer to 1.0 = favor new measurement
-#define TCAL_HYSTERESIS_EMA_SAME_DIR 0.7f    // Same direction: favor new measurement
-#define TCAL_HYSTERESIS_EMA_OPPOSITE_DIR 0.5f // Opposite direction: equal blend to average hysteresis
+// Hysteresis blending EMA factors (new = alpha * measured + (1-alpha) * existing)
+// Physically, IMU bias is more stable during warm-up (rising) than during cooling,
+// so rising-direction measurements are given higher trust.
+#define TCAL_HYSTERESIS_EMA_RISING  0.7f // Rising temp: favor new measurement
+#define TCAL_HYSTERESIS_EMA_FALLING 0.3f // Falling temp: preserve warm-up data
+#define TCAL_HYSTERESIS_EMA_UNKNOWN 0.5f // Unknown direction: equal blend
+
+// Minimum bias change (dps) required to trigger a flash write.
+// Skips NVS/LUT rebuild when successive flushes of the same bucket produce
+// negligible change, preventing periodic flash wear during stable rest.
+#define TCAL_SAVE_SIGNIFICANCE_THRESHOLD 0.002f
+
+// =============================================================================
+// Continuous Accumulator-Based T-Cal Sampling
+// =============================================================================
+// A single accumulator continuously collects gyro+temperature samples while
+// the device is resting. Periodically (every ~20 seconds), the accumulator is
+// flushed: the averaged bias is saved to the appropriate temperature bucket.
+//
+// If temperature drifts more than one bucket width during accumulation, an
+// early flush is triggered to avoid cross-bucket contamination.
+//
+// Benefits over fixed-time one-shot sampling:
+// - No temperature gap can be skipped regardless of change rate
+// - No temperature change invalidation (each flush is short enough)
+// - Points saved at bucket center, eliminating boundary drift issues
+// - Low overhead: just sum accumulation, no per-sample bucket lookup
+
+// Flush interval: accumulator is committed every ~25 seconds
+#define TCAL_ACCUM_FLUSH_INTERVAL_MS 25000
+
+// Minimum samples required for a valid flush
+#define TCAL_ACCUM_MIN_SAMPLES 2500
+
+// Maximum temperature drift within one accumulation window before early flush.
+// Slightly larger than bucket width (0.5°C) to allow full bucket coverage
+// while preventing cross-bucket contamination.
+#define TCAL_ACCUM_TEMP_DRIFT_MAX 0.53f
+
+// Gyro range threshold: if any axis exceeds this during accumulation,
+// motion is detected and the accumulator is reset.
+#define TCAL_ACCUM_GYRO_RANGE_THRESHOLD 1.5f
+
+static struct {
+	double gyro_sum[3];    // Accumulated raw gyro values
+	double temp_sum;       // Accumulated temperature values
+	int sample_count;      // Number of gyro samples
+	int temp_count;        // Number of valid temperature samples
+	float min_g[3];        // Gyro min per axis for motion detection
+	float max_g[3];        // Gyro max per axis for motion detection
+	float temp_min;        // Temperature min during accumulation
+	float temp_max;        // Temperature max during accumulation
+	bool active;           // Whether accumulator is currently collecting
+	int64_t start_time;    // Timestamp when accumulation started
+} tcal_accum;
+
+static int64_t tcal_accum_last_commit_time = 0;
+
+// Forward declarations
+static void tcal_accum_reset(void);
+static void tcal_accum_flush(void);
+static void tcal_save_point(int idx, const float bias[3]);
 
 static float last_gyro_tcal_offset[3] = {0.0f, 0.0f, 0.0f};
 
@@ -277,7 +333,7 @@ static int sensor_tcal_mls_lookup(float temp, float bias_out[3]);
 // - RAM usage: ~0.9KB for standard 10-45°C range
 //
 // Incremental Build Strategy:
-// - At boot, first build entries within ±3°C of current temperature (priority zone)
+// - At boot, first build entries within ±2°C of current temperature (priority zone)
 // - Return quickly to allow other threads to run
 // - Continue building remaining entries in small batches during idle time
 // - LUT lookup falls back to MLS for entries not yet computed
@@ -289,8 +345,8 @@ static int sensor_tcal_mls_lookup(float temp, float bias_out[3]);
 #define MLS_LUT_SIZE ((int)((CONFIG_SENSOR_POLY_TEMP_MAX - CONFIG_SENSOR_POLY_TEMP_MIN) * MLS_LUT_STEP_PER_DEGREE) + 1)
 
 // Incremental build configuration
-#define MLS_LUT_PRIORITY_RANGE 3.0f  // ±3°C around current temp is priority zone
-#define MLS_LUT_BATCH_SIZE 10        // Entries to compute per incremental batch
+#define MLS_LUT_PRIORITY_RANGE 2.0f  // ±2°C around current temp is priority zone
+#define MLS_LUT_BATCH_SIZE 8        // Entries to compute per incremental batch
 #define MLS_LUT_BATCH_YIELD_MS 10     // Sleep between batches to yield CPU
 
 // Convert temperature to LUT index (continuous, for interpolation)
@@ -306,7 +362,7 @@ typedef struct {
 // LUT build state
 typedef enum {
 	MLS_LUT_BUILD_IDLE,         // No build in progress, LUT may be invalid or complete
-	MLS_LUT_BUILD_PRIORITY,     // Building priority zone (±3°C around current temp)
+	MLS_LUT_BUILD_PRIORITY,     // Building priority zone (±2°C around current temp)
 	MLS_LUT_BUILD_BACKGROUND,   // Building remaining entries in background
 	MLS_LUT_BUILD_COMPLETE      // All entries computed
 } MlsLutBuildState;
@@ -459,6 +515,12 @@ void sensor_calibration_process_gyro(float g[3])
 	float calculated_offset[3] = {0.0f, 0.0f, 0.0f};
 	float temp = sensor_get_current_imu_temperature();
 	bool offset_calculated = false;
+
+	// Feed raw gyro data into continuous bucket accumulator for auto T-Cal
+	// This must happen before bias subtraction so we capture the true raw bias
+	if (tcal_auto_calibration_enabled && !isnan(temp)) {
+		sensor_tcal_feed_continuous_sample(g, temp);
+	}
 
 	// ==========================================================================
 	// Unified T-Cal Strategy: LUT -> MLS -> Static Bias
@@ -1001,66 +1063,21 @@ static void sensor_calibrate_imu()
 			int idx = TEMP_TO_IDX(avg_temp);
 			if (idx >= 0 && idx < TCAL_BUFFER_SIZE) {
 
-				// Remove nearby points to avoid numerical instability
-				float min_separation = 0.3f;
-
-				// Check lower indices (sorted by temp)
-				for (int i = idx - 1; i >= 0; i--) {
-					if (retained->tempCalPoints[i].temp != 0.0f) {
-						if (fabsf(retained->tempCalPoints[i].temp - avg_temp) < min_separation) {
-							retained->tempCalPoints[i].temp = 0.0f;
-							memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
-							if (retained->tempCalState.count > 0) {
-								retained->tempCalState.count--;
-							}
-							LOG_INF("T-Cal: Removed conflict point at index %d", i);
-						} else {
-							break; // Further points are even further away
-						}
-					}
-				}
-				// Check upper indices (sorted by temp)
-				for (int i = idx + 1; i < TCAL_BUFFER_SIZE; i++) {
-					if (retained->tempCalPoints[i].temp != 0.0f) {
-						if (fabsf(retained->tempCalPoints[i].temp - avg_temp) < min_separation) {
-							retained->tempCalPoints[i].temp = 0.0f;
-							memset(retained->tempCalPoints[i].bias, 0, sizeof(retained->tempCalPoints[i].bias));
-							if (retained->tempCalState.count > 0) {
-								retained->tempCalState.count--;
-							}
-							LOG_INF("T-Cal: Removed conflict point at index %d", i);
-						} else {
-							break; // Further points are even further away
-						}
-					}
-				}
-
-				// Hysteresis-aware blending: when overwriting an existing point,
-				// blend the new bias with the old one using EMA to compensate for
-				// thermal hysteresis (rising vs falling temperature curves differ).
+				// Hysteresis-aware blending: prefer rising-phase data.
+				// Use tcal_current_direction directly — do not infer from temp comparison.
 				if (retained->tempCalPoints[idx].temp != 0.0f) {
-					// Existing point - blend based on temperature direction
 					float ema_alpha;
-					if (tcal_current_direction == TCAL_DIR_UNKNOWN) {
-						ema_alpha = TCAL_HYSTERESIS_EMA_SAME_DIR;
-					} else {
-						// Determine direction of existing point by comparing stored temp
-						// with the new measurement's approach direction
-						// If directions match, favor the new measurement more
-						// If opposite, blend equally to average out hysteresis
-						float existing_temp = retained->tempCalPoints[idx].temp;
-						bool new_is_rising = (avg_temp >= existing_temp);
-						bool dir_matches = (tcal_current_direction == TCAL_DIR_RISING && new_is_rising) ||
-						                   (tcal_current_direction == TCAL_DIR_FALLING && !new_is_rising);
-						ema_alpha = dir_matches ? TCAL_HYSTERESIS_EMA_SAME_DIR
-						                        : TCAL_HYSTERESIS_EMA_OPPOSITE_DIR;
-						LOG_INF(
-							"T-Cal: Blending with existing point (dir: %s, alpha: %.2f)",
-							dir_matches ? "same" : "opposite",
-							(double)ema_alpha
-						);
+					switch (tcal_current_direction) {
+					case TCAL_DIR_RISING:  ema_alpha = TCAL_HYSTERESIS_EMA_RISING;  break;
+					case TCAL_DIR_FALLING: ema_alpha = TCAL_HYSTERESIS_EMA_FALLING; break;
+					default:               ema_alpha = TCAL_HYSTERESIS_EMA_UNKNOWN; break;
 					}
-					// EMA blend: new = alpha * measured + (1 - alpha) * existing
+					LOG_INF(
+						"T-Cal: Blending with existing point (dir: %s, alpha: %.2f)",
+						tcal_current_direction == TCAL_DIR_RISING ? "rising" :
+						tcal_current_direction == TCAL_DIR_FALLING ? "falling" : "unknown",
+						(double)ema_alpha
+					);
 					for (int axis = 0; axis < 3; axis++) {
 						g_bias[axis] = ema_alpha * g_bias[axis] +
 						               (1.0f - ema_alpha) * retained->tempCalPoints[idx].bias[axis];
@@ -1075,6 +1092,7 @@ static void sensor_calibrate_imu()
 				retained->tempCalPoints[idx].temp = avg_temp;
 				memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
 				retained->tempCalState.valid = false; // Invalidate old curve
+				// Manual calibration always writes NVS (user-initiated, not periodic)
 				update_tcal_state();
 
 			} else {
@@ -2268,6 +2286,9 @@ void sensor_tcal_clear(void)
 	retained->bootCalState.doffset[2] = 0.0f;
 	LOG_INF("Clearing D_offset along with T-Cal data");
 
+	// Reset continuous accumulator sampling state
+	tcal_accum_reset();
+
 	// Manual command: invalidate fusion to force quaternion recalculation
 	sensor_fusion_invalidate();
 
@@ -2364,6 +2385,9 @@ bool sensor_tcal_is_temp_outside_range(float temp, float *min_temp, float *max_t
 void sensor_tcal_set_auto_calibration(bool enabled)
 {
 	tcal_auto_calibration_enabled = enabled;
+	if (!enabled) {
+		tcal_accum_reset();
+	}
 	LOG_INF("T-Cal Auto-calibration %s", enabled ? "enabled" : "disabled");
 }
 
@@ -2373,122 +2397,284 @@ bool sensor_tcal_get_auto_calibration(void)
 	return tcal_auto_calibration_enabled;
 }
 
-// Check and request auto calibration if conditions are met
-// Allows both rising and falling temperature directions.
-// Temperature direction is tracked for hysteresis-aware blending when saving points.
-void sensor_tcal_check_auto_calibration(float current_temp)
+// =============================================================================
+// Continuous Accumulator Implementation
+// =============================================================================
+
+static void tcal_accum_reset(void)
 {
-	static int64_t last_calibration_time = 0;
-	static float last_temp = NAN;
-	static int64_t temp_history_time = 0;
+	memset(&tcal_accum, 0, sizeof(tcal_accum));
+	tcal_accum.temp_min = INFINITY;
+	tcal_accum.temp_max = -INFINITY;
+}
 
-	int64_t now = k_uptime_get();
+/**
+ * Save a calibration point with hysteresis-aware blending.
+ * Saves at the bucket center temperature to prevent boundary drift.
+ */
+static void tcal_save_point(int idx, const float bias[3])
+{
+	if (idx < 0 || idx >= TCAL_BUFFER_SIZE) {
+		LOG_WRN("T-Cal: Index %d out of range, skipping", idx);
+		return;
+	}
 
-	// Check if auto-calibration is enabled
+	// Use the bucket center temperature as the point temperature
+	float bucket_temp = IDX_TO_TEMP(idx) + (0.5f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE);
+
+	// Update temperature direction tracking
+	if (!isnan(tcal_direction_ref_temp)) {
+		float delta = bucket_temp - tcal_direction_ref_temp;
+		if (delta > 0.2f) {
+			tcal_current_direction = TCAL_DIR_RISING;
+		} else if (delta < -0.2f) {
+			tcal_current_direction = TCAL_DIR_FALLING;
+		}
+	}
+	tcal_direction_ref_temp = bucket_temp;
+
+	float final_bias[3];
+	memcpy(final_bias, bias, sizeof(final_bias));
+
+	// Hysteresis-aware blending when overwriting existing point.
+	// Use tcal_current_direction directly — inferring direction from bucket center
+	// temperatures is unreliable since same-bucket overwrites always have equal temps.
+	bool is_new_point = (retained->tempCalPoints[idx].temp == 0.0f);
+	if (!is_new_point) {
+		// Select EMA alpha based on approach direction, preferring rising-phase data
+		float ema_alpha;
+		switch (tcal_current_direction) {
+		case TCAL_DIR_RISING:  ema_alpha = TCAL_HYSTERESIS_EMA_RISING;  break;
+		case TCAL_DIR_FALLING: ema_alpha = TCAL_HYSTERESIS_EMA_FALLING; break;
+		default:               ema_alpha = TCAL_HYSTERESIS_EMA_UNKNOWN; break;
+		}
+		LOG_INF("T-Cal: Blending at idx %d (dir: %s, alpha: %.2f)",
+		        idx,
+		        tcal_current_direction == TCAL_DIR_RISING ? "rising" :
+		        tcal_current_direction == TCAL_DIR_FALLING ? "falling" : "unknown",
+		        (double)ema_alpha);
+		for (int axis = 0; axis < 3; axis++) {
+			final_bias[axis] = ema_alpha * final_bias[axis] +
+			                   (1.0f - ema_alpha) * retained->tempCalPoints[idx].bias[axis];
+		}
+		LOG_INF("T-Cal: Blended bias: %.5f %.5f %.5f",
+		        (double)final_bias[0], (double)final_bias[1], (double)final_bias[2]);
+	} else {
+		retained->tempCalState.count++;
+	}
+
+	// Check if the change is significant enough to warrant a flash write.
+	// New points always write; existing points only write if bias changed meaningfully.
+	float max_delta = 0.0f;
+	if (!is_new_point) {
+		for (int axis = 0; axis < 3; axis++) {
+			float d = fabsf(final_bias[axis] - retained->tempCalPoints[idx].bias[axis]);
+			if (d > max_delta) {
+				max_delta = d;
+			}
+		}
+	}
+
+	retained->tempCalPoints[idx].temp = bucket_temp;
+	memcpy(retained->tempCalPoints[idx].bias, final_bias, sizeof(float) * 3);
+	retained->tempCalState.valid = false;
+
+	LOG_INF("T-Cal: Committed point at idx %d (%.2fC): [%.5f, %.5f, %.5f] (delta: %.4f dps)",
+	        idx, (double)bucket_temp,
+	        (double)final_bias[0], (double)final_bias[1], (double)final_bias[2],
+	        (double)max_delta);
+
+	if (is_new_point || max_delta >= TCAL_SAVE_SIGNIFICANCE_THRESHOLD) {
+		// Significant change or first write: persist to NVS and rebuild LUT
+		update_tcal_state();
+	} else {
+		// Minor update: refresh LUT cache so runtime lookup sees the new value
+		// without paying the cost of a full NVS write cycle
+		LOG_DBG("T-Cal: Change below threshold (%.4f < %.4f), skipping NVS write",
+		        (double)max_delta, (double)TCAL_SAVE_SIGNIFICANCE_THRESHOLD);
+		sensor_tcal_cache_invalidate();
+	}
+}
+
+/**
+ * Flush the accumulator: compute average bias/temperature, save to the
+ * appropriate temperature bucket.
+ */
+static void tcal_accum_flush(void)
+{
+	if (!tcal_accum.active || tcal_accum.sample_count < TCAL_ACCUM_MIN_SAMPLES) {
+		return;
+	}
+
+	// Compute averages
+	float avg_bias[3];
+	for (int axis = 0; axis < 3; axis++) {
+		avg_bias[axis] = (float)(tcal_accum.gyro_sum[axis] / tcal_accum.sample_count);
+	}
+
+	float avg_temp = (tcal_accum.temp_count > 0)
+	                 ? (float)(tcal_accum.temp_sum / tcal_accum.temp_count)
+	                 : NAN;
+
+	if (isnan(avg_temp)) {
+		LOG_WRN("T-Cal: No valid temperature samples in accumulator, discarding");
+		tcal_accum_reset();
+		return;
+	}
+
+	// Map average temperature to bucket index
+	int idx = TEMP_TO_IDX(avg_temp);
+	if (idx < 0 || idx >= TCAL_BUFFER_SIZE) {
+		LOG_WRN("T-Cal: Average temperature %.2fC outside calibration range, discarding",
+		        (double)avg_temp);
+		tcal_accum_reset();
+		return;
+	}
+
+	LOG_INF("T-Cal: Flushing accumulator: %d samples, avg temp %.2fC (range %.2fC), bucket idx %d",
+	        tcal_accum.sample_count, (double)avg_temp,
+	        (double)(tcal_accum.temp_max - tcal_accum.temp_min), idx);
+
+	// Update gyroTemp in retained
+	sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
+
+	// Save to the bucket
+	tcal_save_point(idx, avg_bias);
+	tcal_accum_last_commit_time = k_uptime_get();
+
+	// Reset accumulator for next collection period
+	tcal_accum_reset();
+}
+
+/**
+ * Feed a gyro sample into the continuous accumulator.
+ * Called from sensor_calibration_process_gyro for every raw gyro sample.
+ *
+ * The accumulator collects data continuously. Periodically it is flushed
+ * (by time or by temperature drift) to save the averaged result.
+ *
+ * @param g Raw gyro reading (before bias subtraction)
+ * @param temp Current IMU temperature
+ */
+void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
+{
 	if (!tcal_auto_calibration_enabled) {
 		return;
 	}
 
-	// Prevent starting new calibration while previous one is still running
-	// Use calibration cooldown time (BIAS_COLLECT_MAX_SAMPLE_TIME_MS + margin)
-	const int64_t calibration_cooldown_ms = BIAS_COLLECT_MAX_SAMPLE_TIME_MS + 10000; // 5s sampling + 10s margin = 15s
+	// Validate temperature
+	if (isnan(temp) || temp < (float)CONFIG_SENSOR_POLY_TEMP_MIN ||
+	    temp > (float)CONFIG_SENSOR_POLY_TEMP_MAX) {
+		return;
+	}
+
+	// Initialize accumulator on first sample
+	if (!tcal_accum.active) {
+		tcal_accum_reset();
+		tcal_accum.active = true;
+		tcal_accum.start_time = k_uptime_get();
+		tcal_accum.min_g[0] = g[0]; tcal_accum.min_g[1] = g[1]; tcal_accum.min_g[2] = g[2];
+		tcal_accum.max_g[0] = g[0]; tcal_accum.max_g[1] = g[1]; tcal_accum.max_g[2] = g[2];
+		tcal_accum.temp_min = temp;
+		tcal_accum.temp_max = temp;
+	}
+
+	// Motion detection: check gyro range
+	for (int j = 0; j < 3; j++) {
+		if (g[j] < tcal_accum.min_g[j]) tcal_accum.min_g[j] = g[j];
+		if (g[j] > tcal_accum.max_g[j]) tcal_accum.max_g[j] = g[j];
+		if (tcal_accum.max_g[j] - tcal_accum.min_g[j] > TCAL_ACCUM_GYRO_RANGE_THRESHOLD) {
+			// Motion detected — discard accumulated data
+			LOG_DBG("T-Cal: Motion in accumulator, axis %d (range: %.3f dps), resetting",
+			        j, (double)(tcal_accum.max_g[j] - tcal_accum.min_g[j]));
+			tcal_accum_reset();
+			return;
+		}
+	}
+
+	// Accumulate gyro
+	tcal_accum.gyro_sum[0] += (double)g[0];
+	tcal_accum.gyro_sum[1] += (double)g[1];
+	tcal_accum.gyro_sum[2] += (double)g[2];
+	tcal_accum.sample_count++;
+
+	// Accumulate temperature
+	if (temp < tcal_accum.temp_min) tcal_accum.temp_min = temp;
+	if (temp > tcal_accum.temp_max) tcal_accum.temp_max = temp;
+	tcal_accum.temp_sum += (double)temp;
+	tcal_accum.temp_count++;
+
+	// Check flush conditions
+	int64_t elapsed = k_uptime_get() - tcal_accum.start_time;
+	float temp_drift = tcal_accum.temp_max - tcal_accum.temp_min;
+
+	// Condition 1: Temperature drifted beyond one bucket width — flush early
+	// to avoid cross-bucket contamination, then start a new accumulation window
+	if (temp_drift > TCAL_ACCUM_TEMP_DRIFT_MAX &&
+	    tcal_accum.sample_count >= TCAL_ACCUM_MIN_SAMPLES) {
+		LOG_INF("T-Cal: Temperature drift %.2fC exceeded threshold, early flush",
+		        (double)temp_drift);
+		tcal_accum_flush();
+		return;
+	}
+
+	// Condition 2: Flush interval reached
+	if (elapsed >= TCAL_ACCUM_FLUSH_INTERVAL_MS &&
+	    tcal_accum.sample_count >= TCAL_ACCUM_MIN_SAMPLES) {
+		tcal_accum_flush();
+		return;
+	}
+}
+
+/**
+ * Called when motion is detected — flush if enough data, then reset.
+ */
+void sensor_tcal_continuous_motion_detected(void)
+{
+	if (tcal_accum.active) {
+		if (tcal_accum.sample_count >= TCAL_ACCUM_MIN_SAMPLES) {
+			tcal_accum_flush();
+		} else {
+			tcal_accum_reset();
+		}
+	}
+}
+
+// Check and request auto calibration if conditions are met.
+// With continuous accumulator sampling, this is only used as a fallback
+// to trigger initial calibration when no T-Cal data exists at all.
+void sensor_tcal_check_auto_calibration(float current_temp)
+{
+	static int64_t last_calibration_time = 0;
+
+	int64_t now = k_uptime_get();
+
+	if (!tcal_auto_calibration_enabled) {
+		return;
+	}
+
+	// Continuous accumulator handles the normal case.
+	// This fallback only triggers initial manual calibration when there
+	// are zero temperature calibration points (device first use).
+	if (retained->tempCalState.count > 0) {
+		return;
+	}
+
+	const int64_t calibration_cooldown_ms = BIAS_COLLECT_MAX_SAMPLE_TIME_MS + 10000;
 	if ((now - last_calibration_time) < calibration_cooldown_ms) {
 		return;
 	}
 
-	// Validate current temperature reading
 	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
-		LOG_WRN("T-Cal Auto: Invalid temperature reading %.2fC - skipping", (double)current_temp);
 		return;
 	}
 
-	// Check if temperature is outside calibrated range
-	float closest_temp, distance;
-	bool needs_temp_cal = sensor_tcal_is_temp_outside_range(current_temp, &closest_temp, &distance);
+	LOG_INF("T-Cal Auto: No calibration data exists, requesting initial calibration at %.2fC",
+	        (double)current_temp);
 
-	// Only proceed if temperature calibration is needed
-	if (!needs_temp_cal) {
-		// Still update temperature tracking for direction detection
-		if (isnan(last_temp)) {
-			last_temp = current_temp;
-			temp_history_time = now;
-		}
-		return;
-	}
-
-	// Initialize tracking on first run
-	if (isnan(last_temp)) {
-		last_temp = current_temp;
-		temp_history_time = now;
-		LOG_DBG("T-Cal Auto: Initializing temperature tracking at %.2fC", (double)current_temp);
-		return;
-	}
-
-	// Check temperature trend every 18 seconds
-	// We require a minimum temperature change to ensure the temperature is
-	// actually moving (not just noise), but allow both directions.
-	bool temp_is_changing = false;
-	const int64_t temp_check_interval_ms = 18000;
-
-	if ((now - temp_history_time) >= temp_check_interval_ms) {
-		float temp_change = current_temp - last_temp;
-		float abs_change = fabsf(temp_change);
-
-		const float min_change_threshold = 0.55f;
-
-		if (abs_change >= min_change_threshold) {
-			temp_is_changing = true;
-			LOG_INF(
-				"T-Cal Auto: Temperature %s (%.2fC -> %.2fC, %+.2fC over %llds)",
-				temp_change > 0 ? "rising" : "falling",
-				(double)last_temp,
-				(double)current_temp,
-				(double)temp_change,
-				temp_check_interval_ms / 1000
-			);
-		} else {
-			LOG_DBG(
-				"T-Cal Auto: Temperature stable (%.2fC -> %.2fC, change: %.2fC) - skipping",
-				(double)last_temp,
-				(double)current_temp,
-				(double)abs_change
-			);
-		}
-
-		// Update temperature history
-		last_temp = current_temp;
-		temp_history_time = now;
-	}
-
-	// Require temperature to be changing (either direction) to trigger
-	if (!temp_is_changing) {
-		return;
-	}
-
-	// Provide friendly log message based on whether calibration points exist
-	if (isnan(closest_temp)) {
-		LOG_INF("T-Cal Auto: Temp %.2fC needs calibration (no existing calibration points)", (double)current_temp);
-	} else {
-		LOG_INF(
-			"T-Cal Auto: Temp %.2fC needs calibration (closest: %.2fC, distance: %.2fC)",
-			(double)current_temp,
-			(double)closest_temp,
-			(double)distance
-		);
-	}
-
-	LOG_INF("T-Cal Auto: Requesting auto-calibration (device is resting, temperature changing)");
-
-	// Request standard calibration (which will include tcal)
-	// The calibration routine itself will check if device is still using wait_for_motion()
 	int request_result = sensor_calibration_request(1);
-
-	// Only update timing if request was successful
 	if (request_result == 0) {
-		// Record calibration start time
 		last_calibration_time = now;
-	} else {
-		LOG_DBG("T-Cal Auto: Calibration request rejected (already running), will retry later");
 	}
 }
 

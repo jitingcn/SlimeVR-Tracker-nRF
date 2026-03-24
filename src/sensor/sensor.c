@@ -1848,7 +1848,14 @@ void sensor_loop(void)
 			// This helps maintain accuracy during long usage sessions by updating D_offset
 			sensor_runtime_calibration_check(resting);
 
+			// Notify continuous bucket sampling of motion state changes
+			if (!resting) {
+				sensor_tcal_continuous_motion_detected();
+			}
+
 			// Check for automatic temperature calibration (only when device is resting)
+			// With continuous bucket sampling, this is only used for initial calibration
+			// when no T-Cal data exists at all.
 			if (resting) {
 				float current_temp = temp;
 				if (!isnan(current_temp)) {

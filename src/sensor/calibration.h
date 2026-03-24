@@ -72,6 +72,10 @@ void sensor_tcal_check_auto_calibration(float current_temp);
 void sensor_tcal_set_auto_calibration(bool enabled);
 bool sensor_tcal_get_auto_calibration(void);
 
+// Continuous bucket-based T-Cal sampling
+void sensor_tcal_feed_continuous_sample(const float g[3], float temp);
+void sensor_tcal_continuous_motion_detected(void);
+
 // Quality assessment function - returns true if quality is sufficient
 bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality);
 
