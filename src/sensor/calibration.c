@@ -198,6 +198,24 @@ static int sensor_perform_runtime_calibration(void);
 // Auto-calibration control
 static bool tcal_auto_calibration_enabled = false;
 
+// Temperature direction tracking for hysteresis-aware blending
+// Tracks the direction of temperature change at the time of each calibration sample
+typedef enum {
+	TCAL_DIR_UNKNOWN = 0,
+	TCAL_DIR_RISING,
+	TCAL_DIR_FALLING,
+} tcal_temp_direction_t;
+
+static tcal_temp_direction_t tcal_current_direction = TCAL_DIR_UNKNOWN;
+static float tcal_direction_ref_temp = NAN; // Reference temperature for direction detection
+
+// Hysteresis blending EMA factor
+// When a new measurement at the same temperature slot comes from the opposite
+// direction, we blend with the existing point to average out hysteresis.
+// 0.5 = equal weight (fast convergence), closer to 1.0 = favor new measurement
+#define TCAL_HYSTERESIS_EMA_SAME_DIR 0.7f    // Same direction: favor new measurement
+#define TCAL_HYSTERESIS_EMA_OPPOSITE_DIR 0.5f // Opposite direction: equal blend to average hysteresis
+
 static float last_gyro_tcal_offset[3] = {0.0f, 0.0f, 0.0f};
 
 static void update_tcal_state(void); // Function to refresh T-Cal state
@@ -876,6 +894,18 @@ static void sensor_calibrate_imu()
 		sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
 		LOG_INF("T-Cal auto-calibration enabled: saving to tcal data only, not updating gyro bias");
 
+		// Update temperature direction tracking for hysteresis-aware blending
+		if (!isnan(tcal_direction_ref_temp)) {
+			float delta = avg_temp - tcal_direction_ref_temp;
+			if (delta > 0.2f) {
+				tcal_current_direction = TCAL_DIR_RISING;
+			} else if (delta < -0.2f) {
+				tcal_current_direction = TCAL_DIR_FALLING;
+			}
+			// If delta is within ±0.2°C, keep previous direction (noise filter)
+		}
+		tcal_direction_ref_temp = avg_temp;
+
 		// Check if T-Cal coverage is good - if so, skip saving a redundant point
 		tcal_quality_t quality;
 		bool has_good_coverage = false;
@@ -1005,8 +1035,42 @@ static void sensor_calibrate_imu()
 					}
 				}
 
-				if (retained->tempCalPoints[idx].temp == 0.0f) {
-					retained->tempCalState.count++; // Use struct member
+				// Hysteresis-aware blending: when overwriting an existing point,
+				// blend the new bias with the old one using EMA to compensate for
+				// thermal hysteresis (rising vs falling temperature curves differ).
+				if (retained->tempCalPoints[idx].temp != 0.0f) {
+					// Existing point - blend based on temperature direction
+					float ema_alpha;
+					if (tcal_current_direction == TCAL_DIR_UNKNOWN) {
+						ema_alpha = TCAL_HYSTERESIS_EMA_SAME_DIR;
+					} else {
+						// Determine direction of existing point by comparing stored temp
+						// with the new measurement's approach direction
+						// If directions match, favor the new measurement more
+						// If opposite, blend equally to average out hysteresis
+						float existing_temp = retained->tempCalPoints[idx].temp;
+						bool new_is_rising = (avg_temp >= existing_temp);
+						bool dir_matches = (tcal_current_direction == TCAL_DIR_RISING && new_is_rising) ||
+						                   (tcal_current_direction == TCAL_DIR_FALLING && !new_is_rising);
+						ema_alpha = dir_matches ? TCAL_HYSTERESIS_EMA_SAME_DIR
+						                        : TCAL_HYSTERESIS_EMA_OPPOSITE_DIR;
+						LOG_INF(
+							"T-Cal: Blending with existing point (dir: %s, alpha: %.2f)",
+							dir_matches ? "same" : "opposite",
+							(double)ema_alpha
+						);
+					}
+					// EMA blend: new = alpha * measured + (1 - alpha) * existing
+					for (int axis = 0; axis < 3; axis++) {
+						g_bias[axis] = ema_alpha * g_bias[axis] +
+						               (1.0f - ema_alpha) * retained->tempCalPoints[idx].bias[axis];
+					}
+					LOG_INF(
+						"T-Cal: Blended bias: %.5f %.5f %.5f",
+						(double)g_bias[0], (double)g_bias[1], (double)g_bias[2]
+					);
+				} else {
+					retained->tempCalState.count++; // New slot
 				}
 				retained->tempCalPoints[idx].temp = avg_temp;
 				memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
@@ -2168,6 +2232,10 @@ void sensor_tcal_clear(void)
 	// Invalidate lookup cache since calibration data will be cleared
 	sensor_tcal_cache_invalidate();
 
+	// Reset temperature direction tracking
+	tcal_current_direction = TCAL_DIR_UNKNOWN;
+	tcal_direction_ref_temp = NAN;
+
 	LOG_INF("Clearing all manual T-Cal data.");
 	memset(retained->tempCalPoints, 0, sizeof(retained->tempCalPoints));
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
@@ -2306,11 +2374,12 @@ bool sensor_tcal_get_auto_calibration(void)
 }
 
 // Check and request auto calibration if conditions are met
+// Allows both rising and falling temperature directions.
+// Temperature direction is tracked for hysteresis-aware blending when saving points.
 void sensor_tcal_check_auto_calibration(float current_temp)
 {
 	static int64_t last_calibration_time = 0;
 	static float last_temp = NAN;
-	static float min_temp_since_last_check = NAN;
 	static int64_t temp_history_time = 0;
 
 	int64_t now = k_uptime_get();
@@ -2327,82 +2396,62 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 		return;
 	}
 
-	// Check if temperature is outside calibrated range
-	float closest_temp, distance;
-	bool needs_temp_cal = sensor_tcal_is_temp_outside_range(current_temp, &closest_temp, &distance);
-
-	// Only proceed if temperature calibration is needed
-	if (!needs_temp_cal) {
-		// Update temperature tracking even when calibration is not needed
-		if (!isnan(current_temp)) {
-			if (isnan(min_temp_since_last_check) || current_temp < min_temp_since_last_check) {
-				min_temp_since_last_check = current_temp;
-			}
-		}
-		return;
-	}
-
-	// Track temperature trend - only calibrate when temperature is rising
-	bool is_temp_rising = false;
-
 	// Validate current temperature reading
 	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
 		LOG_WRN("T-Cal Auto: Invalid temperature reading %.2fC - skipping", (double)current_temp);
 		return;
 	}
 
+	// Check if temperature is outside calibrated range
+	float closest_temp, distance;
+	bool needs_temp_cal = sensor_tcal_is_temp_outside_range(current_temp, &closest_temp, &distance);
+
+	// Only proceed if temperature calibration is needed
+	if (!needs_temp_cal) {
+		// Still update temperature tracking for direction detection
+		if (isnan(last_temp)) {
+			last_temp = current_temp;
+			temp_history_time = now;
+		}
+		return;
+	}
+
 	// Initialize tracking on first run
 	if (isnan(last_temp)) {
 		last_temp = current_temp;
-		min_temp_since_last_check = current_temp;
 		temp_history_time = now;
 		LOG_DBG("T-Cal Auto: Initializing temperature tracking at %.2fC", (double)current_temp);
 		return;
 	}
 
-	// Update minimum temperature tracker
-	if (isnan(min_temp_since_last_check) || current_temp < min_temp_since_last_check) {
-		min_temp_since_last_check = current_temp;
-	}
+	// Check temperature trend every 18 seconds
+	// We require a minimum temperature change to ensure the temperature is
+	// actually moving (not just noise), but allow both directions.
+	bool temp_is_changing = false;
+	const int64_t temp_check_interval_ms = 18000;
 
-	// Check temperature trend every 10 seconds to smooth out sensor noise
-	const int64_t temp_check_interval_ms = 10000;
 	if ((now - temp_history_time) >= temp_check_interval_ms) {
 		float temp_change = current_temp - last_temp;
-		float temp_rise_from_min = current_temp - min_temp_since_last_check;
+		float abs_change = fabsf(temp_change);
 
-		// Temperature thresholds adjusted for typical IMU sensor accuracy (~1°C) and noise (~0.1-0.5°C)
-		const float short_term_rise_threshold = 0.3f; // 0.3°C over 10s - clear rising trend
-		const float long_term_rise_threshold = 0.5f;  // 0.5°C from minimum - significant rise after drop
+		const float min_change_threshold = 0.55f;
 
-		// Temperature is rising if:
-		// 1. It increased compared to last check (short-term trend, above noise level)
-		// 2. OR it's rising significantly from recent minimum (handles temp drop then rise case)
-		if (temp_change >= short_term_rise_threshold || temp_rise_from_min >= long_term_rise_threshold) {
-			is_temp_rising = true;
-			if (temp_rise_from_min >= long_term_rise_threshold) {
-				LOG_INF(
-					"T-Cal Auto: Temperature rising from recent minimum (%.2fC -> %.2fC, +%.2fC)",
-					(double)min_temp_since_last_check,
-					(double)current_temp,
-					(double)temp_rise_from_min
-				);
-			} else {
-				LOG_INF(
-					"T-Cal Auto: Temperature rising (%.2fC -> %.2fC, +%.2fC over %llds)",
-					(double)last_temp,
-					(double)current_temp,
-					(double)temp_change,
-					temp_check_interval_ms / 1000
-				);
-			}
-		} else {
-			LOG_DBG(
-				"T-Cal Auto: Temperature not rising (%.2fC -> %.2fC, change: %.2fC, from min: +%.2fC) - skipping",
+		if (abs_change >= min_change_threshold) {
+			temp_is_changing = true;
+			LOG_INF(
+				"T-Cal Auto: Temperature %s (%.2fC -> %.2fC, %+.2fC over %llds)",
+				temp_change > 0 ? "rising" : "falling",
 				(double)last_temp,
 				(double)current_temp,
 				(double)temp_change,
-				(double)temp_rise_from_min
+				temp_check_interval_ms / 1000
+			);
+		} else {
+			LOG_DBG(
+				"T-Cal Auto: Temperature stable (%.2fC -> %.2fC, change: %.2fC) - skipping",
+				(double)last_temp,
+				(double)current_temp,
+				(double)abs_change
 			);
 		}
 
@@ -2411,8 +2460,8 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 		temp_history_time = now;
 	}
 
-	// Only trigger calibration if temperature is rising
-	if (!is_temp_rising) {
+	// Require temperature to be changing (either direction) to trigger
+	if (!temp_is_changing) {
 		return;
 	}
 
@@ -2428,7 +2477,7 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 		);
 	}
 
-	LOG_INF("T-Cal Auto: Requesting auto-calibration (device is resting, temperature rising)");
+	LOG_INF("T-Cal Auto: Requesting auto-calibration (device is resting, temperature changing)");
 
 	// Request standard calibration (which will include tcal)
 	// The calibration routine itself will check if device is still using wait_for_motion()
@@ -2438,8 +2487,6 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 	if (request_result == 0) {
 		// Record calibration start time
 		last_calibration_time = now;
-		// Reset minimum temperature tracker after triggering calibration
-		min_temp_since_last_check = current_temp;
 	} else {
 		LOG_DBG("T-Cal Auto: Calibration request rejected (already running), will retry later");
 	}
