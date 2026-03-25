@@ -36,6 +36,9 @@
 #include "sensors_enum.h"
 #include "magneto/magneto1_4.h"
 #include "imu/BMI270.h"
+#if CONFIG_SENSOR_USE_VQF
+#include "fusion/vqf/vqf.h"
+#endif
 
 #include "calibration.h"
 
@@ -53,9 +56,11 @@ static int64_t magneto_progress_time;
 // Orientation reference directions for magnetometer calibration coverage
 //
 // Goal: enforce uniform directional coverage while collecting magnetometer samples.
-// We still use accelerometer (gravity) for region detection (avoids hard-iron offsets).
+// Use the fusion-estimated gravity direction for region detection when available,
+// and gate samples by acceleration magnitude so strong linear acceleration does
+// not contaminate the coverage estimate.
 //
-// generate a Fibonacci sphere point set which provides
+// Generate a Fibonacci sphere point set which provides
 // more uniform coverage and is easy to scale.
 #define MAG_CAL_NUM_REGIONS 128
 static float orientation_refs[MAG_CAL_NUM_REGIONS][3];
@@ -63,6 +68,12 @@ static bool orientation_refs_initialized;
 
 // golden angle = pi * (3 - sqrt(5))
 #define MAG_CAL_GOLDEN_ANGLE 2.39996322972865332f
+
+// Only trust orientation updates when accel magnitude stays reasonably close to 1 g.
+// This rejects samples collected during strong linear acceleration while keeping
+// normal hand-rotation usable for calibration.
+#define MAG_CAL_ACCEL_MAG_MIN_SQ 0.5625f
+#define MAG_CAL_ACCEL_MAG_MAX_SQ 1.5625f
 
 static void mag_orientation_refs_init(void)
 {
@@ -90,10 +101,11 @@ static int64_t magneto_last_saturated_warning;
 static int64_t mag_cal_last_status_log;
 
 // Calibration thresholds
-#define MAG_CAL_MIN_PER_REGION 10
-#define MAG_CAL_MAX_PER_REGION 15
-#define MAG_CAL_MIN_SAMPLES (MAG_CAL_NUM_REGIONS * MAG_CAL_MIN_PER_REGION)
-#define MAG_CAL_MIN_REGIONS MAG_CAL_NUM_REGIONS
+#define MAG_CAL_MIN_PER_REGION 8
+#define MAG_CAL_MAX_PER_REGION 12
+#define MAG_CAL_ALLOWED_INCOMPLETE_REGIONS 10
+#define MAG_CAL_REQUIRED_REGIONS (MAG_CAL_NUM_REGIONS - MAG_CAL_ALLOWED_INCOMPLETE_REGIONS)
+#define MAG_CAL_MIN_SAMPLES (MAG_CAL_REQUIRED_REGIONS * MAG_CAL_MIN_PER_REGION)
 #define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000
 
 static double ata[100]; // init calibration
@@ -1343,40 +1355,77 @@ static bool wait_for_motion(bool motion, int samples)
 	return false;
 }
 
+static bool mag_get_orientation_vector(const float *a, float out[3])
+{
+	float accel_mag_sq = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+	if (accel_mag_sq < MAG_CAL_ACCEL_MAG_MIN_SQ || accel_mag_sq > MAG_CAL_ACCEL_MAG_MAX_SQ) {
+		return false;
+	}
+
+#if CONFIG_SENSOR_USE_VQF
+	float q[4] = {0};
+	vqf_get_quat(q);
+
+	float quat_mag_sq = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+	if (quat_mag_sq > EPS) {
+		q_normalize(q, q);
+
+		out[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]);
+		out[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
+		out[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]);
+
+		float gravity_mag_sq = out[0] * out[0] + out[1] * out[1] + out[2] * out[2];
+		if (gravity_mag_sq > EPS) {
+#if CONFIG_CMSIS_DSP
+			float gravity_mag;
+			arm_sqrt_f32(gravity_mag_sq, &gravity_mag);
+			float inv_gravity_mag = 1.0f / gravity_mag;
+#else
+			float inv_gravity_mag = 1.0f / sqrtf(gravity_mag_sq);
+#endif
+			out[0] *= inv_gravity_mag;
+			out[1] *= inv_gravity_mag;
+			out[2] *= inv_gravity_mag;
+			return true;
+		}
+	}
+#endif
+
+#if CONFIG_CMSIS_DSP
+	float accel_mag;
+	arm_sqrt_f32(accel_mag_sq, &accel_mag);
+	float inv_accel_mag = 1.0f / accel_mag;
+#else
+	float inv_accel_mag = 1.0f / sqrtf(accel_mag_sq);
+#endif
+	out[0] = a[0] * inv_accel_mag;
+	out[1] = a[1] * inv_accel_mag;
+	out[2] = a[2] * inv_accel_mag;
+	return true;
+}
+
 /**
- * Determine which orientation region the device is in based on accelerometer.
- * Uses Fibonacci-sphere reference directions for improved sphere coverage.
+ * Determine which orientation region the device is in.
+ * Uses VQF-estimated gravity when available, while accel magnitude rejects
+ * samples collected under strong linear acceleration.
  * Returns region index (0..MAG_CAL_NUM_REGIONS-1), or -1 for invalid readings.
- *
- * Using gravity direction avoids the magnetometer hard iron offset problem
- * that made some regions unreachable with the previous approach.
  */
 static int check_orientation_region(const float *a)
 {
 	mag_orientation_refs_init();
 
-	float mag_sq = a[0]*a[0] + a[1]*a[1] + a[2]*a[2];
-	if (mag_sq < 0.25f) {
-		return -1;  // Less than 0.5g - free fall or invalid
+	float orientation[3];
+	if (!mag_get_orientation_vector(a, orientation)) {
+		return -1;
 	}
-
-	// Normalize accel vector
-	float inv_mag;
-#if CONFIG_CMSIS_DSP
-	arm_sqrt_f32(mag_sq, &inv_mag);
-	inv_mag = 1.0f / inv_mag;
-#else
-	inv_mag = 1.0f / sqrtf(mag_sq);
-#endif
-	float norm[3] = { a[0] * inv_mag, a[1] * inv_mag, a[2] * inv_mag };
 
 	// Find nearest reference direction by maximum dot product
 	int best = 0;
 	float best_dot = -2.0f;
 	for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
-		float dot = norm[0] * orientation_refs[i][0]
-		          + norm[1] * orientation_refs[i][1]
-		          + norm[2] * orientation_refs[i][2];
+		float dot = orientation[0] * orientation_refs[i][0]
+		          + orientation[1] * orientation_refs[i][1]
+		          + orientation[2] * orientation_refs[i][2];
 		if (dot > best_dot) {
 			best_dot = dot;
 			best = i;
@@ -1874,16 +1923,19 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 }
 #endif
 
-// Collect magnetometer sample for calibration using orientation-based coverage detection
-// Uses accelerometer (gravity) to track device orientation for uniform directional coverage
+// Collect magnetometer sample for calibration using fusion-assisted coverage detection
+// Uses filtered gravity direction, while accel magnitude gates dynamic-motion samples
 static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 {
-	// Determine orientation region from accelerometer (gravity direction)
-	// This avoids the hard iron offset problem of using magnetometer for coverage
+	// Determine orientation region from filtered gravity direction instead of raw accel angle.
+	// This avoids hard-iron bias in coverage tracking and reduces orientation jitter.
 	int region = check_orientation_region(a);
+	if (region < 0) {
+		return;
+	}
 
 	// Check if this region is already saturated
-	if (region >= 0 && mag_region_samples[region] >= MAG_CAL_MAX_PER_REGION) {
+	if (mag_region_samples[region] >= MAG_CAL_MAX_PER_REGION) {
 		int64_t now = k_uptime_get();
 		if (now - magneto_last_saturated_warning > MAG_CAL_SATURATED_WARNING_INTERVAL_MS) {
 			magneto_last_saturated_warning = now;
@@ -1917,22 +1969,27 @@ static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 
 	// Check if calibration is ready
 	int region_count = mag_region_covered_count;
-	if (sample_count >= MAG_CAL_MIN_SAMPLES && region_count >= MAG_CAL_MIN_REGIONS) {
-		bool balanced = true;
-		for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
-			if (mag_region_samples[i] > 0 &&
-			    mag_region_samples[i] < MAG_CAL_MIN_PER_REGION) {
-				balanced = false;
-				break;
-			}
+	int regions_with_min_samples = 0;
+	for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
+		if (mag_region_samples[i] >= MAG_CAL_MIN_PER_REGION) {
+			regions_with_min_samples++;
 		}
+	}
 
-		if (balanced) {
-			magneto_progress |= 0b01111111;
-			LOG_INF("Mag cal ready: %d samples, %d/%d regions covered",
-			        (int)sample_count, region_count, MAG_CAL_NUM_REGIONS);
-			set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
-		}
+	if (sample_count >= MAG_CAL_MIN_SAMPLES &&
+	    regions_with_min_samples >= MAG_CAL_REQUIRED_REGIONS) {
+		int incomplete_regions = MAG_CAL_NUM_REGIONS - regions_with_min_samples;
+		magneto_progress |= 0b01111111;
+		LOG_INF("Mag cal ready: %d samples, %d/%d regions sufficient, %d/%d touched",
+		        (int)sample_count,
+		        regions_with_min_samples,
+		        MAG_CAL_NUM_REGIONS,
+		        region_count,
+		        MAG_CAL_NUM_REGIONS);
+		LOG_INF("Mag cal ready detail: %d incomplete region(s) allowed=%d",
+		        incomplete_regions,
+		        MAG_CAL_ALLOWED_INCOMPLETE_REGIONS);
+		set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
 	}
 }
 
