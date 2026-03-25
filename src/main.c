@@ -53,9 +53,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 int main(void)
 {
-#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, pwr_gpios)
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, gnd_gpios)
 	gpio_pin_configure_dt(&gnd, GPIO_OUTPUT_ACTIVE);
 	gpio_pin_set_dt(&gnd, 0);
+#endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, pwr_gpios)
 	gpio_pin_configure_dt(&pwr, GPIO_OUTPUT_ACTIVE);
 	gpio_pin_set_dt(&pwr, 1);
 #endif
