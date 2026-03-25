@@ -101,8 +101,8 @@ static int64_t magneto_last_saturated_warning;
 static int64_t mag_cal_last_status_log;
 
 // Calibration thresholds
-#define MAG_CAL_MIN_PER_REGION 8
-#define MAG_CAL_MAX_PER_REGION 12
+#define MAG_CAL_MIN_PER_REGION 16
+#define MAG_CAL_MAX_PER_REGION 20
 #define MAG_CAL_ALLOWED_INCOMPLETE_REGIONS 10
 #define MAG_CAL_REQUIRED_REGIONS (MAG_CAL_NUM_REGIONS - MAG_CAL_ALLOWED_INCOMPLETE_REGIONS)
 #define MAG_CAL_MIN_SAMPLES (MAG_CAL_REQUIRED_REGIONS * MAG_CAL_MIN_PER_REGION)
