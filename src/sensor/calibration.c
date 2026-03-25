@@ -57,7 +57,7 @@ static int64_t magneto_progress_time;
 //
 // generate a Fibonacci sphere point set which provides
 // more uniform coverage and is easy to scale.
-#define MAG_CAL_NUM_REGIONS 42
+#define MAG_CAL_NUM_REGIONS 128
 static float orientation_refs[MAG_CAL_NUM_REGIONS][3];
 static bool orientation_refs_initialized;
 
@@ -85,13 +85,13 @@ static void mag_orientation_refs_init(void)
 }
 
 static uint16_t mag_region_samples[MAG_CAL_NUM_REGIONS];
-static uint64_t mag_region_coverage;  // Bitfield for covered regions
+static uint16_t mag_region_covered_count;
 static int64_t magneto_last_saturated_warning;
 static int64_t mag_cal_last_status_log;
 
 // Calibration thresholds
-#define MAG_CAL_MIN_PER_REGION 44
-#define MAG_CAL_MAX_PER_REGION 47
+#define MAG_CAL_MIN_PER_REGION 10
+#define MAG_CAL_MAX_PER_REGION 15
 #define MAG_CAL_MIN_SAMPLES (MAG_CAL_NUM_REGIONS * MAG_CAL_MIN_PER_REGION)
 #define MAG_CAL_MIN_REGIONS MAG_CAL_NUM_REGIONS
 #define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000
@@ -241,7 +241,7 @@ static float tcal_direction_ref_temp = NAN; // Reference temperature for directi
 #define TCAL_ACCUM_FLUSH_INTERVAL_MS 25000
 
 // Minimum samples required for a valid flush
-#define TCAL_ACCUM_MIN_SAMPLES 2500
+#define TCAL_ACCUM_MIN_SAMPLES 2000
 
 // Maximum temperature drift within one accumulation window before early flush.
 // Slightly larger than bucket width (0.5°C) to allow full bucket coverage
@@ -468,7 +468,6 @@ static void sensor_tcal_cache_invalidate(void)
 // helpers
 static bool wait_for_motion(bool motion, int samples);
 static int check_orientation_region(const float *a);
-static int popcount64(uint64_t x);
 static void magneto_reset(void);
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 static int isAccRest(float *, float *, float, int *, int);
@@ -758,11 +757,18 @@ void sensor_request_calibration_mag(void)
 {
 	// If already collecting or complete, just mark as ready if coverage is met
 	if (magneto_progress & 0x80) {
+		if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
+			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
+		}
 		// Already started, check if ready to apply
 		if (magneto_progress == 0b10111111) {
 			magneto_progress |= 1 << 6;
 		}
 		return;
+	}
+
+	if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
+		set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 	}
 
 	// LED sequence before calibration:
@@ -780,7 +786,7 @@ void sensor_request_calibration_mag(void)
 	magneto_progress = 0;
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
-	mag_region_coverage = 0;
+	mag_region_covered_count = 0;
 	mag_cal_last_status_log = 0;
 	magneto_reset();  // Clear ata buffer and sample count
 	magneto_progress |= 1 << 7;  // Set collection active flag
@@ -1200,7 +1206,15 @@ static int sensor_calibrate_mag(void)
 {
 	float zero[3] = {0};
 	if (v_diff_mag(magBAinv[0], zero) != 0) {
+		magneto_reset();
+		if (get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
+			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+		}
 		return -1; // magnetometer calibration already exists
+	}
+
+	if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
+		set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 	}
 
 	float m[3];
@@ -1214,7 +1228,7 @@ static int sensor_calibrate_mag(void)
 	if (now - mag_cal_last_status_log >= 1000) {
 		mag_cal_last_status_log = now;
 		int region = check_orientation_region(aBuf);
-		int covered = popcount64(mag_region_coverage);
+		int covered = mag_region_covered_count;
 		int min_samples = MAG_CAL_MAX_PER_REGION;
 		int needing_more = 0;
 		for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
@@ -1277,6 +1291,9 @@ static int sensor_calibrate_mag(void)
 			);
 		}
 		sensor_calibration_validate_mag(NULL, true); // additionally verify old calibration
+		if (get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
+			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+		}
 		return -1;
 	} else {
 		LOG_INF("Applying calibration");
@@ -1288,6 +1305,9 @@ static int sensor_calibrate_mag(void)
 	LOG_INF("Finished calibration");
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
 	sensor_refresh_sensor_ids(); // Refresh reported mag status after calibration
+	if (get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
+		set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+	}
 	return 0;
 }
 
@@ -1366,29 +1386,12 @@ static int check_orientation_region(const float *a)
 	return best;
 }
 
-/**
- * Count number of bits set in a 64-bit value (population count)
- */
-static int popcount64(uint64_t x)
-{
-#if defined(__GNUC__) || defined(__clang__)
-	return __builtin_popcountll((unsigned long long)x);
-#else
-	int count = 0;
-	while (x) {
-		count += (int)(x & 1ull);
-		x >>= 1;
-	}
-	return count;
-#endif
-}
-
 static void magneto_reset(void)
 {
 	magneto_progress = 0;
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
-	mag_region_coverage = 0;
+	mag_region_covered_count = 0;
 	memset(mag_region_samples, 0, sizeof(mag_region_samples));
 	magneto_last_saturated_warning = 0;
 	memset(ata, 0, sizeof(ata));
@@ -1903,23 +1906,21 @@ static void sensor_sample_mag_magneto_sample(const float a[3], const float m[3])
 
 	// Update orientation coverage
 	if (region >= 0) {
-		mag_region_samples[region]++;
-		uint64_t region_bit = 1ull << region;
-		if (!(mag_region_coverage & region_bit)) {
-			mag_region_coverage |= region_bit;
-			int covered = popcount64(mag_region_coverage);
+		if (mag_region_samples[region] == 0) {
+			mag_region_covered_count++;
 			LOG_INF("Mag cal coverage: %d/%d regions, %d samples",
-			        covered, MAG_CAL_NUM_REGIONS, (int)sample_count);
+			        mag_region_covered_count, MAG_CAL_NUM_REGIONS, (int)sample_count);
 			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 		}
+		mag_region_samples[region]++;
 	}
 
 	// Check if calibration is ready
-	int region_count = popcount64(mag_region_coverage);
+	int region_count = mag_region_covered_count;
 	if (sample_count >= MAG_CAL_MIN_SAMPLES && region_count >= MAG_CAL_MIN_REGIONS) {
 		bool balanced = true;
 		for (int i = 0; i < MAG_CAL_NUM_REGIONS; i++) {
-			if ((mag_region_coverage & (1ull << i)) &&
+			if (mag_region_samples[i] > 0 &&
 			    mag_region_samples[i] < MAG_CAL_MIN_PER_REGION) {
 				balanced = false;
 				break;
