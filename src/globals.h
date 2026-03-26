@@ -33,6 +33,11 @@
 #define ADAFRUIT_DFU_MAGIC_OTA_RESET 0xA8
 
 #define USER_SHUTDOWN_ENABLED CONFIG_USER_SHUTDOWN // Allow user to use reset or sw0 to shutdown
+#ifdef CONFIG_IGNORE_CHARGE_WAKE_ON_VBUS
+#define IGNORE_CHARGE_WAKE_ON_VBUS 1
+#else
+#define IGNORE_CHARGE_WAKE_ON_VBUS 0
+#endif
 #define IGNORE_RESET CONFIG_IGNORE_RESET // If sw0 available, don't change any reset behavior
 #define WOM_USE_DCDC CONFIG_WOM_USE_DCDC // Use DCDC instead of LDO for WOM if it is more efficient
 

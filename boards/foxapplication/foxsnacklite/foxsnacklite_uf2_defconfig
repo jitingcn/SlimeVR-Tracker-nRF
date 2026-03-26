@@ -9,6 +9,7 @@ CONFIG_USB_DEVICE_MANUFACTURER="FoxApplication"
 CONFIG_USB_DEVICE_PRODUCT="FoxApplication FoxSnackLite Tracker"
 
 CONFIG_BATTERY_USE_REG_BUCK_MAPPING=y
+CONFIG_IGNORE_CHARGE_WAKE_ON_VBUS=y
 
 #generate for adafruit uf2 bootloader flashing
 CONFIG_BUILD_OUTPUT_UF2=y

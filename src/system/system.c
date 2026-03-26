@@ -100,21 +100,26 @@ void configure_sense_pins(void)
 #endif
 	// Configure chgstat sense
 	if (!docked) {
+		bool ignore_charge_wake = IGNORE_CHARGE_WAKE_ON_VBUS && vin_read();
 #if CHG_EXISTS
-		nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, chg_gpios), NRF_GPIO_PIN_PULLUP);
-		nrf_gpio_cfg_sense_set(
-			NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, chg_gpios),
-			chg_read() ? NRF_GPIO_PIN_SENSE_HIGH : NRF_GPIO_PIN_SENSE_LOW
-		);
-		LOG_INF("Configured chg sense");
+		if (!ignore_charge_wake) {
+			nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, chg_gpios), NRF_GPIO_PIN_PULLUP);
+			nrf_gpio_cfg_sense_set(
+				NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, chg_gpios),
+				chg_read() ? NRF_GPIO_PIN_SENSE_HIGH : NRF_GPIO_PIN_SENSE_LOW
+			);
+			LOG_INF("Configured chg sense");
+		}
 #endif
 #if STBY_EXISTS
-		nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stby_gpios), NRF_GPIO_PIN_PULLUP);
-		nrf_gpio_cfg_sense_set(
-			NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stby_gpios),
-			stby_read() ? NRF_GPIO_PIN_SENSE_HIGH : NRF_GPIO_PIN_SENSE_LOW
-		);
-		LOG_INF("Configured stby sense");
+		if (!ignore_charge_wake) {
+			nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stby_gpios), NRF_GPIO_PIN_PULLUP);
+			nrf_gpio_cfg_sense_set(
+				NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stby_gpios),
+				stby_read() ? NRF_GPIO_PIN_SENSE_HIGH : NRF_GPIO_PIN_SENSE_LOW
+			);
+			LOG_INF("Configured stby sense");
+		}
 #endif
 	}
 	// Configure sw0 sense
