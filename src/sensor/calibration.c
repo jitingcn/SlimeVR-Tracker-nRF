@@ -62,7 +62,7 @@ static int64_t magneto_progress_time;
 //
 // Generate a Fibonacci sphere point set which provides
 // more uniform coverage and is easy to scale.
-#define MAG_CAL_NUM_REGIONS 128
+#define MAG_CAL_NUM_REGIONS 256
 static float orientation_refs[MAG_CAL_NUM_REGIONS][3];
 static bool orientation_refs_initialized;
 
@@ -101,9 +101,9 @@ static int64_t magneto_last_saturated_warning;
 static int64_t mag_cal_last_status_log;
 
 // Calibration thresholds
-#define MAG_CAL_MIN_PER_REGION 16
-#define MAG_CAL_MAX_PER_REGION 20
-#define MAG_CAL_ALLOWED_INCOMPLETE_REGIONS 10
+#define MAG_CAL_MIN_PER_REGION 3
+#define MAG_CAL_MAX_PER_REGION 5
+#define MAG_CAL_ALLOWED_INCOMPLETE_REGIONS 16
 #define MAG_CAL_REQUIRED_REGIONS (MAG_CAL_NUM_REGIONS - MAG_CAL_ALLOWED_INCOMPLETE_REGIONS)
 #define MAG_CAL_MIN_SAMPLES (MAG_CAL_REQUIRED_REGIONS * MAG_CAL_MIN_PER_REGION)
 #define MAG_CAL_SATURATED_WARNING_INTERVAL_MS 2000
