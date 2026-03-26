@@ -61,11 +61,11 @@ static void set_params()
 	params.restThGyr = 0.55f;
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 12.0f;
-	params.magCurrentTau = 0.10f;
+	params.magCurrentTau = 0.20f;
 	params.magNormTh = 0.06f;
 	params.magDipTh = 7.0f;
-	params.magNewFirstTime = 5.0f;
-	params.magNewMinGyr = 10.0f;
+	params.magNewFirstTime = 10.0f;
+	params.magNewMinGyr = 15.0f;
 	params.magMinUndisturbedTime = 1.0f;
 	params.magMaxRejectionTime = 5400.0f;
 	params.magRejectionFactor = 900.0f;
