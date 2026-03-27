@@ -689,7 +689,7 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 	uint8_t ireg_buf[5];
 	int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_STATUS0, &interrupts); // clear reset done int flag // TODO: is this needed
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG0, 0x00); // disable default interrupt (RESET_DONE)
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_ACCEL_CONFIG0, ACCEL_UI_FS_SEL_8G << 4 | ACCEL_ODR_50Hz); // set accel ODR and FS
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_ACCEL_CONFIG0, ACCEL_UI_FS_SEL_8G << 4 | ACCEL_ODR_200Hz); // set accel ODR and FS
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, ACCEL_MODE_LP); // set accel and gyro modes
 	ireg_buf[0] = ICM45686_IPREG_SYS2; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_IPREG_SYS2_REG_129;
