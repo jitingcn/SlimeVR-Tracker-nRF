@@ -494,6 +494,15 @@ bool vin_read(void) // blocking
 	return plugged;
 }
 
+bool vbus_read(void)
+{
+#ifdef POWER_USBREGSTATUS_VBUSDETECT_Msk
+	return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+#else
+	return vin_read();
+#endif
+}
+
 static void disable_DFU_thread(void)
 {
 #if ADAFRUIT_BOOTLOADER

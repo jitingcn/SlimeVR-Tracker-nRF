@@ -100,7 +100,10 @@ void configure_sense_pins(void)
 #endif
 	// Configure chgstat sense
 	if (!docked) {
-		bool ignore_charge_wake = IGNORE_CHARGE_WAKE_ON_VBUS && vin_read();
+		bool ignore_charge_wake = IGNORE_CHARGE_WAKE_ON_VBUS && vbus_read();
+		if (ignore_charge_wake) {
+			LOG_INF("Skipped charge wake sense while VBUS is present");
+		}
 #if CHG_EXISTS
 		if (!ignore_charge_wake) {
 			nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, chg_gpios), NRF_GPIO_PIN_PULLUP);
