@@ -101,6 +101,15 @@ config USER_SHUTDOWN
     help
         Allow user to use reset or sw0 to shutdown.
 
+config IGNORE_CHARGE_WAKE_ON_VBUS
+    bool "Ignore charge wake on VBUS"
+    default n
+    depends on USER_SHUTDOWN
+    help
+        When VBUS is present, do not configure charge status pins as wake
+        sources during system shutdown. This keeps charge state transitions
+        from waking the device while USB power is already connected.
+
 config USE_IMU_WAKE_UP
     bool "IMU wake up support"
     default n

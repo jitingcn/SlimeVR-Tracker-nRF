@@ -9,5 +9,6 @@ void sys_request_system_off(bool);
 void sys_request_system_reboot(bool);
 
 bool vin_read(void);
+bool vbus_read(void);
 
 #endif
