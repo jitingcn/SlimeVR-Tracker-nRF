@@ -54,7 +54,7 @@ uint32_t get_ping_interval_ms(void)
 }
 
 static void connection_thread(void);
-K_THREAD_DEFINE(connection_thread_id, 768, connection_thread, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(connection_thread_id, 2048, connection_thread, NULL, NULL, NULL, 8, 0, 0);
 
 void connection_clocks_request_start(void)
 {

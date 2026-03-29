@@ -124,6 +124,14 @@ void clock_init_external(void)
 #if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
 	if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO)) {
 		clock_switch(NRF_CLOCK_LFCLK_XTAL);
+	} else if (IS_ENABLED(CONFIG_CLOCK_USE_LF_SYNTH)) {
+		/* Use LF synthesizer (derived from HFXO) for TDMA timing precision
+		 * when LFXO is not available on the board */
+#ifdef NRF_CLOCK_LFCLK_SYNTH
+		clock_switch(NRF_CLOCK_LFCLK_SYNTH);
+#else
+		LOG_WRN("clock_init_external: LF_SYNTH requested but not supported");
+#endif
 	}
 #endif
 }

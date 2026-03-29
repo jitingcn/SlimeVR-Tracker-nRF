@@ -410,16 +410,6 @@ config CONNECTION_OVER_HID
         Use HID if available.
         Otherwise, use ESB only.
 
-config CONNECTION_TDMA
-    bool "Enable TDMA transmit scheduling"
-    default y
-    help
-        Enable Time Division Multiple Access scheduling for ESB radio.
-        When enabled, each tracker transmits only within its assigned
-        time slot to avoid collisions with other trackers.
-        Requires server time synchronization via PING/PONG.
-        Can also be toggled at runtime via console command.
-
 config CLOCK_USE_LFXO
     bool "Use external low-frequency crystal oscillator (LFXO)"
     default y
@@ -430,5 +420,29 @@ config CLOCK_USE_LFXO
         Disable this option if your board does not have an external
         LFXO crystal. Using LFXO without a crystal will cause the
         system to hang or IMU detection to fail.
+
+config CONNECTION_TDMA
+    bool "Enable TDMA transmit scheduling"
+    default n if !CLOCK_USE_LFXO
+    default y if CLOCK_USE_LFXO
+    help
+        Enable Time Division Multiple Access scheduling for ESB radio.
+        When enabled, each tracker transmits only within its assigned
+        time slot to avoid collisions with other trackers.
+        Requires server time synchronization via PING/PONG.
+        Can also be toggled at runtime via console command.
+
+config CLOCK_USE_LF_SYNTH
+    bool "Use LF synthesizer for low-frequency clock"
+    default y if CONNECTION_TDMA && !CLOCK_USE_LFXO
+    default n
+    help
+        Use the LF synthesizer (derived from HFXO) for the low-frequency
+        clock instead of LFXO or LFRC.
+
+config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
+    bool "Enable RC oscillator calibration for K32SRC"
+    default y if CLOCK_USE_LF_SYNTH && CONNECTION_TDMA
+    default n
 
 source "Kconfig.zephyr"

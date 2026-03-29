@@ -83,7 +83,7 @@ static bool esb_paired = false;
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
-K_THREAD_DEFINE(esb_thread_id, 512, esb_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 6, 0, 0);
 static int64_t last_tx_time = 0;
 
 static uint32_t ping_success_streak = 0; // consecutive success counter
@@ -264,6 +264,14 @@ void clocks_stop(void)
 	if (!clock_status) {
 		return;
 	}
+
+	/* When using LF synthesizer, HFXO must remain active as it's the source
+	 * for the LF clock. Don't stop HFXO in this case. */
+	if (IS_ENABLED(CONFIG_CLOCK_USE_LF_SYNTH)) {
+		LOG_DBG("HF clock kept running for LF_SYNTH");
+		return;
+	}
+
 	clock_status = false;
 
 	onoff_release(clk_mgr);
