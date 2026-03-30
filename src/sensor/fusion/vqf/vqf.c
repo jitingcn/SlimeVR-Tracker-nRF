@@ -48,26 +48,26 @@ static void set_params()
 	init_params(&params);
 	params.tauAcc = 3.2f;
 	params.biasClip = 2.5f;
-	params.biasForgettingTime = 100.0f;
-	params.biasSigmaInit = 1.5f;
-	params.biasSigmaMotion = 0.15f;
+	params.biasForgettingTime = 130.0f;
+	params.biasSigmaInit = 1.2f;
+	params.biasSigmaMotion = 0.20f;
 	params.biasSigmaRest = 0.03f;
 	params.biasVerticalForgettingFactor = 0.00001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.2f;
+	params.restFilterTau = 1.3f;
 	params.restMinT = 2.5f;
 	params.restThAcc = 0.20f;
 	params.restThGyr = 0.55f;
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 12.0f;
 	params.magCurrentTau = 0.20f;
-	params.magNormTh = 0.06f;
-	params.magDipTh = 7.0f;
-	params.magNewFirstTime = 10.0f;
+	params.magNormTh = 0.09f;
+	params.magDipTh = 9.0f;
+	params.magNewFirstTime = 6.0f;
 	params.magNewMinGyr = 15.0f;
-	params.magMinUndisturbedTime = 1.0f;
-	params.magMaxRejectionTime = 5400.0f;
+	params.magMinUndisturbedTime = 0.8f;
+	params.magMaxRejectionTime = 1800.0f;
 	params.magRejectionFactor = 900.0f;
 }
 
