@@ -23,6 +23,7 @@
 #include "globals.h"
 #include "system/system.h"
 #include "system/power.h"
+#include "system/test_mode.h"
 #include "system/watchdog.h"
 #include "util.h"
 #include "connection/connection.h"
@@ -858,7 +859,8 @@ static void sensor_update_sensor_state(void)
 {
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
 	bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005) : q_epsilon(q, last_q, 0.05); // TODO: Probably okay to use the constantly updating last_q?
-	if (!calibrating && resting)
+	bool in_test_mode = test_mode_get();
+	if (!in_test_mode && !calibrating && resting)
 	{
 		int64_t last_data_delta = k_uptime_get() - last_data_time;
 		if (sensor_mode < SENSOR_SENSOR_MODE_LOW_POWER && last_data_delta > CONFIG_SENSOR_LP_TIMEOUT) // No motion in lp timeout
@@ -1817,7 +1819,7 @@ void sensor_loop(void)
 			// Check if we need to force send based on time to maintain minimum packet rate
 			int64_t now = k_uptime_get();
 			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.003f) : q_epsilon(q, last_q, 0.05f);
-			int64_t min_interval = 1000;
+			int64_t min_interval = test_mode_get() ? TEST_MODE_MIN_SEND_INTERVAL_MS : 1000;
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 			if (send_quat_data || send_lin_accel_data || force_send_by_time)

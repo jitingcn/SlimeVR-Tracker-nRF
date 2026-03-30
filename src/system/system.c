@@ -1,4 +1,5 @@
 #include "globals.h"
+#include "test_mode.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration.h"
 #include "connection/connection.h"
@@ -425,7 +426,11 @@ static void button_thread(void)
 			LOG_INF("Button was pressed %d times", num_presses);
 			last_press = 0;
 			if (num_presses == 1) {
-				sys_request_system_reboot(false);
+				if (test_mode_get()) {
+					LOG_INF("Button reboot blocked by test mode");
+				} else {
+					sys_request_system_reboot(false);
+				}
 			}
 #if CONFIG_USER_EXTRA_ACTIONS // TODO: extra actions are default until server can send commands to trackers
 			sys_reset_mode(num_presses - 1);

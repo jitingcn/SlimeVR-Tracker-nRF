@@ -24,6 +24,7 @@
 #include "sensor/calibration.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
+#include "system/test_mode.h"
 #include "system/watchdog.h"
 #include "connection.h"
 #include "zephyr/sys/time_units.h"
@@ -1418,7 +1419,7 @@ static void esb_thread(void)
 			esb_initialize(true);
 		}
 		// Check for shutdown timeout if connection errors persist
-		if (ping_failures >= TX_ERROR_THRESHOLD) {
+		if (ping_failures >= TX_ERROR_THRESHOLD && !test_mode_get()) {
 #if CONFIG_CONNECTION_OVER_HID
 			// only raise error while not potentially communicating by usb
 			if (get_status(SYS_STATUS_CONNECTION_ERROR) == false && get_status(SYS_STATUS_USB_CONNECTED) == false && get_status(SYS_STATUS_CALIBRATION_RUNNING) == false)
@@ -1509,6 +1510,16 @@ static void esb_thread(void)
 				case ESB_PONG_FLAG_TDMA_OFF:
 					LOG_INF("Executing remote command: TDMA_OFF");
 					tdma_set_enabled(false);
+					break;
+
+				case ESB_PONG_FLAG_TEST_MODE_ON:
+					LOG_INF("Executing remote command: TEST_MODE_ON");
+					test_mode_set(true);
+					break;
+
+				case ESB_PONG_FLAG_TEST_MODE_OFF:
+					LOG_INF("Executing remote command: TEST_MODE_OFF");
+					test_mode_set(false);
 					break;
 
 				case ESB_PONG_FLAG_REBOOT:

@@ -1,6 +1,7 @@
 #include "globals.h"
 #include "system/system.h"
 #include "system/battery_tracker.h"
+#include "system/test_mode.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration.h"
 #include "connection/esb.h"
@@ -1177,6 +1178,16 @@ static void console_thread(void)
 				printk("TDMA disabled\n");
 			} else {
 				printk("TDMA: %s\n", tdma_is_enabled() ? "enabled" : "disabled");
+			}
+		} else if (memcmp(line, "test", 4) == 0) {
+			if (arg && strcmp((char *)arg, "on") == 0) {
+				test_mode_set(true);
+				printk("Test mode enabled\n");
+			} else if (arg && strcmp((char *)arg, "off") == 0) {
+				test_mode_set(false);
+				printk("Test mode disabled\n");
+			} else {
+				printk("Test mode: %s\n", test_mode_get() ? "enabled" : "disabled");
 			}
 		} else {
 			printk("Unknown command\n");
