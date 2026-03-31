@@ -364,7 +364,8 @@ static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 
 static int64_t last_sensor_quat_time = 0;
-#define SENSOR_QUAT_INTERVAL_MS 6
+#define SENSOR_QUAT_INTERVAL_TDMA_MS   2
+#define SENSOR_QUAT_INTERVAL_NOTDMA_MS 6
 
 /* Lookahead window: if a low-freq packet is within this many ms of being due,
  * piggyback it onto the current transmission as a composite sub-packet. */
@@ -465,8 +466,11 @@ void connection_thread(void)
 		}
 
 		/* Determine which data types are due or nearly due */
+		int quat_interval_ms = tdma_is_enabled()
+			? SENSOR_QUAT_INTERVAL_TDMA_MS
+			: SENSOR_QUAT_INTERVAL_NOTDMA_MS;
 		bool quat_ready = quat_update_time &&
-				  (now - last_sensor_quat_time >= SENSOR_QUAT_INTERVAL_MS);
+				  (now - last_sensor_quat_time >= quat_interval_ms);
 		bool mag_due = mag_update_time && (now - last_mag_time > 100);
 		bool info_due = (now - last_info_time > 100);
 		bool status_due = (now - last_status_time > 1000);

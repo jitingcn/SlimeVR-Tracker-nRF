@@ -56,6 +56,16 @@
 #define TDMA_SLOT_TICKS    20  /* ~610μs at 32768Hz */
 #define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 200 ticks ≈ 6.1ms */
 
+/*
+ * Grace window (ticks) past the nominal slot end.
+ * If the connection thread overshoots the slot boundary (e.g. preempted
+ * by the higher-priority sensor thread), allow TX anyway rather than
+ * waiting a full frame (~6.1 ms penalty).  Half a slot ≈ 305 μs covers
+ * minor scheduler jitter while leaving room before the neighbour's
+ * target point (neighbour aims for their slot_start + 4 ticks).
+ */
+#define TDMA_OVERSHOOT_GRACE (TDMA_SLOT_TICKS / 2)  /* 10 ticks ≈ 305μs */
+
 /**
  * Initialize the TDMA module with this tracker's ID.
  */
