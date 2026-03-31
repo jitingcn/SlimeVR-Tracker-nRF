@@ -719,6 +719,21 @@ void event_handler(struct esb_evt const *event)
 						// No history found - likely too old or buffer wrapped
 					}
 
+					/* Parse dynamic TDMA config from NORMAL PONG bytes 8-11.
+					 * Only valid when pong_flags == NORMAL (other commands
+					 * use bytes 8-11 for command-specific data). */
+					if (pong_flags == ESB_PONG_FLAG_NORMAL) {
+						uint8_t tdma_slot   = rx_payload.data[8];
+						uint8_t tdma_total  = rx_payload.data[9];
+						uint8_t tdma_sticks = rx_payload.data[10];
+						uint8_t tdma_epoch  = rx_payload.data[11];
+
+						if (tdma_slot != 0xFF && tdma_total > 0 && tdma_sticks > 0 &&
+						    tdma_epoch != tdma_get_config_epoch()) {
+							tdma_update_config(tdma_slot, tdma_total, tdma_sticks, tdma_epoch);
+						}
+					}
+
 					// handle remote commands and delayed execution
 					if (pong_flags != ESB_PONG_FLAG_NORMAL) {
 						if (received_remote_command == ESB_PONG_FLAG_NORMAL) {

@@ -34,24 +34,25 @@
  *
  * Time base: server time ticks (32768 Hz) from PING/PONG synchronization.
  *
- * Frame structure (repeats every TDMA_FRAME_TICKS):
- *   [Slot 0][Slot 1][Slot 2]...[Slot N-1]   (N = TDMA_NUM_TRACKERS)
+ * Frame structure (repeats every frame_ticks):
+ *   [Slot 0][Slot 1][Slot 2]...[Slot N-1]   (N = total_slots, dynamic)
  *
- * Each slot is TDMA_SLOT_TICKS long
- * Slot assignment: tracker_id % TDMA_NUM_TRACKERS
+ * Parameters are dynamically assigned by the receiver via PONG bytes 8-11:
+ *   byte 8:  assigned_slot_index (0-15, or 0xFF = unassigned)
+ *   byte 9:  total_slots (1-16)
+ *   byte 10: slot_ticks (14-163)
+ *   byte 11: config_epoch (wrapping uint8_t)
  *
- * At 18 ticks/slot, 10 trackers: frame = 180 ticks ≈ 5.5ms → ~182 TPS/tracker
- *
- * NoACK sensor data TX at 2Mbps ≈ 200-250μs air time, fits easily in 550μs slot.
+ * NoACK sensor data TX at 2Mbps ≈ 200-250μs air time, fits in minimum 427μs slot.
  *
  * Architecture:
  *   - Connection thread prepares packets and calls esb_write()
  *   - esb_write() queues payload (ESB MANUAL TX mode)
- *   - For noack data: tdma_schedule_tx() sets a k_timer to fire esb_start_tx()
- *     precisely at the next slot boundary (ISR context for timing accuracy)
+ *   - For noack data: tdma_wait_for_slot() blocks until assigned slot
  *   - For PING/ACK packets: esb_start_tx() is called immediately (bypasses TDMA)
  */
 
+/* Compile-time defaults / fallbacks (used if no dynamic config received) */
 #define TDMA_NUM_TRACKERS  10
 #define TDMA_SLOT_TICKS    18  /* ~550μs at 32768Hz */
 #define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 180 ticks ≈ 5.5ms */
@@ -99,5 +100,21 @@ void tdma_set_enabled(bool enabled);
  * Check if TDMA is currently active (compiled in AND runtime enabled).
  */
 bool tdma_is_enabled(void);
+
+/**
+ * Update TDMA parameters from receiver's dynamic config (PONG bytes 8-11).
+ * Automatically enables TDMA when valid config is received.
+ *
+ * @param slot_index   Assigned slot index for this tracker (0-15)
+ * @param total_slots  Total number of active slots in the frame (1-16)
+ * @param slot_ticks   Width of each slot in ticks (14-163)
+ * @param epoch        Config epoch counter (for change detection)
+ */
+void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch);
+
+/**
+ * Get the current config epoch (for change detection in PONG processing).
+ */
+uint8_t tdma_get_config_epoch(void);
 
 #endif
