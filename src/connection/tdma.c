@@ -65,6 +65,7 @@ void tdma_init(uint8_t tracker_id)
  *   - 8+ ticks margin before slot end, 4+ ticks after slot start
  */
 #define TDMA_SLOT_TARGET_OFFSET 4
+#define TDMA_SYNC_STALE_MS (PING_INTERVAL_MS * 10)
 
 void tdma_wait_for_slot(void)
 {
@@ -73,6 +74,26 @@ void tdma_wait_for_slot(void)
 #else
 	if (!tdma_runtime_enabled) {
 		return;
+	}
+
+	/*
+	 * Skip TDMA gating when time sync is stale.
+	 *
+	 * Between PONGs, the server time estimate drifts by
+	 * (true_skew - estimated_skew) * elapsed.  With a typical nRF52
+	 * LFCLK error of 20-250 PPM and the EMA skew filter lagging
+	 * behind, the cumulative phase error can exceed a full TDMA slot
+	 * (20 ticks ≈ 610 µs) within a few seconds of lost sync.
+	 *
+	 * If we keep scheduling with a stale estimate, packets land in
+	 * the wrong slot and collide with other trackers, progressively
+	 * degrading TPS.  Falling back to immediate TX (no scheduling)
+	 * is far better than systematic wrong-slot transmission.
+	 *
+	 */
+	int64_t sync_age = esb_get_sync_age_ms();
+	if (sync_age < 0 || sync_age > TDMA_SYNC_STALE_MS) {
+		return; /* sync lost or too stale — transmit immediately */
 	}
 
 	uint64_t server_ticks = esb_get_server_time_ticks_64();

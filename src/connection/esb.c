@@ -122,7 +122,7 @@ static uint32_t g_last_rx_raw_ticks = 0;
 static uint32_t g_last_sync_local_ticks = 0;
 static bool g_time_initialized = false;
 static int64_t g_last_sync_timestamp = 0;
-#define TIME_SYNC_TIMEOUT_MS 90000
+#define TIME_SYNC_TIMEOUT_MS 30000
 
 // Clock skew compensation (tracker vs receiver crystal frequency difference)
 static int32_t g_clock_skew_ppb = 0;         // Estimated clock skew in parts per billion
@@ -1333,7 +1333,25 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		ping_send_time = k_uptime_get();
 		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
 	}
-	esb_start_tx();
+	int tx_err = esb_start_tx();
+	if (tx_err == -EBUSY && queue_status == 0) {
+		/*
+		 * Radio still busy (e.g. PING ACK/retransmit in progress).
+		 * Wait briefly for the previous TX to complete, then retry.
+		 * Without this, the queued packet sits in the FIFO unsent
+		 * until the next esb_write() call.
+		 */
+		for (int retry = 0; retry < 10; retry++) {
+			k_usleep(200);
+			tx_err = esb_start_tx();
+			if (tx_err != -EBUSY) {
+				break;
+			}
+		}
+		if (tx_err == -EBUSY) {
+			LOG_WRN("esb_start_tx still busy after retries, packet deferred");
+		}
+	}
 	send_data = true;
 }
 
@@ -1389,6 +1407,14 @@ uint32_t esb_get_server_time(void)
 	}
 	uint64_t time_us = esb_get_server_time_us_64();
 	return (uint32_t)(time_us / 1000ULL);
+}
+
+int64_t esb_get_sync_age_ms(void)
+{
+	if (!server_time_synced || g_last_sync_timestamp == 0) {
+		return -1;
+	}
+	return k_uptime_get() - g_last_sync_timestamp;
 }
 
 static void esb_thread(void)

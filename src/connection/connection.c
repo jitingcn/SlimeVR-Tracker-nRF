@@ -443,8 +443,23 @@ void connection_thread(void)
 			continue;
 		}
 
-		/* PING has highest priority */
-		if (now - last_ping_time >= ping_interval_ms) {
+		/* PING has highest priority.
+		 *
+		 * When TDMA is enabled and the last sync is getting stale
+		 * (>2× PING interval), force an early PING to re-sync before
+		 * the TDMA slot estimate drifts too far.  This prevents the
+		 * gradual TPS degradation caused by transmitting in wrong slots.
+		 */
+		bool ping_due = (now - last_ping_time >= ping_interval_ms);
+#if CONFIG_CONNECTION_TDMA
+		if (!ping_due && tdma_is_enabled()) {
+			int64_t sync_age = esb_get_sync_age_ms();
+			if (sync_age > (int64_t)ping_interval_ms * 2) {
+				ping_due = true;
+			}
+		}
+#endif
+		if (ping_due) {
 			uint8_t ping[ESB_PING_LEN] = {0};
 			ping[0] = ESB_PING_TYPE;
 			ping[1] = connection_get_id();
@@ -455,7 +470,14 @@ void connection_thread(void)
 			ping[ESB_PING_LEN - 1] = 0;
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
-			k_usleep(900);
+			/*
+			 * Wait for PING TX to complete (including ACK wait and
+			 * up to 2 retransmits at 310µs retransmit_delay).
+			 * Worst case: ~1.5ms.  Previous 900µs was insufficient
+			 * and caused esb_start_tx() -EBUSY for the next data
+			 * packet.
+			 */
+			k_usleep(1600);
 			continue;
 		}
 

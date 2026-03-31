@@ -120,6 +120,9 @@ uint64_t esb_get_server_time_us_64(void);
 // Get estimated current server time in milliseconds (0 if not synced)
 uint32_t esb_get_server_time(void);
 
+// Get time since last successful PONG sync in milliseconds (-1 if never synced)
+int64_t esb_get_sync_age_ms(void);
+
 // Helper: log esb_write call frequency
 void esb_write_rate_tick(void);
 
