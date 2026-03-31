@@ -30,19 +30,19 @@
  * TDMA (Time Division Multiple Access) scheduling for ESB radio.
  *
  * Uses a short repeating frame to give each tracker a micro-slot for
- * high-frequency continuous packet transmission (~160+ TPS per tracker).
+ * high-frequency continuous packet transmission.
  *
  * Time base: server time ticks (32768 Hz) from PING/PONG synchronization.
  *
  * Frame structure (repeats every TDMA_FRAME_TICKS):
  *   [Slot 0][Slot 1][Slot 2]...[Slot N-1]   (N = TDMA_NUM_TRACKERS)
  *
- * Each slot is TDMA_SLOT_TICKS long (~610μs with default 20 ticks).
+ * Each slot is TDMA_SLOT_TICKS long
  * Slot assignment: tracker_id % TDMA_NUM_TRACKERS
  *
- * At 20 ticks/slot, 10 trackers: frame = 200 ticks ≈ 6.1ms → ~163 TPS/tracker
+ * At 18 ticks/slot, 10 trackers: frame = 180 ticks ≈ 5.5ms → ~182 TPS/tracker
  *
- * NoACK sensor data TX at 2Mbps ≈ 200-250μs air time, fits easily in 610μs slot.
+ * NoACK sensor data TX at 2Mbps ≈ 200-250μs air time, fits easily in 550μs slot.
  *
  * Architecture:
  *   - Connection thread prepares packets and calls esb_write()
@@ -53,18 +53,18 @@
  */
 
 #define TDMA_NUM_TRACKERS  10
-#define TDMA_SLOT_TICKS    20  /* ~610μs at 32768Hz */
-#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 200 ticks ≈ 6.1ms */
+#define TDMA_SLOT_TICKS    18  /* ~550μs at 32768Hz */
+#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 180 ticks ≈ 5.5ms */
 
 /*
  * Grace window (ticks) past the nominal slot end.
  * If the connection thread overshoots the slot boundary (e.g. preempted
  * by the higher-priority sensor thread), allow TX anyway rather than
- * waiting a full frame (~6.1 ms penalty).  Half a slot ≈ 305 μs covers
- * minor scheduler jitter while leaving room before the neighbour's
+ * waiting a full frame.  Half a slot covers minor scheduler jitter
+ * while leaving room before the neighbour's
  * target point (neighbour aims for their slot_start + 4 ticks).
  */
-#define TDMA_OVERSHOOT_GRACE (TDMA_SLOT_TICKS / 2)  /* 10 ticks ≈ 305μs */
+#define TDMA_OVERSHOOT_GRACE 3
 
 /**
  * Initialize the TDMA module with this tracker's ID.
