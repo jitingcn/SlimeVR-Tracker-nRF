@@ -1,0 +1,8 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+board:
+  name: dawn_tracker_mini_uf2
+  vendor: dawnoriginal
+  socs:
+    - name: nrf52833
