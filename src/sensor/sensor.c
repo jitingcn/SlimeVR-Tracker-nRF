@@ -157,6 +157,16 @@ static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
 
+#if CONFIG_SENSOR_USE_LOW_POWER_2
+#define SENSOR_FIFO_RAW_BUFFER_SIZE 2048
+#elif CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+#define SENSOR_FIFO_RAW_BUFFER_SIZE 1536
+#else
+#define SENSOR_FIFO_RAW_BUFFER_SIZE 1024
+#endif
+
+static uint8_t sensor_fifo_raw_buffer[SENSOR_FIFO_RAW_BUFFER_SIZE];
+
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 // Gyroscope oversampling state for noise reduction
 // Accumulates gyro samples and averages them before fusion
@@ -1127,36 +1137,8 @@ void sensor_loop(void)
 			// - At 1000Hz ODR with 33ms low power update: 1000 * 0.033 = ~33 packets
 			// - At 1000Hz ODR with 100ms low power 2 update: 1000 * 0.100 = ~100 packets
 			// - With 4x oversampling at 1600Hz: effectively same as 400Hz but with 4x raw packets
-#if CONFIG_SENSOR_USE_LOW_POWER_2
-			uint8_t* rawData = (uint8_t*)k_malloc(2048);  // Increased for oversampling: worst case ~100 packets * 20 bytes = 2000 bytes
-			if (rawData == NULL)
-			{
-				LOG_ERR("Failed to allocate memory for FIFO buffer");
-				set_status(SYS_STATUS_SENSOR_ERROR, true);
-				main_ok = false;
-			}
-			uint16_t packets = sensor_imu->fifo_read(rawData, 2048);
-#elif CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-			// With oversampling, we read more raw gyro samples per update interval
-			// E.g., 1600Hz * 6ms = ~10 packets, but need margin for timing jitter
-			uint8_t* rawData = (uint8_t*)k_malloc(1536);  // ~75 packets * 20 bytes, enough for 4x oversampling
-			if (rawData == NULL)
-			{
-				LOG_ERR("Failed to allocate memory for FIFO buffer");
-				set_status(SYS_STATUS_SENSOR_ERROR, true);
-				main_ok = false;
-			}
-			uint16_t packets = sensor_imu->fifo_read(rawData, 1536);
-#else
-			uint8_t* rawData = (uint8_t*)k_malloc(1024);  // Standard: ~50 packets * 20 bytes
-			if (rawData == NULL)
-			{
-				LOG_ERR("Failed to allocate memory for FIFO buffer");
-				set_status(SYS_STATUS_SENSOR_ERROR, true);
-				main_ok = false;
-			}
-			uint16_t packets = sensor_imu->fifo_read(rawData, 1024);
-#endif
+			uint8_t *rawData = sensor_fifo_raw_buffer;
+			uint16_t packets = sensor_imu->fifo_read(rawData, sizeof(sensor_fifo_raw_buffer));
 
 #if CONFIG_SENSOR_USE_TCAL
 			// Read IMU temperature after FIFO read so FIFO-backed drivers
@@ -1508,9 +1490,6 @@ void sensor_loop(void)
 
 				processed_packets++;
 			}
-
-			// Free the FIFO buffer
-			k_free(rawData);
 
 #if DEBUG
 			if (valid_acquisition)
