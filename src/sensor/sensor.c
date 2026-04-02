@@ -1663,7 +1663,7 @@ void sensor_loop(void)
 					int min_expected = (int)expected_accel_timesteps_f; // floor
 					int max_expected = (int)(expected_accel_timesteps_f + 0.99f); // ceiling
 					if (a_count < min_expected - 1 || a_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f accel timesteps (oversampling %dx), got %d (elapsed %lldms)",
+						LOG_DBG("Expected ~%.1f accel timesteps (oversampling %dx), got %d (elapsed %lldms)",
 							(double)expected_accel_timesteps_f,
 							CONFIG_SENSOR_ACCEL_OVERSAMPLING, a_count, elapsed_ms);
 				}
@@ -1673,7 +1673,7 @@ void sensor_loop(void)
 					int min_expected = (int)expected_accel_samples; // floor
 					int max_expected = (int)(expected_accel_samples + 0.99f); // ceiling
 					if (a_count < min_expected - 1 || a_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f accel samples, got %d (elapsed %lldms)",
+						LOG_DBG("Expected ~%.1f accel samples, got %d (elapsed %lldms)",
 							(double)expected_accel_samples, a_count, elapsed_ms);
 				}
 #endif
