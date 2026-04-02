@@ -29,6 +29,35 @@ static uint8_t ext_cont_len = 0;
 static bool ext_scanning_mode = true;
 static void icm45_ext_stop_continuous(void);
 
+// Cache the latest FIFO temperature so temperature reads can stay synchronized
+// with the current accel/gyro batch when FIFO packets are available.
+static float fifo_temp = 25.0f;
+static bool fifo_temp_valid = false;
+
+static void icm45_cache_fifo_temp(const uint8_t *data, uint16_t packets)
+{
+	fifo_temp_valid = false;
+	int32_t raw_temp_sum = 0;
+	uint16_t valid_packets = 0;
+
+	for (uint16_t i = 0; i < packets; i++)
+	{
+		const uint8_t *packet = &data[i * PACKET_SIZE];
+		if (packet[0] != 0x78 && packet[0] != 0x7A)
+			continue;
+
+		int16_t raw_temp = (int16_t)((((uint16_t)packet[13]) << 8) | packet[14]);
+		raw_temp_sum += raw_temp;
+		valid_packets++;
+	}
+
+	if (valid_packets == 0)
+		return;
+
+	fifo_temp = ((float)raw_temp_sum / (128.0f * valid_packets)) + 25.0f;
+	fifo_temp_valid = true;
+}
+
 LOG_MODULE_REGISTER(ICM45686, LOG_LEVEL_DBG);
 
 // IREG helpers for runtime verification.
@@ -208,6 +237,8 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	// After init, switch to operational mode for immediate continuous I2CM reads
 	ext_scanning_mode = false;
 	ext_continuous_active = false;
+	fifo_temp = 25.0f;
+	fifo_temp_valid = false;
 
 	// setup interface for SPI
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0);
@@ -324,6 +355,8 @@ void icm45_shutdown(void)
 	icm45_ext_stop_continuous();
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
+	fifo_temp = 25.0f;
+	fifo_temp_valid = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
 	k_msleep(2); // Wait for reset to complete (datasheet: 1ms) - ensures clean state for init
 	// TODO: not working
@@ -548,6 +581,7 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &rawCount[0], 2);
 	uint16_t packets = (uint16_t)(rawCount[0] << 8 | rawCount[1]); // Turn the 16 bits into a unsigned 16-bit value
 
+	fifo_temp_valid = false;
 	if (packets == 0)
 		return 0;
 
@@ -564,6 +598,8 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 	err |= ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_DATA, data, count, PACKET_SIZE);
 	if (err)
 		LOG_ERR("Communication error");
+	else
+		icm45_cache_fifo_temp(data, packets);
 
 	return packets;
 }
@@ -655,6 +691,9 @@ void icm45_gyro_read(float g[3])
 
 float icm45_temp_read(void)
 {
+	if (fifo_temp_valid)
+		return fifo_temp;
+
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_TEMP_DATA1_UI, &rawTemp[0], 2);
 	if (err)
