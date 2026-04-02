@@ -804,8 +804,8 @@ static void set_update_time_ms(int time_ms)
 	// TODO: maybe not get rid of it? it is now repurposed to also change FIFO threshold
 	// TODO: return pin_config and replace call in sensor_init
 #if IMU_INT_EXISTS
-	float fifo_threshold = time_ms / 1000.0f / sensor_actual_time; // target loop rate
-	sensor_fifo_threshold = fifo_threshold;
+	float fifo_threshold = (float)time_ms / 1000.0f / sensor_actual_time; // target loop rate
+	sensor_fifo_threshold = (int16_t)fifo_threshold;
 	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d", (double)fifo_threshold, sensor_fifo_threshold);
 	sensor_imu->setup_DRDY(sensor_fifo_threshold); // do not need to reset pin config
 #endif
@@ -1639,7 +1639,7 @@ void sensor_loop(void)
 					int min_expected = (int)expected_gyro_timesteps_f; // floor
 					int max_expected = (int)(expected_gyro_timesteps_f + 0.99f); // ceiling
 					if (g_count < min_expected - 1 || g_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f gyro timesteps (oversampling %dx), got %d (elapsed %lldms)",
+						LOG_DBG("Expected ~%.1f gyro timesteps (oversampling %dx), got %d (elapsed %lldms)",
 							(double)expected_gyro_timesteps_f,
 							CONFIG_SENSOR_GYRO_OVERSAMPLING, g_count, elapsed_ms);
 				}
@@ -1650,7 +1650,7 @@ void sensor_loop(void)
 					int min_expected = (int)expected_gyro_samples; // floor
 					int max_expected = (int)(expected_gyro_samples + 0.99f); // ceiling
 					if (g_count < min_expected - 1 || g_count > max_expected + 1)
-						LOG_WRN("Expected ~%.1f gyro samples, got %d (elapsed %lldms)",
+						LOG_DBG("Expected ~%.1f gyro samples, got %d (elapsed %lldms)",
 							(double)expected_gyro_samples, g_count, elapsed_ms);
 				}
 #endif
