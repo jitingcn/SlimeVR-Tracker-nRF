@@ -245,10 +245,8 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 
 	int err = 0;
 
-	// Perform soft reset to ensure known state
-	LOG_INF("Performing soft reset...");
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
-	k_msleep(2); // Wait for reset to complete (datasheet: 1ms)
+	// sensor_init() already issued shutdown/reset before calling init.
+	// Continue from the post-reset state and rebuild runtime configuration below.
 
 	// Read WHO_AM_I to verify communication
 	uint8_t who_am_i = 0;
@@ -275,7 +273,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_59;
 	ireg_buf[2] = 0xB6 & ~0x92; // disable internal pull resistors for AP pins (pin 7, 1, 14)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
-	// Re-enable I2CM mode after soft reset (if ext was configured during scan)
+	// Re-enable I2CM mode after the pre-init shutdown reset (if ext was configured during scan)
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
 	ireg_buf[2] = ICM45686_BIT_AUX1_I2CM_MODE; // I2CM mode only, no internal pull-ups
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);

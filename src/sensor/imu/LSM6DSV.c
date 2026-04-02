@@ -66,13 +66,12 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 	LOG_INF("Initializing LSM6DSV...");
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(10), 0);
 
-	// Soft reset clears all registers including sensor hub config
+	// sensor_init() already issued shutdown/reset before calling init.
+	// Continue from the post-reset state and rebuild runtime configuration below.
 	ext_continuous_active = false;
 	ext_scanning_mode = false; // After init, switch to operational mode for immediate continuous
 
-	// Perform soft reset to ensure known state
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
-	k_msleep(2); // Wait for reset to complete
+	int err = 0;
 
 	// Read WHO_AM_I to verify communication
 	uint8_t who_am_i = 0;
@@ -147,8 +146,8 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 
 	last_accel_odr = 0xff; // reset last odr to force update
 	last_gyro_odr = 0xff; // reset last odr to force update
-	// Re-enable SHUB_PU_EN if sensor hub (ext interface) was configured during scan
-	// Soft reset clears IF_CFG, but we need internal pull-ups for auxiliary I2C bus
+	// Re-enable SHUB_PU_EN if sensor hub (ext interface) was configured during scan.
+	// The pre-init shutdown reset clears IF_CFG, so restore auxiliary I2C pull-ups here.
 	uint8_t if_cfg = 0x18; // INT H_LACTIVE active low, PP_OD open-drain
 	if (sensor_interface_ext_get() != NULL)
 		if_cfg |= 0x40; // SHUB_PU_EN: enable internal pull-up for auxiliary I2C
@@ -186,6 +185,7 @@ void lsm_shutdown(void)
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
+	k_msleep(2); // Wait for reset to complete before the next init path continues
 	if (err)
 		LOG_ERR("Communication error");
 }
