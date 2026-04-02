@@ -1120,50 +1120,6 @@ void sensor_loop(void)
 			if (mag_available && mag_enabled && mag_use_oneshot)
 				sensor_mag->mag_oneshot();
 
-#if CONFIG_SENSOR_USE_TCAL
-			// Read IMU temperature
-			temp = sensor_imu->temp_read();
-			// Only update if the value looks like a valid temperature (-20 to 60).
-			if (temp != 0.0f && temp > -20.0f && temp < 60.0f)
-			{
-				int64_t now_ms = k_uptime_get();
-				last_temp_time = now_ms;
-
-				// Keep last raw value for debugging/telemetry if needed
-				sensor_tcal_temp_raw = temp;
-
-				// Low-pass filter the temperature to reduce compensation jitter.
-				// First valid reading initializes the filter to avoid startup lag.
-				if (!sensor_tcal_temp_filter_initialized) {
-					sensor_tcal_temp = temp;
-					sensor_tcal_temp_filter_initialized = true;
-				} else {
-					int64_t dt_ms = now_ms - sensor_tcal_temp_filter_last_ms;
-					// If the last update was a long time ago (e.g. after suspend), re-sync immediately.
-					if (dt_ms < 0 || dt_ms > 10000) {
-						sensor_tcal_temp = temp;
-					} else {
-						// Avoid dt=0 freezing the filter when multiple loops occur within the same ms.
-						if (dt_ms == 0) {
-							dt_ms = 1;
-						}
-						float dt = (float)dt_ms;
-						float alpha = dt / ((float)SENSOR_TCAL_TEMP_FILTER_TAU_MS + dt);
-						sensor_tcal_temp = sensor_tcal_temp + alpha * (temp - sensor_tcal_temp);
-					}
-				}
-				sensor_tcal_temp_filter_last_ms = now_ms;
-
-				// Report filtered temp to keep host display consistent with compensation
-				connection_update_sensor_temp(sensor_tcal_temp);
-			}
-#else
-			// Read IMU temperature
-			temp = sensor_imu->temp_read(); // TODO: use as calibration data
-			last_temp_time = k_uptime_get();
-			connection_update_sensor_temp(temp);
-#endif
-
 			// Read gyroscope (FIFO)
 			// Buffer size calculation:
 			// - Worst case is ICM 20 byte packet
@@ -1200,6 +1156,51 @@ void sensor_loop(void)
 				main_ok = false;
 			}
 			uint16_t packets = sensor_imu->fifo_read(rawData, 1024);
+#endif
+
+#if CONFIG_SENSOR_USE_TCAL
+			// Read IMU temperature after FIFO read so FIFO-backed drivers
+			// can return a sample synchronized with the current accel/gyro batch.
+			temp = sensor_imu->temp_read();
+			// Only update if the value looks like a valid temperature (-20 to 60).
+			if (temp != 0.0f && temp > -20.0f && temp < 60.0f)
+			{
+				int64_t now_ms = k_uptime_get();
+				last_temp_time = now_ms;
+
+				// Keep last raw value for debugging/telemetry if needed
+				sensor_tcal_temp_raw = temp;
+
+				// Low-pass filter the temperature to reduce compensation jitter.
+				// First valid reading initializes the filter to avoid startup lag.
+				if (!sensor_tcal_temp_filter_initialized) {
+					sensor_tcal_temp = temp;
+					sensor_tcal_temp_filter_initialized = true;
+				} else {
+					int64_t dt_ms = now_ms - sensor_tcal_temp_filter_last_ms;
+					// If the last update was a long time ago (e.g. after suspend), re-sync immediately.
+					if (dt_ms < 0 || dt_ms > 10000) {
+						sensor_tcal_temp = temp;
+					} else {
+						// Avoid dt=0 freezing the filter when multiple loops occur within the same ms.
+						if (dt_ms == 0) {
+							dt_ms = 1;
+						}
+						float dt = (float)dt_ms;
+						float alpha = dt / ((float)SENSOR_TCAL_TEMP_FILTER_TAU_MS + dt);
+						sensor_tcal_temp = sensor_tcal_temp + alpha * (temp - sensor_tcal_temp);
+					}
+				}
+				sensor_tcal_temp_filter_last_ms = now_ms;
+
+				// Report filtered temp to keep host display consistent with compensation
+				connection_update_sensor_temp(sensor_tcal_temp);
+			}
+#else
+			// Read IMU temperature after FIFO read so FIFO-backed drivers can reuse it.
+			temp = sensor_imu->temp_read(); // TODO: use as calibration data
+			last_temp_time = k_uptime_get();
+			connection_update_sensor_temp(temp);
 #endif
 
 			// Debug info
