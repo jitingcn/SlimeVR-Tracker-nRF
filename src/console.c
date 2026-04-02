@@ -505,7 +505,7 @@ static void print_help(void)
 	printk("  tdma <on|off>              Enable/disable TDMA scheduling\n");
 	printk("\n");
 	printk("RF Channel:\n");
-	printk("  channel <0-100>            Set RF channel (saved to NVS)\n");
+	printk("  channel <1-100>            Set RF channel (saved to NVS)\n");
 	printk("    Example: channel 25       Set RF channel to 25\n");
 	printk("  clearchannel               Clear RF channel (use default)\n");
 	printk("\n");
@@ -522,7 +522,7 @@ static void print_help(void)
 	printk("  ping                       Flash LED (same as remote PING command)\n");
 	printk("  meow                       Meow!\n");
 	printk("  help                       Show this help message\n");
-	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 10s)\n");
+	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 1s)\n");
 	printk("  range                      Show sensor range statistics (min/max values)\n");
 	printk("  range reset                Reset sensor range statistics\n");
 	printk("\n");
@@ -1038,14 +1038,14 @@ static void console_thread(void)
 			esb_clear_pair();
 		} else if (memcmp(line, command_channel, sizeof(command_channel)) == 0) {
 			if (!arg) {
-				printk("Usage: channel <0-100>\n");
+				printk("Usage: channel <1-100>\n");
 				printk("Example: channel 25 - Set RF channel to 25\n");
 			} else {
 				char *endptr;
 				long channel = strtol(arg, &endptr, 10);
 
-				if (*endptr != '\0' || channel < 0 || channel > 100) {
-					printk("Invalid channel. Must be a number between 0 and 100.\n");
+				if (*endptr != '\0' || channel < 1 || channel > 100) {
+					printk("Invalid channel. Must be a number between 1 and 100.\n");
 				} else {
 					printk("Setting RF channel to %d\n", (int)channel);
 					// Save to retained memory
