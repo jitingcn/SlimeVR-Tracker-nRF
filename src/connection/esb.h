@@ -111,6 +111,9 @@ bool esb_ready(void);
 // Get remote command flag to echo back in PING
 uint8_t esb_get_ping_ack_flag(void);
 
+// Additional delay applied to the base ping interval after repeated failures.
+uint32_t esb_get_ping_backoff_ms(void);
+
 // Get estimated current server time in ticks (0 if not synced) - high precision
 uint64_t esb_get_server_time_ticks_64(void);
 
