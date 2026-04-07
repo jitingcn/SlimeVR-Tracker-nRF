@@ -35,21 +35,25 @@ foreach(pm_static_candidate ${pm_static_candidates})
   endif()
 endforeach()
 
-if(NOT DEFINED ${DEFAULT_IMAGE}_DTC_OVERLAY_FILE)
-  set(dtc_overlay_candidates)
+set(extra_dtc_overlay_candidates)
 
-  if(DEFINED SB_CONFIG_BOARD_QUALIFIERS AND NOT SB_CONFIG_BOARD_QUALIFIERS STREQUAL "")
-    string(REPLACE "/" "_" soc_board_qualifiers ${SB_CONFIG_BOARD_QUALIFIERS})
-    list(APPEND dtc_overlay_candidates ${soc_overlay_dir}/${soc_board_qualifiers}.overlay)
+if(DEFINED SB_CONFIG_BOARD_QUALIFIERS AND NOT SB_CONFIG_BOARD_QUALIFIERS STREQUAL "")
+  string(REPLACE "/" "_" soc_board_qualifiers ${SB_CONFIG_BOARD_QUALIFIERS})
+  list(APPEND extra_dtc_overlay_candidates ${soc_overlay_dir}/${soc_board_qualifiers}.overlay)
 
-    string(REGEX REPLACE "/.*$" "" soc_name ${SB_CONFIG_BOARD_QUALIFIERS})
-    list(APPEND dtc_overlay_candidates ${soc_overlay_dir}/${soc_name}.overlay)
+  string(REGEX REPLACE "/.*$" "" soc_name ${SB_CONFIG_BOARD_QUALIFIERS})
+  list(APPEND extra_dtc_overlay_candidates ${soc_overlay_dir}/${soc_name}.overlay)
+endif()
+
+foreach(extra_dtc_overlay_candidate ${extra_dtc_overlay_candidates})
+  if(EXISTS ${extra_dtc_overlay_candidate})
+    list(APPEND ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE ${extra_dtc_overlay_candidate})
   endif()
+endforeach()
 
-  foreach(dtc_overlay_candidate ${dtc_overlay_candidates})
-    if(EXISTS ${dtc_overlay_candidate})
-      set(${DEFAULT_IMAGE}_DTC_OVERLAY_FILE ${dtc_overlay_candidate} CACHE INTERNAL "")
-      break()
-    endif()
-  endforeach()
+if(DEFINED ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE)
+  list(REMOVE_DUPLICATES ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE)
+  set(${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE
+      ${${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE}
+      CACHE INTERNAL "")
 endif()
