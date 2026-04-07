@@ -175,17 +175,17 @@ jobs:
       fail-fast: false
       matrix:
         boards: [
+                  {boardname: "xiao_ble/nrf52840", filename: "SlimeNRF_XIAO_Tracker"},
+                  {boardname: "xiao_ble/nrf52840/sense", filename: "SlimeNRF_XIAO_Sense_Tracker"},
                   {boardname: "promicro_uf2/nrf52840/i2c", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_I2C"},
                   {boardname: "promicro_uf2/nrf52840/spi", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_SPI"},
                   {boardname: "promicro_uf2/nrf52840/default_spi", filename: "SlimeNRF_ProMicro_Tracker_SPI"},
                   {boardname: "promicro_uf2/nrf52840/default_i2c", filename: "SlimeNRF_ProMicro_Tracker_I2C"},
                   {boardname: "promicro_uf2/nrf52840/chrysalis", filename: "SlimeNRF_ProMicro_Chrysalis_Tracker"},
                   {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker"},
-                  {boardname: "foxsmol40_uf2/nrf52840", filename: "FoxApplication_FoxSmol40_Tracker"},
                   {boardname: "foxsnacklite_uf2/nrf52840", filename: "FoxApplication_FoxSnackLite_Tracker"},
-                  {boardname: "foxsnackeco_uf2/nrf52840", filename: "FoxApplication_FoxSnackECO_Tracker"},
-                  {boardname: "foxsmolv1_spi_uf2/nrf52840", filename: "FoxApplication_FoxSmol_V1_SPI_Tracker"},
                   {boardname: "mochi_uf2/nrf52833", filename: "Mochi_Tracker"},
+                  {boardname: "dawn_tracker_mini_uf2/nrf52833", filename: "Dawn_Tracker_Mini"},
                   {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker"},
                   {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"}
                 ]
