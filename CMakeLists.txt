@@ -99,6 +99,39 @@ add_compile_definitions(
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+set(SOFTDEVICE_HEX_52840 ${CMAKE_SOURCE_DIR}/softdevice/s140_nrf52_7.3.0_softdevice.hex)
+set(UF2_FAMILY_ID_52840 0xADA52840)
+
+if(WITH_SOFTDEVICE)
+  if(CONFIG_SOC_NRF52840)
+    set(sd_softdevice_hex ${SOFTDEVICE_HEX_52840})
+    set(sd_uf2_family_id ${UF2_FAMILY_ID_52840})
+  else()
+    message(FATAL_ERROR "WITH_SOFTDEVICE is currently only supported on nRF52840 targets")
+  endif()
+
+  if(DEFINED sd_softdevice_hex)
+    if(NOT EXISTS ${sd_softdevice_hex})
+      message(FATAL_ERROR "SoftDevice hex not found: ${sd_softdevice_hex}")
+    endif()
+
+    set(sd_merged_hex ${CMAKE_BINARY_DIR}/zephyr/zephyr_sd.hex)
+    set(sd_merged_uf2 ${CMAKE_BINARY_DIR}/zephyr/zephyr_sd.uf2)
+
+    add_custom_command(
+      OUTPUT ${sd_merged_hex} ${sd_merged_uf2}
+      COMMAND ${Python3_EXECUTABLE} ${ZEPHYR_BASE}/scripts/build/mergehex.py --overlap=replace -o ${sd_merged_hex} ${sd_softdevice_hex} ${CMAKE_BINARY_DIR}/zephyr/zephyr.hex
+      COMMAND ${Python3_EXECUTABLE} ${ZEPHYR_BASE}/scripts/build/uf2conv.py ${sd_merged_hex} -c -f ${sd_uf2_family_id} -o ${sd_merged_uf2}
+      DEPENDS ${sd_softdevice_hex} ${CMAKE_BINARY_DIR}/zephyr/zephyr.hex
+      VERBATIM
+    )
+
+    add_custom_target(sd_merged_uf2 ALL DEPENDS ${sd_merged_hex} ${sd_merged_uf2})
+  endif()
+endif()
+
 # NORDIC SDK APP START
 FILE(GLOB_RECURSE app_sources src/*.c)
 target_sources(app PRIVATE ${app_sources})

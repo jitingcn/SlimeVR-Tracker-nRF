@@ -178,15 +178,23 @@ jobs:
                   {boardname: "xiao_ble/nrf52840", filename: "SlimeNRF_XIAO_Tracker"},
                   {boardname: "xiao_ble/nrf52840/sense", filename: "SlimeNRF_XIAO_Sense_Tracker"},
                   {boardname: "promicro_uf2/nrf52840/i2c", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_I2C"},
+                  {boardname: "promicro_uf2/nrf52840/i2c", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_I2C_SD", with_softdevice: true},
                   {boardname: "promicro_uf2/nrf52840/spi", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_SPI"},
+                  {boardname: "promicro_uf2/nrf52840/spi", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_SPI_SD", with_softdevice: true},
                   {boardname: "promicro_uf2/nrf52840/default_spi", filename: "SlimeNRF_ProMicro_Tracker_SPI"},
+                  {boardname: "promicro_uf2/nrf52840/default_spi", filename: "SlimeNRF_ProMicro_Tracker_SPI_SD", with_softdevice: true},
                   {boardname: "promicro_uf2/nrf52840/default_i2c", filename: "SlimeNRF_ProMicro_Tracker_I2C"},
+                  {boardname: "promicro_uf2/nrf52840/default_i2c", filename: "SlimeNRF_ProMicro_Tracker_I2C_SD", with_softdevice: true},
                   {boardname: "promicro_uf2/nrf52840/chrysalis", filename: "SlimeNRF_ProMicro_Chrysalis_Tracker"},
+                  {boardname: "promicro_uf2/nrf52840/chrysalis", filename: "SlimeNRF_ProMicro_Chrysalis_Tracker_SD", with_softdevice: true},
                   {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker"},
+                  {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker_SD", with_softdevice: true},
                   {boardname: "foxsnacklite_uf2/nrf52840", filename: "FoxApplication_FoxSnackLite_Tracker"},
+                  {boardname: "foxsnacklite_uf2/nrf52840", filename: "FoxApplication_FoxSnackLite_Tracker_SD", with_softdevice: true},
                   {boardname: "mochi_uf2/nrf52833", filename: "Mochi_Tracker"},
                   {boardname: "dawn_tracker_mini_uf2/nrf52833", filename: "Dawn_Tracker_Mini"},
                   {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker"},
+                  {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker_SD", with_softdevice: true},
                   {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"}
                 ]
     runs-on: ubuntu-latest
@@ -273,6 +281,13 @@ jobs:
             echo "Repo dir not found: $REPO_DIR; fallback to SlimeNRF-CI"
             REPO_DIR="SlimeNRF-CI"
           fi
+          EXTRA_CMAKE_ARGS=()
+          if [ "${{ matrix.boards.with_softdevice }}" = "true" ]; then
+            EXTRA_CMAKE_ARGS+=(
+              -DWITH_SOFTDEVICE=ON
+              -DCONFIG_FLASH_LOAD_OFFSET=0x27000
+            )
+          fi
           rm -rf "$REPO_DIR/build"
           west build \
               --board ${{ matrix.boards.boardname }} \
@@ -280,7 +295,8 @@ jobs:
               --build-dir "$REPO_DIR/build" \
               -- \
               -DNCS_TOOLCHAIN_VERSION=NONE \
-              -DBOARD_ROOT=../"$REPO_DIR"
+              -DBOARD_ROOT=../"$REPO_DIR" \
+              "${EXTRA_CMAKE_ARGS[@]}"
 
           for ext in uf2 hex; do
             src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.${ext}"
