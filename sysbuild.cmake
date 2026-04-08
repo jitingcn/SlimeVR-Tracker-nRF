@@ -1,30 +1,42 @@
 set(pm_static_dir ${CMAKE_CURRENT_LIST_DIR}/pm_static)
 set(soc_overlay_dir ${CMAKE_CURRENT_LIST_DIR}/socs)
+set(app_config_dir ${CMAKE_CURRENT_LIST_DIR})
 
 set(pm_static_candidates)
+set(pm_static_suffixes)
 
-# (pm_static) + BOARD + QUALIFIERS
-if(DEFINED SB_CONFIG_BOARD_QUALIFIERS AND NOT SB_CONFIG_BOARD_QUALIFIERS STREQUAL "")
-  string(REPLACE "/" "_" pm_static_qualifiers ${SB_CONFIG_BOARD_QUALIFIERS})
-  list(APPEND pm_static_candidates
-    ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}_${pm_static_qualifiers}.yml
-    ${pm_static_dir}/${SB_CONFIG_BOARD}_${pm_static_qualifiers}.yml
-  )
+if(DEFINED FILE_SUFFIX AND NOT FILE_SUFFIX STREQUAL "")
+  list(APPEND pm_static_suffixes _${FILE_SUFFIX})
 endif()
 
-# (pm_static) + BOARD
-list(APPEND pm_static_candidates
-  ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}.yml
-  ${pm_static_dir}/${SB_CONFIG_BOARD}.yml
-)
+list(APPEND pm_static_suffixes "")
 
-# (pm_static) + SOC + "uf2" in BOARD or QUALIFIERS
-if((DEFINED SB_CONFIG_BOARD AND SB_CONFIG_BOARD MATCHES "uf2") OR (DEFINED SB_CONFIG_BOARD_QUALIFIERS AND SB_CONFIG_BOARD_QUALIFIERS MATCHES "uf2"))
+foreach(pm_static_suffix ${pm_static_suffixes})
+  # (pm_static) + BOARD + QUALIFIERS
+  if(DEFINED SB_CONFIG_BOARD_QUALIFIERS AND NOT SB_CONFIG_BOARD_QUALIFIERS STREQUAL "")
+    string(REPLACE "/" "_" pm_static_qualifiers ${SB_CONFIG_BOARD_QUALIFIERS})
+    list(APPEND pm_static_candidates
+      ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}_${pm_static_qualifiers}${pm_static_suffix}.yml
+      ${pm_static_dir}/${SB_CONFIG_BOARD}_${pm_static_qualifiers}${pm_static_suffix}.yml
+    )
+  endif()
+
+  # (pm_static) + BOARD
   list(APPEND pm_static_candidates
-    ${pm_static_dir}/pm_static_${SB_CONFIG_SOC}_uf2.yml
-    ${pm_static_dir}/${SB_CONFIG_SOC}_uf2.yml
+    ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}${pm_static_suffix}.yml
+    ${pm_static_dir}/${SB_CONFIG_BOARD}${pm_static_suffix}.yml
   )
-endif()
+
+  # (pm_static) + SOC + "uf2" in BOARD or QUALIFIERS
+  if((DEFINED SB_CONFIG_BOARD AND SB_CONFIG_BOARD MATCHES "uf2") OR (DEFINED SB_CONFIG_BOARD_QUALIFIERS AND SB_CONFIG_BOARD_QUALIFIERS MATCHES "uf2"))
+    list(APPEND pm_static_candidates
+      ${pm_static_dir}/pm_static_${SB_CONFIG_SOC}_uf2${pm_static_suffix}.yml
+      ${pm_static_dir}/${SB_CONFIG_SOC}_uf2${pm_static_suffix}.yml
+    )
+  endif()
+endforeach()
+
+list(REMOVE_DUPLICATES pm_static_candidates)
 
 #message("-- Partition manager static configuration search candidates: ${pm_static_candidates}")
 
@@ -34,6 +46,18 @@ foreach(pm_static_candidate ${pm_static_candidates})
     break()
   endif()
 endforeach()
+
+if(DEFINED FILE_SUFFIX AND NOT FILE_SUFFIX STREQUAL "")
+  set(app_extra_conf_candidate ${app_config_dir}/prj_${FILE_SUFFIX}.conf)
+
+  if(EXISTS ${app_extra_conf_candidate})
+    list(APPEND ${DEFAULT_IMAGE}_EXTRA_CONF_FILE ${app_extra_conf_candidate})
+    list(REMOVE_DUPLICATES ${DEFAULT_IMAGE}_EXTRA_CONF_FILE)
+    set(${DEFAULT_IMAGE}_EXTRA_CONF_FILE
+        ${${DEFAULT_IMAGE}_EXTRA_CONF_FILE}
+        CACHE INTERNAL "")
+  endif()
+endif()
 
 set(extra_dtc_overlay_candidates)
 
