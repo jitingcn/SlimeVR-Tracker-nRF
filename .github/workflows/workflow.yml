@@ -298,16 +298,34 @@ jobs:
               -DBOARD_ROOT=../"$REPO_DIR" \
               "${EXTRA_CMAKE_ARGS[@]}"
 
-          for ext in uf2 hex; do
-            src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.${ext}"
-            dst="Releases/${{ matrix.boards.filename }}.${ext}"
-            if [ -f "$src" ]; then
-              cp "$src" "$dst"
-              echo "Saved: $dst"
-            else
-              echo "Not found (skip): $src"
-            fi
-          done
+          if [ "${{ matrix.boards.with_softdevice }}" = "true" ]; then
+            for artifact in \
+              "zephyr.hex:${{ matrix.boards.filename }}_OTA.hex" \
+              "zephyr_sd.hex:${{ matrix.boards.filename }}_SD.hex" \
+              "zephyr_sd.uf2:${{ matrix.boards.filename }}_SD.uf2"; do
+              src_name="${artifact%%:*}"
+              dst_name="${artifact#*:}"
+              src="$REPO_DIR/build/$REPO_DIR/zephyr/$src_name"
+              dst="Releases/$dst_name"
+              if [ -f "$src" ]; then
+                cp "$src" "$dst"
+                echo "Saved: $dst"
+              else
+                echo "Not found (skip): $src"
+              fi
+            done
+          else
+            for ext in uf2 hex; do
+              src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.${ext}"
+              dst="Releases/${{ matrix.boards.filename }}.${ext}"
+              if [ -f "$src" ]; then
+                cp "$src" "$dst"
+                echo "Saved: $dst"
+              else
+                echo "Not found (skip): $src"
+              fi
+            done
+          fi
 
       - name: 💾 Upload Artifact - ${{ matrix.boards.boardname }}
         id: upload-artifact
@@ -317,5 +335,4 @@ jobs:
           name: ${{ matrix.boards.filename }}
           if-no-files-found: warn
           path: |
-            zephyr-workspace/Releases/${{ matrix.boards.filename }}.uf2
-            zephyr-workspace/Releases/${{ matrix.boards.filename }}.hex
+            zephyr-workspace/Releases/${{ matrix.boards.filename }}*
