@@ -99,7 +99,12 @@ add_compile_definitions(
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
+find_package(Python3 QUIET COMPONENTS Interpreter)
+
+if(NOT Python3_Interpreter_FOUND)
+  find_program(PYTHON_EXECUTABLE NAMES python3 python REQUIRED)
+  set(Python3_EXECUTABLE ${PYTHON_EXECUTABLE})
+endif()
 
 set(SOFTDEVICE_HEX_52840 ${CMAKE_SOURCE_DIR}/softdevice/s140_nrf52_7.3.0_softdevice.hex)
 set(UF2_FAMILY_ID_52840 0xADA52840)
