@@ -301,8 +301,8 @@ jobs:
           if [ "${{ matrix.boards.with_softdevice }}" = "true" ]; then
             for artifact in \
               "zephyr.hex:${{ matrix.boards.filename }}_OTA.hex" \
-              "zephyr_sd.hex:${{ matrix.boards.filename }}_SD.hex" \
-              "zephyr_sd.uf2:${{ matrix.boards.filename }}_SD.uf2"; do
+              "zephyr_sd.hex:${{ matrix.boards.filename }}.hex" \
+              "zephyr_sd.uf2:${{ matrix.boards.filename }}.uf2"; do
               src_name="${artifact%%:*}"
               dst_name="${artifact#*:}"
               src="$REPO_DIR/build/$REPO_DIR/zephyr/$src_name"
