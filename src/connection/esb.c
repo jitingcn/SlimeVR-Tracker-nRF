@@ -852,6 +852,9 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_DFU:
 								cmd_name = "DFU";
 								break;
+							case ESB_PONG_FLAG_DFU_OTA:
+								cmd_name = "DFU_OTA";
+								break;
 							case ESB_PONG_FLAG_SET_CHANNEL:
 								cmd_name = "SET_CHANNEL";
 								break;
@@ -1663,6 +1666,19 @@ static void esb_thread(void)
 					sys_request_system_reboot(false);
 #else
 					LOG_WRN("Remote command: DFU not supported (no bootloader)");
+#endif
+					break;
+
+				case ESB_PONG_FLAG_DFU_OTA:
+#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+					LOG_WRN("Executing remote command: DFU_OTA (enter OTA bootloader)");
+#if CONFIG_BUILD_OUTPUT_UF2
+					NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
+					k_msleep(2);
+#endif
+					sys_request_system_reboot(false);
+#else
+					LOG_WRN("Remote command: DFU_OTA not supported (no bootloader)");
 #endif
 					break;
 

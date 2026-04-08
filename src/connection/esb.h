@@ -83,7 +83,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_DFU 0x09           // Enter DFU bootloader
 #define ESB_PONG_FLAG_SET_CHANNEL 0x0A   // Set RF channel (data[8-11] contains channel value)
 #define ESB_PONG_FLAG_CLEAR_CHANNEL 0x0B // Clear RF channel setting (restore default)
-// Reserved for future use: 0x0C-0xFF
 #define ESB_PONG_FLAG_SENS_SET 0x0C
 #define ESB_PONG_FLAG_SENS_RESET 0x0D
 #define ESB_PONG_FLAG_RESET_ZRO 0x0E
@@ -105,6 +104,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_TDMA_OFF 0x1E      // Disable TDMA scheduling
 #define ESB_PONG_FLAG_TEST_MODE_ON 0x1F  // Enable battery drain test mode
 #define ESB_PONG_FLAG_TEST_MODE_OFF 0x20 // Disable battery drain test mode
+#define ESB_PONG_FLAG_DFU_OTA 0x21       // Enter OTA DFU bootloader
 
 bool esb_ready(void);
 

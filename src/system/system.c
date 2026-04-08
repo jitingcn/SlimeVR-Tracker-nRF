@@ -580,6 +580,16 @@ void sys_reset_mode(uint8_t mode)
 #if NRF5_BOOTLOADER
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
 #endif
+		break;
+	case 7: // Reset mode OTA DFU
+		LOG_INF("OTA DFU requested");
+#if ADAFRUIT_BOOTLOADER
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
+		sys_request_system_reboot(false);
+#endif
+#if NRF5_BOOTLOADER
+		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+#endif
 #endif
 	default:
 		break;
