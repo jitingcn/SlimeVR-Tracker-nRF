@@ -2443,6 +2443,7 @@ bool sensor_tcal_is_temp_outside_range(float temp, float *min_temp, float *max_t
 void sensor_tcal_set_auto_calibration(bool enabled)
 {
 	tcal_auto_calibration_enabled = enabled;
+	set_status(SYS_STATUS_CALIBRATION_RUNNING, enabled);
 	if (!enabled) {
 		tcal_accum_reset();
 	}
