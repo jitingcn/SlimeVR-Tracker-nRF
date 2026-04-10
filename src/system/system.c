@@ -581,8 +581,9 @@ void sys_reset_mode(uint8_t mode)
 		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
 #endif
 		break;
-	case 7: // Reset mode OTA DFU
-		LOG_INF("OTA DFU requested");
+	case 7:
+	case 8: // Reset mode DFU OTA
+		LOG_INF("DFU OTA requested");
 #if ADAFRUIT_BOOTLOADER
 		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
 		sys_request_system_reboot(false);
