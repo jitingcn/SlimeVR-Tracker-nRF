@@ -510,6 +510,7 @@ static void print_help(void)
 	printk("  clearchannel               Clear RF channel (use default)\n");
 	printk("\n");
 	printk("System:\n");
+	printk("  shutdown                   Power off the device\n");
 	printk("  reboot                     Soft reset the device\n");
 #if DFU_EXISTS
 	printk("  dfu                        Enter DFU bootloader\n");
@@ -658,6 +659,12 @@ void cmd_ping_start(void)
 	set_led(SYS_LED_PATTERN_ONESHOT_PING, SYS_LED_PRIORITY_HIGHEST);
 }
 
+void cmd_shutdown(void)
+{
+	printk("Shutting down device.\n");
+	sys_command_shutdown();
+}
+
 static void console_thread(void)
 {
 #if USB_EXISTS && DFU_EXISTS
@@ -707,6 +714,7 @@ static void console_thread(void)
 
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
+	uint8_t command_shutdown[] = "shutdown";
 	uint8_t command_reboot[] = "reboot";
 	uint8_t command_battery[] = "battery";
 	uint8_t command_scan[] = "scan";
@@ -784,6 +792,8 @@ static void console_thread(void)
 			uint64_t uptime = k_uptime_ticks();
 			print_uptime(uptime, "Uptime");
 			print_uptime(uptime - retained->uptime_latest + retained->uptime_sum, "Accumulated");
+		} else if (memcmp(line, command_shutdown, sizeof(command_shutdown)) == 0) {
+			cmd_shutdown();
 		} else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0) {
 			sys_request_system_reboot(false);
 		} else if (memcmp(line, command_battery, sizeof(command_battery)) == 0) {

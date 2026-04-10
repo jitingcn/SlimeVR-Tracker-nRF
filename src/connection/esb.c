@@ -1570,7 +1570,7 @@ static void esb_thread(void)
 				switch (received_remote_command) {
 				case ESB_PONG_FLAG_SHUTDOWN:
 					LOG_WRN("Executing remote command: SHUTDOWN");
-					sys_request_system_off(false);
+					sys_command_shutdown();
 					break;
 
 				case ESB_PONG_FLAG_CALIBRATE:
