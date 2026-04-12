@@ -551,6 +551,15 @@ int sys_user_shutdown(void)
 	return 0;
 }
 
+void sys_command_shutdown(void)
+{
+	LOG_INF("Command shutdown requested");
+	reboot_counter_write(0);
+	set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
+	k_msleep(1500);
+	sys_request_system_off(false);
+}
+
 void sys_reset_mode(uint8_t mode)
 {
 	switch (mode) {
@@ -575,6 +584,17 @@ void sys_reset_mode(uint8_t mode)
 		LOG_INF("DFU requested");
 #if ADAFRUIT_BOOTLOADER
 		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
+		sys_request_system_reboot(false);
+#endif
+#if NRF5_BOOTLOADER
+		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+#endif
+		break;
+	case 7:
+	case 8: // Reset mode DFU OTA
+		LOG_INF("DFU OTA requested");
+#if ADAFRUIT_BOOTLOADER
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
 		sys_request_system_reboot(false);
 #endif
 #if NRF5_BOOTLOADER

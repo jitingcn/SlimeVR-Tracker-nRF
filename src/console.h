@@ -13,5 +13,6 @@ void cmd_reset_bat(void);
 void cmd_reset_tcal(void);
 void cmd_fusion_reset(void);
 void cmd_ping_start(void);
+void cmd_shutdown(void);
 
 #endif

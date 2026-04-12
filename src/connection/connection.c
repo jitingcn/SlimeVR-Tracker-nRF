@@ -40,6 +40,8 @@ static uint8_t packet_sequence = 0;
 static int64_t last_ping_time = 0;
 static uint32_t ping_interval_ms = PING_INTERVAL_MS;
 
+#define PING_RESYNC_MIN_INTERVAL_MS 500
+
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
 #ifndef CONFIG_CONNECTION_ENABLE_ACK
@@ -50,11 +52,11 @@ static bool no_ack = false;
 
 uint32_t get_ping_interval_ms(void)
 {
-	return ping_interval_ms;
+	return ping_interval_ms + esb_get_ping_backoff_ms();
 }
 
 static void connection_thread(void);
-K_THREAD_DEFINE(connection_thread_id, 2048, connection_thread, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(connection_thread_id, 2048, connection_thread, NULL, NULL, NULL, 5, 0, 0);
 
 void connection_clocks_request_start(void)
 {
@@ -433,7 +435,7 @@ void connection_thread(void)
 
 		/* Adaptive PING interval based on connection health */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-			ping_interval_ms = 2450;
+			ping_interval_ms = 1450;
 		} else {
 			ping_interval_ms = PING_INTERVAL_MS;
 		}
@@ -450,11 +452,16 @@ void connection_thread(void)
 		 * the TDMA slot estimate drifts too far.  This prevents the
 		 * gradual TPS degradation caused by transmitting in wrong slots.
 		 */
-		bool ping_due = (now - last_ping_time >= ping_interval_ms);
+		uint32_t effective_ping_interval_ms = get_ping_interval_ms();
+		bool ping_due = (now - last_ping_time >= effective_ping_interval_ms);
 #if CONFIG_CONNECTION_TDMA
 		if (!ping_due && tdma_is_enabled()) {
 			int64_t sync_age = esb_get_sync_age_ms();
-			if (sync_age > (int64_t)ping_interval_ms * 2) {
+			uint32_t resync_interval_ms = effective_ping_interval_ms / 2;
+			if (resync_interval_ms < PING_RESYNC_MIN_INTERVAL_MS) {
+				resync_interval_ms = PING_RESYNC_MIN_INTERVAL_MS;
+			}
+			if (sync_age > (int64_t)effective_ping_interval_ms * 2 && (now - last_ping_time) >= resync_interval_ms) {
 				ping_due = true;
 			}
 		}
