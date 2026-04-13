@@ -99,6 +99,7 @@ typedef struct {
 } vqf_debug_info_t;
 
 void vqf_get_debug_info(vqf_debug_info_t *info);
+void vqf_run_benchmark(uint32_t iterations);
 
 extern const sensor_fusion_t sensor_fusion_vqf;
 
