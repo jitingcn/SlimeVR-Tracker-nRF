@@ -22,6 +22,8 @@
 */
 #include "util.h"
 
+#include <zephyr/kernel.h>
+
 #include "../src/vqf.h" // conflicting with vqf.h in local path
 
 #include "../vqf/vqf.h" // conflicting with vqf.h in vqf-c
@@ -37,6 +39,7 @@ static vqf_state_t state;
 static vqf_coeffs_t coeffs;
 
 static float last_a[3] = {0};
+static volatile float vqf_bench_sink;
 
 void vqf_update_sensor_ids(int imu)
 {
@@ -278,6 +281,118 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 
 	// Convert candidate dip from rad to degrees
 	info->mag_candidate_dip *= 180.0f / M_PI;
+}
+
+static uint32_t vqf_bench_elapsed_cycles(uint32_t start_cycles)
+{
+	return k_cycle_get_32() - start_cycles;
+}
+
+static void vqf_bench_print_stats(const char *name, uint32_t iterations, uint32_t total_cycles)
+{
+	uint32_t avg_cycles_int = 0;
+	uint32_t avg_cycles_frac = 0;
+
+	if (iterations) {
+		uint64_t avg_cycles_x1000 = ((uint64_t)total_cycles * 1000ULL) / iterations;
+		avg_cycles_int = (uint32_t)(avg_cycles_x1000 / 1000ULL);
+		avg_cycles_frac = (uint32_t)(avg_cycles_x1000 % 1000ULL);
+	}
+
+	printk(
+		"  %-10s total_cycles=%10u avg_cycles=%3u.%03u\n",
+		name,
+		total_cycles,
+		avg_cycles_int,
+		avg_cycles_frac
+	);
+}
+
+void vqf_run_benchmark(uint32_t iterations)
+{
+	vqf_bench_sink = 0.0f;
+	vqf_params_t bench_params;
+	vqf_state_t bench_state;
+	vqf_coeffs_t bench_coeffs;
+	float quat[4];
+	uint32_t start_cycles;
+	uint32_t elapsed_cycles;
+
+	if (iterations == 0) {
+		iterations = 1000;
+	}
+
+	const vqf_real_t gyr_samples[][3] = {
+		{0.12f, -0.34f, 0.56f},
+		{-1.10f, 0.45f, 0.08f},
+		{0.78f, 0.11f, -0.29f},
+		{-0.05f, 0.92f, 0.37f},
+	};
+	const vqf_real_t acc_samples[][3] = {
+		{0.30f, 0.10f, 9.70f},
+		{-0.25f, 0.45f, 9.63f},
+		{0.60f, -0.15f, 9.55f},
+		{-0.40f, -0.20f, 9.81f},
+	};
+	const vqf_real_t mag_samples[][3] = {
+		{0.32f, 0.05f, -0.41f},
+		{0.28f, 0.10f, -0.39f},
+		{0.35f, -0.02f, -0.43f},
+		{0.30f, 0.08f, -0.40f},
+	};
+	const size_t sample_count = sizeof(gyr_samples) / sizeof(gyr_samples[0]);
+
+	set_params();
+	bench_params = params;
+	initVqf(&bench_params, &bench_state, &bench_coeffs, 0.001f, 0.001f, 0.01f);
+
+	for (size_t i = 0; i < sample_count * 8; i++) {
+		const size_t idx = i % sample_count;
+		updateGyr(&bench_params, &bench_state, &bench_coeffs, gyr_samples[idx]);
+		updateAcc(&bench_params, &bench_state, &bench_coeffs, acc_samples[idx]);
+		updateMag(&bench_params, &bench_state, &bench_coeffs, mag_samples[idx]);
+		getQuat9D(&bench_state, quat);
+		vqf_bench_sink += quat[0];
+	}
+
+	printk("VQF benchmark (%u iterations, CMSIS-DSP=%s)\n", iterations,
+#ifdef CONFIG_CMSIS_DSP
+		"on"
+#else
+		"off"
+#endif
+	);
+
+	start_cycles = k_cycle_get_32();
+	for (uint32_t i = 0; i < iterations; i++) {
+		updateGyr(&bench_params, &bench_state, &bench_coeffs, gyr_samples[i % sample_count]);
+	}
+	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
+	vqf_bench_print_stats("updateGyr", iterations, elapsed_cycles);
+
+	start_cycles = k_cycle_get_32();
+	for (uint32_t i = 0; i < iterations; i++) {
+		updateAcc(&bench_params, &bench_state, &bench_coeffs, acc_samples[i % sample_count]);
+	}
+	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
+	vqf_bench_print_stats("updateAcc", iterations, elapsed_cycles);
+
+	start_cycles = k_cycle_get_32();
+	for (uint32_t i = 0; i < iterations; i++) {
+		updateMag(&bench_params, &bench_state, &bench_coeffs, mag_samples[i % sample_count]);
+	}
+	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
+	vqf_bench_print_stats("updateMag", iterations, elapsed_cycles);
+
+	start_cycles = k_cycle_get_32();
+	for (uint32_t i = 0; i < iterations; i++) {
+		getQuat9D(&bench_state, quat);
+		vqf_bench_sink += quat[i & 3];
+	}
+	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
+	vqf_bench_print_stats("getQuat9D", iterations, elapsed_cycles);
+
+	printk("  checksum: %.6f\n", (double)vqf_bench_sink);
 }
 
 const sensor_fusion_t sensor_fusion_vqf = {
