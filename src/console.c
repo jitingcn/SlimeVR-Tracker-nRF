@@ -4,6 +4,7 @@
 #include "system/test_mode.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration.h"
+#include "sensor/fusion/vqf/vqf.h"
 #include "connection/esb.h"
 #include "connection/tdma.h"
 #include "build_defines.h"
