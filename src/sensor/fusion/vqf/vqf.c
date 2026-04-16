@@ -100,6 +100,24 @@ static float current_tau_level = -1; /* current quantized level (-1 = unset) */
 static float smoothed_tau;           /* smoothed tauAcc for gradual transitions */
 #endif
 
+/* Rest detection diagnostics */
+static uint32_t rest_enter_count;
+static uint32_t rest_exit_count;
+static float rest_total_s;
+static float rest_last_enter_time;   /* uptime when last rest started */
+static float rest_last_duration_s;
+static float uptime_s;
+static bool prev_rest_detected;
+
+/* Circular rest event log */
+#define REST_EVENT_LOG_SIZE 5
+static struct {
+	float time_s;
+	bool entered;
+} rest_event_log[REST_EVENT_LOG_SIZE];
+static uint8_t rest_event_idx;  /* next write position */
+static uint8_t rest_event_total; /* total events (up to log size) */
+
 void vqf_update_sensor_ids(int imu)
 {
 	imu_id = imu;
@@ -142,6 +160,15 @@ void vqf_init(float g_time, float a_time, float m_time)
 	current_tau_level = -1.0f;
 	smoothed_tau = params.tauAcc;
 #endif
+	rest_enter_count = 0;
+	rest_exit_count = 0;
+	rest_total_s = 0;
+	rest_last_enter_time = 0;
+	rest_last_duration_s = 0;
+	uptime_s = 0;
+	prev_rest_detected = false;
+	rest_event_idx = 0;
+	rest_event_total = 0;
 }
 
 void vqf_load(const void *data)
@@ -156,6 +183,15 @@ void vqf_load(const void *data)
 	current_tau_level = -1.0f;
 	smoothed_tau = params.tauAcc;
 #endif
+	rest_enter_count = 0;
+	rest_exit_count = 0;
+	rest_total_s = 0;
+	rest_last_enter_time = 0;
+	rest_last_duration_s = 0;
+	uptime_s = 0;
+	prev_rest_detected = false;
+	rest_event_idx = 0;
+	rest_event_total = 0;
 }
 
 void vqf_save(void *data)
@@ -260,6 +296,41 @@ static void vqf_pre_accel_update(const float a_m_s2[3])
 }
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
+/**
+ * @brief Track rest detection transitions and accumulate diagnostics.
+ * Called after each accelerometer update (which runs rest detection).
+ */
+static void vqf_track_rest_diag(void)
+{
+	float dt = coeffs.accTs;
+	uptime_s += dt;
+
+	bool cur = state.restDetected;
+	if (cur && !prev_rest_detected) {
+		/* entering rest */
+		rest_enter_count++;
+		rest_last_enter_time = uptime_s;
+		rest_event_log[rest_event_idx].time_s = uptime_s;
+		rest_event_log[rest_event_idx].entered = true;
+		rest_event_idx = (rest_event_idx + 1) % REST_EVENT_LOG_SIZE;
+		if (rest_event_total < REST_EVENT_LOG_SIZE)
+			rest_event_total++;
+	} else if (!cur && prev_rest_detected) {
+		/* leaving rest */
+		rest_exit_count++;
+		rest_last_duration_s = uptime_s - rest_last_enter_time;
+		rest_event_log[rest_event_idx].time_s = uptime_s;
+		rest_event_log[rest_event_idx].entered = false;
+		rest_event_idx = (rest_event_idx + 1) % REST_EVENT_LOG_SIZE;
+		if (rest_event_total < REST_EVENT_LOG_SIZE)
+			rest_event_total++;
+	}
+	if (cur) {
+		rest_total_s += dt;
+	}
+	prev_rest_detected = cur;
+}
+
 void vqf_update_accel(float *a, float time)
 {
 	ARG_UNUSED(time);
@@ -273,6 +344,7 @@ void vqf_update_accel(float *a, float time)
 	vqf_pre_accel_update(a_m_s2);
 #endif
 	updateAcc(&params, &state, &coeffs, a_m_s2);
+	vqf_track_rest_diag();
 }
 
 void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
@@ -286,6 +358,7 @@ void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
 	vqf_pre_accel_update(a_m_s2);
 #endif
 	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
+	vqf_track_rest_diag();
 }
 
 void vqf_update_mag(float *m, float time)
@@ -442,6 +515,30 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	info->tau_acc = params.tauAcc;
 	info->motion_intensity = motion_intensity;
 #endif
+
+	// Rest detection diagnostics
+	info->rest_enter_count = rest_enter_count;
+	info->rest_exit_count = rest_exit_count;
+	info->rest_total_s = rest_total_s;
+	info->rest_last_duration_s = rest_last_duration_s;
+	info->uptime_s = uptime_s;
+
+	// Copy rest event log (oldest first)
+	info->rest_event_count = rest_event_total;
+	for (uint8_t i = 0; i < REST_EVENT_LOG_SIZE; i++) {
+		uint8_t src;
+		if (rest_event_total >= REST_EVENT_LOG_SIZE)
+			src = (rest_event_idx + i) % REST_EVENT_LOG_SIZE;
+		else
+			src = i;
+		info->rest_events[i].time_s = rest_event_log[src].time_s;
+		info->rest_events[i].entered = rest_event_log[src].entered;
+	}
+
+	// Kalman filter P diagonal
+	info->biasP[0] = state.biasP[0];
+	info->biasP[1] = state.biasP[4];
+	info->biasP[2] = state.biasP[8];
 }
 
 static uint32_t vqf_bench_elapsed_cycles(uint32_t start_cycles)

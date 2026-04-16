@@ -1776,6 +1776,26 @@ void sensor_loop(void)
 					printk("     Adapt: tauAcc:%.2fs motInt:%.3f\n",
 						(double)vqf_info.tau_acc, (double)vqf_info.motion_intensity);
 #endif
+					printk("     RestDiag: enter:%u exit:%u total:%.1fs last:%.1fs up:%.0fs rest%%:%.1f\n",
+						vqf_info.rest_enter_count, vqf_info.rest_exit_count,
+						(double)vqf_info.rest_total_s, (double)vqf_info.rest_last_duration_s,
+						(double)vqf_info.uptime_s,
+						(double)(vqf_info.uptime_s > 0 ? 100.0f * vqf_info.rest_total_s / vqf_info.uptime_s : 0));
+					printk("     BiasP[%.1f,%.1f,%.1f]\n",
+						(double)vqf_info.biasP[0], (double)vqf_info.biasP[1], (double)vqf_info.biasP[2]);
+					{
+						uint8_t n = vqf_info.rest_event_count;
+						if (n > 8) n = 8;
+						if (n > 0) {
+							printk("     RestLog(%u events):", vqf_info.rest_event_count);
+							for (uint8_t ri = 0; ri < n; ri++) {
+								printk(" %s@%.0fs",
+									vqf_info.rest_events[ri].entered ? "EN" : "EX",
+									(double)vqf_info.rest_events[ri].time_s);
+							}
+							printk("\n");
+						}
+					}
 					if (mag_enabled) {
 						printk("     Mag: DisAng:%.2f° CorrRate:%.2f°/s\n",
 							(double)vqf_info.mag_dis_angle, (double)vqf_info.mag_corr_rate);
