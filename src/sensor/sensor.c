@@ -220,7 +220,7 @@ static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 // Temperature used by T-Cal (°C).
 // Low-pass filtered to reduce IMU temperature sensor noise which can cause compensation jitter.
 #ifndef SENSOR_TCAL_TEMP_FILTER_TAU_MS
-#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 500  // ms
+#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 200  // ms
 #endif
 
 static float sensor_tcal_temp = 25.0f;      // Filtered temperature (°C)
@@ -1772,6 +1772,10 @@ void sensor_loop(void)
 						(double)vqf_info.rest_deviations[0], (double)vqf_info.rest_deviations[1],
 						(double)vqf_info.bias[0], (double)vqf_info.bias[1], (double)vqf_info.bias[2],
 						(double)vqf_info.bias_sigma, (double)vqf_info.delta);
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+					printk("     Adapt: tauAcc:%.2fs motInt:%.3f\n",
+						(double)vqf_info.tau_acc, (double)vqf_info.motion_intensity);
+#endif
 					if (mag_enabled) {
 						printk("     Mag: DisAng:%.2f° CorrRate:%.2f°/s\n",
 							(double)vqf_info.mag_dis_angle, (double)vqf_info.mag_corr_rate);

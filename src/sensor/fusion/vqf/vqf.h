@@ -96,6 +96,11 @@ typedef struct {
     // Filter gains (useful to understand how strong mag correction is)
     float mag_k;               // dimensionless (kMag)
     float mag_k_init;          // dimensionless (kMagInit)
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+    // Adaptive tauAcc state
+    float tau_acc;             // current tauAcc value (seconds)
+    float motion_intensity;    // motion intensity estimate [0, 1]
+#endif
 } vqf_debug_info_t;
 
 void vqf_get_debug_info(vqf_debug_info_t *info);
