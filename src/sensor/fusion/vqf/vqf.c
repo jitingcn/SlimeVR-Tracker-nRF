@@ -62,25 +62,15 @@
  * is linearly interpolated from GENTLE (0) to AGGRESSIVE (1).
  * When rest is detected, TAU_ACC_REST overrides.
  */
-#define ADAPTIVE_TAU_ACC_REST       6.0f   /* tauAcc when at rest (seconds) */
-#define ADAPTIVE_TAU_ACC_GENTLE     5.8f   /* tauAcc during gentle motion (seconds) */
-#define ADAPTIVE_TAU_ACC_AGGRESSIVE 3.0f   /* tauAcc under aggressive motion (seconds) */
-#define ADAPTIVE_TAU_ACC_LEVELS     14      /* quantization levels */
+#define ADAPTIVE_TAU_ACC_REST       3.0f   /* tauAcc when at rest (seconds) */
+#define ADAPTIVE_TAU_ACC_GENTLE     0.5f   /* tauAcc during gentle motion (seconds) */
+#define ADAPTIVE_TAU_ACC_AGGRESSIVE 6.0f   /* tauAcc under aggressive motion (seconds) */
+#define ADAPTIVE_TAU_ACC_LEVELS     6      /* quantization levels */
 #define ADAPTIVE_ACC_DEV_TH         3.0f   /* accel deviation threshold (m/s²) */
-#define ADAPTIVE_ATTACK_ALPHA       0.15f  /* fast attack coefficient (per sample) */
+#define ADAPTIVE_ATTACK_ALPHA       0.20f  /* fast attack coefficient (per sample) */
 #define ADAPTIVE_RELEASE_ALPHA      0.008f /* slow release coefficient (per sample) */
-
-/*
- * tauAcc transition smoothing: prevents Butterworth LP filter transients
- * when switching between motion regimes (e.g. rest→aggressive).
- * Uses asymmetric exponential smoothing: slow decrease, fast increase.
- *
- * At 100 Hz accel ODR (CONFIG_SENSOR_ACCEL_ODR):
- *   ALPHA_DOWN = 0.004 → τ ≈ 2.5s, 95% settling ≈ 7.5s
- *   ALPHA_UP   = 0.008 → τ ≈ 1.25s, 95% settling ≈ 3.75s
- */
-#define TAU_SMOOTH_ALPHA_DOWN  0.004f  /* tauAcc decrease smoothing (per sample) */
-#define TAU_SMOOTH_ALPHA_UP    0.008f  /* tauAcc increase smoothing (per sample) */
+#define TAU_SMOOTH_ALPHA_DOWN       0.03f  /* tauAcc decrease smoothing (per sample) */
+#define TAU_SMOOTH_ALPHA_UP         0.05f  /* tauAcc increase smoothing (per sample) */
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
 static uint8_t imu_id;
