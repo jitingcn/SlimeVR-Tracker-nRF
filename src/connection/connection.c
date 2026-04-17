@@ -23,6 +23,7 @@
 #include "globals.h"
 #include "sensor/fusion/vqf/vqf.h"
 #include "sensor/sensor.h"
+#include "connection.h"
 #include "util.h"
 #include "esb.h"
 #include "tdma.h"
@@ -365,6 +366,166 @@ void connection_write_packet_4() // full precision quat and magnetometer
 static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 
+/*
+ * Raw sensor data collection subsystem.
+ *
+ * Runtime-controlled: activated via ESB_PONG_FLAG_DATA_COLLECT_ON command.
+ * Sensor thread queues raw IMU/mag samples via message queues.
+ * Connection thread drains them and sends ESB packets with floats.
+ *
+ * ESB Raw IMU packet (type 0x10, 48 bytes):
+ *   [0]    type 0x10
+ *   [1]    tracker_id
+ *   [2-3]  sequence (16-bit BE)
+ *   [4-15] gyro x,y,z (float × 3, deg/s)
+ *   [16-27] accel x,y,z (float × 3, g)
+ *   [28-39] mag x,y,z (float × 3, or zeros)
+ *   [40]   flags (bit0: has_new_mag)
+ *   [41]   temperature (uint8)
+ *   [42-47] reserved
+ */
+#include <zephyr/sys/byteorder.h>
+
+#define RAW_IMU_QUEUE_SIZE  16
+
+struct raw_imu_queued {
+	float gyro[3];
+	float accel[3];
+};
+
+K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4);
+
+static uint16_t raw_sequence = 0;
+static bool data_collection_active = false;
+static bool raw_metadata_sent = false;
+static int64_t raw_metadata_last_ms = 0;
+#define RAW_METADATA_RESEND_MS 60000
+
+/* Latest mag data for piggybacking onto IMU packets */
+static float latest_mag[3] = {0};
+static bool latest_mag_valid = false;
+
+void connection_set_data_collection(bool enable)
+{
+	if (enable && !data_collection_active) {
+		/* Flush any stale data in queues */
+		k_msgq_purge(&raw_imu_msgq);
+		raw_sequence = 0;
+		raw_metadata_sent = false;
+		latest_mag_valid = false;
+	}
+	data_collection_active = enable;
+	LOG_INF("Data collection %s", enable ? "STARTED" : "STOPPED");
+}
+
+bool connection_get_data_collection(void)
+{
+	return data_collection_active;
+}
+
+void connection_queue_raw_sample(const struct raw_imu_sample *sample)
+{
+	if (!data_collection_active) return;
+
+	struct raw_imu_queued entry;
+	memcpy(entry.gyro, sample->gyro, sizeof(entry.gyro));
+	memcpy(entry.accel, sample->accel, sizeof(entry.accel));
+
+	if (k_msgq_put(&raw_imu_msgq, &entry, K_NO_WAIT) != 0) {
+		struct raw_imu_queued discard;
+		k_msgq_get(&raw_imu_msgq, &discard, K_NO_WAIT);
+		k_msgq_put(&raw_imu_msgq, &entry, K_NO_WAIT);
+	}
+}
+
+void connection_queue_raw_mag(const float mag[3])
+{
+	if (!data_collection_active) return;
+
+	/* Store latest mag for piggybacking onto IMU packets */
+	memcpy(latest_mag, mag, sizeof(latest_mag));
+	latest_mag_valid = true;
+}
+
+void connection_send_raw_metadata(float gyro_range, float accel_range,
+				  float gyro_odr, float accel_odr,
+				  float mag_odr, uint8_t imu, uint8_t mag)
+{
+	uint8_t buf[ESB_MAX_PAYLOAD_LEN];
+	memset(buf, 0, sizeof(buf));
+	buf[0] = ESB_RAW_META_TYPE;
+	buf[1] = tracker_id;
+	memcpy(&buf[2], &gyro_range, 4);
+	memcpy(&buf[6], &accel_range, 4);
+	memcpy(&buf[10], &gyro_odr, 4);
+	memcpy(&buf[14], &accel_odr, 4);
+	memcpy(&buf[18], &mag_odr, 4);
+	buf[22] = imu;
+	buf[23] = mag;
+
+	esb_write(buf, false, ESB_MAX_PAYLOAD_LEN);
+	raw_metadata_sent = true;
+	raw_metadata_last_ms = k_uptime_get();
+}
+
+bool connection_raw_metadata_resend_due(void)
+{
+	if (!data_collection_active || !raw_metadata_sent) return false;
+	return (k_uptime_get() - raw_metadata_last_ms) >= RAW_METADATA_RESEND_MS;
+}
+
+bool connection_process_raw_data(void)
+{
+	if (!data_collection_active)
+		return false;
+
+	/* Send metadata once when data collection starts */
+	if (!raw_metadata_sent) {
+		/* Metadata will be sent by sensor_loop after it detects
+		 * data_collection_active. Skip until it's sent. */
+		return false;
+	}
+
+	/* Send one IMU sample per float packet (48 bytes) */
+	struct raw_imu_queued sample;
+	if (k_msgq_get(&raw_imu_msgq, &sample, K_NO_WAIT) == 0) {
+		uint8_t buf[ESB_MAX_PAYLOAD_LEN];
+		memset(buf, 0, sizeof(buf));
+
+		buf[0] = ESB_RAW_IMU_TYPE;
+		buf[1] = tracker_id;
+		sys_put_be16(raw_sequence++, &buf[2]);
+
+		/* Gyro float × 3 */
+		memcpy(&buf[4], &sample.gyro[0], 4);
+		memcpy(&buf[8], &sample.gyro[1], 4);
+		memcpy(&buf[12], &sample.gyro[2], 4);
+
+		/* Accel float × 3 */
+		memcpy(&buf[16], &sample.accel[0], 4);
+		memcpy(&buf[20], &sample.accel[1], 4);
+		memcpy(&buf[24], &sample.accel[2], 4);
+
+		/* Piggyback latest mag if available */
+		uint8_t flags = 0;
+		if (latest_mag_valid) {
+			memcpy(&buf[28], &latest_mag[0], 4);
+			memcpy(&buf[32], &latest_mag[1], 4);
+			memcpy(&buf[36], &latest_mag[2], 4);
+			flags |= 0x01; /* has_new_mag */
+			latest_mag_valid = false;
+		}
+
+		buf[40] = flags;
+		buf[41] = sensor_temp;
+
+		esb_write(buf, false, ESB_MAX_PAYLOAD_LEN);
+		return true;
+	}
+
+	return false;
+}
+
 static int64_t last_sensor_quat_time = 0;
 #define SENSOR_QUAT_INTERVAL_TDMA_MS   2
 #define SENSOR_QUAT_INTERVAL_NOTDMA_MS 6
@@ -491,6 +652,12 @@ void connection_thread(void)
 		/* Skip sensor data during connection error */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 			k_msleep(100);
+			continue;
+		}
+
+		/* Raw data has priority over fusion data to minimize latency */
+		if (connection_process_raw_data()) {
+			k_usleep(300); /* Brief delay for ESB TX completion */
 			continue;
 		}
 

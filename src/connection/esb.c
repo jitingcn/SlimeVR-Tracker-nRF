@@ -1802,6 +1802,17 @@ static void esb_thread(void)
 #endif
 					break;
 
+				case ESB_PONG_FLAG_DATA_COLLECT_ON:
+					LOG_INF("Executing remote command: DATA_COLLECT_ON");
+					connection_set_data_collection(true);
+					test_mode_set(true);  // Prevent sleep during data collection
+					break;
+
+				case ESB_PONG_FLAG_DATA_COLLECT_OFF:
+					LOG_INF("Executing remote command: DATA_COLLECT_OFF");
+					connection_set_data_collection(false);
+					break;
+
 				default:
 					LOG_WRN("Unknown remote command: 0x%02X", received_remote_command);
 					break;
