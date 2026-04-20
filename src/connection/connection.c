@@ -31,6 +31,7 @@
 #include "hid.h"
 #include "system/watchdog.h"
 
+#include <stdbool.h>
 #include <zephyr/kernel.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
@@ -397,6 +398,25 @@ K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4
 
 static uint16_t raw_sequence = 0;
 static bool data_collection_active = false;
+
+/*
+ * ARQ ring buffer: stores last RAW_RING_SIZE sent packets for retransmission.
+ * Indexed by (sequence % RAW_RING_SIZE).
+ */
+#define RAW_RING_SIZE 256
+static uint8_t raw_ring[RAW_RING_SIZE][ESB_MAX_PAYLOAD_LEN];
+static bool    raw_ring_valid[RAW_RING_SIZE];
+
+/*
+ * Retransmit queue: filled by ESB event handler when ACK payload carries
+ * retransmit requests (marker 0xAA).  Up to RAW_RETX_MAX entries.
+ * Connection thread drains this before sending new data.
+ */
+#define RAW_RETX_MAX 8
+#define RAW_ARQ_MARKER 0xAA
+volatile uint16_t raw_retx_queue[RAW_RETX_MAX];
+volatile uint8_t  raw_retx_count;
+static volatile uint32_t raw_retx_total;  /* lifetime retransmit count */
 static bool raw_metadata_sent = false;
 static int64_t raw_metadata_last_ms = 0;
 #define RAW_METADATA_RESEND_MS 60000
@@ -413,6 +433,10 @@ void connection_set_data_collection(bool enable)
 		raw_sequence = 0;
 		raw_metadata_sent = false;
 		latest_mag_valid = false;
+		/* Reset ARQ state */
+		memset(raw_ring_valid, 0, sizeof(raw_ring_valid));
+		raw_retx_count = 0;
+		raw_retx_total = 0;
 	}
 	data_collection_active = enable;
 	LOG_INF("Data collection %s", enable ? "STARTED" : "STOPPED");
@@ -486,7 +510,28 @@ bool connection_process_raw_data(void)
 		return false;
 	}
 
-	/* Send one IMU sample per float packet (48 bytes) */
+	/* Priority 1: Process retransmit requests from ARQ ACK payloads */
+	if (raw_retx_count > 0) {
+		uint16_t seq = raw_retx_queue[0];
+		uint16_t idx = seq % RAW_RING_SIZE;
+
+		if (raw_ring_valid[idx]) {
+			/* Retransmit from ring buffer */
+			esb_write(raw_ring[idx], false, ESB_MAX_PAYLOAD_LEN);
+			raw_retx_total++;
+		}
+
+		/* Remove from queue (shift remaining entries) */
+		unsigned irq_key = irq_lock();
+		for (uint8_t i = 0; i + 1 < raw_retx_count; i++) {
+			raw_retx_queue[i] = raw_retx_queue[i + 1];
+		}
+		raw_retx_count--;
+		irq_unlock(irq_key);
+		return true;
+	}
+
+	/* Priority 2: Send new IMU sample */
 	struct raw_imu_queued sample;
 	if (k_msgq_get(&raw_imu_msgq, &sample, K_NO_WAIT) == 0) {
 		uint8_t buf[ESB_MAX_PAYLOAD_LEN];
@@ -494,7 +539,8 @@ bool connection_process_raw_data(void)
 
 		buf[0] = ESB_RAW_IMU_TYPE;
 		buf[1] = tracker_id;
-		sys_put_be16(raw_sequence++, &buf[2]);
+		uint16_t seq = raw_sequence++;
+		sys_put_be16(seq, &buf[2]);
 
 		/* Gyro float × 3 */
 		memcpy(&buf[4], &sample.gyro[0], 4);
@@ -519,11 +565,12 @@ bool connection_process_raw_data(void)
 		buf[40] = flags;
 		buf[41] = sensor_temp;
 
-		/* Send twice with noack for redundancy without ACK overhead.
-		 * Receiver deduplicates using sequence number. */
-		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
-		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
-		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
+		/* Save to ring buffer for potential retransmission */
+		uint16_t ring_idx = seq % RAW_RING_SIZE;
+		memcpy(raw_ring[ring_idx], buf, ESB_MAX_PAYLOAD_LEN);
+		raw_ring_valid[ring_idx] = true;
+
+		esb_write(buf, false, ESB_MAX_PAYLOAD_LEN);
 		return true;
 	}
 
@@ -531,7 +578,7 @@ bool connection_process_raw_data(void)
 }
 
 static int64_t last_sensor_quat_time = 0;
-#define SENSOR_QUAT_INTERVAL_TDMA_MS   2
+#define SENSOR_QUAT_INTERVAL_TDMA_MS   1
 #define SENSOR_QUAT_INTERVAL_NOTDMA_MS 6
 
 /* Lookahead window: if a low-freq packet is within this many ms of being due,
@@ -642,7 +689,7 @@ void connection_thread(void)
 			ping[ESB_PING_LEN - 1] = 0;
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
-			k_usleep(400);
+			// k_usleep(400);
 			continue;
 		}
 
@@ -657,6 +704,14 @@ void connection_thread(void)
 			// k_usleep(300); /* Brief delay for ESB TX completion */
 			continue;
 		}
+
+		/* During data collection, skip all fusion data to avoid
+		 * saturating the radio.  Only PING (above) and raw data
+		 * are sent. */
+		// if (data_collection_active) {
+		// 	k_usleep(350);
+		// 	continue;
+		// }
 
 		/* Determine which data types are due or nearly due */
 		int quat_interval_ms = tdma_is_enabled()

@@ -33,7 +33,7 @@ extern uint8_t last_reset;
 // extern const nrfx_timer_t m_timer;
 extern bool esb_state;
 extern bool timer_state;
-extern bool send_data;
+
 // TODO: esb/sensor?
 extern uint16_t led_clock;
 extern uint32_t led_clock_offset;
