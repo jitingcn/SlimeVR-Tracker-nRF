@@ -570,6 +570,7 @@ bool connection_process_raw_data(void)
 		memcpy(raw_ring[ring_idx], buf, ESB_MAX_PAYLOAD_LEN);
 		raw_ring_valid[ring_idx] = true;
 
+		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
 		esb_write(buf, false, ESB_MAX_PAYLOAD_LEN);
 		return true;
 	}
@@ -705,13 +706,16 @@ void connection_thread(void)
 			continue;
 		}
 
-		/* During data collection, skip all fusion data to avoid
-		 * saturating the radio.  Only PING (above) and raw data
-		 * are sent. */
-		// if (data_collection_active) {
-		// 	k_usleep(350);
-		// 	continue;
-		// }
+		/* During data collection, throttle fusion data
+		 * to leave radio bandwidth for raw data. */
+		if (data_collection_active) {
+			static int64_t last_fusion_dc_time;
+			if (now - last_fusion_dc_time < 9) {
+				k_usleep(300);
+				continue;
+			}
+			last_fusion_dc_time = now;
+		}
 
 		/* Determine which data types are due or nearly due */
 		int quat_interval_ms = tdma_is_enabled()

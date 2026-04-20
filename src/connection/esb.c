@@ -396,7 +396,7 @@ void event_handler(struct esb_evt const *event)
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
-		if (esb_paired) {
+		if (esb_paired && !connection_get_data_collection()) {
 			clocks_stop();
 		}
 		break;
@@ -462,7 +462,7 @@ void event_handler(struct esb_evt const *event)
 			);
 		}
 
-		if (esb_paired) {
+		if (esb_paired && !connection_get_data_collection()) {
 			clocks_stop();
 		}
 		break;
@@ -1382,10 +1382,15 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 *
 	 * PING / ACK packets bypass TDMA (no_ack == false) so time-sync and
 	 * connection-health probes are never delayed.
+	 * Raw data (0x10-0x12) always bypasses TDMA for minimum latency.
 	 */
 #if CONFIG_CONNECTION_TDMA
 	if (no_ack) {
-		tdma_wait_for_slot();
+		uint8_t pkt_type = data[0];
+		bool is_raw = (pkt_type >= 0x10 && pkt_type <= 0x12);
+		if (!is_raw) {
+			tdma_wait_for_slot();
+		}
 	}
 #endif
 	/*
