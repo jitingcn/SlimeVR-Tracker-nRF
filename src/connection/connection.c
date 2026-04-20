@@ -519,7 +519,11 @@ bool connection_process_raw_data(void)
 		buf[40] = flags;
 		buf[41] = sensor_temp;
 
-		esb_write(buf, false, ESB_MAX_PAYLOAD_LEN);
+		/* Send twice with noack for redundancy without ACK overhead.
+		 * Receiver deduplicates using sequence number. */
+		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
+		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
+		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
 		return true;
 	}
 
@@ -638,14 +642,7 @@ void connection_thread(void)
 			ping[ESB_PING_LEN - 1] = 0;
 			esb_write(ping, false, ESB_PING_LEN);
 			last_ping_time = now;
-			/*
-			 * Wait for PING TX to complete (including ACK wait and
-			 * up to 2 retransmits at 310µs retransmit_delay).
-			 * Worst case: ~1.5ms.  Previous 900µs was insufficient
-			 * and caused esb_start_tx() -EBUSY for the next data
-			 * packet.
-			 */
-			k_usleep(1600);
+			k_usleep(400);
 			continue;
 		}
 
@@ -657,7 +654,7 @@ void connection_thread(void)
 
 		/* Raw data has priority over fusion data to minimize latency */
 		if (connection_process_raw_data()) {
-			k_usleep(300); /* Brief delay for ESB TX completion */
+			// k_usleep(300); /* Brief delay for ESB TX completion */
 			continue;
 		}
 
