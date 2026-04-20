@@ -62,11 +62,11 @@
  * is linearly interpolated from GENTLE (0) to AGGRESSIVE (1).
  * When rest is detected, TAU_ACC_REST overrides.
  */
-#define ADAPTIVE_TAU_ACC_REST       3.0f   /* tauAcc when at rest (seconds) */
-#define ADAPTIVE_TAU_ACC_GENTLE     0.5f   /* tauAcc during gentle motion (seconds) */
-#define ADAPTIVE_TAU_ACC_AGGRESSIVE 6.0f   /* tauAcc under aggressive motion (seconds) */
-#define ADAPTIVE_TAU_ACC_LEVELS     6      /* quantization levels */
-#define ADAPTIVE_ACC_DEV_TH         3.0f   /* accel deviation threshold (m/s²) */
+#define ADAPTIVE_TAU_ACC_REST       2.5f   /* tauAcc when at rest (seconds) */
+#define ADAPTIVE_TAU_ACC_GENTLE     1.5f   /* tauAcc during gentle motion (seconds) */
+#define ADAPTIVE_TAU_ACC_AGGRESSIVE 4.5f   /* tauAcc under aggressive motion (seconds) */
+#define ADAPTIVE_TAU_ACC_LEVELS     3      /* quantization levels */
+#define ADAPTIVE_ACC_DEV_TH         2.5f   /* accel deviation threshold (m/s²) */
 #define ADAPTIVE_ATTACK_ALPHA       0.20f  /* fast attack coefficient (per sample) */
 #define ADAPTIVE_RELEASE_ALPHA      0.008f /* slow release coefficient (per sample) */
 #define TAU_SMOOTH_ALPHA_DOWN       0.03f  /* tauAcc decrease smoothing (per sample) */
