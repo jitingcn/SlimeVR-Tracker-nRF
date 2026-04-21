@@ -61,9 +61,9 @@ static int64_t magneto_progress_time;
 #define MAG_CAL_ACCEL_MAG_MAX_SQ 1.3f
 
 // Minimum samples before attempting trial calibration
-#define MAG_CAL_MIN_SAMPLES 50
+#define MAG_CAL_MIN_SAMPLES 60
 // Attempt trial calibration every this many new samples (manual cal)
-#define MAG_CAL_TRIAL_INTERVAL 50
+#define MAG_CAL_TRIAL_INTERVAL 80
 // Minimum new samples between online calibration checks
 // Higher than manual to reduce oscillation from repeated small updates
 #define MAG_CAL_ONLINE_CHECK_INTERVAL 100
@@ -91,7 +91,7 @@ static float online_dir_sum[3];
 // Minimum direction change to accept an online sample (cosine similarity threshold)
 static float online_last_dir[3];
 #define ONLINE_MIN_DIR_CHANGE 0.05f // ~3 degrees minimum direction change
-#define ONLINE_MIN_INTERVAL_MS 100  // minimum 100ms between online samples
+#define ONLINE_MIN_INTERVAL_MS 40  // minimum 40ms between online samples
 
 // Runtime calibrated norm tracking (exponential moving average)
 // Used to assess current calibration quality and decide if online update is needed
@@ -103,7 +103,7 @@ static uint32_t cal_norm_count;   // number of norm samples processed
 #define CAL_NORM_GOOD_CV 0.05f    // 5% = good enough calibration
 
 // Minimum time between online calibration updates (prevents frequent VQF mag ref resets)
-#define ONLINE_MIN_UPDATE_INTERVAL_S 60  // 1 minute cooldown
+#define ONLINE_MIN_UPDATE_INTERVAL_S 30  // 30 seconds cooldown
 static int64_t online_last_update_time;
 
 // #define DEBUG true
