@@ -220,7 +220,7 @@ static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 // Temperature used by T-Cal (°C).
 // Low-pass filtered to reduce IMU temperature sensor noise which can cause compensation jitter.
 #ifndef SENSOR_TCAL_TEMP_FILTER_TAU_MS
-#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 200  // ms
+#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 500  // ms
 #endif
 
 static float sensor_tcal_temp = 25.0f;      // Filtered temperature (°C)
@@ -1573,12 +1573,27 @@ void sensor_loop(void)
 				float uncalibrated_m[3] = {0};
 				memcpy(uncalibrated_m, raw_m, sizeof(uncalibrated_m)); // copy raw magnetometer data
 
+				// Feed raw mag to background online calibration accumulator
+				sensor_calibration_online_mag_sample(uncalibrated_m);
+
 				sensor_calibration_process_mag(raw_m);
 				float zero_m[3] = {0};
 				if (v_epsilon(raw_m, zero_m, 1e-6)) // if the magnetometer is not calibrated, skip and send raw data
 				{
 					memcpy(raw_m, uncalibrated_m, sizeof(uncalibrated_m));
 					mag_calibrated = false;
+				} else {
+					// Track calibrated mag norm for online quality assessment
+					// Only track when VQF reports no magnetic disturbance — including
+					// disturbed samples inflates norm CV and prevents online cal from stabilizing
+#if CONFIG_SENSOR_USE_VQF
+					if (!vqf_get_mag_dist_detected()) {
+#endif
+						float cal_norm_sq = raw_m[0] * raw_m[0] + raw_m[1] * raw_m[1] + raw_m[2] * raw_m[2];
+						sensor_calibration_track_mag_norm(sqrtf(cal_norm_sq));
+#if CONFIG_SENSOR_USE_VQF
+					}
+#endif
 				}
 				// Save mag data for debug output
 				if (sensor_debug_is_active()) {

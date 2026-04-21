@@ -146,53 +146,17 @@ static void print_sensor(void)
 	}
 
 	// Print calibration quality analysis
-	printk("\nAccel calibration quality:\n");
-	// Extract offset (BAinv[0])
+	printk("\nAccel calibration:\n");
 	printk(
 		"  Offset: [%.5f, %.5f, %.5f]\n",
 		(double)retained->accBAinv[0][0],
 		(double)retained->accBAinv[0][1],
 		(double)retained->accBAinv[0][2]
 	);
-
-	// Extract diagonal elements (BAinv[1][0], BAinv[2][1], BAinv[3][2])
 	float diag_x = retained->accBAinv[1][0];
 	float diag_y = retained->accBAinv[2][1];
 	float diag_z = retained->accBAinv[3][2];
-	printk("  Diagonal: [%.5f, %.5f, %.5f]\n", (double)diag_x, (double)diag_y, (double)diag_z);
-
-	// Calculate average diagonal value (should be close to 1.0)
-	float diag_avg = (diag_x + diag_y + diag_z) / 3.0f;
-	printk("  Diagonal avg: %.5f (ideal: 1.0)\n", (double)diag_avg);
-
-	// Calculate diagonal deviation
-	float diag_dev = sqrtf(
-		((diag_x - diag_avg) * (diag_x - diag_avg) + (diag_y - diag_avg) * (diag_y - diag_avg)
-		 + (diag_z - diag_avg) * (diag_z - diag_avg))
-		/ 3.0f
-	);
-	printk("  Diagonal std: %.5f (lower is better)\n", (double)diag_dev);
-
-	// Calculate max off-diagonal element magnitude
-	float max_off_diag = 0.0f;
-	float off_diag_vals[6]
-		= {fabsf(retained->accBAinv[1][1]),
-		   fabsf(retained->accBAinv[1][2]),
-		   fabsf(retained->accBAinv[2][0]),
-		   fabsf(retained->accBAinv[2][2]),
-		   fabsf(retained->accBAinv[3][0]),
-		   fabsf(retained->accBAinv[3][1])};
-	for (int i = 0; i < 6; i++) {
-		if (off_diag_vals[i] > max_off_diag) {
-			max_off_diag = off_diag_vals[i];
-		}
-	}
-	printk("  Max off-diagonal: %.5f (ideal: ~0.0)\n", (double)max_off_diag);
-
-	// Overall quality assessment
-	bool good_diag = (diag_dev < 0.1f * diag_avg) && (fabsf(diag_avg - 1.0f) < 0.15f);
-	bool good_off_diag = (max_off_diag < 0.15f);
-	printk("  Quality: %s\n", (good_diag && good_off_diag) ? "GOOD" : (good_diag || good_off_diag) ? "FAIR" : "POOR");
+	printk("  Scale: [%.5f, %.5f, %.5f]\n", (double)diag_x, (double)diag_y, (double)diag_z);
 
 #else
 	printk(
@@ -231,6 +195,17 @@ static void print_sensor(void)
 			(double)retained->magBAinv[2][i],
 			(double)retained->magBAinv[3][i]
 		);
+	}
+	{
+		bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
+		                 || retained->magBAinv[0][1] != 0.0f
+		                 || retained->magBAinv[0][2] != 0.0f);
+		float dir_bias = 0;
+		int online_samples = sensor_calibration_online_mag_status(&dir_bias);
+		float mag_cv = sensor_calibration_get_mag_quality();
+		printk("Mag cal: %s | norm_cv=%.3f | Online: %d samples, dir_bias=%.2f\n",
+		       mag_has_cal ? "active" : "none",
+		       (double)mag_cv, online_samples, (double)dir_bias);
 	}
 
 	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
@@ -1016,6 +991,24 @@ static void console_thread(void)
 				// No argument: show status
 				printk("Magnetometer: %s\n", sensor_get_mag_enabled() ? "enabled" : "disabled");
 				printk("Hardware: %s\n", sensor_get_sensor_mag_name());
+				printk("Magnetometer matrix:\n");
+				for (int i = 0; i < 3; i++) {
+					printk("%.5f %.5f %.5f %.5f\n",
+						(double)retained->magBAinv[0][i],
+						(double)retained->magBAinv[1][i],
+						(double)retained->magBAinv[2][i],
+						(double)retained->magBAinv[3][i]);
+				}
+				float dir_bias = 0;
+				int online_samples = sensor_calibration_online_mag_status(&dir_bias);
+				bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
+				                 || retained->magBAinv[0][1] != 0.0f
+				                 || retained->magBAinv[0][2] != 0.0f);
+				float mag_cv = sensor_calibration_get_mag_quality();
+				printk("Calibration: %s (norm_cv=%.3f)\n",
+				       mag_has_cal ? "active" : "none", (double)mag_cv);
+				printk("Online: %d samples, dir_bias=%.2f\n",
+				       online_samples, (double)dir_bias);
 			} else {
 				char *subcmd = strtok((char *)arg, " ");
 				if (strcmp(subcmd, "on") == 0) {
