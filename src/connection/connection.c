@@ -403,7 +403,7 @@ static bool data_collection_active = false;
  * ARQ ring buffer: stores last RAW_RING_SIZE sent packets for retransmission.
  * Indexed by (sequence % RAW_RING_SIZE).
  */
-#define RAW_RING_SIZE 256
+#define RAW_RING_SIZE 512
 static uint8_t raw_ring[RAW_RING_SIZE][ESB_MAX_PAYLOAD_LEN];
 static bool    raw_ring_valid[RAW_RING_SIZE];
 
@@ -412,7 +412,7 @@ static bool    raw_ring_valid[RAW_RING_SIZE];
  * retransmit requests (marker 0xAA).  Up to RAW_RETX_MAX entries.
  * Connection thread drains this before sending new data.
  */
-#define RAW_RETX_MAX 8
+#define RAW_RETX_MAX 16
 #define RAW_ARQ_MARKER 0xAA
 volatile uint16_t raw_retx_queue[RAW_RETX_MAX];
 volatile uint8_t  raw_retx_count;
@@ -570,7 +570,6 @@ bool connection_process_raw_data(void)
 		memcpy(raw_ring[ring_idx], buf, ESB_MAX_PAYLOAD_LEN);
 		raw_ring_valid[ring_idx] = true;
 
-		esb_write(buf, true, ESB_MAX_PAYLOAD_LEN);
 		esb_write(buf, false, ESB_MAX_PAYLOAD_LEN);
 		return true;
 	}

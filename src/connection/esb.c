@@ -919,7 +919,7 @@ void event_handler(struct esb_evt const *event)
 								break;
 							}
 						}
-						if (!found && raw_retx_count < 8) {
+						if (!found && raw_retx_count < 16) {
 							raw_retx_queue[raw_retx_count++] = seq;
 						}
 					}
@@ -1274,6 +1274,19 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		esb_flush_tx();
 		queue_status = esb_write_payload(&tx_payload);
 	}
+
+	bool is_raw = (data[0] >= 0x10 && data[0] <= 0x12);
+	// manually repeat raw packets for better reliability
+	if (is_raw) {
+		tx_payload.noack = true;
+		queue_status = esb_write_payload(&tx_payload);
+		if (queue_status == 0) {
+			queue_status = esb_write_payload(&tx_payload);
+			if (queue_status == 0) {
+				queue_status = esb_write_payload(&tx_payload);
+			}
+		}
+	}
 # if 0
 	if (no_ack) {
 		// manually repeat packet for noack packets for better reliability
@@ -1386,8 +1399,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 */
 #if CONFIG_CONNECTION_TDMA
 	if (no_ack) {
-		uint8_t pkt_type = data[0];
-		bool is_raw = (pkt_type >= 0x10 && pkt_type <= 0x12);
 		if (!is_raw) {
 			tdma_wait_for_slot();
 		}
