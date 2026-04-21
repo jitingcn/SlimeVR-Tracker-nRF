@@ -3597,14 +3597,17 @@ static int sensor_tcal_mls_lookup(float temp, float bias_out[3])
 		float weight;
 	} WeightedPoint;
 
-	// First pass: collect all points with sufficient weight
-	// With MLS_MIN_WEIGHT=0.05, points beyond ~6.5°C are filtered out early
-	WeightedPoint all_points[MLS_MAX_POINTS * 2];  // Temporary buffer
-	int all_count = 0;
+	// Online top-k selection: maintain only the best MLS_MAX_POINTS by weight
+	// This avoids large stack allocations while scanning all buffer entries
+	WeightedPoint points[MLS_MAX_POINTS];
+	int point_count = 0;
+	int total_valid = 0;  // total points passing weight filter
 
 	float bandwidth_sq = MLS_BANDWIDTH * MLS_BANDWIDTH;
+	float min_selected_weight = 0.0f;  // track minimum weight in selected set
+	int min_selected_idx = 0;
 
-	for (int i = 0; i < TCAL_BUFFER_SIZE && all_count < MLS_MAX_POINTS * 2; i++) {
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
 		if (retained->tempCalPoints[i].temp == 0.0f) {
 			continue; // Skip empty slots
 		}
@@ -3614,7 +3617,6 @@ static int sensor_tcal_mls_lookup(float temp, float bias_out[3])
 		float d_sq = d * d;
 
 		// Cauchy-like weight: w = 1 / (1 + (d/h)²)
-		// This provides smooth falloff and is computationally efficient
 		float weight = 1.0f / (1.0f + d_sq / bandwidth_sq);
 
 		// Skip points with negligible weight
@@ -3622,38 +3624,41 @@ static int sensor_tcal_mls_lookup(float temp, float bias_out[3])
 			continue;
 		}
 
-		all_points[all_count].temp = point_temp;
-		all_points[all_count].weight = weight;
-		memcpy(all_points[all_count].bias, retained->tempCalPoints[i].bias, sizeof(float) * 3);
-		all_count++;
-	}
+		total_valid++;
 
-	// Second pass: if we have more than MLS_MAX_POINTS, select top-k by weight
-	// Uses partial selection sort - O(k*n) which is efficient for small k
-	WeightedPoint points[MLS_MAX_POINTS];
-	int point_count = (all_count <= MLS_MAX_POINTS) ? all_count : MLS_MAX_POINTS;
+		if (point_count < MLS_MAX_POINTS) {
+			// Still filling the selection buffer
+			points[point_count].temp = point_temp;
+			points[point_count].weight = weight;
+			memcpy(points[point_count].bias, retained->tempCalPoints[i].bias, sizeof(float) * 3);
+			point_count++;
 
-	if (all_count <= MLS_MAX_POINTS) {
-		// Just copy all points
-		memcpy(points, all_points, all_count * sizeof(WeightedPoint));
-	} else {
-		// Partial selection: pick top MLS_MAX_POINTS by weight
-		for (int k = 0; k < MLS_MAX_POINTS; k++) {
-			int max_idx = k;
-			float max_weight = all_points[k].weight;
-			for (int j = k + 1; j < all_count; j++) {
-				if (all_points[j].weight > max_weight) {
-					max_weight = all_points[j].weight;
-					max_idx = j;
+			// Update minimum tracking when buffer is full
+			if (point_count == MLS_MAX_POINTS) {
+				min_selected_weight = points[0].weight;
+				min_selected_idx = 0;
+				for (int j = 1; j < MLS_MAX_POINTS; j++) {
+					if (points[j].weight < min_selected_weight) {
+						min_selected_weight = points[j].weight;
+						min_selected_idx = j;
+					}
 				}
 			}
-			// Swap to position k
-			if (max_idx != k) {
-				WeightedPoint tmp = all_points[k];
-				all_points[k] = all_points[max_idx];
-				all_points[max_idx] = tmp;
+		} else if (weight > min_selected_weight) {
+			// Replace the weakest point in our selection
+			points[min_selected_idx].temp = point_temp;
+			points[min_selected_idx].weight = weight;
+			memcpy(points[min_selected_idx].bias, retained->tempCalPoints[i].bias, sizeof(float) * 3);
+
+			// Find new minimum
+			min_selected_weight = points[0].weight;
+			min_selected_idx = 0;
+			for (int j = 1; j < MLS_MAX_POINTS; j++) {
+				if (points[j].weight < min_selected_weight) {
+					min_selected_weight = points[j].weight;
+					min_selected_idx = j;
+				}
 			}
-			points[k] = all_points[k];
 		}
 	}
 

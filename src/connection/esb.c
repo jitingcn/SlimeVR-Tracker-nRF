@@ -27,6 +27,7 @@
 #include "system/test_mode.h"
 #include "system/watchdog.h"
 #include "connection.h"
+#include "zephyr/sys/byteorder.h"
 #include "zephyr/sys/time_units.h"
 
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
@@ -48,7 +49,6 @@ uint8_t last_reset = 0;
 // const nrfx_timer_t m_timer = NRFX_TIMER_INSTANCE(1);
 bool esb_state = false;
 bool timer_state = false;
-bool send_data = false;
 uint16_t led_clock = 0;
 uint32_t led_clock_offset = 0;
 
@@ -90,11 +90,6 @@ static bool esb_paired = false;
 #define PING_BACKOFF_LVL3_MS        4000
 #define PING_BACKOFF_LVL4_MS        9000
 
-#define TX_BUSY_RECOVERY_RETRY_COUNT    10
-#define TX_BUSY_RECOVERY_RETRY_DELAY_US 200
-#define TX_BUSY_RECOVERY_THRESHOLD      8
-#define TX_BUSY_RECOVERY_WINDOW_MS      250
-
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
@@ -109,8 +104,7 @@ static uint32_t ping_failures = 0;
 static uint32_t ping_ctr_sent = 0;
 static uint8_t ping_counter = 0;
 static int64_t ping_send_time = 0;
-static uint32_t tx_start_busy_streak = 0;
-static int64_t tx_start_busy_since = 0;
+
 
 // Track send cycles for recent PINGs (circular buffer)
 #define PING_HISTORY_SIZE 10
@@ -233,20 +227,7 @@ static void esb_clear_time_sync_state(void)
 	g_sync_update_count = 0;
 }
 
-static void esb_recover_stuck_tx(const char *reason)
-{
-	LOG_WRN("Recovering ESB TX path after %s", reason);
 
-	ping_pending = false;
-	ping_failed = false;
-	tx_start_busy_streak = 0;
-	tx_start_busy_since = 0;
-	esb_clear_time_sync_state();
-
-	esb_deinitialize();
-	k_msleep(1);
-	esb_initialize(true);
-}
 
 uint32_t esb_get_ping_backoff_ms(void)
 {
@@ -415,9 +396,7 @@ void event_handler(struct esb_evt const *event)
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
-		tx_start_busy_streak = 0;
-		tx_start_busy_since = 0;
-		if (esb_paired) {
+		if (esb_paired && !connection_get_data_collection()) {
 			clocks_stop();
 		}
 		break;
@@ -483,7 +462,7 @@ void event_handler(struct esb_evt const *event)
 			);
 		}
 
-		if (esb_paired) {
+		if (esb_paired && !connection_get_data_collection()) {
 			clocks_stop();
 		}
 		break;
@@ -531,26 +510,6 @@ void event_handler(struct esb_evt const *event)
 			}
 		} else {
 			switch (rx_payload.length) {
-			case 4: {
-				// TODO: Device should never receive packets if it is already
-				// paired, why is this packet received? This may be part of
-				// acknowledge
-				//					if (!nrfx_timer_init_check(&m_timer))
-				{
-					LOG_WRN("Timer not initialized");
-					break;
-				}
-				if (timer_state == false) {
-					//						nrfx_timer_resume(&m_timer);
-					timer_state = true;
-				}
-				//					nrfx_timer_clear(&m_timer);
-				last_reset = 0;
-				led_clock = (rx_payload.data[0] << 8) + rx_payload.data[1]; // sync led flashes :)
-				led_clock_offset = 0;
-				LOG_DBG("RX, timer reset");
-				pair_ack_pending = false;
-			} break;
 			case ESB_PONG_LEN: {
 				if (rx_payload.data[0] == ESB_PONG_TYPE) {
 					// check CRC first
@@ -939,7 +898,34 @@ void event_handler(struct esb_evt const *event)
 				// received other tracker's sensor data, likely due to shared pipe, just ignore
 			} break;
 			default:
-				LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
+				/* ACK payload from receiver carrying ARQ retransmit requests */
+				if (rx_payload.length >= 4 &&
+				    rx_payload.data[0] == 0xAA &&
+				    connection_get_data_collection()) {
+					uint8_t retx_n = rx_payload.data[1];
+					uint8_t max_entries = (rx_payload.length - 2) / 2;
+					if (retx_n > max_entries) {
+						retx_n = max_entries;
+					}
+					extern volatile uint16_t raw_retx_queue[];
+					extern volatile uint8_t  raw_retx_count;
+					for (uint8_t i = 0; i < retx_n; i++) {
+						uint16_t seq = sys_get_be16(&rx_payload.data[2 + i * 2]);
+						/* Deduplicate */
+						bool found = false;
+						for (uint8_t j = 0; j < raw_retx_count; j++) {
+							if (raw_retx_queue[j] == seq) {
+								found = true;
+								break;
+							}
+						}
+						if (!found && raw_retx_count < 16) {
+							raw_retx_queue[raw_retx_count++] = seq;
+						}
+					}
+				} else {
+					LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
+				}
 			} // end of rx_payload length switch
 		}
 		break;
@@ -1127,8 +1113,6 @@ void esb_pair(void)
 	shutdown_requested = false;
 	ping_failed = false;
 	ping_pending = false;
-	tx_start_busy_streak = 0;
-	tx_start_busy_since = 0;
 	// Reset time sync state
 	esb_clear_time_sync_state();
 	if (!paired_addr[0]) // zero, no receiver paired
@@ -1290,6 +1274,16 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		esb_flush_tx();
 		queue_status = esb_write_payload(&tx_payload);
 	}
+
+	bool is_raw = (data[0] >= 0x10 && data[0] <= 0x12);
+	// manually repeat raw packets for better reliability
+	if (is_raw) {
+		tx_payload.noack = true;
+		queue_status = esb_write_payload(&tx_payload);
+		if (queue_status == 0) {
+			queue_status = esb_write_payload(&tx_payload);
+		}
+	}
 # if 0
 	if (no_ack) {
 		// manually repeat packet for noack packets for better reliability
@@ -1398,10 +1392,13 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 *
 	 * PING / ACK packets bypass TDMA (no_ack == false) so time-sync and
 	 * connection-health probes are never delayed.
+	 * Raw data (0x10-0x12) always bypasses TDMA for minimum latency.
 	 */
 #if CONFIG_CONNECTION_TDMA
 	if (no_ack) {
-		tdma_wait_for_slot();
+		if (!is_raw) {
+			tdma_wait_for_slot();
+		}
 	}
 #endif
 	/*
@@ -1415,42 +1412,13 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		ping_send_time = k_uptime_get();
 		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
 	}
-	int tx_err = esb_start_tx();
-	if (tx_err == -EBUSY && queue_status == 0) {
-		/*
-		 * Radio still busy (e.g. PING ACK/retransmit in progress).
-		 * Wait briefly for the previous TX to complete, then retry.
-		 * Without this, the queued packet sits in the FIFO unsent
-		 * until the next esb_write() call.
-		 */
-		for (int retry = 0; retry < TX_BUSY_RECOVERY_RETRY_COUNT; retry++) {
-			k_usleep(TX_BUSY_RECOVERY_RETRY_DELAY_US);
-			tx_err = esb_start_tx();
-			if (tx_err != -EBUSY) {
-				break;
-			}
-		}
-		if (tx_err == -EBUSY) {
-			int64_t now = k_uptime_get();
-			if (tx_start_busy_since == 0 || (now - tx_start_busy_since) > TX_BUSY_RECOVERY_WINDOW_MS) {
-				tx_start_busy_since = now;
-				tx_start_busy_streak = 0;
-			}
-			tx_start_busy_streak++;
-			LOG_WRN("esb_start_tx still busy after retries, packet deferred (streak=%u)", tx_start_busy_streak);
-
-			if (tx_start_busy_streak >= TX_BUSY_RECOVERY_THRESHOLD) {
-				esb_recover_stuck_tx("repeated start_tx busy");
-			}
-		} else {
-			tx_start_busy_streak = 0;
-			tx_start_busy_since = 0;
-		}
-	} else if (tx_err == 0) {
-		tx_start_busy_streak = 0;
-		tx_start_busy_since = 0;
-	}
-	send_data = true;
+	/*
+	 * In MANUAL_START mode the radio auto-drains the FIFO once started.
+	 * esb_start_tx() only needs to kick the first packet; if -EBUSY,
+	 * the TX chain is already running and our queued packet will be
+	 * sent automatically.  No retry or recovery needed.
+	 */
+	esb_start_tx();
 }
 
 bool esb_ready(void)
@@ -1800,6 +1768,17 @@ static void esb_thread(void)
 #else
 					LOG_WRN("Remote command: TCAL_BOOT_OFF not supported (T-Cal disabled in config)");
 #endif
+					break;
+
+				case ESB_PONG_FLAG_DATA_COLLECT_ON:
+					LOG_INF("Executing remote command: DATA_COLLECT_ON");
+					connection_set_data_collection(true);
+					test_mode_set(true);  // Prevent sleep during data collection
+					break;
+
+				case ESB_PONG_FLAG_DATA_COLLECT_OFF:
+					LOG_INF("Executing remote command: DATA_COLLECT_OFF");
+					connection_set_data_collection(false);
 					break;
 
 				default:

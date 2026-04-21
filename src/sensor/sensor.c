@@ -220,7 +220,7 @@ static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 // Temperature used by T-Cal (°C).
 // Low-pass filtered to reduce IMU temperature sensor noise which can cause compensation jitter.
 #ifndef SENSOR_TCAL_TEMP_FILTER_TAU_MS
-#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 500  // ms
+#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 200  // ms
 #endif
 
 static float sensor_tcal_temp = 25.0f;      // Filtered temperature (°C)
@@ -1066,6 +1066,22 @@ int sensor_init(void)
 	sensor_fusion_init = true;
 	last_mag_fusion_ticks = 0; // reset so first mag update uses nominal mag_actual_time as dt
 	// last_mag_fusion_ticks reset is sufficient; no extra state to clear.
+
+	if (connection_get_data_collection()) {
+		connection_send_raw_metadata(
+			gyro_actual_range,
+			accel_actual_range,
+			1.0f / gyro_actual_time,
+			1.0f / accel_actual_time,
+			mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
+			(uint8_t)sensor_imu_id,
+			(uint8_t)sensor_mag_id
+		);
+		LOG_INF("Data collection mode: metadata sent (gyro %.0fdps, accel %.0fg, gyro ODR %.0fHz)",
+			(double)gyro_actual_range, (double)accel_actual_range,
+			1.0 / (double)gyro_actual_time);
+	}
+
 	return 0;
 }
 
@@ -1074,6 +1090,8 @@ int sensor_init(void)
 
 static int64_t last_status_time = 0;
 static int64_t max_loop_time = 0;
+
+static bool last_data_collection_state = false;
 
 #if DEBUG
 static int64_t last_acquisition_time = INT64_MAX;
@@ -1113,6 +1131,34 @@ void sensor_loop(void)
 #if DEBUG
 			int64_t loop_begin = k_uptime_ticks();
 #endif
+
+			/* Detect data collection activation transition and send metadata */
+			bool dc_active = connection_get_data_collection();
+			if (dc_active && !last_data_collection_state) {
+				sys_interface_resume();
+				connection_send_raw_metadata(
+					gyro_actual_range,
+					accel_actual_range,
+					1.0f / gyro_actual_time,
+					1.0f / accel_actual_time,
+					mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
+					(uint8_t)sensor_imu_id,
+					(uint8_t)sensor_mag_id
+				);
+				LOG_INF("Data collection activated: metadata sent");
+			} else if (dc_active && connection_raw_metadata_resend_due()) {
+				connection_send_raw_metadata(
+					gyro_actual_range,
+					accel_actual_range,
+					1.0f / gyro_actual_time,
+					1.0f / accel_actual_time,
+					mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
+					(uint8_t)sensor_imu_id,
+					(uint8_t)sensor_mag_id
+				);
+			}
+			last_data_collection_state = dc_active;
+
 			// Resume devices
 			sys_interface_resume();
 
@@ -1203,6 +1249,10 @@ void sensor_loop(void)
 			if (mag_available && mag_enabled)
 				new_mag_data = sensor_mag->mag_read(raw_m); // returns false if no new sample (DRDY not set)
 
+			if (new_mag_data && connection_get_data_collection()) {
+				connection_queue_raw_mag(raw_m);
+			}
+
 			if (reconfig) // TODO: get rid of reconfig?
 			{
 				// Changing FIFO threshold here should be fine since FIFO is empty now
@@ -1243,12 +1293,33 @@ void sensor_loop(void)
 			float debug_raw_m[3] = {0};
 			float debug_cal_m[3] = {0};
 			bool debug_mag_valid = false;
+			/* Persistent accel for data collection: accel tags arrive less
+			 * frequently than gyro tags, so we hold the latest accel value
+			 * and pair it with each gyro sample. */
+			static float raw_collect_a[3] = {0};
+
 			for (uint16_t i = 0; i < packets; i++)
 			{
 				float raw_a[3] = {0};
 				float raw_g[3] = {0};
 				if (sensor_imu->fifo_process(i, rawData, raw_a, raw_g))
 					continue; // skip on error
+
+				/* Update persistent accel when we get an accel tag (non-zero) */
+				if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0) {
+					memcpy(raw_collect_a, raw_a, sizeof(raw_collect_a));
+				}
+
+				/* Only queue raw samples on gyro tags to avoid
+				 * duplicate entries from separate accel/gyro FIFO tags.
+				 * Pair with the most recent accel reading. */
+				if (connection_get_data_collection() &&
+				    (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0)) {
+					struct raw_imu_sample raw_sample;
+					memcpy(raw_sample.gyro, raw_g, sizeof(raw_sample.gyro));
+					memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
+					connection_queue_raw_sample(&raw_sample);
+				}
 
 				// Debug: Log gyro values to see if they're all zero
 				static int gyro_log_count = 0;
@@ -1772,6 +1843,30 @@ void sensor_loop(void)
 						(double)vqf_info.rest_deviations[0], (double)vqf_info.rest_deviations[1],
 						(double)vqf_info.bias[0], (double)vqf_info.bias[1], (double)vqf_info.bias[2],
 						(double)vqf_info.bias_sigma, (double)vqf_info.delta);
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+					printk("     Adapt: tauAcc:%.2fs motInt:%.3f\n",
+						(double)vqf_info.tau_acc, (double)vqf_info.motion_intensity);
+#endif
+					printk("     RestDiag: enter:%u exit:%u total:%.1fs last:%.1fs up:%.0fs rest%%:%.1f\n",
+						vqf_info.rest_enter_count, vqf_info.rest_exit_count,
+						(double)vqf_info.rest_total_s, (double)vqf_info.rest_last_duration_s,
+						(double)vqf_info.uptime_s,
+						(double)(vqf_info.uptime_s > 0 ? 100.0f * vqf_info.rest_total_s / vqf_info.uptime_s : 0));
+					printk("     BiasP[%.1f,%.1f,%.1f]\n",
+						(double)vqf_info.biasP[0], (double)vqf_info.biasP[1], (double)vqf_info.biasP[2]);
+					{
+						uint8_t n = vqf_info.rest_event_count;
+						if (n > 8) n = 8;
+						if (n > 0) {
+							printk("     RestLog(%u events):", vqf_info.rest_event_count);
+							for (uint8_t ri = 0; ri < n; ri++) {
+								printk(" %s@%.0fs",
+									vqf_info.rest_events[ri].entered ? "EN" : "EX",
+									(double)vqf_info.rest_events[ri].time_s);
+							}
+							printk("\n");
+						}
+					}
 					if (mag_enabled) {
 						printk("     Mag: DisAng:%.2f° CorrRate:%.2f°/s\n",
 							(double)vqf_info.mag_dis_angle, (double)vqf_info.mag_corr_rate);

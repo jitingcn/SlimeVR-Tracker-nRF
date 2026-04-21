@@ -96,6 +96,28 @@ typedef struct {
     // Filter gains (useful to understand how strong mag correction is)
     float mag_k;               // dimensionless (kMag)
     float mag_k_init;          // dimensionless (kMagInit)
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+    // Adaptive tauAcc state
+    float tau_acc;             // current tauAcc value (seconds)
+    float motion_intensity;    // motion intensity estimate [0, 1]
+#endif
+    // Rest detection diagnostics (cumulative since boot/init)
+    uint32_t rest_enter_count;     // number of transitions to rest
+    uint32_t rest_exit_count;      // number of transitions from rest
+    float rest_total_s;            // cumulative time in rest state (seconds)
+    float rest_last_duration_s;    // duration of the most recent rest period (seconds)
+    float uptime_s;                // total uptime since init (seconds)
+
+    // Recent rest events log (circular, most recent last)
+    #define VQF_REST_EVENT_LOG_SIZE 5
+    struct {
+        float time_s;  // uptime when event occurred
+        bool entered;   // true = entered rest, false = left rest
+    } rest_events[VQF_REST_EVENT_LOG_SIZE];
+    uint8_t rest_event_count;      // total events recorded (wraps at log size)
+
+    // Kalman filter state (P diagonal, internal units: (0.01rad/s)^2)
+    float biasP[3];                // P[0,0], P[1,1], P[2,2]
 } vqf_debug_info_t;
 
 void vqf_get_debug_info(vqf_debug_info_t *info);

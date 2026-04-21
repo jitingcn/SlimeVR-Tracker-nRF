@@ -22,24 +22,91 @@
 */
 #include "util.h"
 
+#include <math.h>
 #include <zephyr/kernel.h>
 
 #include "../src/vqf.h" // conflicting with vqf.h in local path
 
 #include "../vqf/vqf.h" // conflicting with vqf.h in vqf-c
 
+#include "retained.h" // for BUILD_ASSERT on fusion_data size
+
 #ifndef DEG_TO_RAD
 #define DEG_TO_RAD (M_PI / 180.0f)
 #endif
+
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+/* ---------- Adaptive tauAcc configuration ---------- */
+/*
+ * Three-regime adaptive tauAcc strategy:
+ *
+ * 1. REST (VQF rest detection active):
+ *    tauAcc = TAU_ACC_REST.
+ *    At true rest the accelerometer perfectly reflects gravity,
+ *    so a small tau enables fast inclination convergence while
+ *    the rest bias estimator handles gyro drift.
+ *
+ * 2. GENTLE MOTION (accel close to gravity, low linear acceleration):
+ *    tauAcc = TAU_ACC_GENTLE (high).
+ *    Micro-movements (breathing, subtle swaying) contaminate the
+ *    accelerometer slightly.  A high tau avoids these perturbations
+ *    being coupled into heading via the bias estimator R-matrix.
+ *
+ * 3. AGGRESSIVE MOTION (significant linear acceleration):
+ *    tauAcc = TAU_ACC_AGGRESSIVE (lower).
+ *    Active deliberate motion—fast inclination correction helps
+ *    prevent pitch/roll drift from coupling into heading.
+ *
+ * The accel deviation |‖a‖ - g| drives a [0,1] motion_intensity
+ * with fast-attack / slow-release dynamics.  During motion, tauAcc
+ * is linearly interpolated from GENTLE (0) to AGGRESSIVE (1).
+ * When rest is detected, TAU_ACC_REST overrides.
+ */
+#define ADAPTIVE_TAU_ACC_REST       2.5f   /* tauAcc when at rest (seconds) */
+#define ADAPTIVE_TAU_ACC_GENTLE     1.5f   /* tauAcc during gentle motion (seconds) */
+#define ADAPTIVE_TAU_ACC_AGGRESSIVE 4.5f   /* tauAcc under aggressive motion (seconds) */
+#define ADAPTIVE_TAU_ACC_LEVELS     3      /* quantization levels */
+#define ADAPTIVE_ACC_DEV_TH         2.5f   /* accel deviation threshold (m/s²) */
+#define ADAPTIVE_ATTACK_ALPHA       0.20f  /* fast attack coefficient (per sample) */
+#define ADAPTIVE_RELEASE_ALPHA      0.008f /* slow release coefficient (per sample) */
+#define TAU_SMOOTH_ALPHA_DOWN       0.03f  /* tauAcc decrease smoothing (per sample) */
+#define TAU_SMOOTH_ALPHA_UP         0.05f  /* tauAcc increase smoothing (per sample) */
+#endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
 static uint8_t imu_id;
 
 static vqf_params_t params;
 static vqf_state_t state;
 static vqf_coeffs_t coeffs;
+#define VQF_MEM_SIZE (sizeof(vqf_state_t) + sizeof(vqf_coeffs_t))
 
 static float last_a[3] = {0};
 static volatile float vqf_bench_sink;
+
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+/* Adaptive tauAcc state */
+static float motion_intensity;       /* low-pass filtered motion intensity [0,1] */
+static float current_tau_level = -1; /* current quantized level (-1 = unset) */
+static float smoothed_tau;           /* smoothed tauAcc for gradual transitions */
+#endif
+
+/* Rest detection diagnostics */
+static uint32_t rest_enter_count;
+static uint32_t rest_exit_count;
+static float rest_total_s;
+static float rest_last_enter_time;   /* uptime when last rest started */
+static float rest_last_duration_s;
+static float uptime_s;
+static bool prev_rest_detected;
+
+/* Circular rest event log */
+#define REST_EVENT_LOG_SIZE 5
+static struct {
+	float time_s;
+	bool entered;
+} rest_event_log[REST_EVENT_LOG_SIZE];
+static uint8_t rest_event_idx;  /* next write position */
+static uint8_t rest_event_total; /* total events (up to log size) */
 
 void vqf_update_sensor_ids(int imu)
 {
@@ -49,19 +116,19 @@ void vqf_update_sensor_ids(int imu)
 static void set_params()
 {
 	init_params(&params);
-	params.tauAcc = 3.2f;
-	params.biasClip = 2.5f;
-	params.biasForgettingTime = 130.0f;
+	params.tauAcc = 3.6f;
+	params.biasClip = 2.0f;
+	params.biasForgettingTime = 100.0f;
 	params.biasSigmaInit = 1.2f;
-	params.biasSigmaMotion = 0.20f;
+	params.biasSigmaMotion = 0.15f;
 	params.biasSigmaRest = 0.03f;
-	params.biasVerticalForgettingFactor = 0.00001f;
+	params.biasVerticalForgettingFactor = 0.0001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.3f;
-	params.restMinT = 2.5f;
+	params.restFilterTau = 1.8f;
+	params.restMinT = 2.8f;
 	params.restThAcc = 0.20f;
-	params.restThGyr = 0.55f;
+	params.restThGyr = 0.65f;
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 12.0f;
 	params.magCurrentTau = 0.20f;
@@ -78,17 +145,49 @@ void vqf_init(float g_time, float a_time, float m_time)
 {
 	set_params();
 	initVqf(&params, &state, &coeffs, g_time, a_time, m_time);
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+	motion_intensity = 0.0f;
+	current_tau_level = -1.0f;
+	smoothed_tau = params.tauAcc;
+#endif
+	rest_enter_count = 0;
+	rest_exit_count = 0;
+	rest_total_s = 0;
+	rest_last_enter_time = 0;
+	rest_last_duration_s = 0;
+	uptime_s = 0;
+	prev_rest_detected = false;
+	rest_event_idx = 0;
+	rest_event_total = 0;
 }
 
 void vqf_load(const void *data)
 {
+	BUILD_ASSERT(VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
+		     "VQF state+coeffs exceeds fusion_data buffer in retained memory");
 	set_params();
 	memcpy(&state, data, sizeof(state));
 	memcpy(&coeffs, (uint8_t *)data + sizeof(state), sizeof(coeffs));
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+	motion_intensity = 0.0f;
+	current_tau_level = -1.0f;
+	smoothed_tau = params.tauAcc;
+#endif
+	rest_enter_count = 0;
+	rest_exit_count = 0;
+	rest_total_s = 0;
+	rest_last_enter_time = 0;
+	rest_last_duration_s = 0;
+	uptime_s = 0;
+	prev_rest_detected = false;
+	rest_event_idx = 0;
+	rest_event_total = 0;
 }
 
 void vqf_save(void *data)
 {
+	BUILD_ASSERT(VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
+		     "VQF state+coeffs exceeds fusion_data buffer in retained memory");
 	memcpy(data, &state, sizeof(state));
 	memcpy((uint8_t *)data + sizeof(state), &coeffs, sizeof(coeffs));
 }
@@ -111,6 +210,117 @@ void vqf_update_gyro_ts(float *g, uint64_t timestamp_us)
 	updateGyrTs(&params, &state, &coeffs, g_rad, timestamp_us);
 }
 
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+/**
+ * @brief Pre-accel-update processing: adaptive tauAcc (experimental).
+ *
+ * Called before each accelerometer update to adjust VQF parameters based on
+ * current motion intensity and temperature dynamics.
+ *
+ * @param a_m_s2 accelerometer reading in m/s²
+ */
+static void vqf_pre_accel_update(const float a_m_s2[3])
+{
+	/* --- Adaptive tauAcc based on motion intensity --- */
+	float a_norm = sqrtf(a_m_s2[0] * a_m_s2[0] +
+			     a_m_s2[1] * a_m_s2[1] +
+			     a_m_s2[2] * a_m_s2[2]);
+	float a_dev = fabsf(a_norm - CONST_EARTH_GRAVITY);
+	float alpha_inst = fminf(a_dev / ADAPTIVE_ACC_DEV_TH, 1.0f);
+
+	/* Attack-release envelope: fast increase, slow decrease */
+	if (alpha_inst > motion_intensity) {
+		motion_intensity += ADAPTIVE_ATTACK_ALPHA * (alpha_inst - motion_intensity);
+	} else {
+		motion_intensity += ADAPTIVE_RELEASE_ALPHA * (alpha_inst - motion_intensity);
+	}
+
+	/*
+	 * Compute target tauAcc:
+	 * - Rest detected: use rest tauAcc
+	 * - Motion: linearly interpolate from GENTLE (intensity=0) to
+	 *   AGGRESSIVE (intensity=1).  This supports both increasing and
+	 *   decreasing curves depending on how the defines are set.
+	 */
+	float target_tau;
+	if (state.restDetected) {
+		target_tau = ADAPTIVE_TAU_ACC_REST;
+	} else {
+		target_tau = ADAPTIVE_TAU_ACC_GENTLE +
+			     (ADAPTIVE_TAU_ACC_AGGRESSIVE - ADAPTIVE_TAU_ACC_GENTLE) *
+				     motion_intensity;
+	}
+
+	/*
+	 * Smooth tauAcc transitions to avoid Butterworth LP filter transients.
+	 * Decrease (rest→motion) is slow to prevent heading coupling from the
+	 * sudden acc correction gain change.  Increase (motion→rest) is fast
+	 * so the filter settles quickly at rest.
+	 */
+	float tau_alpha = (target_tau < smoothed_tau) ? TAU_SMOOTH_ALPHA_DOWN
+						      : TAU_SMOOTH_ALPHA_UP;
+	smoothed_tau += tau_alpha * (target_tau - smoothed_tau);
+
+	/*
+	 * Quantize target_tau directly to avoid unnecessary setTauAcc() calls.
+	 * The step size is derived from the full possible range of tauAcc values.
+	 */
+	float tau_min = fminf(fminf(ADAPTIVE_TAU_ACC_REST, ADAPTIVE_TAU_ACC_GENTLE),
+			      ADAPTIVE_TAU_ACC_AGGRESSIVE);
+	float tau_max = fmaxf(fmaxf(ADAPTIVE_TAU_ACC_REST, ADAPTIVE_TAU_ACC_GENTLE),
+			      ADAPTIVE_TAU_ACC_AGGRESSIVE);
+	float tau_step = (tau_max - tau_min) / ADAPTIVE_TAU_ACC_LEVELS;
+	float quantized_tau;
+	if (tau_step > 0.001f) {
+		quantized_tau = tau_min +
+				roundf((smoothed_tau - tau_min) / tau_step) * tau_step;
+		quantized_tau = fmaxf(tau_min, fminf(quantized_tau, tau_max));
+	} else {
+		quantized_tau = smoothed_tau;
+	}
+
+	if (quantized_tau != current_tau_level) {
+		current_tau_level = quantized_tau;
+		setTauAcc(&params, &state, &coeffs, quantized_tau);
+	}
+}
+#endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
+
+/**
+ * @brief Track rest detection transitions and accumulate diagnostics.
+ * Called after each accelerometer update (which runs rest detection).
+ */
+static void vqf_track_rest_diag(void)
+{
+	float dt = coeffs.accTs;
+	uptime_s += dt;
+
+	bool cur = state.restDetected;
+	if (cur && !prev_rest_detected) {
+		/* entering rest */
+		rest_enter_count++;
+		rest_last_enter_time = uptime_s;
+		rest_event_log[rest_event_idx].time_s = uptime_s;
+		rest_event_log[rest_event_idx].entered = true;
+		rest_event_idx = (rest_event_idx + 1) % REST_EVENT_LOG_SIZE;
+		if (rest_event_total < REST_EVENT_LOG_SIZE)
+			rest_event_total++;
+	} else if (!cur && prev_rest_detected) {
+		/* leaving rest */
+		rest_exit_count++;
+		rest_last_duration_s = uptime_s - rest_last_enter_time;
+		rest_event_log[rest_event_idx].time_s = uptime_s;
+		rest_event_log[rest_event_idx].entered = false;
+		rest_event_idx = (rest_event_idx + 1) % REST_EVENT_LOG_SIZE;
+		if (rest_event_total < REST_EVENT_LOG_SIZE)
+			rest_event_total++;
+	}
+	if (cur) {
+		rest_total_s += dt;
+	}
+	prev_rest_detected = cur;
+}
+
 void vqf_update_accel(float *a, float time)
 {
 	ARG_UNUSED(time);
@@ -120,7 +330,11 @@ void vqf_update_accel(float *a, float time)
 		a_m_s2[i] = a[i] * CONST_EARTH_GRAVITY;
 	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0)
 		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+	vqf_pre_accel_update(a_m_s2);
+#endif
 	updateAcc(&params, &state, &coeffs, a_m_s2);
+	vqf_track_rest_diag();
 }
 
 void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
@@ -130,7 +344,11 @@ void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
 		a_m_s2[i] = a[i] * CONST_EARTH_GRAVITY;
 	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0)
 		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+	vqf_pre_accel_update(a_m_s2);
+#endif
 	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
+	vqf_track_rest_diag();
 }
 
 void vqf_update_mag(float *m, float time)
@@ -281,6 +499,36 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 
 	// Convert candidate dip from rad to degrees
 	info->mag_candidate_dip *= 180.0f / M_PI;
+
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+	// Adaptive tauAcc state
+	info->tau_acc = params.tauAcc;
+	info->motion_intensity = motion_intensity;
+#endif
+
+	// Rest detection diagnostics
+	info->rest_enter_count = rest_enter_count;
+	info->rest_exit_count = rest_exit_count;
+	info->rest_total_s = rest_total_s;
+	info->rest_last_duration_s = rest_last_duration_s;
+	info->uptime_s = uptime_s;
+
+	// Copy rest event log (oldest first)
+	info->rest_event_count = rest_event_total;
+	for (uint8_t i = 0; i < REST_EVENT_LOG_SIZE; i++) {
+		uint8_t src;
+		if (rest_event_total >= REST_EVENT_LOG_SIZE)
+			src = (rest_event_idx + i) % REST_EVENT_LOG_SIZE;
+		else
+			src = i;
+		info->rest_events[i].time_s = rest_event_log[src].time_s;
+		info->rest_events[i].entered = rest_event_log[src].entered;
+	}
+
+	// Kalman filter P diagonal
+	info->biasP[0] = state.biasP[0];
+	info->biasP[1] = state.biasP[4];
+	info->biasP[2] = state.biasP[8];
 }
 
 static uint32_t vqf_bench_elapsed_cycles(uint32_t start_cycles)

@@ -22,6 +22,8 @@
 */
 #ifndef SLIMENRF_CONNECTION
 #define SLIMENRF_CONNECTION
+#include <stdbool.h>
+#include <stdint.h>
 
 uint32_t get_ping_interval_ms(void);
 void connection_clocks_request_start(void);
@@ -45,5 +47,34 @@ void connection_write_packet_1();
 void connection_write_packet_2();
 void connection_write_packet_3();
 void connection_write_packet_4();
+
+// Raw sensor data collection (runtime controlled via PONG command)
+
+struct raw_imu_sample {
+	float gyro[3];   // deg/s from fifo_process
+	float accel[3];  // g from fifo_process
+};
+
+// Enable/disable data collection (called from PONG command handler)
+void connection_set_data_collection(bool enable);
+bool connection_get_data_collection(void);
+
+// Queue a raw IMU sample for transmission (called from sensor thread)
+void connection_queue_raw_sample(const struct raw_imu_sample *sample);
+
+// Queue raw magnetometer data (called from sensor thread)
+void connection_queue_raw_mag(const float mag[3]);
+
+// Send metadata packet with ODR/range info (called once when data collection starts)
+void connection_send_raw_metadata(float gyro_range, float accel_range,
+				  float gyro_odr, float accel_odr,
+				  float mag_odr, uint8_t imu_id, uint8_t mag_id);
+
+// Check if metadata needs periodic re-send (returns true if due)
+bool connection_raw_metadata_resend_due(void);
+
+// Drain queued raw data and transmit (called from connection thread)
+// Returns true if a packet was sent
+bool connection_process_raw_data(void);
 
 #endif
