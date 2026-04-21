@@ -49,6 +49,7 @@ bool sensor_get_mag_enabled(void);
 bool sensor_get_mag_available(void);
 bool sensor_get_mag_calibrated(void);
 void sensor_refresh_sensor_ids(void);
+void sensor_mag_ref_reset(void);
 
 void sensor_fusion_invalidate(void);
 void sensor_fusion_update_bias(float *g_off);

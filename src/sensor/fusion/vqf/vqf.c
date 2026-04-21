@@ -450,6 +450,11 @@ void vqf_reset_mag_ref(void)
 	setMagRef(&state, 0, 0);
 }
 
+void vqf_set_mag_ref(float norm, float dip)
+{
+	setMagRef(&state, norm, dip);
+}
+
 void vqf_get_relative_rest_deviations(float *out)
 {
 	getRelativeRestDeviations(&params, &state, out);

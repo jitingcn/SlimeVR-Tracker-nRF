@@ -1106,6 +1106,80 @@ static uint64_t total_loop_iterations = 0;
 // Count actual mag samples fed to VQF since last status report (always tracked)
 static uint32_t mag_vqf_updates_since_status = 0;
 
+#if CONFIG_SENSOR_USE_VQF
+/*
+ * Compute magRefNorm and magRefDip from the first calibrated mag samples
+ * at startup. This sets VQF's magnetic field reference immediately so that
+ * disturbance detection is accurate from the very first sample, instead of
+ * waiting for the reference to converge naturally.
+ *
+ * The algorithm is the same as VQF's internal dip calculation:
+ *   norm = |m_cal|
+ *   dip  = -asin(dot(m_cal, up_hat) / norm)    [rad]
+ * where up_hat = accel / |accel| (accelerometer points up when stationary).
+ */
+#define MAG_REF_INIT_TARGET_SAMPLES 50
+#define MAG_REF_INIT_ACCEL_TOL 0.3f  /* accept samples with |accel| within 30% of 1g */
+
+static bool mag_ref_init_done = false;
+static float mag_ref_norm_sum = 0;
+static float mag_ref_dip_sum = 0;
+static int mag_ref_init_count = 0;
+
+static void sensor_mag_ref_accumulate(const float m_cal[3],
+                                      const float accel_sum[3], int accel_count)
+{
+	if (mag_ref_init_done || accel_count == 0) {
+		return;
+	}
+
+	/* Average calibrated accel for this frame (in g) */
+	float ax = accel_sum[0] / accel_count;
+	float ay = accel_sum[1] / accel_count;
+	float az = accel_sum[2] / accel_count;
+	float a_norm = sqrtf(ax * ax + ay * ay + az * az);
+	if (fabsf(a_norm - 1.0f) > MAG_REF_INIT_ACCEL_TOL) {
+		return; /* skip: too much linear acceleration */
+	}
+
+	float m_norm = sqrtf(m_cal[0] * m_cal[0] + m_cal[1] * m_cal[1] + m_cal[2] * m_cal[2]);
+	if (m_norm < 0.01f) {
+		return;
+	}
+
+	/* up_hat = accel / |accel| */
+	float inv_a = 1.0f / a_norm;
+	float m_dot_up = (m_cal[0] * ax + m_cal[1] * ay + m_cal[2] * az) * inv_a;
+
+	float sin_dip = m_dot_up / m_norm;
+	if (sin_dip > 1.0f) sin_dip = 1.0f;
+	if (sin_dip < -1.0f) sin_dip = -1.0f;
+	float dip = -asinf(sin_dip); /* rad, same convention as VQF */
+
+	mag_ref_norm_sum += m_norm;
+	mag_ref_dip_sum += dip;
+	mag_ref_init_count++;
+
+	if (mag_ref_init_count >= MAG_REF_INIT_TARGET_SAMPLES) {
+		float avg_norm = mag_ref_norm_sum / mag_ref_init_count;
+		float avg_dip = mag_ref_dip_sum / mag_ref_init_count;
+		vqf_set_mag_ref(avg_norm, avg_dip);
+		mag_ref_init_done = true;
+		LOG_INF("Mag ref from %d samples: norm=%.4f dip=%.1f deg",
+			mag_ref_init_count, (double)avg_norm,
+			(double)(avg_dip * 180.0f / (float)M_PI));
+	}
+}
+
+void sensor_mag_ref_reset(void)
+{
+	mag_ref_init_done = false;
+	mag_ref_norm_sum = 0;
+	mag_ref_dip_sum = 0;
+	mag_ref_init_count = 0;
+}
+#endif /* CONFIG_SENSOR_USE_VQF */
+
 void sensor_loop(void)
 {
 	if (!sensor_sensor_init)
@@ -1628,6 +1702,10 @@ void sensor_loop(void)
 					last_mag_fusion_ticks = now_ticks;
 					sensor_fusion->update_mag(m, mag_dt);
 					mag_vqf_updates_since_status++;
+
+#if CONFIG_SENSOR_USE_VQF
+					sensor_mag_ref_accumulate(m, a_sum, a_count);
+#endif
 				}
 
 				v_rotate(m, q3, m); // magnetic field in local device frame, no other transformation will be done

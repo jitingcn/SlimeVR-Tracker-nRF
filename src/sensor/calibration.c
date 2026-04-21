@@ -38,6 +38,7 @@
 #include "imu/BMI270.h"
 #if CONFIG_SENSOR_USE_VQF
 #include "fusion/vqf/vqf.h"
+#include "sensor.h"
 #endif
 
 #include "calibration.h"
@@ -57,7 +58,7 @@ static int64_t magneto_progress_time;
 // Only trust orientation updates when accel magnitude stays reasonably close to 1 g.
 // This rejects samples collected during strong linear acceleration while keeping
 // normal hand-rotation usable for calibration.
-#define MAG_CAL_ACCEL_MAG_MIN_SQ 0.8f
+#define MAG_CAL_ACCEL_MAG_MIN_SQ 0.75f
 #define MAG_CAL_ACCEL_MAG_MAX_SQ 1.3f
 
 // Minimum samples before attempting trial calibration
@@ -1287,6 +1288,10 @@ static int sensor_calibrate_mag(void)
 		LOG_INF("Applying calibration");
 		memcpy(magBAinv, m_inv, sizeof(magBAinv));
 		magneto_online_reset();  // Restart online accumulation with new baseline
+#if CONFIG_SENSOR_USE_VQF
+		vqf_reset_mag_ref();
+		sensor_mag_ref_reset(); // Re-compute magRef from new calibration
+#endif
 		// fusion invalidation not necessary
 	}
 	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, magBAinv, sizeof(magBAinv));
@@ -2117,6 +2122,7 @@ static bool sensor_calibration_online_mag_check(void)
 	// This avoids VQF entering disturbance rejection mode due to the calibration change
 #if CONFIG_SENSOR_USE_VQF
 	vqf_reset_mag_ref();
+	sensor_mag_ref_reset(); // Re-compute magRef from next calibrated samples
 #endif
 
 	// Reset norm tracking after calibration change
