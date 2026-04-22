@@ -82,11 +82,6 @@ struct retained_data {
 
 	bool mag_enabled;
 
-#if CONFIG_SENSOR_USE_VQF
-	float magRefNorm;
-	float magRefDip; // rad
-#endif
-
 #if CONFIG_SENSOR_USE_TCAL
 	float gyroTemp;
 

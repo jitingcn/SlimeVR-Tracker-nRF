@@ -689,9 +689,6 @@ void sensor_retained_write(void) // TODO: move to sys?
 	}
 	sensor_fusion->save(retained->fusion_data);
 	retained->fusion_id = fusion_id;
-#if CONFIG_SENSOR_USE_VQF
-	vqf_get_mag_ref(&retained->magRefNorm, &retained->magRefDip);
-#endif
 	retained_update();
 }
 
