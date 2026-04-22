@@ -198,8 +198,8 @@ void esb_write_rate_tick(void)
 		esb_rate_last_ts = now;
 	}
 	esb_write_calls++;
-	if (now - esb_rate_last_ts >= 3000) {
-		LOG_INF("esb_write rate: calls=%u/s queued=%u/s", esb_write_calls / 3, esb_write_queued / 3);
+	if (now - esb_rate_last_ts >= 5000) {
+		LOG_INF("esb_write rate: calls=%u/s queued=%u/s", esb_write_calls / 5, esb_write_queued / 5);
 		esb_write_calls = 0;
 		esb_write_queued = 0;
 		esb_rate_last_ts = now;

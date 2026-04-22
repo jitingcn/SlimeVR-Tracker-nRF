@@ -38,7 +38,6 @@
 #include "imu/BMI270.h"
 #if CONFIG_SENSOR_USE_VQF
 #include "fusion/vqf/vqf.h"
-#include "sensor.h"
 #endif
 
 #include "calibration.h"
@@ -101,7 +100,7 @@ static float cal_norm_var_ema;    // EMA of squared deviation from mean
 static uint32_t cal_norm_count;   // number of norm samples processed
 #define CAL_NORM_EMA_ALPHA 0.01f  // smoothing factor (~100 sample window)
 // Don't update calibration if current norm CV is below this threshold
-#define CAL_NORM_GOOD_CV 0.05f    // 5% = good enough calibration
+#define CAL_NORM_GOOD_CV 0.07f    // 7% = good enough calibration
 
 // Minimum time between online calibration updates (prevents frequent VQF mag ref resets)
 #define ONLINE_MIN_UPDATE_INTERVAL_S 30  // 30 seconds cooldown
@@ -1290,7 +1289,7 @@ static int sensor_calibrate_mag(void)
 		magneto_online_reset();  // Restart online accumulation with new baseline
 #if CONFIG_SENSOR_USE_VQF
 		vqf_reset_mag_ref();
-		sensor_mag_ref_reset(); // Re-compute magRef from new calibration
+		sensor_mag_ref_reset(); // Recompute magRef from new calibration
 #endif
 		// fusion invalidation not necessary
 	}
@@ -2122,7 +2121,7 @@ static bool sensor_calibration_online_mag_check(void)
 	// This avoids VQF entering disturbance rejection mode due to the calibration change
 #if CONFIG_SENSOR_USE_VQF
 	vqf_reset_mag_ref();
-	sensor_mag_ref_reset(); // Re-compute magRef from next calibrated samples
+	sensor_mag_ref_reset(); // Recompute magRef from new calibration
 #endif
 
 	// Reset norm tracking after calibration change

@@ -132,7 +132,7 @@ static void set_params()
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 9.0f;
 	params.magCurrentTau = 0.30f;
-	params.magNormTh = 0.8f;
+	params.magNormTh = 0.10f;
 	params.magDipTh = 10.0f;
 	params.magNewFirstTime = 8.0f;
 	params.magNewMinGyr = 12.0f;
@@ -453,6 +453,27 @@ void vqf_reset_mag_ref(void)
 void vqf_set_mag_ref(float norm, float dip)
 {
 	setMagRef(&state, norm, dip);
+}
+
+float vqf_get_mag_ref_norm(void)
+{
+	return getMagRefNorm(&state);
+}
+
+void vqf_get_mag_ref(float *norm, float *dip)
+{
+	*norm = getMagRefNorm(&state);
+	*dip = getMagRefDip(&state);
+}
+
+float vqf_get_delta(void)
+{
+	return getDelta(&state);
+}
+
+void vqf_set_delta(float delta)
+{
+	state.delta = delta;
 }
 
 void vqf_get_relative_rest_deviations(float *out)
