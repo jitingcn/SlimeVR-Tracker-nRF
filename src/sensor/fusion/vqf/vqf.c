@@ -62,15 +62,15 @@
  * is linearly interpolated from GENTLE (0) to AGGRESSIVE (1).
  * When rest is detected, TAU_ACC_REST overrides.
  */
-#define ADAPTIVE_TAU_ACC_REST       2.5f   /* tauAcc when at rest (seconds) */
-#define ADAPTIVE_TAU_ACC_GENTLE     1.0f   /* tauAcc during gentle motion (seconds) */
-#define ADAPTIVE_TAU_ACC_AGGRESSIVE 3.6f   /* tauAcc under aggressive motion (seconds) */
-#define ADAPTIVE_TAU_ACC_LEVELS     3      /* quantization levels */
-#define ADAPTIVE_ACC_DEV_TH         2.5f   /* accel deviation threshold (m/s²) */
-#define ADAPTIVE_ATTACK_ALPHA       0.20f  /* fast attack coefficient (per sample) */
-#define ADAPTIVE_RELEASE_ALPHA      0.05f /* slow release coefficient (per sample) */
-#define TAU_SMOOTH_ALPHA_DOWN       0.1f  /* tauAcc decrease smoothing (per sample) */
-#define TAU_SMOOTH_ALPHA_UP         0.2f  /* tauAcc increase smoothing (per sample) */
+#define ADAPTIVE_TAU_ACC_REST       6.2f   /* tauAcc when at rest (seconds) */
+#define ADAPTIVE_TAU_ACC_GENTLE     3.0f   /* tauAcc during gentle motion (seconds) */
+#define ADAPTIVE_TAU_ACC_AGGRESSIVE 12.0f   /* tauAcc under aggressive motion (seconds) */
+#define ADAPTIVE_TAU_ACC_LEVELS     10     /* quantization levels */
+#define ADAPTIVE_ACC_DEV_TH         6.2f   /* accel deviation threshold (m/s²) */
+#define ADAPTIVE_ATTACK_ALPHA       0.015f  /* fast attack coefficient (per sample) */
+#define ADAPTIVE_RELEASE_ALPHA      0.235f  /* slow release coefficient (per sample) */
+#define TAU_SMOOTH_ALPHA_DOWN       0.485f   /* tauAcc decrease smoothing (per sample) */
+#define TAU_SMOOTH_ALPHA_UP         0.085f  /* tauAcc increase smoothing (per sample) */
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
 static uint8_t imu_id;
