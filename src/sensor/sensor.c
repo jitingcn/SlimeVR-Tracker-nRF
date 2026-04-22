@@ -220,7 +220,7 @@ static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 // Temperature used by T-Cal (°C).
 // Low-pass filtered to reduce IMU temperature sensor noise which can cause compensation jitter.
 #ifndef SENSOR_TCAL_TEMP_FILTER_TAU_MS
-#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 200  // ms
+#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 500  // ms
 #endif
 
 static float sensor_tcal_temp = 25.0f;      // Filtered temperature (°C)
@@ -1106,6 +1106,73 @@ static uint64_t total_loop_iterations = 0;
 // Count actual mag samples fed to VQF since last status report (always tracked)
 static uint32_t mag_vqf_updates_since_status = 0;
 
+#if CONFIG_SENSOR_USE_VQF
+/*
+ * After a calibration change, vqf_reset_mag_ref() zeros VQF's magRef.
+ * Rather than waiting for VQF's natural convergence (~6s magNewFirstTime),
+ * re-compute magRef directly from the first calibrated mag samples.
+ *
+ *   norm = |m_cal|
+ *   dip  = -asin(dot(m_cal, up_hat) / norm)    [rad]
+ * where up_hat = accel / |accel| (accelerometer points up when stationary).
+ *
+ * Triggered by sensor_mag_ref_reset(); does NOT run on startup.
+ */
+#define MAG_REF_RECOMPUTE_SAMPLES 50
+#define MAG_REF_ACCEL_TOL 0.3f
+
+static bool mag_ref_recompute_active;
+static float mag_ref_norm_sum;
+static float mag_ref_dip_sum;
+static int mag_ref_count;
+
+static void sensor_mag_ref_accumulate(const float m_cal[3],
+                                      const float accel_sum[3], int accel_count)
+{
+	if (!mag_ref_recompute_active || accel_count == 0)
+		return;
+
+	float ax = accel_sum[0] / accel_count;
+	float ay = accel_sum[1] / accel_count;
+	float az = accel_sum[2] / accel_count;
+	float a_norm = sqrtf(ax * ax + ay * ay + az * az);
+	if (fabsf(a_norm - 1.0f) > MAG_REF_ACCEL_TOL)
+		return;
+
+	float m_norm = sqrtf(m_cal[0] * m_cal[0] + m_cal[1] * m_cal[1] + m_cal[2] * m_cal[2]);
+	if (m_norm < 0.01f)
+		return;
+
+	float inv_a = 1.0f / a_norm;
+	float m_dot_up = (m_cal[0] * ax + m_cal[1] * ay + m_cal[2] * az) * inv_a;
+	float sin_dip = m_dot_up / m_norm;
+	if (sin_dip > 1.0f) sin_dip = 1.0f;
+	if (sin_dip < -1.0f) sin_dip = -1.0f;
+
+	mag_ref_norm_sum += m_norm;
+	mag_ref_dip_sum += -asinf(sin_dip);
+	mag_ref_count++;
+
+	if (mag_ref_count >= MAG_REF_RECOMPUTE_SAMPLES) {
+		float avg_norm = mag_ref_norm_sum / mag_ref_count;
+		float avg_dip = mag_ref_dip_sum / mag_ref_count;
+		vqf_set_mag_ref(avg_norm, avg_dip);
+		mag_ref_recompute_active = false;
+		LOG_INF("Mag ref recomputed from %d samples: norm=%.4f dip=%.1f deg",
+			mag_ref_count, (double)avg_norm,
+			(double)(avg_dip * 180.0f / (float)M_PI));
+	}
+}
+
+void sensor_mag_ref_reset(void)
+{
+	mag_ref_recompute_active = true;
+	mag_ref_norm_sum = 0;
+	mag_ref_dip_sum = 0;
+	mag_ref_count = 0;
+}
+#endif /* CONFIG_SENSOR_USE_VQF */
+
 void sensor_loop(void)
 {
 	if (!sensor_sensor_init)
@@ -1573,12 +1640,27 @@ void sensor_loop(void)
 				float uncalibrated_m[3] = {0};
 				memcpy(uncalibrated_m, raw_m, sizeof(uncalibrated_m)); // copy raw magnetometer data
 
+				// Feed raw mag to background online calibration accumulator
+				sensor_calibration_online_mag_sample(uncalibrated_m);
+
 				sensor_calibration_process_mag(raw_m);
 				float zero_m[3] = {0};
 				if (v_epsilon(raw_m, zero_m, 1e-6)) // if the magnetometer is not calibrated, skip and send raw data
 				{
 					memcpy(raw_m, uncalibrated_m, sizeof(uncalibrated_m));
 					mag_calibrated = false;
+				} else {
+					// Track calibrated mag norm for online quality assessment
+					// Only track when VQF reports no magnetic disturbance — including
+					// disturbed samples inflates norm CV and prevents online cal from stabilizing
+#if CONFIG_SENSOR_USE_VQF
+					if (!vqf_get_mag_dist_detected()) {
+#endif
+						float cal_norm_sq = raw_m[0] * raw_m[0] + raw_m[1] * raw_m[1] + raw_m[2] * raw_m[2];
+						sensor_calibration_track_mag_norm(sqrtf(cal_norm_sq));
+#if CONFIG_SENSOR_USE_VQF
+					}
+#endif
 				}
 				// Save mag data for debug output
 				if (sensor_debug_is_active()) {
@@ -1613,6 +1695,9 @@ void sensor_loop(void)
 					last_mag_fusion_ticks = now_ticks;
 					sensor_fusion->update_mag(m, mag_dt);
 					mag_vqf_updates_since_status++;
+#if CONFIG_SENSOR_USE_VQF
+					sensor_mag_ref_accumulate(m, a_sum, a_count);
+#endif
 				}
 
 				v_rotate(m, q3, m); // magnetic field in local device frame, no other transformation will be done
@@ -2083,7 +2168,15 @@ void main_imu_restart(void)
 		// Use actual mag rate; guard against INFINITY (oneshot mode) with config-based fallback.
 		float fusion_mag_time = (mag_actual_time > 0.0f && mag_actual_time < 10.0f)
 			? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
+#if CONFIG_SENSOR_USE_VQF
+		float saved_ref_norm, saved_ref_dip;
+		vqf_get_mag_ref(&saved_ref_norm, &saved_ref_dip);
+#endif
 		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, fusion_mag_time);
+#if CONFIG_SENSOR_USE_VQF
+		if (saved_ref_norm > 0)
+			vqf_set_mag_ref(saved_ref_norm, saved_ref_dip);
+#endif
 		// Reset mag timing so the first post-restart update uses the nominal fallback
 		// instead of a potentially stale diff (which could be > 10s → updateMag fallback path).
 		last_mag_fusion_ticks = 0;

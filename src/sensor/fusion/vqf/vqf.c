@@ -63,14 +63,14 @@
  * When rest is detected, TAU_ACC_REST overrides.
  */
 #define ADAPTIVE_TAU_ACC_REST       2.5f   /* tauAcc when at rest (seconds) */
-#define ADAPTIVE_TAU_ACC_GENTLE     1.5f   /* tauAcc during gentle motion (seconds) */
-#define ADAPTIVE_TAU_ACC_AGGRESSIVE 4.5f   /* tauAcc under aggressive motion (seconds) */
+#define ADAPTIVE_TAU_ACC_GENTLE     1.0f   /* tauAcc during gentle motion (seconds) */
+#define ADAPTIVE_TAU_ACC_AGGRESSIVE 3.6f   /* tauAcc under aggressive motion (seconds) */
 #define ADAPTIVE_TAU_ACC_LEVELS     3      /* quantization levels */
 #define ADAPTIVE_ACC_DEV_TH         2.5f   /* accel deviation threshold (m/s²) */
 #define ADAPTIVE_ATTACK_ALPHA       0.20f  /* fast attack coefficient (per sample) */
-#define ADAPTIVE_RELEASE_ALPHA      0.008f /* slow release coefficient (per sample) */
-#define TAU_SMOOTH_ALPHA_DOWN       0.03f  /* tauAcc decrease smoothing (per sample) */
-#define TAU_SMOOTH_ALPHA_UP         0.05f  /* tauAcc increase smoothing (per sample) */
+#define ADAPTIVE_RELEASE_ALPHA      0.05f /* slow release coefficient (per sample) */
+#define TAU_SMOOTH_ALPHA_DOWN       0.1f  /* tauAcc decrease smoothing (per sample) */
+#define TAU_SMOOTH_ALPHA_UP         0.2f  /* tauAcc increase smoothing (per sample) */
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
 static uint8_t imu_id;
@@ -118,26 +118,26 @@ static void set_params()
 	init_params(&params);
 	params.tauAcc = 3.6f;
 	params.biasClip = 2.0f;
-	params.biasForgettingTime = 100.0f;
+	params.biasForgettingTime = 105.0f;
 	params.biasSigmaInit = 1.2f;
-	params.biasSigmaMotion = 0.15f;
-	params.biasSigmaRest = 0.03f;
+	params.biasSigmaMotion = 0.105f;
+	params.biasSigmaRest = 0.034f;
 	params.biasVerticalForgettingFactor = 0.0001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.8f;
-	params.restMinT = 2.8f;
-	params.restThAcc = 0.20f;
-	params.restThGyr = 0.65f;
+	params.restFilterTau = 0.45f;
+	params.restMinT = 0.85f;
+	params.restThAcc = 0.18f;
+	params.restThGyr = 1.4f;
 	params.magDistRejectionEnabled = true;
-	params.tauMag = 12.0f;
-	params.magCurrentTau = 0.20f;
-	params.magNormTh = 0.09f;
-	params.magDipTh = 9.0f;
-	params.magNewFirstTime = 6.0f;
-	params.magNewMinGyr = 15.0f;
-	params.magMinUndisturbedTime = 0.8f;
-	params.magMaxRejectionTime = 1800.0f;
+	params.tauMag = 9.0f;
+	params.magCurrentTau = 0.30f;
+	params.magNormTh = 0.10f;
+	params.magDipTh = 10.0f;
+	params.magNewFirstTime = 8.0f;
+	params.magNewMinGyr = 12.0f;
+	params.magMinUndisturbedTime = 0.5f;
+	params.magMaxRejectionTime = 400.0f;
 	params.magRejectionFactor = 900.0f;
 }
 
@@ -438,6 +438,42 @@ void vqf_get_quat(float *q)
 bool vqf_get_rest_detected(void)
 {
 	return getRestDetected(&state);
+}
+
+bool vqf_get_mag_dist_detected(void)
+{
+	return getMagDistDetected(&state);
+}
+
+void vqf_reset_mag_ref(void)
+{
+	setMagRef(&state, 0, 0);
+}
+
+void vqf_set_mag_ref(float norm, float dip)
+{
+	setMagRef(&state, norm, dip);
+}
+
+float vqf_get_mag_ref_norm(void)
+{
+	return getMagRefNorm(&state);
+}
+
+void vqf_get_mag_ref(float *norm, float *dip)
+{
+	*norm = getMagRefNorm(&state);
+	*dip = getMagRefDip(&state);
+}
+
+float vqf_get_delta(void)
+{
+	return getDelta(&state);
+}
+
+void vqf_set_delta(float delta)
+{
+	state.delta = delta;
 }
 
 void vqf_get_relative_rest_deviations(float *out)

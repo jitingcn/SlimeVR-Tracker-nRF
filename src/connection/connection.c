@@ -228,7 +228,7 @@ void connection_update_sensor_temp(float temp)
 {
 	// sensor_temp == zero means no data
 #if CONFIG_SENSOR_USE_VQF
-	if (sensor_get_mag_available() && sensor_get_mag_enabled() && sensor_get_mag_calibrated()) {
+	if (sensor_get_mag_available() && sensor_get_mag_enabled()) {
 		// temp hack to display vqf mag disturbance detection status
 		vqf_debug_info_t vqf_info;
 		vqf_get_debug_info(&vqf_info);

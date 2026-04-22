@@ -48,6 +48,10 @@ void sensor_calibration_clear_mag(float m_inv[][3], bool write); // "request" ma
 void sensor_request_calibration(void);
 void sensor_request_calibration_6_side(void);
 void sensor_request_calibration_mag(void);
+void sensor_calibration_online_mag_sample(const float m[3]);
+int sensor_calibration_online_mag_status(float *dir_bias);
+void sensor_calibration_track_mag_norm(float cal_norm);
+float sensor_calibration_get_mag_quality(void);
 
 #if CONFIG_SENSOR_USE_TCAL
 
