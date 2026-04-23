@@ -266,7 +266,7 @@ static const struct gpio_dt_spec int0 = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, int0_
 const char *sensor_get_sensor_imu_name(void)
 {
 	if (sensor_imu_id < 0)
-		return "None";
+		return "\033[38;5;196;1mNone\033[0m"; // color 196 (bright red), intense/bold
 	return dev_imu_names[sensor_imu_id];
 }
 
