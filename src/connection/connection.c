@@ -107,6 +107,7 @@ uint8_t connection_get_packet_sequence(void)
 #define SUB_DATA_LEN_COMPACT 13 /* type 2: batt+temp+q_buf+a (no rssi) */
 #define SUB_DATA_LEN_STATUS  2  /* type 3: svr_stat + status */
 #define SUB_DATA_LEN_MAG    14  /* type 4: q0-q3 + m0-m2 */
+#define SUB_DATA_LEN_RUNTIME 8  /* type 5: remaining runtime estimate */
 
 /* Fill sub-packet payload (without type/id prefix) into buf, return bytes written */
 static int fill_sub_info(uint8_t *buf)
@@ -183,6 +184,13 @@ static int fill_sub_mag(uint8_t *buf)
 	return SUB_DATA_LEN_MAG;
 }
 
+static int fill_sub_runtime(uint8_t *buf)
+{
+	uint64_t runtime_us = k_ticks_to_us_floor64(sys_get_battery_remaining_time_estimate());
+	memcpy(buf, &runtime_us, sizeof(runtime_us));
+	return SUB_DATA_LEN_RUNTIME;
+}
+
 /* Return sub-packet data size for a given type */
 static int sub_data_len(uint8_t type)
 {
@@ -192,6 +200,7 @@ static int sub_data_len(uint8_t type)
 	case 2: return SUB_DATA_LEN_COMPACT;
 	case 3: return SUB_DATA_LEN_STATUS;
 	case 4: return SUB_DATA_LEN_MAG;
+	case 5: return SUB_DATA_LEN_RUNTIME;
 	default: return 0;
 	}
 }
@@ -631,6 +640,7 @@ static void send_composite(const uint8_t *types, int n)
 		case 2: pos += fill_sub_compact_quat(&buf[pos]); break;
 		case 3: pos += fill_sub_status(&buf[pos]); break;
 		case 4: pos += fill_sub_mag(&buf[pos]); break;
+		case 5: pos += fill_sub_runtime(&buf[pos]); break;
 		default: break;
 		}
 	}
@@ -749,13 +759,15 @@ void connection_thread(void)
 		/* Lookahead: consider nearly-due low-freq packets for piggybacking */
 		bool info_soon = (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
+		bool runtime_soon = (now - last_runtime_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool mag_soon = mag_update_time && (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 
 		if (quat_ready) {
 			/* Count how many extras we can piggyback */
 			int extras = (mag_due || mag_soon ? 1 : 0)
 				   + (info_soon && !send_precise_quat ? 0 : (info_due || info_soon ? 1 : 0))
-				   + (status_due || status_soon ? 1 : 0);
+				   + (status_due || status_soon ? 1 : 0)
+				   + (runtime_due || runtime_soon ? 1 : 0);
 
 			if (extras > 0) {
 				/* Build composite packet */
@@ -779,6 +791,8 @@ void connection_thread(void)
 				/* Piggyback low-freq sub-packets if they fit */
 				if ((status_due || status_soon) && composite_try_add(types, &n, &used, 3))
 					last_status_time = now;
+				if ((runtime_due || runtime_soon) && composite_try_add(types, &n, &used, 5))
+					last_runtime_time = now;
 				if ((info_due || info_soon) && now - last_info_time != now)
 					; /* info already handled via compact quat or not due */
 				else if ((info_due || info_soon) && composite_try_add(types, &n, &used, 0))
@@ -815,13 +829,15 @@ void connection_thread(void)
 
 		/* No quat ready — handle standalone low-freq packets */
 		if (mag_due) {
-			/* Mag with optional status piggyback */
-			if (status_due || status_soon) {
-				uint8_t types[2];
+			/* Mag with optional low-frequency piggyback */
+			if (status_due || status_soon || runtime_due || runtime_soon) {
+				uint8_t types[3];
 				int n = 0, used = 0;
 				composite_try_add(types, &n, &used, 4);
-				if (composite_try_add(types, &n, &used, 3))
+				if ((status_due || status_soon) && composite_try_add(types, &n, &used, 3))
 					last_status_time = now;
+				if ((runtime_due || runtime_soon) && composite_try_add(types, &n, &used, 5))
+					last_runtime_time = now;
 				send_composite(types, n);
 			} else {
 				connection_write_packet_4();
@@ -832,13 +848,15 @@ void connection_thread(void)
 		}
 
 		if (info_due) {
-			/* Info with optional status piggyback */
-			if (status_due || status_soon) {
-				uint8_t types[2];
+			/* Info with optional low-frequency piggyback */
+			if (status_due || status_soon || runtime_due || runtime_soon) {
+				uint8_t types[3];
 				int n = 0, used = 0;
 				composite_try_add(types, &n, &used, 0);
-				if (composite_try_add(types, &n, &used, 3))
+				if ((status_due || status_soon) && composite_try_add(types, &n, &used, 3))
 					last_status_time = now;
+				if ((runtime_due || runtime_soon) && composite_try_add(types, &n, &used, 5))
+					last_runtime_time = now;
 				send_composite(types, n);
 			} else {
 				connection_write_packet_0();
@@ -848,8 +866,18 @@ void connection_thread(void)
 		}
 
 		if (status_due) {
-			last_status_time = now;
-			connection_write_packet_3();
+			if (runtime_due || runtime_soon) {
+				uint8_t types[2];
+				int n = 0, used = 0;
+				composite_try_add(types, &n, &used, 3);
+				last_status_time = now;
+				if (composite_try_add(types, &n, &used, 5))
+					last_runtime_time = now;
+				send_composite(types, n);
+			} else {
+				last_status_time = now;
+				connection_write_packet_3();
+			}
 			continue;
 		}
 
