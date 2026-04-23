@@ -29,6 +29,7 @@
 #include "tdma.h"
 #include "build_defines.h"
 #include "hid.h"
+#include "system/battery_tracker.h"
 #include "system/watchdog.h"
 
 #include <stdbool.h>
@@ -293,7 +294,9 @@ void connection_update_status(int status)
 //|mag_id  |fw_date          |major   |minor   |patch   |rssi    | |1       |id      |q0
 //|q1               |q2               |q3               |a0               |a1 |a2 | |2
 //|id      |batt    |batt_v  |temp    |q_buf                              |a0 |a1 |a2
-//|rssi    | |3	   |id      |svr_stat|status  |resv |rssi    |
+//|rssi    | |3      |id      |svr_stat|status  |resv |rssi    |
+//| |4      |id      |q0               |q1               |q2               |q3               |m0 |m1 |m2 |
+//| |5      |id      |runtime (uint64, us)                              |resv              |rssi |
 
 void connection_write_packet_0() // device info
 {
@@ -364,8 +367,24 @@ void connection_write_packet_4() // full precision quat and magnetometer
 	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
 }
 
+void connection_write_packet_5() // runtime estimate
+{
+	uint8_t data[16] = {0};
+	data[0] = 5;
+	data[1] = tracker_id;
+	uint64_t runtime_us = k_ticks_to_us_floor64(sys_get_battery_remaining_time_estimate());
+	memcpy(&data[2], &runtime_us, sizeof(runtime_us));
+	data[15] = 0; // rssi (supplied by receiver)
+
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence++;
+	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+}
+
 static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
+static int64_t last_runtime_time = 0;
 
 /*
  * Raw sensor data collection subsystem.
@@ -725,6 +744,7 @@ void connection_thread(void)
 		bool mag_due = mag_update_time && (now - last_mag_time > 100);
 		bool info_due = (now - last_info_time > 100);
 		bool status_due = (now - last_status_time > 1000);
+		bool runtime_due = (now - last_runtime_time > 1000);
 
 		/* Lookahead: consider nearly-due low-freq packets for piggybacking */
 		bool info_soon = (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
@@ -830,6 +850,12 @@ void connection_thread(void)
 		if (status_due) {
 			last_status_time = now;
 			connection_write_packet_3();
+			continue;
+		}
+
+		if (runtime_due) {
+			last_runtime_time = now;
+			connection_write_packet_5();
 			continue;
 		}
 
