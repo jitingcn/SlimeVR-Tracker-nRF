@@ -191,6 +191,12 @@ static int fill_sub_runtime(uint8_t *buf)
 	return SUB_DATA_LEN_RUNTIME;
 }
 
+struct composite_builder {
+	uint8_t types[5];
+	int n;
+	int used;
+};
+
 /* Return sub-packet data size for a given type */
 static int sub_data_len(uint8_t type)
 {
@@ -202,6 +208,33 @@ static int sub_data_len(uint8_t type)
 	case 4: return SUB_DATA_LEN_MAG;
 	case 5: return SUB_DATA_LEN_RUNTIME;
 	default: return 0;
+	}
+}
+
+static void connection_write_packet_type(uint8_t type)
+{
+	switch (type) {
+	case 0:
+		connection_write_packet_0();
+		break;
+	case 1:
+		connection_write_packet_1();
+		break;
+	case 2:
+		connection_write_packet_2();
+		break;
+	case 3:
+		connection_write_packet_3();
+		break;
+	case 4:
+		connection_write_packet_4();
+		break;
+	case 5:
+		connection_write_packet_5();
+		break;
+	default:
+		connection_write_packet_1();
+		break;
 	}
 }
 
@@ -649,19 +682,43 @@ static void send_composite(const uint8_t *types, int n)
 	esb_write(buf, no_ack, pos);
 }
 
+static void composite_builder_reset(struct composite_builder *builder)
+{
+	builder->n = 0;
+	builder->used = 0;
+}
+
 /*
  * Try to append a sub-packet type to the pending composite list.
  * Returns true if it fits within COMPOSITE_MAX_SUB_DATA.
  */
-static bool composite_try_add(uint8_t *types, int *n, int *used, uint8_t type)
+static bool composite_try_add(struct composite_builder *builder, uint8_t type)
 {
 	int need = 1 + sub_data_len(type); /* 1 for type byte + data */
-	if (*used + need > COMPOSITE_MAX_SUB_DATA)
+	if (builder->used + need > COMPOSITE_MAX_SUB_DATA)
 		return false;
-	types[*n] = type;
-	(*n)++;
-	*used += need;
+	builder->types[builder->n] = type;
+	builder->n++;
+	builder->used += need;
 	return true;
+}
+
+static bool composite_try_add_due(struct composite_builder *builder, uint8_t type, bool wanted, int64_t *last_time, int64_t now)
+{
+	if (!wanted)
+		return false;
+	if (!composite_try_add(builder, type))
+		return false;
+	*last_time = now;
+	return true;
+}
+
+static void send_composite_or_single(const struct composite_builder *builder, uint8_t fallback_type)
+{
+	if (builder->n > 1)
+		send_composite(builder->types, builder->n);
+	else
+		connection_write_packet_type(fallback_type);
 }
 
 void connection_thread(void)
@@ -761,47 +818,41 @@ void connection_thread(void)
 		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool runtime_soon = (now - last_runtime_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool mag_soon = mag_update_time && (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
+		bool status_wanted = status_due || status_soon;
+		bool runtime_wanted = runtime_due || runtime_soon;
+		bool info_wanted = info_due || info_soon;
+		bool mag_wanted = mag_due || mag_soon;
 
 		if (quat_ready) {
-			uint8_t types[5];
-			int n = 0, used = 0;
+			struct composite_builder builder;
 			bool info_in_primary = false;
+			uint8_t fallback_type = 1;
+			composite_builder_reset(&builder);
 
 			/* Primary: quat sub-packet */
-			if (mag_due || mag_soon) {
+			if (mag_wanted) {
 				/* mag includes full quat, use type 4 instead of separate quat+mag */
-				composite_try_add(types, &n, &used, 4);
+				composite_try_add(&builder, 4);
 				mag_update_time = 0;
 				last_mag_time = now;
-			} else if (!send_precise_quat && (info_due || info_soon)) {
+				fallback_type = 4;
+			} else if (!send_precise_quat && info_wanted) {
 				/* compact quat (type 2) already contains batt/temp like info */
-				composite_try_add(types, &n, &used, 2);
+				composite_try_add(&builder, 2);
 				last_info_time = now;
 				info_in_primary = true;
+				fallback_type = 2;
 			} else {
-				composite_try_add(types, &n, &used, 1);
+				composite_try_add(&builder, 1);
 			}
 
 			/* Piggyback low-freq sub-packets if they fit */
-			if ((status_due || status_soon) && composite_try_add(types, &n, &used, 3))
-				last_status_time = now;
-			if ((runtime_due || runtime_soon) && composite_try_add(types, &n, &used, 5))
-				last_runtime_time = now;
-			if (!info_in_primary && (info_due || info_soon) && composite_try_add(types, &n, &used, 0))
-				last_info_time = now;
+			composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
+			composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
+			if (!info_in_primary)
+				composite_try_add_due(&builder, 0, info_wanted, &last_info_time, now);
 
-			if (n > 1) {
-				send_composite(types, n);
-			} else {
-				/* Only one sub-packet — send as standard packet instead */
-				uint8_t t = types[0];
-				if (t == 2)
-					connection_write_packet_2();
-				else if (t == 4)
-					connection_write_packet_4();
-				else
-					connection_write_packet_1();
-			}
+			send_composite_or_single(&builder, fallback_type);
 			quat_update_time = 0;
 			last_quat_time = now;
 			last_sensor_quat_time = now;
@@ -811,18 +862,13 @@ void connection_thread(void)
 		/* No quat ready — handle standalone low-freq packets */
 		if (mag_due) {
 			/* Mag with optional low-frequency piggyback */
-			if (status_due || status_soon || runtime_due || runtime_soon) {
-				uint8_t types[3];
-				int n = 0, used = 0;
-				composite_try_add(types, &n, &used, 4);
-				if ((status_due || status_soon) && composite_try_add(types, &n, &used, 3))
-					last_status_time = now;
-				if ((runtime_due || runtime_soon) && composite_try_add(types, &n, &used, 5))
-					last_runtime_time = now;
-				if (n > 1)
-					send_composite(types, n);
-				else
-					connection_write_packet_4();
+			if (status_wanted || runtime_wanted) {
+				struct composite_builder builder;
+				composite_builder_reset(&builder);
+				composite_try_add(&builder, 4);
+				composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
+				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
+				send_composite_or_single(&builder, 4);
 			} else {
 				connection_write_packet_4();
 			}
@@ -833,18 +879,13 @@ void connection_thread(void)
 
 		if (info_due) {
 			/* Info with optional low-frequency piggyback */
-			if (status_due || status_soon || runtime_due || runtime_soon) {
-				uint8_t types[3];
-				int n = 0, used = 0;
-				composite_try_add(types, &n, &used, 0);
-				if ((status_due || status_soon) && composite_try_add(types, &n, &used, 3))
-					last_status_time = now;
-				if ((runtime_due || runtime_soon) && composite_try_add(types, &n, &used, 5))
-					last_runtime_time = now;
-				if (n > 1)
-					send_composite(types, n);
-				else
-					connection_write_packet_0();
+			if (status_wanted || runtime_wanted) {
+				struct composite_builder builder;
+				composite_builder_reset(&builder);
+				composite_try_add(&builder, 0);
+				composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
+				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
+				send_composite_or_single(&builder, 0);
 			} else {
 				connection_write_packet_0();
 			}
@@ -853,19 +894,13 @@ void connection_thread(void)
 		}
 
 		if (status_due) {
-			if (runtime_due || runtime_soon) {
-				uint8_t types[2];
-				int n = 0, used = 0;
-				composite_try_add(types, &n, &used, 3);
-				if (composite_try_add(types, &n, &used, 5))
-					last_runtime_time = now;
-				if (n > 1) {
-					last_status_time = now;
-					send_composite(types, n);
-				} else {
-					last_status_time = now;
-					connection_write_packet_3();
-				}
+			if (runtime_wanted) {
+				struct composite_builder builder;
+				composite_builder_reset(&builder);
+				composite_try_add(&builder, 3);
+				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
+				last_status_time = now;
+				send_composite_or_single(&builder, 3);
 			} else {
 				last_status_time = now;
 				connection_write_packet_3();
