@@ -650,10 +650,12 @@ static int64_t last_sensor_quat_time = 0;
 #define COMPOSITE_MAX_SUB_DATA (ESB_MAX_PAYLOAD_LEN - 4)
 
 /*
- * Build and send a composite packet (type 0x05) containing multiple sub-packets.
+ * Build and send a composite packet identified by ESB_COMPOSITE_TYPE
+ * containing multiple sub-packets.
  * types[] / lens[] describe the sub-packets to include; n is the count.
  * Each sub-packet is: [type_byte][data...].
- * Format: [0x05][tracker_id][sub_count][sub0_type][sub0_data...][sub1_type][sub1_data...]...[sequence]
+ * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub0_type][sub0_data...]
+ *         [sub1_type][sub1_data...]...[sequence]
  */
 static void send_composite(const uint8_t *types, int n)
 {
