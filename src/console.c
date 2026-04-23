@@ -498,6 +498,7 @@ static void print_help(void)
 	printk("Other:\n");
 	printk("  ping                       Flash LED (same as remote PING command)\n");
 	printk("  meow                       Meow!\n");
+	printk("  nvs                        Show NVS usage statistics\n");
 	printk("  help                       Show this help message\n");
 	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 1s)\n");
 	printk("  range                      Show sensor range statistics (min/max values)\n");
@@ -719,6 +720,7 @@ static void console_thread(void)
 
 	uint8_t command_ping[] = "ping";
 	uint8_t command_meow[] = "meow";
+	uint8_t command_nvs[] = "nvs";
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	uint8_t command_sens[] = "sens";
@@ -1117,6 +1119,9 @@ static void console_thread(void)
 #endif
 		else if (memcmp(line, command_ping, sizeof(command_ping)) == 0) {
 			cmd_ping_start();
+		}
+		else if (memcmp(line, command_nvs, sizeof(command_nvs)) == 0) {
+			sys_nvs_stats();
 		}
 		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
 			print_meow();
