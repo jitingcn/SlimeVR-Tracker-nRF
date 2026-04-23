@@ -19,6 +19,7 @@
 #include <hal/nrf_spim.h>
 #include <hal/nrf_twim.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
+#include <stdint.h>
 
 #include "power.h"
 #include "clock_control.h"
@@ -36,7 +37,7 @@ enum sys_regulator {
 #define BATTERY_SAMPLES 24
 
 static int16_t calibrated_battery_pptt = -1;
-static int16_t current_battery_pptt = -1;
+static int16_t current_battery_pptt = INT16_MIN;
 static int32_t hysteresis_pptt = -1;
 static int32_t average_pptt = -1;
 static int16_t last_pptt[BATTERY_SAMPLES - 1] = {[0 ... BATTERY_SAMPLES - 2] = -1};
@@ -626,6 +627,8 @@ static void power_thread(void)
 
 		int battery_mV;
 		int16_t battery_pptt = read_batt_mV(&battery_mV);
+		if (battery_pptt < 0)
+			LOG_ERR("Failed to read battery voltage: %d", battery_pptt);
 		if (samples < BATTERY_SAMPLES)
 			samples++;
 
