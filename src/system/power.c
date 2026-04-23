@@ -511,8 +511,16 @@ static void disable_DFU_thread(void)
 #endif
 }
 
-static void update_battery(int16_t battery_pptt)
+static bool battery_pptt_is_valid(int16_t battery_pptt)
 {
+	return battery_pptt >= 0 && battery_pptt <= 10000;
+}
+
+static bool update_battery(int16_t battery_pptt)
+{
+	if (!battery_pptt_is_valid(battery_pptt))
+		return false;
+
 	// Plugged state will cause a sudden change in SOC >10%, so reset the sample array
 	if (average_pptt >= 0 && NRFX_ABS(battery_pptt - average_pptt) > 1000)
 	{
@@ -569,6 +577,7 @@ static void update_battery(int16_t battery_pptt)
 	// 0% to battery tracker will reset it, as >1% to 0% is invalid change
 	// Instead, remap 1-100 to 0-100
 	current_battery_pptt = (hysteresis_pptt - 100) * 100 / 99;
+	return true;
 }
 
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
@@ -629,7 +638,8 @@ static void power_thread(void)
 		int16_t battery_pptt = read_batt_mV(&battery_mV);
 		if (battery_pptt < 0)
 			LOG_ERR("Failed to read battery voltage: %d", battery_pptt);
-		if (samples < BATTERY_SAMPLES)
+		bool battery_pptt_valid = battery_pptt_is_valid(battery_pptt);
+		if (battery_pptt_valid && samples < BATTERY_SAMPLES)
 			samples++;
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
@@ -685,8 +695,12 @@ static void power_thread(void)
 			sys_request_system_off(true);
 		}
 
-		// will update average_pptt, and current_battery_pptt
-		update_battery(battery_pptt);
+		// Only feed valid SOC readings into the filter. ADC errors would
+		// otherwise look like real 0%/100% jumps and poison the estimate.
+		if (battery_pptt_valid)
+		{
+			update_battery(battery_pptt);
+		}
 
 		if (battery_available && !battery_low && current_battery_pptt < 1000)
 			battery_low = true;
@@ -694,11 +708,18 @@ static void power_thread(void)
 			battery_low = false;
 
 		sys_update_battery_tracker_voltage(battery_mV, device_plugged);
-		if (samples == BATTERY_SAMPLES || device_plugged)
+		if (battery_pptt_valid && (samples == BATTERY_SAMPLES || device_plugged))
 			sys_update_battery_tracker(current_battery_pptt, device_plugged);
-		calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
+		if (battery_pptt_valid)
+			calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
 
-		connection_update_battery(battery_available, device_plugged, device_charged, calibrated_battery_pptt, battery_mV);
+		connection_update_battery(
+			battery_available,
+			device_plugged,
+			device_charged,
+			calibrated_battery_pptt >= 0 ? (uint32_t)calibrated_battery_pptt : 0,
+			battery_mV
+		);
 
 		if (charging)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
