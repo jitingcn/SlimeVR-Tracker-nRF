@@ -272,9 +272,10 @@ void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 
 void sys_read(uint16_t id, void *data, size_t len)
 {
+	memset(data, 0, len);
+
 	if (!sys_nvs_init()) {
 		LOG_ERR("sys_read: NVS init failed, cannot read ID %d", id);
-		memset(data, 0, len);
 		return;
 	}
 	int err = nvs_read(&fs, id, data, len);
@@ -286,8 +287,10 @@ void sys_read(uint16_t id, void *data, size_t len)
 			LOG_ERR("Failed to read from NVS, error: %d", err);
 			LOG_WRN("Read data set to zero");
 		}
-		memset(data, 0, len);
 		return;
+	}
+	if ((size_t)err < len) {
+		LOG_WRN("Short NVS read for ID %d: got %d bytes, expected %zu", id, err, len);
 	}
 }
 
