@@ -1372,9 +1372,6 @@ void sensor_loop(void)
 			float debug_raw_m[3] = {0};
 			float debug_cal_m[3] = {0};
 			bool debug_mag_valid = false;
-			/* Persistent accel for data collection: accel tags arrive less
-			 * frequently than gyro tags, so we hold the latest accel value
-			 * and pair it with each gyro sample. */
 			static float raw_collect_a[3] = {0};
 
 			for (uint16_t i = 0; i < packets; i++)
@@ -1384,21 +1381,23 @@ void sensor_loop(void)
 				if (sensor_imu->fifo_process(i, rawData, raw_a, raw_g))
 					continue; // skip on error
 
-				/* Update persistent accel when we get an accel tag (non-zero) */
+				/* Pair the most recent accel tag with the next gyro tag once. */
 				if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0) {
 					memcpy(raw_collect_a, raw_a, sizeof(raw_collect_a));
 				}
 
 				/* Only queue raw samples on gyro tags to avoid
 				 * duplicate entries from separate accel/gyro FIFO tags.
-				 * Pair with the most recent accel reading. */
-				if (connection_get_data_collection() &&
-				    (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0)) {
+				 * Pair with the latest accel sample if present; otherwise zeros. */
+				if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
 					struct raw_imu_sample raw_sample;
-					memcpy(raw_sample.gyro, raw_g, sizeof(raw_sample.gyro));
-					memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
-					raw_sample.temp_c = raw_collect_temp_c;
-					connection_queue_raw_sample(&raw_sample);
+					if (dc_active) {
+						memcpy(raw_sample.gyro, raw_g, sizeof(raw_sample.gyro));
+						memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
+						raw_sample.temp_c = raw_collect_temp_c;
+						connection_queue_raw_sample(&raw_sample);
+					}
+					memset(raw_collect_a, 0, sizeof(raw_collect_a));
 				}
 
 				// Debug: Log gyro values to see if they're all zero
