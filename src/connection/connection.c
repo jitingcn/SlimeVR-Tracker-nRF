@@ -443,8 +443,8 @@ static int64_t last_runtime_time = 0;
  *   [16-27] accel x,y,z (float × 3, g)
  *   [28-39] mag x,y,z (float × 3, or zeros)
  *   [40]   flags (bit0: has_new_mag)
- *   [41]   temperature (uint8)
- *   [42-47] reserved
+ *   [41-44] T-Cal temperature (float, deg C)
+ *   [45-47] reserved
  */
 #include <zephyr/sys/byteorder.h>
 
@@ -453,6 +453,7 @@ static int64_t last_runtime_time = 0;
 struct raw_imu_queued {
 	float gyro[3];
 	float accel[3];
+	float temp_c;
 };
 
 K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4);
@@ -515,6 +516,7 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 	struct raw_imu_queued entry;
 	memcpy(entry.gyro, sample->gyro, sizeof(entry.gyro));
 	memcpy(entry.accel, sample->accel, sizeof(entry.accel));
+	entry.temp_c = sample->temp_c;
 
 	if (k_msgq_put(&raw_imu_msgq, &entry, K_NO_WAIT) != 0) {
 		struct raw_imu_queued discard;
@@ -624,7 +626,7 @@ bool connection_process_raw_data(void)
 		}
 
 		buf[40] = flags;
-		buf[41] = sensor_temp;
+		memcpy(&buf[41], &sample.temp_c, sizeof(sample.temp_c));
 
 		/* Save to ring buffer for potential retransmission */
 		uint16_t ring_idx = seq % RAW_RING_SIZE;

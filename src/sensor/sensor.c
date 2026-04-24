@@ -1298,6 +1298,18 @@ void sensor_loop(void)
 			connection_update_sensor_temp(temp);
 #endif
 
+			float raw_collect_temp_c = NAN;
+			int64_t temp_age_ms = k_uptime_get() - last_temp_time;
+#if CONFIG_SENSOR_USE_TCAL
+			if (last_temp_time >= 0 && temp_age_ms <= 1000) {
+				raw_collect_temp_c = sensor_tcal_temp_filter_initialized ? sensor_tcal_temp : sensor_tcal_temp_raw;
+			}
+#else
+			if (last_temp_time >= 0 && temp_age_ms <= 1000) {
+				raw_collect_temp_c = temp;
+			}
+#endif
+
 			// Debug info
 #if DEBUG
 			int64_t acquisition_time = k_uptime_ticks();
@@ -1385,6 +1397,7 @@ void sensor_loop(void)
 					struct raw_imu_sample raw_sample;
 					memcpy(raw_sample.gyro, raw_g, sizeof(raw_sample.gyro));
 					memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
+					raw_sample.temp_c = raw_collect_temp_c;
 					connection_queue_raw_sample(&raw_sample);
 				}
 
