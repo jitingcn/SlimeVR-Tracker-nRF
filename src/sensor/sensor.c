@@ -257,6 +257,7 @@ K_THREAD_DEFINE(sensor_init_thread_id, 256, sensor_request_scan, true, NULL, NUL
 */
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
+#define SENSOR_BOARD_HAS_AUX_MAG_VIA_IMU DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, aux_mag_via_imu)
 
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, int0_gpios)
 #define IMU_INT_EXISTS true
@@ -444,7 +445,7 @@ int sensor_scan(void)
 	}
 #endif
 #if SENSOR_MAG_EXT_EXISTS
-	if (mag_id < 0 && (sensor_imu_dev_reg & 0x80)) // SPI IMU
+	if (mag_id < 0 && (sensor_imu_dev_reg & 0x80) && SENSOR_BOARD_HAS_AUX_MAG_VIA_IMU) // SPI IMU
 	{
 		// IMU may support I2CM if the magnetometer is connected through the IMU
 		int err = sensor_imu->ext_setup();

@@ -1,11 +1,15 @@
 #include <math.h>
 #include <string.h>
 
+#include <zephyr/devicetree.h>
 #include <zephyr/logging/log.h>
 #include <hal/nrf_gpio.h>
 
 #include "LSM6DSV.h"
 #include "sensor/sensor_none.h"
+
+#define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
+#define LSM6DSV_AUX_MAG_VIA_IMU DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, aux_mag_via_imu)
 
 #define PACKET_SIZE 7
 LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
@@ -149,10 +153,10 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 
 	last_accel_odr = 0xff; // reset last odr to force update
 	last_gyro_odr = 0xff; // reset last odr to force update
-	// Re-enable SHUB_PU_EN if sensor hub (ext interface) was configured during scan.
-	// The pre-init shutdown reset clears IF_CFG, so restore auxiliary I2C pull-ups here.
+	// Reapply the intended runtime IF_CFG state explicitly.
+	// IF_CFG is not reset by SW_RESET, and earlier scan/WOM paths may have changed it.
 	uint8_t if_cfg = 0x18; // INT H_LACTIVE active low, PP_OD open-drain
-	if (sensor_interface_ext_get() != NULL)
+	if (LSM6DSV_AUX_MAG_VIA_IMU)
 		if_cfg |= 0x40; // SHUB_PU_EN: enable internal pull-up for auxiliary I2C
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, if_cfg);
 
@@ -580,14 +584,16 @@ int lsm_ext_setup(void)
 	// lsm_init() will reconfigure ODR for normal operation.
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, (OP_MODE_XL_HP << 4) | ODR_480Hz);
 	k_msleep(5); // wait for oscillator startup
-	// enable internal pull-up for auxiliary I2C
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, 0x58); // SHUB_PU_EN, INT H_LACTIVE active low, PP_OD open-drain
+	uint8_t if_cfg = 0x18; // INT H_LACTIVE active low, PP_OD open-drain
+	if (LSM6DSV_AUX_MAG_VIA_IMU)
+		if_cfg |= 0x40; // SHUB_PU_EN: enable internal pull-up for auxiliary I2C
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, if_cfg);
 	if (err)
 		LOG_ERR("Communication error");
 	// Reset to scanning mode for clean device discovery
 	ext_continuous_active = false;
 	ext_scanning_mode = true;
-	sensor_interface_ext_configure(&sensor_ext_lsm6dsv);
+	sensor_interface_ext_configure(LSM6DSV_AUX_MAG_VIA_IMU ? &sensor_ext_lsm6dsv : NULL);
 	return 0;
 }
 
