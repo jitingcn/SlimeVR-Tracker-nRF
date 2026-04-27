@@ -116,29 +116,29 @@ void vqf_update_sensor_ids(int imu)
 static void set_params()
 {
 	init_params(&params);
-	params.tauAcc = 4.5f;
+	params.tauAcc = 4.3f;
 	params.biasClip = 2.0f;
-	params.biasForgettingTime = 107.0f;
-	params.biasSigmaInit = 0.5f;
+	params.biasForgettingTime = 100.0f;
+	params.biasSigmaInit = 0.54f;
 	params.biasSigmaMotion = 0.10f;
-	params.biasSigmaRest = 0.028f;
-	params.biasVerticalForgettingFactor = 0.00003f;
+	params.biasSigmaRest = 0.026f;
+	params.biasVerticalForgettingFactor = 0.00005f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 0.7f;
-	params.restMinT = 1.00f;
-	params.restThGyr = 0.9f;
-	params.restThAcc = 0.7f;
+	params.restFilterTau = 0.61f;
+	params.restMinT = 1.17f;
+	params.restThGyr = 1.49f;
+	params.restThAcc = 0.41f;
 	params.magDistRejectionEnabled = true;
-	params.tauMag = 9.0f;
-	params.magCurrentTau = 0.30f;
-	params.magNormTh = 0.10f;
-	params.magDipTh = 10.0f;
-	params.magNewFirstTime = 8.0f;
-	params.magNewMinGyr = 12.0f;
-	params.magMinUndisturbedTime = 0.5f;
-	params.magMaxRejectionTime = 400.0f;
-	params.magRejectionFactor = 900.0f;
+	params.tauMag = 6.0f;
+	params.magCurrentTau = 0.44f;
+	params.magNormTh = 0.09f;
+	params.magDipTh = 6.0f;
+	params.magNewFirstTime = 5.5f;
+	params.magNewMinGyr = 16.0f;
+	params.magMinUndisturbedTime = 0.6f;
+	params.magMaxRejectionTime = 3200.0f;
+	params.magRejectionFactor = 1150.0f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)
