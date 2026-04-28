@@ -32,12 +32,14 @@
 #include "system/battery_tracker.h"
 #include "system/watchdog.h"
 
+#include <math.h>
 #include <stdbool.h>
 #include <zephyr/kernel.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
+static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
 
 static uint8_t packet_sequence = 0;
 static int64_t last_ping_time = 0;
@@ -242,6 +244,7 @@ void connection_update_sensor_ids(int imu, int mag)
 {
 	imu_id = get_server_constant_imu_id(imu);
 	mag_id = get_server_constant_mag_id(mag);
+	sensor_ids_set = true;
 }
 
 static int64_t quat_update_time = 0;
@@ -252,6 +255,13 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 {
 	// data_time is in system ticks, nonzero means valid measurement
 	// TODO: use data_time to measure latency! the latency should be calculated up to before radio sent data
+
+	// Reject NaN quaternions to prevent sending invalid data to server
+	if (isnan(q[0]) || isnan(q[1]) || isnan(q[2]) || isnan(q[3])) {
+		LOG_WRN("Rejected NaN quaternion");
+		return;
+	}
+
 	send_precise_quat = q_epsilon(q, sensor_q, 0.005f);
 	memcpy(sensor_q, q, sizeof(sensor_q));
 	memcpy(sensor_a, a, sizeof(sensor_a));
@@ -813,12 +823,12 @@ void connection_thread(void)
 		bool quat_ready = quat_update_time &&
 				  (now - last_sensor_quat_time >= quat_interval_ms);
 		bool mag_due = mag_update_time && (now - last_mag_time > 100);
-		bool info_due = (now - last_info_time > 100);
+		bool info_due = sensor_ids_set && (now - last_info_time > 100);
 		bool status_due = (now - last_status_time > 1000);
 		bool runtime_due = (now - last_runtime_time > 1000);
 
 		/* Lookahead: consider nearly-due low-freq packets for piggybacking */
-		bool info_soon = (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
+		bool info_soon = sensor_ids_set && (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool runtime_soon = (now - last_runtime_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool mag_soon = mag_update_time && (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
@@ -829,7 +839,6 @@ void connection_thread(void)
 
 		if (quat_ready) {
 			struct composite_builder builder;
-			bool info_in_primary = false;
 			uint8_t fallback_type = 1;
 			composite_builder_reset(&builder);
 
@@ -841,10 +850,10 @@ void connection_thread(void)
 				last_mag_time = now;
 				fallback_type = 4;
 			} else if (!send_precise_quat && info_wanted) {
-				/* compact quat (type 2) already contains batt/temp like info */
+				/* compact quat (type 2) contains batt/temp but NOT imu_id/mag_id.
+				 * Don't update last_info_time here so that a real type 0 info
+				 * sub-packet is still piggybacked to keep IMU model visible. */
 				composite_try_add(&builder, 2);
-				last_info_time = now;
-				info_in_primary = true;
 				fallback_type = 2;
 			} else {
 				composite_try_add(&builder, 1);
@@ -853,8 +862,7 @@ void connection_thread(void)
 			/* Piggyback low-freq sub-packets if they fit */
 			composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
 			composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
-			if (!info_in_primary)
-				composite_try_add_due(&builder, 0, info_wanted, &last_info_time, now);
+			composite_try_add_due(&builder, 0, info_wanted, &last_info_time, now);
 
 			send_composite_or_single(&builder, fallback_type);
 			quat_update_time = 0;
