@@ -68,7 +68,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_LEN 13 // with CRC-8
 #define ESB_SENSOR_DATA_LEN 17
 #define ESB_MAX_PAYLOAD_LEN CONFIG_ESB_MAX_PAYLOAD_LENGTH
-#define ESB_COMPOSITE_TYPE 0x05 // Composite packet containing multiple sub-packets
+#define ESB_COMPOSITE_TYPE 0xFE // Composite packet containing multiple sub-packets
 
 // Remote command flags for PONG data[7] (shared with receiver)
 #define ESB_PONG_FLAG_NORMAL 0x00

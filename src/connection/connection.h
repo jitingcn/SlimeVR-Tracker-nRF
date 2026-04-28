@@ -47,12 +47,14 @@ void connection_write_packet_1();
 void connection_write_packet_2();
 void connection_write_packet_3();
 void connection_write_packet_4();
+void connection_write_packet_5();
 
 // Raw sensor data collection (runtime controlled via PONG command)
 
 struct raw_imu_sample {
 	float gyro[3];   // deg/s from fifo_process
 	float accel[3];  // g from fifo_process
+	float temp_c;    // T-Cal temperature in deg C for raw data collection
 };
 
 // Enable/disable data collection (called from PONG command handler)

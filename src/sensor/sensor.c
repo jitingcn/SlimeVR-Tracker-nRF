@@ -266,7 +266,7 @@ static const struct gpio_dt_spec int0 = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, int0_
 const char *sensor_get_sensor_imu_name(void)
 {
 	if (sensor_imu_id < 0)
-		return "None";
+		return "\033[38;5;196;1mNone\033[0m"; // color 196 (bright red), intense/bold
 	return dev_imu_names[sensor_imu_id];
 }
 
@@ -1298,6 +1298,18 @@ void sensor_loop(void)
 			connection_update_sensor_temp(temp);
 #endif
 
+			float raw_collect_temp_c = NAN;
+			int64_t temp_age_ms = k_uptime_get() - last_temp_time;
+#if CONFIG_SENSOR_USE_TCAL
+			if (last_temp_time >= 0 && temp_age_ms <= 1000) {
+				raw_collect_temp_c = sensor_tcal_temp_filter_initialized ? sensor_tcal_temp : sensor_tcal_temp_raw;
+			}
+#else
+			if (last_temp_time >= 0 && temp_age_ms <= 1000) {
+				raw_collect_temp_c = temp;
+			}
+#endif
+
 			// Debug info
 #if DEBUG
 			int64_t acquisition_time = k_uptime_ticks();
@@ -1360,9 +1372,6 @@ void sensor_loop(void)
 			float debug_raw_m[3] = {0};
 			float debug_cal_m[3] = {0};
 			bool debug_mag_valid = false;
-			/* Persistent accel for data collection: accel tags arrive less
-			 * frequently than gyro tags, so we hold the latest accel value
-			 * and pair it with each gyro sample. */
 			static float raw_collect_a[3] = {0};
 
 			for (uint16_t i = 0; i < packets; i++)
@@ -1372,20 +1381,23 @@ void sensor_loop(void)
 				if (sensor_imu->fifo_process(i, rawData, raw_a, raw_g))
 					continue; // skip on error
 
-				/* Update persistent accel when we get an accel tag (non-zero) */
+				/* Pair the most recent accel tag with the next gyro tag once. */
 				if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0) {
 					memcpy(raw_collect_a, raw_a, sizeof(raw_collect_a));
 				}
 
 				/* Only queue raw samples on gyro tags to avoid
 				 * duplicate entries from separate accel/gyro FIFO tags.
-				 * Pair with the most recent accel reading. */
-				if (connection_get_data_collection() &&
-				    (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0)) {
+				 * Pair with the latest accel sample if present; otherwise zeros. */
+				if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
 					struct raw_imu_sample raw_sample;
-					memcpy(raw_sample.gyro, raw_g, sizeof(raw_sample.gyro));
-					memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
-					connection_queue_raw_sample(&raw_sample);
+					if (dc_active) {
+						memcpy(raw_sample.gyro, raw_g, sizeof(raw_sample.gyro));
+						memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
+						raw_sample.temp_c = raw_collect_temp_c;
+						connection_queue_raw_sample(&raw_sample);
+					}
+					memset(raw_collect_a, 0, sizeof(raw_collect_a));
 				}
 
 				// Debug: Log gyro values to see if they're all zero

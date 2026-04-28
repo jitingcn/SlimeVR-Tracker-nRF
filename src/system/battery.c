@@ -255,12 +255,12 @@ static const struct battery_level_point levels[] = {
 #endif
 };
 
-unsigned int read_batt() {
+int read_batt() {
 	int rc = battery_measure_enable(true);
 
 	if (rc != 0) {
 		LOG_ERR("Failed initialize battery measurement: %d", rc);
-		return -1;
+		return rc;
 	}
 
 	int batt_mV = battery_sample();
@@ -271,15 +271,22 @@ unsigned int read_batt() {
 
 	battery_measure_enable(false);
 
-	return battery_level_pptt(batt_mV, levels);
+	if (batt_mV < 0) {
+		return batt_mV;
+	}
+
+	return (int)battery_level_pptt((unsigned int)batt_mV, levels);
 }
 
-unsigned int read_batt_mV(int* out) {
+int read_batt_mV(int* out) {
 	int rc = battery_measure_enable(true);
 
 	if (rc != 0) {
 		LOG_ERR("Failed initialize battery measurement: %d", rc);
-		return -1;
+		if (out != NULL) {
+			*out = -1;
+		}
+		return rc;
 	}
 
 	int batt_mV = battery_sample();
@@ -290,6 +297,13 @@ unsigned int read_batt_mV(int* out) {
 
 	battery_measure_enable(false);
 
-	*out = batt_mV;
-	return battery_level_pptt(batt_mV, levels);
+	if (out != NULL) {
+		*out = batt_mV;
+	}
+
+	if (batt_mV < 0) {
+		return batt_mV;
+	}
+
+	return (int)battery_level_pptt((unsigned int)batt_mV, levels);
 }

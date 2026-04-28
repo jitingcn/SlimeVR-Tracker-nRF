@@ -22,6 +22,7 @@ static struct nvs_fs fs;
 #define NVS_PARTITION storage_partition
 #define NVS_PARTITION_DEVICE FIXED_PARTITION_DEVICE(NVS_PARTITION)
 #define NVS_PARTITION_OFFSET FIXED_PARTITION_OFFSET(NVS_PARTITION)
+#define NVS_PARTITION_SIZE FIXED_PARTITION_SIZE(NVS_PARTITION)
 
 LOG_MODULE_REGISTER(system, LOG_LEVEL_INF);
 
@@ -271,9 +272,10 @@ void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 
 void sys_read(uint16_t id, void *data, size_t len)
 {
+	memset(data, 0, len);
+
 	if (!sys_nvs_init()) {
 		LOG_ERR("sys_read: NVS init failed, cannot read ID %d", id);
-		memset(data, 0, len);
 		return;
 	}
 	int err = nvs_read(&fs, id, data, len);
@@ -285,8 +287,10 @@ void sys_read(uint16_t id, void *data, size_t len)
 			LOG_ERR("Failed to read from NVS, error: %d", err);
 			LOG_WRN("Read data set to zero");
 		}
-		memset(data, 0, len);
 		return;
+	}
+	if ((size_t)err < len) {
+		LOG_WRN("Short NVS read for ID %d: got %d bytes, expected %zu", id, err, len);
 	}
 }
 
@@ -318,6 +322,27 @@ void sys_clear(void)
 	retained_update();
 
 	LOG_INF("NVS and retained reset");
+}
+
+void sys_nvs_stats(void)
+{
+	if (!sys_nvs_init()) {
+		printk("NVS init failed\n");
+		return;
+	}
+
+	printk("Storage partition: %u bytes\n", NVS_PARTITION_SIZE);
+	printk(
+		"Allocated NVS: %u * %u = %u bytes\n",
+		fs.sector_size,
+		fs.sector_count,
+		fs.sector_size * fs.sector_count
+	);
+	printk(
+		"NVS free: %d bytes, max item: %d bytes\n",
+		nvs_calc_free_space(&fs),
+		nvs_sector_max_data_size(&fs)
+	);
 }
 
 // return 0 if clock applied, -1 if failed (because there is no clk_en or clk_out)
