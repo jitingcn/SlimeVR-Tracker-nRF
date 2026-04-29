@@ -31,6 +31,7 @@
 #include "hid.h"
 #include "system/battery_tracker.h"
 #include "system/watchdog.h"
+#include "system/test_mode.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -795,6 +796,19 @@ void connection_thread(void)
 
 		/* Skip sensor data during connection error */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
+			/* Auto-stop data collection after prolonged connection error
+			 * to avoid indefinite battery drain and stuck state. */
+			if (data_collection_active) {
+				static int64_t dc_conn_error_start;
+				if (dc_conn_error_start == 0) {
+					dc_conn_error_start = now;
+				} else if (now - dc_conn_error_start > 60000) {
+					connection_set_data_collection(false);
+					test_mode_set(false);
+					dc_conn_error_start = 0;
+					LOG_WRN("Data collection auto-stopped (connection error for 60s)");
+				}
+			}
 			k_msleep(100);
 			continue;
 		}

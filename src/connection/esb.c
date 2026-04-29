@@ -1776,6 +1776,7 @@ static void esb_thread(void)
 				case ESB_PONG_FLAG_DATA_COLLECT_OFF:
 					LOG_INF("Executing remote command: DATA_COLLECT_OFF");
 					connection_set_data_collection(false);
+					test_mode_set(false);
 					break;
 
 				default:
