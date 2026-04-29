@@ -1280,9 +1280,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	if (is_raw) {
 		tx_payload.noack = true;
 		queue_status = esb_write_payload(&tx_payload);
-		if (queue_status == 0) {
-			queue_status = esb_write_payload(&tx_payload);
-		}
 	}
 # if 0
 	if (no_ack) {
