@@ -1584,11 +1584,17 @@ static void esb_thread(void)
 					break;
 
 				case ESB_PONG_FLAG_TCAL_ON:
-					LOG_INF("TODO: Executing remote command: TCAL_ON");
+#if CONFIG_SENSOR_USE_TCAL
+					LOG_INF("Executing remote command: TCAL_ON");
+					sensor_tcal_set_enabled(true);
+#endif
 					break;
 
 				case ESB_PONG_FLAG_TCAL_OFF:
-					LOG_INF("TODO: Executing remote command: TCAL_OFF");
+#if CONFIG_SENSOR_USE_TCAL
+					LOG_INF("Executing remote command: TCAL_OFF");
+					sensor_tcal_set_enabled(false);
+#endif
 					break;
 
 				case ESB_PONG_FLAG_TDMA_ON:

@@ -218,6 +218,9 @@ static int sensor_perform_runtime_calibration(void);
 // Auto-calibration control
 static bool tcal_auto_calibration_enabled = false;
 
+// T-Cal compensation control (persisted via NVS)
+static bool tcal_compensation_enabled = true;
+
 // Temperature direction tracking for hysteresis-aware blending
 // Tracks the direction of temperature change at the time of each calibration sample
 typedef enum {
@@ -547,6 +550,7 @@ void sensor_calibration_process_gyro(float g[3])
 
 	// Feed raw gyro data into continuous bucket accumulator for auto T-Cal
 	// This must happen before bias subtraction so we capture the true raw bias
+	// (auto-cal collection continues regardless of compensation enable state)
 	if (tcal_auto_calibration_enabled && !isnan(temp)) {
 		sensor_tcal_feed_continuous_sample(g, temp);
 	}
@@ -554,9 +558,10 @@ void sensor_calibration_process_gyro(float g[3])
 	// ==========================================================================
 	// Unified T-Cal Strategy: LUT -> MLS -> Static Bias
 	// D_offset is always applied when valid
+	// Skipped when tcal_compensation_enabled is false (uses static bias instead)
 	// ==========================================================================
 
-	if (!isnan(temp) && retained->tempCalState.count >= 1) {
+	if (tcal_compensation_enabled && !isnan(temp) && retained->tempCalState.count >= 1) {
 		// Strategy 1: Try LUT lookup (preferred - O(1) linear interpolation)
 		if (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
 			if (sensor_tcal_lut_lookup(temp, calculated_offset) == 0) {
@@ -569,7 +574,7 @@ void sensor_calibration_process_gyro(float g[3])
 		}
 	}
 
-	// Strategy 2: Final fallback to static bias (when no T-Cal data available)
+	// Strategy 2: Final fallback to static bias (when no T-Cal data or compensation disabled)
 	if (!offset_calculated) {
 		for (int i = 0; i < 3; i++) {
 			calculated_offset[i] = gyroBias[i];
@@ -637,6 +642,10 @@ void sensor_calibration_read(void)
 	memcpy(magBias, retained->magBias, sizeof(magBias));
 	memcpy(magBAinv, retained->magBAinv, sizeof(magBAinv));
 	memcpy(accBAinv, retained->accBAinv, sizeof(accBAinv));
+#if CONFIG_SENSOR_USE_TCAL
+	tcal_compensation_enabled = retained->tcal_enabled;
+	LOG_INF("T-Cal compensation: %s", tcal_compensation_enabled ? "enabled" : "disabled");
+#endif
 }
 
 int sensor_calibration_validate(float *a_bias, float *g_bias, bool write)
@@ -3497,6 +3506,24 @@ void sensor_boot_cal_set_enabled(bool enabled)
 {
 	retained->bootCalState.enabled = enabled;
 	LOG_INF("Boot Cal: %s", enabled ? "Enabled" : "Disabled");
+}
+
+// Enable/disable T-Cal compensation (persisted via NVS)
+void sensor_tcal_set_enabled(bool enabled)
+{
+	if (tcal_compensation_enabled == enabled) {
+		LOG_INF("T-Cal compensation already %s", enabled ? "enabled" : "disabled");
+		return;
+	}
+	tcal_compensation_enabled = enabled;
+	bool val = enabled;
+	sys_write(TCAL_ENABLED_ID, &retained->tcal_enabled, &val, sizeof(val));
+	LOG_INF("T-Cal compensation %s (persisted)", enabled ? "enabled" : "disabled");
+}
+
+bool sensor_tcal_get_enabled(void)
+{
+	return tcal_compensation_enabled;
 }
 
 // Get boot calibration status

@@ -83,6 +83,7 @@ struct retained_data {
 	bool mag_enabled;
 
 #if CONFIG_SENSOR_USE_TCAL
+	bool tcal_enabled; // Temperature calibration compensation enabled
 	float gyroTemp;
 
 	#define TCAL_BUFFER_SIZE                                                                                               \

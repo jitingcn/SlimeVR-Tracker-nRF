@@ -471,7 +471,7 @@ static void print_help(void)
 #endif
 #if CONFIG_SENSOR_USE_TCAL
 	// Update the help string to show the new command set
-	printk("  tcal <status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
+	printk("  tcal <on|off|status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
 #endif
 	printk("\n");
 	printk("Connection:\n");
@@ -821,16 +821,23 @@ static void console_thread(void)
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
-				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
+				printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 			} else {
 				// Tokenize the argument string by space to get the subcommand
 				char *subcmd = strtok((char *)arg, " ");
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
-					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
+					printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
+				} else if (strcmp(subcmd, "on") == 0) {
+					sensor_tcal_set_enabled(true);
+					printk("T-Cal compensation enabled\n");
+				} else if (strcmp(subcmd, "off") == 0) {
+					sensor_tcal_set_enabled(false);
+					printk("T-Cal compensation disabled (using static gyro bias)\n");
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status();
+					printk("T-Cal compensation: %s\n", sensor_tcal_get_enabled() ? "enabled" : "disabled");
 					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
 				} else if (strcmp(subcmd, "clear") == 0) {
 					cmd_reset_tcal();
