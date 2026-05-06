@@ -61,11 +61,9 @@ static int64_t magneto_progress_time;
 #define MAG_CAL_ACCEL_MAG_MAX_SQ 1.3f
 
 // Minimum samples before attempting trial calibration
-#define MAG_CAL_MIN_SAMPLES 55
+#define MAG_CAL_MIN_SAMPLES 65
 // Attempt trial calibration every this many new samples (manual cal)
 #define MAG_CAL_TRIAL_INTERVAL 80
-// Minimum new samples between online calibration checks
-#define MAG_CAL_ONLINE_CHECK_INTERVAL 80
 
 static int64_t mag_cal_last_status_log;
 
@@ -100,6 +98,7 @@ typedef struct {
 	quadrant_sample_t samples[QUADRANT_BUF_SIZE];
 	uint8_t head;   // next write position
 	uint8_t count;  // valid samples (0..QUADRANT_BUF_SIZE)
+	int64_t last_seq; // global accepted-sample sequence of the newest sample in this octant
 } quadrant_buf_t;
 
 // Incremental calibration blending (EMA on BAinv elements)
@@ -114,8 +113,13 @@ typedef struct {
 
 static quadrant_buf_t quad_buf[ONLINE_QUADRANT_COUNT];
 static int64_t online_total_sample_count;
-static int64_t online_last_check_count; // total accepted online samples at last trial check
+static int64_t online_last_checked_sample_count;
+static int64_t online_last_check_time;
 static int64_t online_last_sample_time; // rate limiting
+// Drop octants that have not been refreshed for too long.
+// This is kept separate from the check cadence: stale-history rejection should
+// not depend on how often the background thread decides to run Magneto.
+#define ONLINE_STALE_QUADRANT_MAX_AGE 80
 // Minimum direction change to accept an online sample. The configured value is
 // expressed in degrees and converted to the equivalent 1 - cos(theta) threshold.
 static float online_last_dir[3];
@@ -127,6 +131,10 @@ static float manual_last_accel_dir[3];
 
 #define ONLINE_MIN_DIR_CHANGE_DEG 10.0f
 #define ONLINE_MIN_INTERVAL_MS 30  // minimum 30ms between online samples
+// Background checks should not run on every calibration-thread pass.
+// Tie the minimum check spacing to roughly one fresh fit's worth of accepted
+// samples at the maximum online sampling rate.
+#define ONLINE_MIN_CHECK_INTERVAL_MS (MAG_CAL_MIN_SAMPLES * ONLINE_MIN_INTERVAL_MS * 2)
 
 // Runtime calibrated norm tracking (exponential moving average)
 // Used to assess current calibration quality and decide if online update is needed
@@ -152,6 +160,9 @@ static int online_update_count;
 // We clear buffers to avoid mixed-data fits and let the next cycle fit
 // on consistent data from the new environment.
 static float online_last_buf_avg_norm = 0.0f;
+
+static void magneto_online_runtime_reset(void);
+static void magneto_online_runtime_load_retained(void);
 
 // #define DEBUG true
 
@@ -667,6 +678,36 @@ uint8_t *sensor_calibration_get_sensor_data()
 	return sensor_data;
 }
 
+static void magneto_online_runtime_load_retained(void)
+{
+	magneto_online_reset();
+	online_update_count = retained->onlineMagState.update_count;
+	online_last_buf_avg_norm = retained->onlineMagState.last_buf_avg_norm;
+	cal_norm_ema = retained->onlineMagState.norm_ema;
+	cal_norm_var_ema = retained->onlineMagState.norm_var_ema;
+	cal_norm_count = retained->onlineMagState.norm_count;
+}
+
+void sensor_calibration_online_mag_retained_save(void)
+{
+	retained->onlineMagState.update_count = (uint8_t)CLAMP(online_update_count, 0, 255);
+	retained->onlineMagState.last_buf_avg_norm = online_last_buf_avg_norm;
+	retained->onlineMagState.norm_ema = cal_norm_ema;
+	retained->onlineMagState.norm_var_ema = cal_norm_var_ema;
+	retained->onlineMagState.norm_count = cal_norm_count;
+}
+
+void sensor_calibration_online_mag_retained_clear(void)
+{
+	memset(&retained->onlineMagState, 0, sizeof(retained->onlineMagState));
+}
+
+void sensor_calibration_online_mag_cold_start(void)
+{
+	magneto_online_runtime_reset();
+	sensor_calibration_online_mag_retained_clear();
+}
+
 void sensor_calibration_read(void)
 {
 	memcpy(sensor_data, retained->sensor_data, sizeof(sensor_data));
@@ -675,6 +716,18 @@ void sensor_calibration_read(void)
 	memcpy(magBias, retained->magBias, sizeof(magBias));
 	memcpy(magBAinv, retained->magBAinv, sizeof(magBAinv));
 	memcpy(accBAinv, retained->accBAinv, sizeof(accBAinv));
+	{
+		float zero[3] = {0};
+		if (v_diff_mag(magBAinv[0], zero) != 0) {
+			magneto_online_runtime_load_retained();
+			if (online_update_count > 0 || cal_norm_count > 0) {
+				LOG_INF("Online mag runtime restored (%d updates, %u norm samples)",
+				        online_update_count, cal_norm_count);
+			}
+		} else {
+			magneto_online_runtime_reset();
+		}
+	}
 #if CONFIG_SENSOR_USE_TCAL
 	tcal_compensation_enabled = retained->tcal_enabled;
 	LOG_INF("T-Cal compensation: %s", tcal_compensation_enabled ? "enabled" : "disabled");
@@ -802,12 +855,17 @@ void sensor_calibration_clear_6_side(float a_inv[][3], bool write)
 
 void sensor_calibration_clear_mag(float m_inv[][3], bool write)
 {
+	bool clearing_live_state = (m_inv == NULL || m_inv == magBAinv);
 	if (m_inv == NULL) {
 		m_inv = magBAinv;
 	}
 	memset(m_inv, 0, sizeof(magBAinv)); // zeroed matrix will disable magnetometer in fusion
+	if (clearing_live_state) {
+		magneto_online_runtime_reset();
+	}
 	if (write) {
 		LOG_INF("Clearing stored calibration data");
+		sensor_calibration_online_mag_retained_clear();
 		sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
 		sensor_refresh_sensor_ids(); // Refresh reported mag status after clear
 	}
@@ -1352,7 +1410,7 @@ static int sensor_calibrate_mag(void)
 	} else {
 		LOG_INF("Applying calibration");
 		memcpy(magBAinv, m_inv, sizeof(magBAinv));
-		magneto_online_reset();  // Restart online accumulation with new baseline
+		magneto_online_runtime_reset();  // Restart online calibration from a clean baseline
 #if CONFIG_SENSOR_USE_VQF
 		vqf_reset_mag_ref();
 		sensor_mag_ref_reset(); // Recompute magRef from new calibration
@@ -1426,13 +1484,32 @@ static void magneto_online_reset(void)
 	online_last_update_time = 0;
 }
 
+static void magneto_online_runtime_reset(void)
+{
+	magneto_online_reset();
+	online_update_count = 0;
+	online_last_buf_avg_norm = 0.0f;
+	cal_norm_count = 0;
+	cal_norm_ema = 0.0f;
+	cal_norm_var_ema = 0.0f;
+}
+
 static void magneto_online_clear_history(void)
 {
 	memset(quad_buf, 0, sizeof(quad_buf));
 	online_total_sample_count = 0;
-	online_last_check_count = 0;
+	online_last_checked_sample_count = 0;
+	online_last_check_time = 0;
 	memset(online_last_dir, 0, sizeof(online_last_dir));
 	memset(online_last_accel_dir, 0, sizeof(online_last_accel_dir));
+}
+
+static bool magneto_online_quadrant_is_recent(const quadrant_buf_t *qbuf)
+{
+	if (qbuf->count == 0) {
+		return false;
+	}
+	return (online_total_sample_count - qbuf->last_seq) <= ONLINE_STALE_QUADRANT_MAX_AGE;
 }
 
 // Collect all valid samples from all 8 quadrant ring buffers.
@@ -1445,6 +1522,9 @@ static double magneto_online_collect_recent(double ata_out[100], double *norm_su
 
 	double recent_sample_count = 0;
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
+		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+			continue;
+		}
 		for (int i = 0; i < quad_buf[q].count; i++) {
 			quadrant_sample_t *s = &quad_buf[q].samples[i];
 			magneto_sample((double)s->x, (double)s->y, (double)s->z, ata_out, norm_sum_out, &recent_sample_count);
@@ -1458,6 +1538,9 @@ static int magneto_online_recent_sample_count(void)
 {
 	int count = 0;
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
+		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+			continue;
+		}
 		count += quad_buf[q].count;
 	}
 	return count;
@@ -1469,6 +1552,9 @@ static float magneto_online_recent_dir_bias(void)
 	double recent_sample_count = 0;
 
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
+		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+			continue;
+		}
 		for (int i = 0; i < quad_buf[q].count; i++) {
 			quadrant_sample_t *s = &quad_buf[q].samples[i];
 			magneto_accumulate_direction(dir_sum_recent, s->x, s->y, s->z);
@@ -2391,6 +2477,8 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	if (m[2] < 0) octant |= 4;
 
 	quadrant_buf_t *qbuf = &quad_buf[octant];
+	online_total_sample_count++;
+	qbuf->last_seq = online_total_sample_count;
 	qbuf->samples[qbuf->head].x = m[0];
 	qbuf->samples[qbuf->head].y = m[1];
 	qbuf->samples[qbuf->head].z = m[2];
@@ -2398,19 +2486,26 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	if (qbuf->count < QUADRANT_BUF_SIZE) {
 		qbuf->count++;
 	}
-	online_total_sample_count++;
 }
 
 static bool sensor_calibration_online_mag_check(void)
 {
-	if (online_total_sample_count < MAG_CAL_MIN_SAMPLES) {
+	int recent_sample_count_now = magneto_online_recent_sample_count();
+	int64_t now = k_uptime_get();
+
+	if (recent_sample_count_now < MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
-	if (online_total_sample_count - online_last_check_count < MAG_CAL_ONLINE_CHECK_INTERVAL) {
+	if (online_total_sample_count == online_last_checked_sample_count) {
+		return false;
+	}
+	if (online_last_check_time > 0 &&
+	    (now - online_last_check_time) < ONLINE_MIN_CHECK_INTERVAL_MS) {
 		return false;
 	}
 
-	online_last_check_count = online_total_sample_count;
+	online_last_checked_sample_count = online_total_sample_count;
+	online_last_check_time = now;
 
 	float zero[3] = {0};
 	bool has_existing = (v_diff_mag(magBAinv[0], zero) != 0);
@@ -2485,6 +2580,9 @@ static bool sensor_calibration_online_mag_check(void)
 	// in the vertical direction, causing poor calibration when tilted.
 	double axis_sum[3] = {0};
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
+		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+			continue;
+		}
 		for (int i = 0; i < quad_buf[q].count; i++) {
 			quadrant_sample_t *s = &quad_buf[q].samples[i];
 			axis_sum[0] += (double)s->x;
@@ -2498,6 +2596,9 @@ static bool sensor_calibration_online_mag_check(void)
 		axis_mean[a] = axis_sum[a] / recent_sample_count;
 	}
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
+		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+			continue;
+		}
 		for (int i = 0; i < quad_buf[q].count; i++) {
 			quadrant_sample_t *s = &quad_buf[q].samples[i];
 			double dx = (double)s->x - axis_mean[0];
@@ -2525,8 +2626,6 @@ static bool sensor_calibration_online_mag_check(void)
 		        (int)recent_sample_count, (double)dbias);
 		return false;
 	}
-
-	int64_t now = k_uptime_get();
 
 	if (has_existing) {
 		// Enforce minimum cooldown between updates to avoid frequent VQF mag ref resets.
@@ -2583,10 +2682,9 @@ static bool sensor_calibration_online_mag_check(void)
 		memcpy(magBAinv, blended, sizeof(magBAinv));
 		memcpy(m_inv, blended, sizeof(m_inv)); // for logging below
 
-		// Incremental update: do NOT clear online history.
-		// Blending preserves long-term calibration; the buffer data stays
-		// available for the next trial fit. Each quadrant's ring buffer
-		// naturally ages out old samples as it wraps.
+		// Start the next cycle from a clean buffer. Keeping pre-update samples
+		// around can immediately re-mix old field conditions into the next fit.
+		magneto_online_clear_history();
 		online_last_update_time = now;
 		online_update_count++;
 		online_last_buf_avg_norm = buf_avg_norm;
@@ -2614,13 +2712,13 @@ static bool sensor_calibration_online_mag_check(void)
 #endif
 	}
 
-	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, magBAinv, sizeof(magBAinv));
-	sensor_refresh_sensor_ids();
-
 	// Reset norm tracking after calibration change
 	cal_norm_count = 0;
 	cal_norm_ema = 0;
 	cal_norm_var_ema = 0;
+
+	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, magBAinv, sizeof(magBAinv));
+	sensor_refresh_sensor_ids();
 
 	LOG_INF("Online mag cal applied:");
 	for (int i = 0; i < 3; i++) {
