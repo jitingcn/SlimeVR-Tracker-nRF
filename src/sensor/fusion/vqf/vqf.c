@@ -25,6 +25,10 @@
 #include <math.h>
 #include <zephyr/kernel.h>
 
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+#include <cmsis_core.h>
+#endif
+
 #include "../src/vqf.h" // conflicting with vqf.h in local path
 
 #include "../vqf/vqf.h" // conflicting with vqf.h in vqf-c
@@ -93,6 +97,36 @@ static vqf_coeffs_t coeffs;
 
 static float last_a[3] = {0};
 static volatile float vqf_bench_sink;
+static vqf_params_t vqf_bench_params;
+static vqf_params_t vqf_bench_warm_params;
+static vqf_state_t vqf_bench_state;
+static vqf_state_t vqf_bench_warm_state;
+static vqf_coeffs_t vqf_bench_coeffs;
+static vqf_coeffs_t vqf_bench_warm_coeffs;
+static float vqf_bench_quat[4];
+
+static const vqf_real_t vqf_bench_gyr_samples[][3] = {
+	{0.12f, -0.34f, 0.56f},
+	{-1.10f, 0.45f, 0.08f},
+	{0.78f, 0.11f, -0.29f},
+	{-0.05f, 0.92f, 0.37f},
+};
+
+static const vqf_real_t vqf_bench_acc_samples[][3] = {
+	{0.30f, 0.10f, 9.70f},
+	{-0.25f, 0.45f, 9.63f},
+	{0.60f, -0.15f, 9.55f},
+	{-0.40f, -0.20f, 9.81f},
+};
+
+static const vqf_real_t vqf_bench_mag_samples[][3] = {
+	{0.32f, 0.05f, -0.41f},
+	{0.28f, 0.10f, -0.39f},
+	{0.35f, -0.02f, -0.43f},
+	{0.30f, 0.08f, -0.40f},
+};
+
+static const size_t vqf_bench_sample_count = sizeof(vqf_bench_gyr_samples) / sizeof(vqf_bench_gyr_samples[0]);
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 /* Adaptive tauAcc state */
@@ -717,116 +751,233 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	info->biasP[2] = state.biasP[8];
 }
 
-static uint32_t vqf_bench_elapsed_cycles(uint32_t start_cycles)
+static ALWAYS_INLINE void vqf_bench_timer_prepare(void)
 {
-	return k_cycle_get_32() - start_cycles;
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+#endif
 }
 
-static void vqf_bench_print_stats(const char *name, uint32_t iterations, uint32_t total_cycles)
+static ALWAYS_INLINE uint32_t vqf_bench_timer_begin(unsigned int *irq_key)
+{
+	*irq_key = irq_lock();
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	DWT->CYCCNT = 0;
+	return 0;
+#else
+	return k_cycle_get_32();
+#endif
+}
+
+static ALWAYS_INLINE uint32_t vqf_bench_timer_end(unsigned int irq_key, uint32_t start_cycles)
+{
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	uint32_t elapsed_cycles = DWT->CYCCNT;
+	irq_unlock(irq_key);
+	return elapsed_cycles;
+#else
+	uint32_t elapsed_cycles = k_cycle_get_32() - start_cycles;
+	irq_unlock(irq_key);
+	return elapsed_cycles;
+#endif
+}
+
+static ALWAYS_INLINE uint32_t vqf_bench_timer_hz(void)
+{
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	return SystemCoreClock ? SystemCoreClock : CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#else
+	return CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#endif
+}
+
+static void vqf_bench_print_stats(const char *name, uint32_t iterations, uint32_t total_cycles,
+				  uint32_t timer_hz)
 {
 	uint32_t avg_cycles_int = 0;
 	uint32_t avg_cycles_frac = 0;
+	uint32_t total_us_int = 0;
+	uint32_t total_us_frac = 0;
+	uint32_t avg_us_int = 0;
+	uint32_t avg_us_frac = 0;
 
 	if (iterations) {
-		uint64_t avg_cycles_x1000 = ((uint64_t)total_cycles * 1000ULL) / iterations;
+		uint64_t avg_cycles_x1000 = (total_cycles * 1000ULL) / iterations;
 		avg_cycles_int = (uint32_t)(avg_cycles_x1000 / 1000ULL);
 		avg_cycles_frac = (uint32_t)(avg_cycles_x1000 % 1000ULL);
 	}
 
+	if (timer_hz) {
+		uint64_t total_us_x1000 = (total_cycles * 1000000000ULL) / timer_hz;
+		total_us_int = (uint32_t)(total_us_x1000 / 1000ULL);
+		total_us_frac = (uint32_t)(total_us_x1000 % 1000ULL);
+
+		if (iterations) {
+			uint64_t avg_us_x1000 = total_us_x1000 / iterations;
+			avg_us_int = (uint32_t)(avg_us_x1000 / 1000ULL);
+			avg_us_frac = (uint32_t)(avg_us_x1000 % 1000ULL);
+		}
+	}
+
 	printk(
-		"  %-10s total_cycles=%10u avg_cycles=%3u.%03u\n",
+		"  %-10s t_c=%10u avg_c=%4u.%03u t_us=%8u.%03u avg_us=%4u.%03u\n",
 		name,
 		total_cycles,
 		avg_cycles_int,
-		avg_cycles_frac
+		avg_cycles_frac,
+		total_us_int,
+		total_us_frac,
+		avg_us_int,
+		avg_us_frac
 	);
+}
+
+#define VQF_BENCH_BATCH_SIZE 16U
+#define VQF_BENCH_THREAD_PRIO 8
+
+typedef enum {
+	VQF_BENCH_UPDATE_GYR,
+	VQF_BENCH_UPDATE_ACC,
+	VQF_BENCH_UPDATE_MAG,
+	VQF_BENCH_GET_QUAT9D,
+} vqf_bench_op_t;
+
+static uint32_t vqf_bench_measure(vqf_bench_op_t op, uint32_t iterations,
+				  const vqf_real_t gyr_samples[][3],
+				  const vqf_real_t acc_samples[][3],
+				  const vqf_real_t mag_samples[][3], size_t sample_count,
+				  vqf_params_t *bench_params, vqf_state_t *bench_state,
+				  vqf_coeffs_t *bench_coeffs, float quat[4])
+{
+	uint32_t total_cycles = 0;
+	uint32_t remaining = iterations;
+	uint32_t sample_offset = 0;
+
+	while (remaining > 0) {
+		uint32_t batch_len = remaining > VQF_BENCH_BATCH_SIZE ? VQF_BENCH_BATCH_SIZE : remaining;
+		unsigned int irq_key;
+		uint32_t start_cycles = vqf_bench_timer_begin(&irq_key);
+
+		for (uint32_t i = 0; i < batch_len; i++, sample_offset++) {
+			size_t sample_idx = sample_offset % sample_count;
+
+			switch (op) {
+			case VQF_BENCH_UPDATE_GYR:
+				updateGyr(bench_params, bench_state, bench_coeffs, gyr_samples[sample_idx]);
+				break;
+			case VQF_BENCH_UPDATE_ACC:
+				updateAcc(bench_params, bench_state, bench_coeffs, acc_samples[sample_idx]);
+				break;
+			case VQF_BENCH_UPDATE_MAG:
+				updateMag(bench_params, bench_state, bench_coeffs, mag_samples[sample_idx]);
+				break;
+			case VQF_BENCH_GET_QUAT9D:
+				getQuat9D(bench_state, quat);
+				vqf_bench_sink += quat[sample_offset & 3U];
+				break;
+			}
+		}
+
+		total_cycles += vqf_bench_timer_end(irq_key, start_cycles);
+		remaining -= batch_len;
+	}
+
+	return total_cycles;
 }
 
 void vqf_run_benchmark(uint32_t iterations)
 {
 	vqf_bench_sink = 0.0f;
-	vqf_params_t bench_params;
-	vqf_state_t bench_state;
-	vqf_coeffs_t bench_coeffs;
-	float quat[4];
-	uint32_t start_cycles;
+	uint32_t timer_hz;
 	uint32_t elapsed_cycles;
+	k_tid_t bench_thread = k_current_get();
+	int bench_thread_prio = k_thread_priority_get(bench_thread);
+	bool bench_prio_changed = false;
 
 	if (iterations == 0) {
 		iterations = 1000;
 	}
 
-	const vqf_real_t gyr_samples[][3] = {
-		{0.12f, -0.34f, 0.56f},
-		{-1.10f, 0.45f, 0.08f},
-		{0.78f, 0.11f, -0.29f},
-		{-0.05f, 0.92f, 0.37f},
-	};
-	const vqf_real_t acc_samples[][3] = {
-		{0.30f, 0.10f, 9.70f},
-		{-0.25f, 0.45f, 9.63f},
-		{0.60f, -0.15f, 9.55f},
-		{-0.40f, -0.20f, 9.81f},
-	};
-	const vqf_real_t mag_samples[][3] = {
-		{0.32f, 0.05f, -0.41f},
-		{0.28f, 0.10f, -0.39f},
-		{0.35f, -0.02f, -0.43f},
-		{0.30f, 0.08f, -0.40f},
-	};
-	const size_t sample_count = sizeof(gyr_samples) / sizeof(gyr_samples[0]);
+	if (bench_thread_prio < VQF_BENCH_THREAD_PRIO) {
+		k_thread_priority_set(bench_thread, VQF_BENCH_THREAD_PRIO);
+		bench_prio_changed = true;
+	}
 
 	set_params();
-	bench_params = params;
-	initVqf(&bench_params, &bench_state, &bench_coeffs, 0.001f, 0.001f, 0.01f);
+	vqf_bench_params = params;
+	initVqf(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, 0.001f, 0.001f, 0.01f);
 
-	for (size_t i = 0; i < sample_count * 8; i++) {
-		const size_t idx = i % sample_count;
-		updateGyr(&bench_params, &bench_state, &bench_coeffs, gyr_samples[idx]);
-		updateAcc(&bench_params, &bench_state, &bench_coeffs, acc_samples[idx]);
-		updateMag(&bench_params, &bench_state, &bench_coeffs, mag_samples[idx]);
-		getQuat9D(&bench_state, quat);
-		vqf_bench_sink += quat[0];
+	for (size_t i = 0; i < vqf_bench_sample_count * 8; i++) {
+		const size_t idx = i % vqf_bench_sample_count;
+		updateGyr(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_gyr_samples[idx]);
+		updateAcc(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_acc_samples[idx]);
+		updateMag(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_mag_samples[idx]);
+		getQuat9D(&vqf_bench_state, vqf_bench_quat);
+		vqf_bench_sink += vqf_bench_quat[0];
 	}
 
-	printk("VQF benchmark (%u iterations, CMSIS-DSP=%s)\n", iterations,
-#ifdef CONFIG_CMSIS_DSP
-		"on"
-#else
-		"off"
-#endif
-	);
+	vqf_bench_warm_params = vqf_bench_params;
+	vqf_bench_warm_state = vqf_bench_state;
+	vqf_bench_warm_coeffs = vqf_bench_coeffs;
+	vqf_bench_timer_prepare();
+	timer_hz = vqf_bench_timer_hz();
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		updateGyr(&bench_params, &bench_state, &bench_coeffs, gyr_samples[i % sample_count]);
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("updateGyr", iterations, elapsed_cycles);
+	printk("VQF benchmark (%u iterations, CMSIS-DSP=%s, timer=%s)\n", iterations,
+	#ifdef CONFIG_CMSIS_DSP
+			"on"
+	#else
+			"off"
+	#endif
+			,
+	#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+			"DWT CYCCNT"
+	#else
+			"system timer"
+	#endif
+		);
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		updateAcc(&bench_params, &bench_state, &bench_coeffs, acc_samples[i % sample_count]);
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("updateAcc", iterations, elapsed_cycles);
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_UPDATE_GYR, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("updateGyr", iterations, elapsed_cycles, timer_hz);
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		updateMag(&bench_params, &bench_state, &bench_coeffs, mag_samples[i % sample_count]);
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("updateMag", iterations, elapsed_cycles);
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_UPDATE_ACC, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("updateAcc", iterations, elapsed_cycles, timer_hz);
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		getQuat9D(&bench_state, quat);
-		vqf_bench_sink += quat[i & 3];
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("getQuat9D", iterations, elapsed_cycles);
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_UPDATE_MAG, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("updateMag", iterations, elapsed_cycles, timer_hz);
+
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_GET_QUAT9D, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("getQuat9D", iterations, elapsed_cycles, timer_hz);
 
 	printk("  checksum: %.6f\n", (double)vqf_bench_sink);
+
+	if (bench_prio_changed) {
+		k_thread_priority_set(bench_thread, bench_thread_prio);
+	}
 }
 
 const sensor_fusion_t sensor_fusion_vqf = {
