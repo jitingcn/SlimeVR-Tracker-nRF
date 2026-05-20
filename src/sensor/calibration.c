@@ -799,12 +799,12 @@ int sensor_calibration_validate_mag(float m_inv[][3], bool write)
 	}
 	float magnitude = v_avg(diagonal);
 	float average[3] = {magnitude, magnitude, magnitude};
-	if (!v_epsilon(m_inv[0], zero, 1)
+	if (!v_epsilon(m_inv[0], zero, magnitude * 2.0f)
 		|| !v_epsilon(
 			diagonal,
 			average,
 			MAX(magnitude * 0.2f, 0.1f)
-		)) // check offset is <1 unit and diagonals are within 20%
+		)) // check offset is <hm*2 (supports fixed magnet bias) and diagonals are within 20%
 	{
 		sensor_calibration_clear_mag(m_inv, write);
 		LOG_WRN("Invalidated calibration");
@@ -1694,7 +1694,8 @@ static bool magneto_quality_check(double *ata_buf, double norm_sum_val, double s
 	}
 	float magnitude = v_avg(diagonal);
 	float average[3] = {magnitude, magnitude, magnitude};
-	if (!v_epsilon(m_inv[0], zero, 1)
+	float hm = (float)(norm_sum_val / sample_count_val);
+	if (!v_epsilon(m_inv[0], zero, hm * 2.0f)
 	    || !v_epsilon(diagonal, average, MAX(magnitude * 0.2f, 0.1f))) {
 		return false;
 	}
