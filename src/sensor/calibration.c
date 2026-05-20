@@ -2423,15 +2423,27 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	// Reject if VQF detects magnetic disturbance (only when we have an existing
 	// calibration — VQF only receives mag data when calibrated, so mag_dist_detected
 	// is meaningless without calibration).
-	// Exception: if current calibration quality is bad (norm CV > 10%), the disturbance
+	// Exception 1: if current calibration quality is bad (norm CV > 6%), the disturbance
 	// detection itself may be unreliable due to the bad calibration, so skip the gate.
+	// Exception 2: if VQF has been reporting disturbance continuously for a long time,
+	// the "disturbance" is likely a calibration drift or environment change rather than
+	// transient interference.  Allow samples through to enable recalibration.
+	// Without this, a deadlock occurs: VQF reports disturbance → gate blocks samples →
+	// cal_norm_count stops updating (guarded by !magDistDetected in sensor.c) → CV
+	// stays frozen at a low value → gate never opens → no recalibration possible.
 #if CONFIG_SENSOR_USE_VQF
 	{
 		float zero[3] = {0};
 		bool has_cal = (v_diff_mag(magBAinv[0], zero) != 0);
 		float current_cv = sensor_calibration_get_mag_quality();
-		if (has_cal && current_cv < 0.10f && vqf_get_mag_dist_detected()) {
-			return;
+		if (has_cal && current_cv < 0.06f && vqf_get_mag_dist_detected()) {
+			// Sustained disturbance override: if disturbance has persisted for
+			// more than 5 seconds, allow samples through.
+			bool sustained = (online_vqf_dist_start_time > 0 &&
+			                  (now - online_vqf_dist_start_time) > 5000);
+			if (!sustained) {
+				return;
+			}
 		}
 	}
 #endif
