@@ -172,8 +172,12 @@ void tdma_wait_for_slot(void)
 	} else {
 		/* Overshot significantly — TX anyway to prevent cascade */
 		tdma_slot_overshoots++;
-		LOG_DBG("TDMA overshoot: pos=%d (slot 0-%d)",
-			pos_in_slot, (int)(slot_ticks - 1));
+		LOG_WRN("TDMA overshoot: pos=%d target=%u slept=%u (slot 0-%d)",
+			pos_in_slot, ticks_to_target,
+			(uint32_t)(frame_phase >= target_phase ?
+				frame_phase - target_phase :
+				frame_phase + frame_ticks - target_phase),
+			(int)(slot_ticks - 1));
 	}
 
 	/* Periodic TDMA statistics */
