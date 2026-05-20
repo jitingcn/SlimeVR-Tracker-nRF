@@ -61,7 +61,7 @@ static int64_t magneto_progress_time;
 #define MAG_CAL_ACCEL_MAG_MAX_SQ 1.3f
 
 // Minimum samples before attempting trial calibration
-#define MAG_CAL_MIN_SAMPLES 65
+#define MAG_CAL_MIN_SAMPLES 64
 // Attempt trial calibration every this many new samples (manual cal)
 #define MAG_CAL_TRIAL_INTERVAL 80
 
@@ -2581,7 +2581,21 @@ static bool sensor_calibration_online_mag_check(void)
 	//   Tier 2 (relaxed): CV is excellent AND we've done many updates
 	//     → trust the fit regardless of dir_bias (directional fluctuations
 	//       during normal rotation are just sampling noise, not real problems)
-	if (has_existing && current_cv < CAL_NORM_GOOD_CV && online_update_count >= ONLINE_MIN_UPDATES) {
+	//
+	// Exception: skip convergence checks when VQF is experiencing sustained
+	// magnetic disturbance.  The CV value is frozen during disturbance (norm
+	// tracking gated by !magDistDetected in sensor.c), so a low frozen CV
+	// does NOT mean the calibration is still good — the environment may have
+	// changed.  If the code reached here past the CV < 4% disturbance gate
+	// above, the disturbance is sustained and recalibration should proceed.
+#if CONFIG_SENSOR_USE_VQF
+	bool vqf_sustained_dist = (online_vqf_dist_start_time > 0 &&
+	                           (now - online_vqf_dist_start_time) > ONLINE_VQF_DIST_MIN_DURATION_MS);
+#else
+	bool vqf_sustained_dist = false;
+#endif
+	if (has_existing && current_cv < CAL_NORM_GOOD_CV && online_update_count >= ONLINE_MIN_UPDATES
+	    && !vqf_sustained_dist) {
 		float dir_bias_check = magneto_online_recent_dir_bias();
 
 		// Tier 2: Excellent fit + sufficient history — lock it in.
