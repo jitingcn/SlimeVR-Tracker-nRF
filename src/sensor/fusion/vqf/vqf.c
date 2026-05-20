@@ -23,9 +23,11 @@
 #include "util.h"
 
 #include <math.h>
+#if defined(CONFIG_VQF_BENCH)
 #include <zephyr/kernel.h>
+#endif
 
-#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+#if defined(CONFIG_VQF_BENCH) && defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
 #include <cmsis_core.h>
 #endif
 
@@ -96,6 +98,7 @@ static vqf_coeffs_t coeffs;
 #define VQF_MEM_SIZE (sizeof(vqf_state_t) + sizeof(vqf_coeffs_t))
 
 static float last_a[3] = {0};
+#if defined(CONFIG_VQF_BENCH)
 static volatile float vqf_bench_sink;
 static vqf_params_t vqf_bench_params;
 static vqf_params_t vqf_bench_warm_params;
@@ -127,6 +130,7 @@ static const vqf_real_t vqf_bench_mag_samples[][3] = {
 };
 
 static const size_t vqf_bench_sample_count = sizeof(vqf_bench_gyr_samples) / sizeof(vqf_bench_gyr_samples[0]);
+#endif
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 /* Adaptive tauAcc state */
@@ -751,6 +755,7 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	info->biasP[2] = state.biasP[8];
 }
 
+#if defined(CONFIG_VQF_BENCH)
 static ALWAYS_INLINE void vqf_bench_timer_prepare(void)
 {
 #if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
@@ -979,6 +984,7 @@ void vqf_run_benchmark(uint32_t iterations)
 		k_thread_priority_set(bench_thread, bench_thread_prio);
 	}
 }
+#endif
 
 const sensor_fusion_t sensor_fusion_vqf = {
 	vqf_init,

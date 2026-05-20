@@ -326,6 +326,15 @@ config VQF_SOFT_MBE_GATE
         motion where motion bias estimation can otherwise overcompensate.
         This feature is experimental and may affect heading stability.
 
+config VQF_BENCH
+    bool "Enable VQF benchmark console command"
+    default n
+    depends on SENSOR_USE_VQF && USE_SLIMENRF_CONSOLE
+    help
+        Compile in the `vqfbench` console command and its benchmark working
+        storage. Keep this disabled for normal firmware builds to avoid the
+        extra RAM cost from static benchmark buffers.
+
 config SENSOR_USE_6_SIDE_CALIBRATION
     bool "Use 6-side calibration"
     default y

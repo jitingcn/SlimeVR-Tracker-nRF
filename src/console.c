@@ -503,7 +503,9 @@ static void print_help(void)
 	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 1s)\n");
 	printk("  range                      Show sensor range statistics (min/max values)\n");
 	printk("  range reset                Reset sensor range statistics\n");
+#if CONFIG_VQF_BENCH
 	printk("  vqfbench [iterations]      Benchmark VQF update paths (default 1000)\n");
+#endif
 	printk("\n");
 	printk("Debug Commands:\n");
 	printk("  reset zro                  Reset ZRO calibration\n");
@@ -700,7 +702,9 @@ static void console_thread(void)
 	uint8_t command_help[] = "help";
 	uint8_t command_debug[] = "debug";
 	uint8_t command_range[] = "range";
+#if CONFIG_VQF_BENCH
 	uint8_t command_vqfbench[] = "vqfbench";
+#endif
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	uint8_t command_6_side[] = "6-side";
@@ -1156,6 +1160,7 @@ static void console_thread(void)
 #else
 			printk("Sensor range statistics not enabled in configuration.\n");
 #endif // CONFIG_SENSOR_RANGE_STATS
+#if CONFIG_VQF_BENCH
 		} else if (memcmp(line, command_vqfbench, sizeof(command_vqfbench)) == 0) {
 			uint32_t iterations = 1000;
 			if (arg) {
@@ -1168,6 +1173,7 @@ static void console_thread(void)
 				}
 			}
 			vqf_run_benchmark(iterations);
+#endif // CONFIG_VQF_BENCH
 		}	else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
 			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0) {
 				cmd_reset_zro();

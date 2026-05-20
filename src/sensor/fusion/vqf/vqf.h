@@ -137,7 +137,9 @@ typedef struct {
 } vqf_debug_info_t;
 
 void vqf_get_debug_info(vqf_debug_info_t *info);
+#if defined(CONFIG_VQF_BENCH)
 void vqf_run_benchmark(uint32_t iterations);
+#endif
 
 extern const sensor_fusion_t sensor_fusion_vqf;
 
