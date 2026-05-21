@@ -424,21 +424,8 @@ int icm42686_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 		g_raw[i] *= gyro_sensitivity_32;
 	}
 
-	// Board mounting alignment: swap X/Y, keep Z (yaw) unchanged.
-	float aa[3] = {
-		a_raw[1], // X <- -old Y (fix roll direction)
-		-a_raw[0], // Y <- old X
-		a_raw[2]  // Z unchanged
-	};
-
-	float gg[3] = {
-		g_raw[1], // X <- -old Y (fix roll direction)
-		-g_raw[0], // Y <- old X
-		g_raw[2]  // Z unchanged
-	};
-
-	memcpy(a, aa, sizeof(aa));
-	memcpy(g, gg, sizeof(gg));
+	memcpy(a, a_raw, sizeof(a_raw));
+	memcpy(g, g_raw, sizeof(g_raw));
 
 	return 0;
 }
