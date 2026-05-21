@@ -1,0 +1,10 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_NINI_SLIMEVR_MAG_UF2
+	bool "NiNi SlimeVR MAG UF2 board"
+	select SOC_NRF52833_QDAA
+	select BOARD_HAS_DTS
+	help
+	  Enable support for the NiNi SlimeVR MAG UF2 board with PWM RGB LED and I2C magnetometer.
+
