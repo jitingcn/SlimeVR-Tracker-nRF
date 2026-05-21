@@ -229,6 +229,12 @@ void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 		return;
 	}
 
+	if (slot_index >= total_slots) {
+		LOG_WRN("TDMA: Invalid slot_index=%u (>= total_slots=%u), ignoring config update",
+			slot_index, total_slots);
+		return;
+	}
+
 	tdma_slot_index = slot_index;
 	tdma_dyn_total_slots = total_slots;
 	tdma_dyn_slot_ticks = slot_ticks;

@@ -140,11 +140,8 @@ static int32_t g_skew_ref_offset = 0;        // Offset at skew reference point
 static uint32_t g_skew_ref_local_ticks = 0;  // Local ticks at skew reference point (updated infrequently)
 #define SKEW_REF_REFRESH_TICKS (60 * 32768)  // Refresh skew reference every ~60s
 
-// Minimum RTT tracking for asymmetric delay compensation
-// In ESB, return path (ACK) has fixed delay ≈ min_rtt/2
-// Forward path absorbs all retransmission overhead
-// Init to ~305µs (10 ticks): conservative estimate for clean 2Mbps ESB RTT,
-// avoids wildly wrong first offset if first PONG has retransmissions.
+// Minimum RTT tracking for PONG acceptance threshold and diagnostics.
+// Init to ~305µs (10 ticks): conservative estimate for clean 2Mbps ESB RTT.
 static uint32_t g_min_rtt_ticks = 10;
 static uint32_t g_min_rtt_age = 0; // PONGs since last min_rtt update
 #define MIN_RTT_AGE_LIMIT 120      // Age out after ~120 PONGs (~2 min at 1/s)
@@ -606,7 +603,7 @@ void event_handler(struct esb_evt const *event)
 						);
 					} else if (ping_ticks_for_this_ctr != 0) {
 						// ====================================================================
-						// RTT and Server Time Offset Calculation (ESB Asymmetric Model)
+						// RTT and Server Time Offset Calculation (Reference-Point Model)
 						// ====================================================================
 						// In ESB, the return path (ACK) has FIXED delay regardless of
 						// retransmissions. All retransmission time is on the forward path.
@@ -615,8 +612,7 @@ void event_handler(struct esb_evt const *event)
 						// With retransmit:  T1 --[fail]--[fail]--[air]--> T2
 						//                   T4 <--[ACK]-- T3≈T2
 						//
-						// return_delay ≈ min_rtt / 2  (constant)
-						// offset = T2 - T4 + return_delay
+						// offset = T2 - T4 (constant one-way bias cancels for TDMA)
 						// ====================================================================
 
 						/* Use ISR-accurate T4 timestamp captured in the RADIO
@@ -670,10 +666,13 @@ void event_handler(struct esb_evt const *event)
 							rtt_threshold_us = 1000;
 						}
 						if (rtt_us < rtt_threshold_us) {
-							// Asymmetric offset: ACK return path has fixed delay
-							int32_t return_delay_ticks = (int32_t)g_min_rtt_ticks / 2;
+							// Reference-point offset: T2 - T4
+							// The constant one-way delay bias is the same for
+							// all trackers and cancels out in TDMA slot alignment.
+							// Decoupling from min_rtt avoids noise injection when
+							// min_rtt ages/updates.
 							int32_t server_offset_ticks
-								= (int32_t)(ping_rx_ticks - t4_ticks) + return_delay_ticks;
+								= (int32_t)(ping_rx_ticks - t4_ticks);
 
 							g_last_rx_raw_ticks = ping_rx_ticks;
 							g_last_sync_local_ticks = ping_ticks_for_this_ctr;
@@ -722,25 +721,30 @@ void event_handler(struct esb_evt const *event)
 									}
 
 									/*
-									 * EMA-filtered offset update.
-									 *
-								 * With ISR-accurate T4 timestamps, measurement noise
-								 * is ±2 ticks (down from ±15 with EVENT_IRQ).
-								 * Use alpha=1/2 throughout for fast tracking.
+								 * Predict-Update EMA offset filter.
 								 *
-								 * Warm-up (first 5 PONGs): alpha=3/4 for aggressive
-								 * convergence when min_rtt is still settling.
+								 * Use skew prediction as the expected offset,
+								 * so EMA innovation contains only measurement
+								 * noise (not deterministic drift).  This allows
+								 * a smaller alpha for better noise rejection
+								 * while skew handles drift tracking.
+								 *
+								 * Warm-up (first 5 PONGs): alpha=3/4 for fast
+								 * initial convergence before skew is estimated.
 								 */
 								g_sync_update_count++;
-								int32_t offset_innovation = server_offset_ticks - (int32_t)g_server_ticks_offset;
+								/* Predict: where we expect the offset to be based on skew */
+								uint32_t delta_since_sync = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
+								int32_t predicted_current = (int32_t)g_server_ticks_offset
+									+ (int32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
+								int32_t offset_innovation = server_offset_ticks - predicted_current;
 								if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
-									/* Warm-up: alpha=3/4 */
-									g_server_ticks_offset += (offset_innovation * 3 + 2) / 4;
+									/* Warm-up: alpha=3/4 for fast convergence */
+									g_server_ticks_offset = predicted_current + (offset_innovation * 3 + 2) / 4;
 								} else {
-									/* Steady state: alpha=1/2 */
-									g_server_ticks_offset += (offset_innovation + 1) / 2;
+									/* Steady state: alpha=1/4 (skew handles drift) */
+									g_server_ticks_offset = predicted_current + (offset_innovation + 2) / 4;
 								}
-
 								// Refresh skew reference periodically to avoid uint32 wrap
 								if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
 										g_skew_ref_offset = server_offset_ticks;
