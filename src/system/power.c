@@ -383,6 +383,7 @@ static void sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	}
 #endif
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	sensor_calibration_online_mag_retained_save();
 	sensor_retained_write();
 #if WOM_USE_DCDC // In case DCDC is more efficient in the ~10-100uA range
 	set_regulator(SYS_REGULATOR_DCDC); // Make sure DCDC is selected
@@ -416,6 +417,7 @@ static void sys_system_off(void) // TODO: add timeout
 {
 	LOG_INF("System off requested");
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	sensor_calibration_online_mag_cold_start();
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
@@ -451,6 +453,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 {
 	LOG_INF("System reboot requested");
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	sensor_calibration_online_mag_cold_start();
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();

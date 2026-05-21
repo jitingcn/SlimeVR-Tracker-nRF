@@ -23,7 +23,13 @@
 #include "util.h"
 
 #include <math.h>
+#if defined(CONFIG_VQF_BENCH)
 #include <zephyr/kernel.h>
+#endif
+
+#if defined(CONFIG_VQF_BENCH) && defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+#include <cmsis_core.h>
+#endif
 
 #include "../src/vqf.h" // conflicting with vqf.h in local path
 
@@ -73,6 +79,17 @@
 #define TAU_SMOOTH_ALPHA_UP         0.21f  /* tauAcc increase smoothing (per sample) */
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+/* ---------- Soft motion-bias-estimation gate configuration ---------- */
+#define SOFT_MBE_GYRO_TH_RAD_S       (6.0f * DEG_TO_RAD)
+#define SOFT_MBE_ACC_DEV_TH          (0.009f * CONST_EARTH_GRAVITY)
+#define SOFT_MBE_LIN_ACC_TH          (0.075f * CONST_EARTH_GRAVITY)
+#define SOFT_MBE_SMOOTH_T            10.0f
+#define SOFT_MBE_MIN_QUASI_T         45.0f
+#define SOFT_MBE_MARGIN_T            4.0f
+#define SOFT_MBE_BIAS_NOISE_SCALE    0.001733f
+#endif /* CONFIG_VQF_SOFT_MBE_GATE */
+
 static uint8_t imu_id;
 
 static vqf_params_t params;
@@ -81,13 +98,56 @@ static vqf_coeffs_t coeffs;
 #define VQF_MEM_SIZE (sizeof(vqf_state_t) + sizeof(vqf_coeffs_t))
 
 static float last_a[3] = {0};
+#if defined(CONFIG_VQF_BENCH)
 static volatile float vqf_bench_sink;
+static vqf_params_t vqf_bench_params;
+static vqf_params_t vqf_bench_warm_params;
+static vqf_state_t vqf_bench_state;
+static vqf_state_t vqf_bench_warm_state;
+static vqf_coeffs_t vqf_bench_coeffs;
+static vqf_coeffs_t vqf_bench_warm_coeffs;
+static float vqf_bench_quat[4];
+
+static const vqf_real_t vqf_bench_gyr_samples[][3] = {
+	{0.12f, -0.34f, 0.56f},
+	{-1.10f, 0.45f, 0.08f},
+	{0.78f, 0.11f, -0.29f},
+	{-0.05f, 0.92f, 0.37f},
+};
+
+static const vqf_real_t vqf_bench_acc_samples[][3] = {
+	{0.30f, 0.10f, 9.70f},
+	{-0.25f, 0.45f, 9.63f},
+	{0.60f, -0.15f, 9.55f},
+	{-0.40f, -0.20f, 9.81f},
+};
+
+static const vqf_real_t vqf_bench_mag_samples[][3] = {
+	{0.32f, 0.05f, -0.41f},
+	{0.28f, 0.10f, -0.39f},
+	{0.35f, -0.02f, -0.43f},
+	{0.30f, 0.08f, -0.40f},
+};
+
+static const size_t vqf_bench_sample_count = sizeof(vqf_bench_gyr_samples) / sizeof(vqf_bench_gyr_samples[0]);
+#endif
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 /* Adaptive tauAcc state */
 static float motion_intensity;       /* low-pass filtered motion intensity [0,1] */
 static float current_tau_level = -1; /* current quantized level (-1 = unset) */
 static float smoothed_tau;           /* smoothed tauAcc for gradual transitions */
+#endif
+
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+static float soft_mbe_latest_gyr_norm;
+static float soft_mbe_gyr_norm_lp;
+static float soft_mbe_acc_dev_lp;
+static float soft_mbe_lin_acc_lp;
+static float soft_mbe_quasi_t;
+static float soft_mbe_margin_t;
+static float soft_mbe_scale = 1.0f;
+static float soft_mbe_base_bias_v;
 #endif
 
 /* Rest detection diagnostics */
@@ -108,6 +168,98 @@ static struct {
 static uint8_t rest_event_idx;  /* next write position */
 static uint8_t rest_event_total; /* total events (up to log size) */
 
+
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+static inline float vqf_square_f(float v)
+{
+	return v * v;
+}
+
+static void soft_mbe_apply_bias_noise_scale(float scale)
+{
+	if (scale < 1e-6f)
+		scale = 1e-6f;
+
+	soft_mbe_scale = scale;
+	coeffs.biasV = soft_mbe_base_bias_v * scale;
+
+	float sigma_motion = params.biasSigmaMotion * 100.0f;
+	float p_motion = sigma_motion * sigma_motion;
+	coeffs.biasMotionW = vqf_square_f(p_motion) / coeffs.biasV + p_motion;
+	coeffs.biasVerticalW = coeffs.biasMotionW /
+		fmaxf(params.biasVerticalForgettingFactor, 1e-10f);
+
+	float sigma_rest = params.biasSigmaRest * 100.0f;
+	float p_rest = sigma_rest * sigma_rest;
+	coeffs.biasRestW = vqf_square_f(p_rest) / coeffs.biasV + p_rest;
+}
+
+static void soft_mbe_reset(void)
+{
+	soft_mbe_latest_gyr_norm = 0.0f;
+	soft_mbe_gyr_norm_lp = 0.0f;
+	soft_mbe_acc_dev_lp = 0.0f;
+	soft_mbe_lin_acc_lp = 0.0f;
+	soft_mbe_quasi_t = 0.0f;
+	soft_mbe_margin_t = 0.0f;
+	soft_mbe_scale = 1.0f;
+	soft_mbe_base_bias_v = coeffs.biasV;
+}
+
+static void soft_mbe_update_gyro_norm(const float g_rad[3])
+{
+	soft_mbe_latest_gyr_norm = sqrtf(g_rad[0] * g_rad[0] +
+					       g_rad[1] * g_rad[1] +
+					       g_rad[2] * g_rad[2]);
+}
+
+static void soft_mbe_pre_accel_update(const float a_m_s2[3])
+{
+	float dt = coeffs.accTs;
+	float alpha = dt / (SOFT_MBE_SMOOTH_T + dt);
+
+	float a_norm = sqrtf(a_m_s2[0] * a_m_s2[0] +
+				   a_m_s2[1] * a_m_s2[1] +
+				   a_m_s2[2] * a_m_s2[2]);
+	float acc_dev = fabsf(a_norm - CONST_EARTH_GRAVITY);
+
+	float q[4];
+	getQuat6D(&state, q);
+	float gravity_body[3];
+	gravity_body[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]) * CONST_EARTH_GRAVITY;
+	gravity_body[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]) * CONST_EARTH_GRAVITY;
+	gravity_body[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]) * CONST_EARTH_GRAVITY;
+	float lin_x = a_m_s2[0] - gravity_body[0];
+	float lin_y = a_m_s2[1] - gravity_body[1];
+	float lin_z = a_m_s2[2] - gravity_body[2];
+	float lin_acc = sqrtf(lin_x * lin_x + lin_y * lin_y + lin_z * lin_z);
+
+	soft_mbe_gyr_norm_lp += alpha * (soft_mbe_latest_gyr_norm - soft_mbe_gyr_norm_lp);
+	soft_mbe_acc_dev_lp += alpha * (acc_dev - soft_mbe_acc_dev_lp);
+	soft_mbe_lin_acc_lp += alpha * (lin_acc - soft_mbe_lin_acc_lp);
+
+	bool low_energy = !state.restDetected &&
+		soft_mbe_gyr_norm_lp <= SOFT_MBE_GYRO_TH_RAD_S &&
+		soft_mbe_acc_dev_lp <= SOFT_MBE_ACC_DEV_TH &&
+		soft_mbe_lin_acc_lp <= SOFT_MBE_LIN_ACC_TH;
+
+	if (low_energy) {
+		soft_mbe_quasi_t += dt;
+		if (soft_mbe_quasi_t >= SOFT_MBE_MIN_QUASI_T) {
+			soft_mbe_margin_t = SOFT_MBE_MARGIN_T;
+		}
+	} else {
+		soft_mbe_quasi_t = 0.0f;
+		if (soft_mbe_margin_t > 0.0f) {
+			soft_mbe_margin_t = fmaxf(soft_mbe_margin_t - dt, 0.0f);
+		}
+	}
+
+	float scale = soft_mbe_margin_t > 0.0f ? SOFT_MBE_BIAS_NOISE_SCALE : 1.0f;
+	soft_mbe_apply_bias_noise_scale(scale);
+}
+#endif /* CONFIG_VQF_SOFT_MBE_GATE */
+
 void vqf_update_sensor_ids(int imu)
 {
 	imu_id = imu;
@@ -118,22 +270,24 @@ static void set_params()
 	init_params(&params);
 	params.tauAcc = 4.3f;
 	params.biasClip = 2.0f;
-	params.biasForgettingTime = 100.0f;
-	params.biasSigmaInit = 0.54f;
-	params.biasSigmaMotion = 0.10f;
-	params.biasSigmaRest = 0.026f;
-	params.biasVerticalForgettingFactor = 0.00005f;
+	params.biasForgettingTime = 427.0f;
+	params.biasSigmaInit = 1.10f;
+	params.biasSigmaMotion = 0.048f;
+	params.biasSigmaRest = 0.0153f;
+	params.biasVerticalForgettingFactor = 0.0001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 0.61f;
-	params.restMinT = 1.17f;
-	params.restThGyr = 1.49f;
-	params.restThAcc = 0.41f;
+	params.restFilterTau = 0.66f;
+	params.restMinT = 0.63f;
+	params.restThGyr = 0.68f;
+	params.restThAcc = 0.21f;
 	params.magDistRejectionEnabled = true;
-	params.tauMag = 6.0f;
-	params.magCurrentTau = 0.44f;
+	params.tauMag = 9.0f;
+	params.magCurrentTau = 0.50f;
 	params.magNormTh = 0.09f;
 	params.magDipTh = 6.0f;
+	params.magRefTau = 15.0f;
+	params.magNewTime = 12.0f;
 	params.magNewFirstTime = 5.5f;
 	params.magNewMinGyr = 16.0f;
 	params.magMinUndisturbedTime = 0.6f;
@@ -149,6 +303,9 @@ void vqf_init(float g_time, float a_time, float m_time)
 	motion_intensity = 0.0f;
 	current_tau_level = -1.0f;
 	smoothed_tau = params.tauAcc;
+#endif
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	soft_mbe_reset();
 #endif
 	rest_enter_count = 0;
 	rest_exit_count = 0;
@@ -173,6 +330,9 @@ void vqf_load(const void *data)
 	current_tau_level = -1.0f;
 	smoothed_tau = params.tauAcc;
 #endif
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	soft_mbe_reset();
+#endif
 	rest_enter_count = 0;
 	rest_exit_count = 0;
 	rest_total_s = 0;
@@ -189,7 +349,14 @@ void vqf_save(void *data)
 	BUILD_ASSERT(VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
 		     "VQF state+coeffs exceeds fusion_data buffer in retained memory");
 	memcpy(data, &state, sizeof(state));
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	float saved_scale = soft_mbe_scale;
+	soft_mbe_apply_bias_noise_scale(1.0f);
 	memcpy((uint8_t *)data + sizeof(state), &coeffs, sizeof(coeffs));
+	soft_mbe_apply_bias_noise_scale(saved_scale);
+#else
+	memcpy((uint8_t *)data + sizeof(state), &coeffs, sizeof(coeffs));
+#endif
 }
 
 void vqf_update_gyro(float *g, float time)
@@ -199,6 +366,9 @@ void vqf_update_gyro(float *g, float time)
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++)
 		g_rad[i] = g[i] * DEG_TO_RAD;
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	soft_mbe_update_gyro_norm(g_rad);
+#endif
 	updateGyr(&params, &state, &coeffs, g_rad);
 }
 
@@ -207,6 +377,9 @@ void vqf_update_gyro_ts(float *g, uint64_t timestamp_us)
 	float g_rad[3] = {0};
 	for (int i = 0; i < 3; i++)
 		g_rad[i] = g[i] * DEG_TO_RAD;
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	soft_mbe_update_gyro_norm(g_rad);
+#endif
 	updateGyrTs(&params, &state, &coeffs, g_rad, timestamp_us);
 }
 
@@ -333,6 +506,9 @@ void vqf_update_accel(float *a, float time)
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	vqf_pre_accel_update(a_m_s2);
 #endif
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	soft_mbe_pre_accel_update(a_m_s2);
+#endif
 	updateAcc(&params, &state, &coeffs, a_m_s2);
 	vqf_track_rest_diag();
 }
@@ -346,6 +522,9 @@ void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
 		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	vqf_pre_accel_update(a_m_s2);
+#endif
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	soft_mbe_pre_accel_update(a_m_s2);
 #endif
 	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
 	vqf_track_rest_diag();
@@ -541,6 +720,15 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	info->tau_acc = params.tauAcc;
 	info->motion_intensity = motion_intensity;
 #endif
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+	// Soft MBE gate state
+	info->soft_mbe_scale = soft_mbe_scale;
+	info->soft_mbe_quasi_t = soft_mbe_quasi_t;
+	info->soft_mbe_margin_t = soft_mbe_margin_t;
+	info->soft_mbe_gyr_norm = soft_mbe_gyr_norm_lp * 180.0f / M_PI;
+	info->soft_mbe_acc_dev = soft_mbe_acc_dev_lp / CONST_EARTH_GRAVITY;
+	info->soft_mbe_lin_acc = soft_mbe_lin_acc_lp / CONST_EARTH_GRAVITY;
+#endif
 
 	// Rest detection diagnostics
 	info->rest_enter_count = rest_enter_count;
@@ -567,117 +755,236 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	info->biasP[2] = state.biasP[8];
 }
 
-static uint32_t vqf_bench_elapsed_cycles(uint32_t start_cycles)
+#if defined(CONFIG_VQF_BENCH)
+static ALWAYS_INLINE void vqf_bench_timer_prepare(void)
 {
-	return k_cycle_get_32() - start_cycles;
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+#endif
 }
 
-static void vqf_bench_print_stats(const char *name, uint32_t iterations, uint32_t total_cycles)
+static ALWAYS_INLINE uint32_t vqf_bench_timer_begin(unsigned int *irq_key)
+{
+	*irq_key = irq_lock();
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	DWT->CYCCNT = 0;
+	return 0;
+#else
+	return k_cycle_get_32();
+#endif
+}
+
+static ALWAYS_INLINE uint32_t vqf_bench_timer_end(unsigned int irq_key, uint32_t start_cycles)
+{
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	uint32_t elapsed_cycles = DWT->CYCCNT;
+	irq_unlock(irq_key);
+	return elapsed_cycles;
+#else
+	uint32_t elapsed_cycles = k_cycle_get_32() - start_cycles;
+	irq_unlock(irq_key);
+	return elapsed_cycles;
+#endif
+}
+
+static ALWAYS_INLINE uint32_t vqf_bench_timer_hz(void)
+{
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+	return SystemCoreClock ? SystemCoreClock : CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#else
+	return CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#endif
+}
+
+static void vqf_bench_print_stats(const char *name, uint32_t iterations, uint32_t total_cycles,
+				  uint32_t timer_hz)
 {
 	uint32_t avg_cycles_int = 0;
 	uint32_t avg_cycles_frac = 0;
+	uint32_t total_us_int = 0;
+	uint32_t total_us_frac = 0;
+	uint32_t avg_us_int = 0;
+	uint32_t avg_us_frac = 0;
 
 	if (iterations) {
-		uint64_t avg_cycles_x1000 = ((uint64_t)total_cycles * 1000ULL) / iterations;
+		uint64_t avg_cycles_x1000 = (total_cycles * 1000ULL) / iterations;
 		avg_cycles_int = (uint32_t)(avg_cycles_x1000 / 1000ULL);
 		avg_cycles_frac = (uint32_t)(avg_cycles_x1000 % 1000ULL);
 	}
 
+	if (timer_hz) {
+		uint64_t total_us_x1000 = (total_cycles * 1000000000ULL) / timer_hz;
+		total_us_int = (uint32_t)(total_us_x1000 / 1000ULL);
+		total_us_frac = (uint32_t)(total_us_x1000 % 1000ULL);
+
+		if (iterations) {
+			uint64_t avg_us_x1000 = total_us_x1000 / iterations;
+			avg_us_int = (uint32_t)(avg_us_x1000 / 1000ULL);
+			avg_us_frac = (uint32_t)(avg_us_x1000 % 1000ULL);
+		}
+	}
+
 	printk(
-		"  %-10s total_cycles=%10u avg_cycles=%3u.%03u\n",
+		"  %-10s t_c=%10u avg_c=%4u.%03u t_us=%8u.%03u avg_us=%4u.%03u\n",
 		name,
 		total_cycles,
 		avg_cycles_int,
-		avg_cycles_frac
+		avg_cycles_frac,
+		total_us_int,
+		total_us_frac,
+		avg_us_int,
+		avg_us_frac
 	);
+}
+
+#define VQF_BENCH_BATCH_SIZE 16U
+#define VQF_BENCH_THREAD_PRIO 8
+
+typedef enum {
+	VQF_BENCH_UPDATE_GYR,
+	VQF_BENCH_UPDATE_ACC,
+	VQF_BENCH_UPDATE_MAG,
+	VQF_BENCH_GET_QUAT9D,
+} vqf_bench_op_t;
+
+static uint32_t vqf_bench_measure(vqf_bench_op_t op, uint32_t iterations,
+				  const vqf_real_t gyr_samples[][3],
+				  const vqf_real_t acc_samples[][3],
+				  const vqf_real_t mag_samples[][3], size_t sample_count,
+				  vqf_params_t *bench_params, vqf_state_t *bench_state,
+				  vqf_coeffs_t *bench_coeffs, float quat[4])
+{
+	uint32_t total_cycles = 0;
+	uint32_t remaining = iterations;
+	uint32_t sample_offset = 0;
+
+	while (remaining > 0) {
+		uint32_t batch_len = remaining > VQF_BENCH_BATCH_SIZE ? VQF_BENCH_BATCH_SIZE : remaining;
+		unsigned int irq_key;
+		uint32_t start_cycles = vqf_bench_timer_begin(&irq_key);
+
+		for (uint32_t i = 0; i < batch_len; i++, sample_offset++) {
+			size_t sample_idx = sample_offset % sample_count;
+
+			switch (op) {
+			case VQF_BENCH_UPDATE_GYR:
+				updateGyr(bench_params, bench_state, bench_coeffs, gyr_samples[sample_idx]);
+				break;
+			case VQF_BENCH_UPDATE_ACC:
+				updateAcc(bench_params, bench_state, bench_coeffs, acc_samples[sample_idx]);
+				break;
+			case VQF_BENCH_UPDATE_MAG:
+				updateMag(bench_params, bench_state, bench_coeffs, mag_samples[sample_idx]);
+				break;
+			case VQF_BENCH_GET_QUAT9D:
+				getQuat9D(bench_state, quat);
+				vqf_bench_sink += quat[sample_offset & 3U];
+				break;
+			}
+		}
+
+		total_cycles += vqf_bench_timer_end(irq_key, start_cycles);
+		remaining -= batch_len;
+	}
+
+	return total_cycles;
 }
 
 void vqf_run_benchmark(uint32_t iterations)
 {
 	vqf_bench_sink = 0.0f;
-	vqf_params_t bench_params;
-	vqf_state_t bench_state;
-	vqf_coeffs_t bench_coeffs;
-	float quat[4];
-	uint32_t start_cycles;
+	uint32_t timer_hz;
 	uint32_t elapsed_cycles;
+	k_tid_t bench_thread = k_current_get();
+	int bench_thread_prio = k_thread_priority_get(bench_thread);
+	bool bench_prio_changed = false;
 
 	if (iterations == 0) {
 		iterations = 1000;
 	}
 
-	const vqf_real_t gyr_samples[][3] = {
-		{0.12f, -0.34f, 0.56f},
-		{-1.10f, 0.45f, 0.08f},
-		{0.78f, 0.11f, -0.29f},
-		{-0.05f, 0.92f, 0.37f},
-	};
-	const vqf_real_t acc_samples[][3] = {
-		{0.30f, 0.10f, 9.70f},
-		{-0.25f, 0.45f, 9.63f},
-		{0.60f, -0.15f, 9.55f},
-		{-0.40f, -0.20f, 9.81f},
-	};
-	const vqf_real_t mag_samples[][3] = {
-		{0.32f, 0.05f, -0.41f},
-		{0.28f, 0.10f, -0.39f},
-		{0.35f, -0.02f, -0.43f},
-		{0.30f, 0.08f, -0.40f},
-	};
-	const size_t sample_count = sizeof(gyr_samples) / sizeof(gyr_samples[0]);
+	if (bench_thread_prio < VQF_BENCH_THREAD_PRIO) {
+		k_thread_priority_set(bench_thread, VQF_BENCH_THREAD_PRIO);
+		bench_prio_changed = true;
+	}
 
 	set_params();
-	bench_params = params;
-	initVqf(&bench_params, &bench_state, &bench_coeffs, 0.001f, 0.001f, 0.01f);
+	vqf_bench_params = params;
+	initVqf(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, 0.001f, 0.001f, 0.01f);
 
-	for (size_t i = 0; i < sample_count * 8; i++) {
-		const size_t idx = i % sample_count;
-		updateGyr(&bench_params, &bench_state, &bench_coeffs, gyr_samples[idx]);
-		updateAcc(&bench_params, &bench_state, &bench_coeffs, acc_samples[idx]);
-		updateMag(&bench_params, &bench_state, &bench_coeffs, mag_samples[idx]);
-		getQuat9D(&bench_state, quat);
-		vqf_bench_sink += quat[0];
+	for (size_t i = 0; i < vqf_bench_sample_count * 8; i++) {
+		const size_t idx = i % vqf_bench_sample_count;
+		updateGyr(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_gyr_samples[idx]);
+		updateAcc(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_acc_samples[idx]);
+		updateMag(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_mag_samples[idx]);
+		getQuat9D(&vqf_bench_state, vqf_bench_quat);
+		vqf_bench_sink += vqf_bench_quat[0];
 	}
 
-	printk("VQF benchmark (%u iterations, CMSIS-DSP=%s)\n", iterations,
-#ifdef CONFIG_CMSIS_DSP
-		"on"
-#else
-		"off"
-#endif
-	);
+	vqf_bench_warm_params = vqf_bench_params;
+	vqf_bench_warm_state = vqf_bench_state;
+	vqf_bench_warm_coeffs = vqf_bench_coeffs;
+	vqf_bench_timer_prepare();
+	timer_hz = vqf_bench_timer_hz();
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		updateGyr(&bench_params, &bench_state, &bench_coeffs, gyr_samples[i % sample_count]);
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("updateGyr", iterations, elapsed_cycles);
+	printk("VQF benchmark (%u iterations, CMSIS-DSP=%s, timer=%s)\n", iterations,
+	#ifdef CONFIG_CMSIS_DSP
+			"on"
+	#else
+			"off"
+	#endif
+			,
+	#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+			"DWT CYCCNT"
+	#else
+			"system timer"
+	#endif
+		);
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		updateAcc(&bench_params, &bench_state, &bench_coeffs, acc_samples[i % sample_count]);
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("updateAcc", iterations, elapsed_cycles);
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_UPDATE_GYR, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("updateGyr", iterations, elapsed_cycles, timer_hz);
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		updateMag(&bench_params, &bench_state, &bench_coeffs, mag_samples[i % sample_count]);
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("updateMag", iterations, elapsed_cycles);
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_UPDATE_ACC, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("updateAcc", iterations, elapsed_cycles, timer_hz);
 
-	start_cycles = k_cycle_get_32();
-	for (uint32_t i = 0; i < iterations; i++) {
-		getQuat9D(&bench_state, quat);
-		vqf_bench_sink += quat[i & 3];
-	}
-	elapsed_cycles = vqf_bench_elapsed_cycles(start_cycles);
-	vqf_bench_print_stats("getQuat9D", iterations, elapsed_cycles);
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_UPDATE_MAG, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("updateMag", iterations, elapsed_cycles, timer_hz);
+
+	vqf_bench_params = vqf_bench_warm_params;
+	vqf_bench_state = vqf_bench_warm_state;
+	vqf_bench_coeffs = vqf_bench_warm_coeffs;
+	elapsed_cycles = vqf_bench_measure(VQF_BENCH_GET_QUAT9D, iterations, vqf_bench_gyr_samples,
+				       vqf_bench_acc_samples, vqf_bench_mag_samples,
+				       vqf_bench_sample_count, &vqf_bench_params,
+				       &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_quat);
+	vqf_bench_print_stats("getQuat9D", iterations, elapsed_cycles, timer_hz);
 
 	printk("  checksum: %.6f\n", (double)vqf_bench_sink);
+
+	if (bench_prio_changed) {
+		k_thread_priority_set(bench_thread, bench_thread_prio);
+	}
 }
+#endif
 
 const sensor_fusion_t sensor_fusion_vqf = {
 	vqf_init,

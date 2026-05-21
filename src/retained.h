@@ -82,7 +82,17 @@ struct retained_data {
 
 	bool mag_enabled;
 
+	// Online magnetometer calibration runtime state.
+	// Persists across WoM resumes so online mag cal does not re-enter
+	// early bootstrap after every wake, but is cleared on full reboot/shutdown.
+	struct {
+		float last_buf_avg_norm;
+		uint8_t update_count;
+		uint8_t reserved[3];
+	} onlineMagState;
+
 #if CONFIG_SENSOR_USE_TCAL
+	bool tcal_enabled; // Temperature calibration compensation enabled
 	float gyroTemp;
 
 	#define TCAL_BUFFER_SIZE                                                                                               \

@@ -52,6 +52,9 @@ void sensor_calibration_online_mag_sample(const float m[3]);
 int sensor_calibration_online_mag_status(float *dir_bias);
 void sensor_calibration_track_mag_norm(float cal_norm);
 float sensor_calibration_get_mag_quality(void);
+void sensor_calibration_online_mag_retained_save(void);
+void sensor_calibration_online_mag_retained_clear(void);
+void sensor_calibration_online_mag_cold_start(void);
 
 #if CONFIG_SENSOR_USE_TCAL
 
@@ -75,6 +78,10 @@ bool sensor_tcal_is_temp_outside_range(float temp, float *min_temp, float *max_t
 void sensor_tcal_check_auto_calibration(float current_temp);
 void sensor_tcal_set_auto_calibration(bool enabled);
 bool sensor_tcal_get_auto_calibration(void);
+
+// T-Cal compensation enable/disable (persisted)
+void sensor_tcal_set_enabled(bool enabled);
+bool sensor_tcal_get_enabled(void);
 
 // Continuous bucket-based T-Cal sampling
 void sensor_tcal_feed_continuous_sample(const float g[3], float temp);
