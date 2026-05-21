@@ -108,6 +108,15 @@ typedef struct {
     float tau_acc;             // current tauAcc value (seconds)
     float motion_intensity;    // motion intensity estimate [0, 1]
 #endif
+#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
+    // Soft MBE gate state
+    float soft_mbe_scale;      // bias process-noise scale (1 = normal)
+    float soft_mbe_quasi_t;    // accumulated low-energy non-rest time (seconds)
+    float soft_mbe_margin_t;   // remaining active margin time (seconds)
+    float soft_mbe_gyr_norm;   // smoothed gyro norm (°/s)
+    float soft_mbe_acc_dev;    // smoothed |norm(acc)-1g| (g)
+    float soft_mbe_lin_acc;    // smoothed linear acceleration norm (g)
+#endif
     // Rest detection diagnostics (cumulative since boot/init)
     uint32_t rest_enter_count;     // number of transitions to rest
     uint32_t rest_exit_count;      // number of transitions from rest
@@ -128,7 +137,9 @@ typedef struct {
 } vqf_debug_info_t;
 
 void vqf_get_debug_info(vqf_debug_info_t *info);
+#if defined(CONFIG_VQF_BENCH)
 void vqf_run_benchmark(uint32_t iterations);
+#endif
 
 extern const sensor_fusion_t sensor_fusion_vqf;
 

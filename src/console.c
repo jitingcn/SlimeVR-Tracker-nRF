@@ -471,7 +471,7 @@ static void print_help(void)
 #endif
 #if CONFIG_SENSOR_USE_TCAL
 	// Update the help string to show the new command set
-	printk("  tcal <status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
+	printk("  tcal <on|off|status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
 #endif
 	printk("\n");
 	printk("Connection:\n");
@@ -503,7 +503,9 @@ static void print_help(void)
 	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 1s)\n");
 	printk("  range                      Show sensor range statistics (min/max values)\n");
 	printk("  range reset                Reset sensor range statistics\n");
+#if CONFIG_VQF_BENCH
 	printk("  vqfbench [iterations]      Benchmark VQF update paths (default 1000)\n");
+#endif
 	printk("\n");
 	printk("Debug Commands:\n");
 	printk("  reset zro                  Reset ZRO calibration\n");
@@ -700,7 +702,9 @@ static void console_thread(void)
 	uint8_t command_help[] = "help";
 	uint8_t command_debug[] = "debug";
 	uint8_t command_range[] = "range";
+#if CONFIG_VQF_BENCH
 	uint8_t command_vqfbench[] = "vqfbench";
+#endif
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	uint8_t command_6_side[] = "6-side";
@@ -821,16 +825,23 @@ static void console_thread(void)
 		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
-				printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
+				printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 			} else {
 				// Tokenize the argument string by space to get the subcommand
 				char *subcmd = strtok((char *)arg, " ");
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
-					printk("Error: Missing argument. Use: tcal <status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
+					printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
+				} else if (strcmp(subcmd, "on") == 0) {
+					sensor_tcal_set_enabled(true);
+					printk("T-Cal compensation enabled\n");
+				} else if (strcmp(subcmd, "off") == 0) {
+					sensor_tcal_set_enabled(false);
+					printk("T-Cal compensation disabled (using static gyro bias)\n");
 				} else if (strcmp(subcmd, "status") == 0) {
 					sensor_tcal_status();
+					printk("T-Cal compensation: %s\n", sensor_tcal_get_enabled() ? "enabled" : "disabled");
 					printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
 				} else if (strcmp(subcmd, "clear") == 0) {
 					cmd_reset_tcal();
@@ -1149,6 +1160,7 @@ static void console_thread(void)
 #else
 			printk("Sensor range statistics not enabled in configuration.\n");
 #endif // CONFIG_SENSOR_RANGE_STATS
+#if CONFIG_VQF_BENCH
 		} else if (memcmp(line, command_vqfbench, sizeof(command_vqfbench)) == 0) {
 			uint32_t iterations = 1000;
 			if (arg) {
@@ -1161,6 +1173,7 @@ static void console_thread(void)
 				}
 			}
 			vqf_run_benchmark(iterations);
+#endif // CONFIG_VQF_BENCH
 		}	else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
 			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0) {
 				cmd_reset_zro();
