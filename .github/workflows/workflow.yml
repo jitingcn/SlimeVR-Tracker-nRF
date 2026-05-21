@@ -175,6 +175,27 @@ jobs:
       fail-fast: false
       matrix:
         boards: [
+                  {boardname: "xiao_ble/nrf52840", filename: "SlimeNRF_XIAO_Tracker"},
+                  {boardname: "xiao_ble/nrf52840/sense", filename: "SlimeNRF_XIAO_Sense_Tracker"},
+                  {boardname: "promicro_uf2/nrf52840/i2c", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_I2C"},
+                  {boardname: "promicro_uf2/nrf52840/i2c", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_I2C_SD", with_softdevice: true},
+                  {boardname: "promicro_uf2/nrf52840/spi", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_SPI"},
+                  {boardname: "promicro_uf2/nrf52840/spi", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_SPI_SD", with_softdevice: true},
+                  {boardname: "promicro_uf2/nrf52840/default_spi", filename: "SlimeNRF_ProMicro_Tracker_SPI"},
+                  {boardname: "promicro_uf2/nrf52840/default_spi", filename: "SlimeNRF_ProMicro_Tracker_SPI_SD", with_softdevice: true},
+                  {boardname: "promicro_uf2/nrf52840/default_i2c", filename: "SlimeNRF_ProMicro_Tracker_I2C"},
+                  {boardname: "promicro_uf2/nrf52840/default_i2c", filename: "SlimeNRF_ProMicro_Tracker_I2C_SD", with_softdevice: true},
+                  {boardname: "promicro_uf2/nrf52840/chrysalis", filename: "SlimeNRF_ProMicro_Chrysalis_Tracker"},
+                  {boardname: "promicro_uf2/nrf52840/chrysalis", filename: "SlimeNRF_ProMicro_Chrysalis_Tracker_SD", with_softdevice: true},
+                  {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker"},
+                  {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker_SD", with_softdevice: true},
+                  {boardname: "foxsnacklite_uf2/nrf52840", filename: "FoxApplication_FoxSnackLite_Tracker"},
+                  {boardname: "foxsnacklite_uf2/nrf52840", filename: "FoxApplication_FoxSnackLite_Tracker_SD", with_softdevice: true},
+                  {boardname: "mochi_uf2/nrf52833", filename: "Mochi_Tracker"},
+                  {boardname: "dawn_tracker_mini_uf2/nrf52833", filename: "Dawn_Tracker_Mini"},
+                  {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker"},
+                  {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker_SD", with_softdevice: true},
+                  {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"},
                   {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"}
                 ]
     runs-on: ubuntu-latest
