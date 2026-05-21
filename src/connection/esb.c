@@ -1308,21 +1308,33 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	bool is_raw = (data[0] >= 0x10 && data[0] <= 0x12);
 
 	/*
-	 * TDMA slot gating for noack sensor-data packets.
+	 * TDMA slot gating / random backoff for noack sensor-data packets.
 	 *
 	 * Wait BEFORE queuing: if the packet were queued first and the radio
 	 * were still auto-draining a previous TX, the new packet could be
 	 * transmitted before the TDMA slot (bypassing the wait entirely).
 	 *
-	 * PING / ACK packets bypass TDMA (no_ack == false) so time-sync and
+	 * PING / ACK packets bypass this (no_ack == false) so time-sync and
 	 * connection-health probes are never delayed.
-	 * Raw data (0x10-0x12) always bypasses TDMA for minimum latency.
+	 * Raw data (0x10-0x12) always bypasses for minimum latency.
+	 *
+	 * When TDMA is disabled (compile-time or runtime), use random backoff
+	 * to reduce collision
 	 */
-#if CONFIG_CONNECTION_TDMA
 	if (no_ack && !is_raw) {
-		tdma_wait_for_slot();
-	}
+#if CONFIG_CONNECTION_TDMA
+		if (tdma_is_enabled()) {
+			tdma_wait_for_slot();
+		} else
 #endif
+		{
+			/* Random backoff: 0-1ms jitter using low bits of cycle counter */
+			uint32_t jitter_us = (k_cycle_get_32() & 0x3FF) % 1000;
+			if (jitter_us > 100) {
+				k_usleep(jitter_us);
+			}
+		}
+	}
 
 	// Try to queue the packet (now inside the TDMA slot window)
 	int queue_status = esb_write_payload(&tx_payload);
