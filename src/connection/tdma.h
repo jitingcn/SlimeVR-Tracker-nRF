@@ -32,7 +32,7 @@
  * Uses a short repeating frame to give each tracker a micro-slot for
  * high-frequency continuous packet transmission.
  *
- * Time base: server time ticks (32768 Hz) from PING/PONG synchronization.
+ * Time base: reference-point sync projected from last PONG (see tdma_set_sync_ref).
  *
  * Frame structure (repeats every frame_ticks):
  *   [Slot 0][Slot 1][Slot 2]...[Slot N-1]   (N = total_slots, dynamic)
@@ -51,6 +51,31 @@
  *   - For noack data: tdma_wait_for_slot() blocks until assigned slot
  *   - For PING/ACK packets: esb_start_tx() is called immediately (bypasses TDMA)
  */
+
+/**
+ * Get the estimated current receiver time.
+ * Projects forward from the last PONG sync reference point.
+ * Returns 0 if no sync has been performed yet.
+ */
+uint32_t tdma_get_time(void);
+
+/**
+ * Set the sync reference point from a PONG.
+ * Called from the ESB event handler after each successful PONG.
+ *
+ * @param rx_ticks     Receiver's T2 timestamp (from PONG bytes 3-6).
+ * @param local_ticks  Local sys_clock_tick_get_32() at PONG ACK RX.
+ */
+void tdma_set_sync_ref(uint32_t rx_ticks, uint32_t local_ticks);
+
+/**
+ * Clear time sync reference state.
+ * Called when pairing resets or connection drops.
+ */
+void tdma_clear_sync(void);
+
+/** @deprecated Kept for API compatibility. */
+void tdma_update_timer_offset(int32_t diff);
 
 /* Compile-time defaults / fallbacks (used if no dynamic config received) */
 #define TDMA_NUM_TRACKERS  10
@@ -83,11 +108,11 @@ void tdma_init(uint8_t tracker_id);
  * Returns immediately if:
  *   - CONFIG_CONNECTION_TDMA is disabled
  *   - runtime TDMA is disabled
- *   - server time is not yet synced (fallback: transmit now)
+ *   - time sync is not yet established (fallback: transmit now)
  *   - already inside our slot window
  *
  * Uses k_sleep(K_TICKS(n)) which on nRF52 is backed by the 32768 Hz RTC,
- * giving ±1 tick (~30 µs) accuracy — sufficient for 610 µs slots.
+ * giving ±1 tick (~30 µs) accuracy.
  */
 void tdma_wait_for_slot(void);
 

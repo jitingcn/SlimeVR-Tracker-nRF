@@ -28,35 +28,70 @@
 
 LOG_MODULE_REGISTER(tdma, LOG_LEVEL_INF);
 
-static uint8_t tdma_slot_index = 0;
-static bool tdma_runtime_enabled = false; /* disabled until receiver sends config */
+/*
+ * Reference-point sync: receiver time projected from the last PONG.
+ * tdma_get_time() = rx_ref + (local_now - local_ref).
+ * 32-bit wrap in the subtraction is handled correctly by unsigned modular
+ * arithmetic; elapsed is bounded by staleness checks (< TIME_SYNC_TIMEOUT_MS).
+ */
+static volatile uint32_t tdma_rx_ref;
+static volatile uint32_t tdma_local_ref;
+static volatile bool tdma_time_synced = false;
 
-/* Dynamic TDMA parameters (updated from receiver PONG) */
-static uint8_t tdma_dyn_slot_ticks = TDMA_SLOT_TICKS;
-static uint8_t tdma_dyn_total_slots = TDMA_NUM_TRACKERS;
-static uint16_t tdma_dyn_frame_ticks = TDMA_FRAME_TICKS;
-static uint8_t tdma_dyn_epoch = 0;
+uint32_t tdma_get_time(void)
+{
+	if (!tdma_time_synced) {
+		return 0;
+	}
+	uint32_t elapsed = sys_clock_tick_get_32() - tdma_local_ref;
+	return tdma_rx_ref + elapsed;
+}
+
+void tdma_set_sync_ref(uint32_t rx_ticks, uint32_t local_ticks)
+{
+	tdma_rx_ref = rx_ticks;
+	tdma_local_ref = local_ticks;
+	tdma_time_synced = true;
+}
+
+void tdma_clear_sync(void)
+{
+	tdma_rx_ref = 0;
+	tdma_local_ref = 0;
+	tdma_time_synced = false;
+}
+
+void tdma_update_timer_offset(int32_t diff)
+{
+	(void)diff;
+}
+
+/*
+ * Dynamic TDMA parameters packed into a single uint64_t and read
+ * with a seqlock-style retry loop.  On 32-bit Cortex-M a uint64_t load
+ * is two 32-bit operations — an interrupt between them tears the value.
+ * tdma_update_config() runs from the ESB event handler ISR, while
+ * tdma_wait_for_slot() reads from the connection thread.
+ * Layout: [47:40]=slot_ticks, [39:32]=total_slots, [31:16]=frame_ticks,
+ *         [15:0]=slot_index<<8 | epoch
+ */
+static volatile uint64_t tdma_dyn_packed = 0;
+
+static inline void tdma_dyn_write(uint8_t slot_ticks, uint8_t total_slots,
+				  uint16_t frame_ticks, uint8_t slot_index, uint8_t epoch)
+{
+	tdma_dyn_packed = ((uint64_t)slot_ticks << 40)
+			| ((uint64_t)total_slots << 32)
+			| ((uint64_t)frame_ticks << 16)
+			| ((uint64_t)slot_index << 8)
+			| (uint64_t)epoch;
+}
 
 /* Diagnostic counters for TDMA slot hit/miss tracking */
 static uint32_t tdma_slot_hits = 0;
 static uint32_t tdma_slot_overshoots = 0;
 static uint32_t tdma_grace_hits = 0;
 static int64_t tdma_stats_last_ts = 0;
-
-void tdma_init(uint8_t tracker_id)
-{
-	tdma_slot_index = tracker_id % TDMA_NUM_TRACKERS;
-#if CONFIG_CONNECTION_TDMA
-	LOG_INF("TDMA init: slot=%u/%u, frame=%u ticks (~%u.%01u ms), ~%u TPS/tracker",
-		tdma_slot_index, TDMA_NUM_TRACKERS,
-		TDMA_FRAME_TICKS,
-		(TDMA_FRAME_TICKS * 1000) / 32768,
-		((TDMA_FRAME_TICKS * 10000) / 32768) % 10,
-		32768 / TDMA_FRAME_TICKS);
-#else
-	LOG_INF("TDMA compiled out, all transmissions immediate");
-#endif
-}
 
 /*
  * Slot targeting offset: aim for a point TDMA_SLOT_TARGET_OFFSET ticks INTO
@@ -73,6 +108,24 @@ void tdma_init(uint8_t tracker_id)
 #define TDMA_SLOT_TARGET_OFFSET 4
 #define TDMA_SYNC_STALE_MS (PING_INTERVAL_MS * 10)
 
+static bool tdma_runtime_enabled = false; /* disabled until receiver sends config */
+
+void tdma_init(uint8_t tracker_id)
+{
+	uint8_t init_slot = tracker_id % TDMA_NUM_TRACKERS;
+	tdma_dyn_write(TDMA_SLOT_TICKS, TDMA_NUM_TRACKERS, TDMA_FRAME_TICKS, init_slot, 0);
+#if CONFIG_CONNECTION_TDMA
+	LOG_INF("TDMA init: slot=%u/%u, frame=%u ticks (~%u.%01u ms), ~%u TPS/tracker",
+		init_slot, TDMA_NUM_TRACKERS,
+		TDMA_FRAME_TICKS,
+		(TDMA_FRAME_TICKS * 1000) / 32768,
+		((TDMA_FRAME_TICKS * 10000) / 32768) % 10,
+		32768 / TDMA_FRAME_TICKS);
+#else
+	LOG_INF("TDMA compiled out, all transmissions immediate");
+#endif
+}
+
 void tdma_wait_for_slot(void)
 {
 #if !CONFIG_CONNECTION_TDMA
@@ -82,10 +135,14 @@ void tdma_wait_for_slot(void)
 		return;
 	}
 
-	/* Read dynamic parameters (single-threaded connection thread, no race) */
-	uint16_t frame_ticks = tdma_dyn_frame_ticks;
-	uint8_t slot_ticks = tdma_dyn_slot_ticks;
-	uint8_t slot_index = tdma_slot_index;
+	/* Read dynamic parameters with seqlock retry (64-bit is non-atomic on 32-bit) */
+	uint64_t packed;
+	do {
+		packed = tdma_dyn_packed;
+	} while (packed != tdma_dyn_packed);
+	uint8_t slot_ticks = (uint8_t)(packed >> 40);
+	uint16_t frame_ticks = (uint16_t)(packed >> 16);
+	uint8_t slot_index = (uint8_t)(packed >> 8);
 
 	if (frame_ticks == 0 || slot_ticks == 0) {
 		return; /* invalid config — transmit immediately */
@@ -99,13 +156,13 @@ void tdma_wait_for_slot(void)
 		return; /* sync lost or too stale — transmit immediately */
 	}
 
-	uint64_t server_ticks = esb_get_server_time_ticks_64();
-	if (server_ticks == 0) {
+	uint32_t now = tdma_get_time();
+	if (now == 0) {
 		return; /* not synced — fallback to immediate TX */
 	}
 
-	uint32_t frame_phase = (uint32_t)(server_ticks % frame_ticks);
 	uint32_t slot_start = (uint32_t)slot_index * slot_ticks;
+	uint32_t frame_phase = now % frame_ticks;
 
 	/* Check if we're already inside our slot (between start and end) */
 	int32_t pos_in_slot = (int32_t)frame_phase - (int32_t)slot_start;
@@ -148,13 +205,14 @@ void tdma_wait_for_slot(void)
 		k_sleep(K_TICKS(ticks_to_target));
 	}
 
-	/* Re-read server time after sleep to classify landing accuracy.
+	/* Re-read time after sleep to classify landing accuracy.
 	 * Regardless of where we land, always proceed to TX. */
-	server_ticks = esb_get_server_time_ticks_64();
-	if (server_ticks == 0) {
+	now = tdma_get_time();
+	if (now == 0) {
 		return;
 	}
-	frame_phase = (uint32_t)(server_ticks % frame_ticks);
+	frame_phase = now % frame_ticks;
+	slot_start = (uint32_t)slot_index * slot_ticks;
 	pos_in_slot = (int32_t)frame_phase - (int32_t)slot_start;
 	if (pos_in_slot > (int32_t)(frame_ticks / 2)) {
 		pos_in_slot -= frame_ticks;
@@ -181,11 +239,11 @@ void tdma_wait_for_slot(void)
 	}
 
 	/* Periodic TDMA statistics */
-	int64_t now = k_uptime_get();
+	int64_t stat_now = k_uptime_get();
 	if (tdma_stats_last_ts == 0) {
-		tdma_stats_last_ts = now;
+		tdma_stats_last_ts = stat_now;
 	}
-	if (now - tdma_stats_last_ts >= 10000) {
+	if (stat_now - tdma_stats_last_ts >= 10000) {
 		uint32_t total = tdma_slot_hits + tdma_grace_hits + tdma_slot_overshoots;
 		if (total > 0) {
 			LOG_INF("TDMA stats (10s): hits=%u grace=%u overshoot=%u total=%u",
@@ -195,7 +253,7 @@ void tdma_wait_for_slot(void)
 		tdma_slot_hits = 0;
 		tdma_grace_hits = 0;
 		tdma_slot_overshoots = 0;
-		tdma_stats_last_ts = now;
+		tdma_stats_last_ts = stat_now;
 	}
 #endif
 }
@@ -235,11 +293,8 @@ void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 		return;
 	}
 
-	tdma_slot_index = slot_index;
-	tdma_dyn_total_slots = total_slots;
-	tdma_dyn_slot_ticks = slot_ticks;
-	tdma_dyn_frame_ticks = (uint16_t)slot_ticks * total_slots;
-	tdma_dyn_epoch = epoch;
+	uint16_t frame_ticks = (uint16_t)slot_ticks * total_slots;
+	tdma_dyn_write(slot_ticks, total_slots, frame_ticks, slot_index, epoch);
 
 	if (!tdma_runtime_enabled) {
 		tdma_runtime_enabled = true;
@@ -248,8 +303,8 @@ void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 
 	LOG_INF("TDMA config: slot=%u/%u, slot_ticks=%u, frame=%u ticks, ~%u TPS (epoch=%u)",
 		slot_index, total_slots, slot_ticks,
-		tdma_dyn_frame_ticks,
-		tdma_dyn_frame_ticks > 0 ? 32768 / tdma_dyn_frame_ticks : 0,
+		frame_ticks,
+		frame_ticks > 0 ? 32768 / frame_ticks : 0,
 		epoch);
 #else
 	ARG_UNUSED(slot_index);
@@ -262,7 +317,12 @@ void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 uint8_t tdma_get_config_epoch(void)
 {
 #if CONFIG_CONNECTION_TDMA
-	return tdma_dyn_epoch;
+	/* Read epoch from packed value with seqlock for consistency */
+	uint64_t packed;
+	do {
+		packed = tdma_dyn_packed;
+	} while (packed != tdma_dyn_packed);
+	return (uint8_t)packed;
 #else
 	return 0;
 #endif

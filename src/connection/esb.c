@@ -142,29 +142,16 @@ static volatile uint8_t ota_rx_tail;
 static bool server_time_synced = false;
 
 // Server time synchronization
-static uint32_t g_server_ticks_offset = 0;
-static uint32_t g_last_rx_raw_ticks = 0;
-static uint32_t g_last_sync_local_ticks = 0;
 static bool g_time_initialized = false;
 static int64_t g_last_sync_timestamp = 0;
 #define TIME_SYNC_TIMEOUT_MS 15000
 
-// Clock skew compensation (tracker vs receiver crystal frequency difference)
-static int32_t g_clock_skew_ppb = 0;         // Estimated clock skew in parts per billion
-static int32_t g_skew_ref_offset = 0;        // Offset at skew reference point
-static uint32_t g_skew_ref_local_ticks = 0;  // Local ticks at skew reference point (updated infrequently)
-#define SKEW_REF_REFRESH_TICKS (60 * 32768)  // Refresh skew reference every ~60s
-
-// Minimum RTT tracking for PONG acceptance threshold and diagnostics.
+// Minimum RTT tracking for diagnostics and PONG acceptance threshold.
 // Init to ~305µs (10 ticks): conservative estimate for clean 2Mbps ESB RTT.
 static uint32_t g_min_rtt_ticks = 10;
 static uint32_t g_min_rtt_age = 0; // PONGs since last min_rtt update
 #define MIN_RTT_AGE_LIMIT 120      // Age out after ~120 PONGs (~2 min at 1/s)
 #define MIN_RTT_CEILING   20       // Never age beyond this (conservative upper bound)
-
-// Warm-up counter: first few PONGs use faster EMA for quick convergence
-static uint32_t g_sync_update_count = 0;
-#define SYNC_WARM_UP_COUNT 5
 
 // Track last sent packet for TX_FAILED diagnostics
 struct last_tx_info {
@@ -273,14 +260,9 @@ static void esb_clear_time_sync_state(void)
 	server_time_synced = false;
 	g_time_initialized = false;
 	g_last_sync_timestamp = 0;
-	g_last_rx_raw_ticks = 0;
-	g_last_sync_local_ticks = 0;
-	g_server_ticks_offset = 0;
-	g_clock_skew_ppb = 0;
-	g_skew_ref_offset = 0;
-	g_skew_ref_local_ticks = 0;
 	g_min_rtt_ticks = 10;
-	g_sync_update_count = 0;
+	g_min_rtt_age = 0;
+	tdma_clear_sync();
 }
 
 
@@ -730,117 +712,20 @@ void event_handler(struct esb_evt const *event)
 							rtt_threshold_us = 1000;
 						}
 						if (rtt_us < rtt_threshold_us) {
-							// Reference-point offset: T2 - T4
-							// The constant one-way delay bias is the same for
-							// all trackers and cancels out in TDMA slot alignment.
-							// Decoupling from min_rtt avoids noise injection when
-							// min_rtt ages/updates.
-							int32_t server_offset_ticks
-								= (int32_t)(ping_rx_ticks - t4_ticks);
+							tdma_set_sync_ref(ping_rx_ticks, t4_ticks);
 
-							g_last_rx_raw_ticks = ping_rx_ticks;
-							g_last_sync_local_ticks = ping_ticks_for_this_ctr;
 							g_last_sync_timestamp = k_uptime_get();
 
-							if (!g_time_initialized) {
-								g_server_ticks_offset = server_offset_ticks;
-								g_skew_ref_offset = server_offset_ticks;
-								g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-								g_sync_update_count = 0;
-								g_time_initialized = true;
-								server_time_synced = true;
-								LOG_DBG("Server offset initialized: %d ticks", server_offset_ticks);
-							} else {
-								// Long-baseline skew estimation:
-								// Keep skew reference point fixed, compute total drift
-								// over growing baseline to average out RTT noise
-								uint32_t delta_from_ref = ping_ticks_for_this_ctr - g_skew_ref_local_ticks;
+						if (!g_time_initialized) {
+							g_time_initialized = true;
+							LOG_DBG("TDMA sync initialized: rx_ref=%u local_ref=%u",
+								ping_rx_ticks, t4_ticks);
+						}
 
-								// Compute innovation (prediction residual) for diagnostics
-								int32_t predicted_drift = (int32_t)((int64_t)g_clock_skew_ppb * (int64_t)delta_from_ref / 1000000000LL);
-								int32_t predicted_offset = g_skew_ref_offset + predicted_drift;
-								int32_t innovation = server_offset_ticks - predicted_offset;
+						server_time_synced = true;
 
-								// Large jump detection (> 1 second ≈ 32000 ticks)
-								if (abs(innovation) > 32000) {
-									LOG_WRN(
-										"Large offset jump detected (%d ticks), resetting "
-										"(old=%d new=%d)",
-										innovation,
-										g_server_ticks_offset,
-										server_offset_ticks
-									);
-									g_server_ticks_offset = server_offset_ticks;
-									g_skew_ref_offset = server_offset_ticks;
-									g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-									g_clock_skew_ppb = 0;
-								} else {
-									// Update skew from long-baseline total drift
-									// As baseline grows, RTT noise effect shrinks
-									if (delta_from_ref >= 32768) {
-										int64_t total_drift = (int64_t)(server_offset_ticks - g_skew_ref_offset);
-										int32_t raw_skew_ppb = (int32_t)(total_drift * 1000000000LL / (int64_t)delta_from_ref);
-										// Gentle EMA: long baseline already provides stability
-										g_clock_skew_ppb = g_clock_skew_ppb + (raw_skew_ppb - g_clock_skew_ppb) / 4;
-									}
-
-									/*
-								 * Predict-Update EMA offset filter.
-								 *
-								 * Use skew prediction as the expected offset,
-								 * so EMA innovation contains only measurement
-								 * noise (not deterministic drift).  This allows
-								 * a smaller alpha for better noise rejection
-								 * while skew handles drift tracking.
-								 *
-								 * Warm-up (first 5 PONGs): alpha=3/4 for fast
-								 * initial convergence before skew is estimated.
-								 */
-								g_sync_update_count++;
-								/* Predict: where we expect the offset to be based on skew */
-								uint32_t delta_since_sync = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
-								int32_t predicted_current = (int32_t)g_server_ticks_offset
-									+ (int32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
-								int32_t offset_innovation = server_offset_ticks - predicted_current;
-								if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
-									/* Warm-up: alpha=3/4 for fast convergence */
-									g_server_ticks_offset = predicted_current + (offset_innovation * 3 + 2) / 4;
-								} else {
-									/* Steady state: alpha=1/4 (skew handles drift) */
-									g_server_ticks_offset = predicted_current + (offset_innovation + 2) / 4;
-								}
-								// Refresh skew reference periodically to avoid uint32 wrap
-								if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
-										g_skew_ref_offset = server_offset_ticks;
-										g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-									}
-
-									LOG_DBG("Offset update: innovation=%d offset=%d skew=%d ppb (rtt=%u min=%u)",
-										innovation, g_server_ticks_offset, g_clock_skew_ppb,
-										rtt_ticks, g_min_rtt_ticks);
-								}
-							}
-
-							server_time_synced = true;
-
-							// Display skew-compensated estimated server time
-							uint32_t local_now = sys_clock_tick_get_32();
-							uint32_t elapsed_since_meas = local_now - ping_ticks_for_this_ctr;
-							int32_t skew_corr = (int32_t)((int64_t)g_clock_skew_ppb * elapsed_since_meas / 1000000000LL);
-							uint32_t est_ticks = (uint32_t)((int32_t)g_server_ticks_offset + (int32_t)local_now + skew_corr);
-							uint32_t server_time_ms = k_ticks_to_ms_near32(est_ticks);
-							uint32_t server_ms = server_time_ms % 1000;
-							uint32_t server_s = (server_time_ms / 1000) % 60;
-							uint32_t server_m = (server_time_ms / 60000) % 60;
-							uint32_t server_h = (server_time_ms / 3600000) % 24;
-							LOG_DBG(
-								"estimated server time: %02u:%02u:%02u.%03u (ticks=%u)",
-								server_h,
-								server_m,
-								server_s,
-								server_ms,
-								est_ticks
-							);
+							LOG_DBG("PONG sync: rx_ref=%u local_ref=%u (rtt=%u min=%u)",
+								ping_rx_ticks, t4_ticks, rtt_ticks, g_min_rtt_ticks);
 						}
 					} else {
 						// No history found - likely too old or buffer wrapped
@@ -1649,15 +1534,11 @@ uint64_t esb_get_server_time_ticks_64(void)
 	if (now - g_last_sync_timestamp > TIME_SYNC_TIMEOUT_MS) {
 		LOG_WRN("Time sync timeout: %lld ms since last sync, clearing sync state", now - g_last_sync_timestamp);
 		server_time_synced = false;
+		tdma_clear_sync();
 		return 0;
 	}
 
-	uint32_t local_now = sys_clock_tick_get_32();
-	// Apply clock skew compensation only for time elapsed since last PONG
-	// (g_server_ticks_offset already incorporates all drift up to last measurement)
-	uint32_t elapsed = local_now - g_last_sync_local_ticks;
-	int32_t skew_correction = (int32_t)((int64_t)g_clock_skew_ppb * elapsed / 1000000000LL);
-	return (uint32_t)(g_server_ticks_offset + local_now) + skew_correction;
+	return tdma_get_time();
 }
 
 uint64_t esb_get_server_time_us_64(void)
