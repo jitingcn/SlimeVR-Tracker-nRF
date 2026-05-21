@@ -192,6 +192,7 @@ static void set_tracker_id(uint8_t id)
 // --- esb_write() rate logging ---
 static uint32_t esb_write_calls = 0;
 static uint32_t esb_write_queued = 0;
+static uint32_t esb_write_dup_queued = 0;
 static int64_t esb_rate_last_ts = 0;
 
 void esb_write_rate_tick(void)
@@ -202,9 +203,11 @@ void esb_write_rate_tick(void)
 	}
 	esb_write_calls++;
 	if (now - esb_rate_last_ts >= 5000) {
-		LOG_INF("esb_write rate: calls=%u/s queued=%u/s", esb_write_calls / 5, esb_write_queued / 5);
+		LOG_INF("esb_write rate: calls=%u/s queued=%u/s dup=%u/s",
+			esb_write_calls / 5, esb_write_queued / 5, esb_write_dup_queued / 5);
 		esb_write_calls = 0;
 		esb_write_queued = 0;
+		esb_write_dup_queued = 0;
 		esb_rate_last_ts = now;
 	}
 }
@@ -399,7 +402,7 @@ void event_handler(struct esb_evt const *event)
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
-		if (esb_paired && !connection_get_data_collection()) {
+		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
 			clocks_stop();
 		}
 		break;
@@ -1329,11 +1332,18 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	if (is_raw) {
 		tx_payload.noack = true;
 		queue_status = esb_write_payload(&tx_payload);
+		esb_write_dup_queued++;
 	}
 # if 0
-	if (no_ack) {
+	if (no_ack && !is_raw) {
 		// manually repeat packet for noack packets for better reliability
-		queue_status = esb_write_payload(&tx_payload);
+		int dup_ret = esb_write_payload(&tx_payload);
+		if (dup_ret != 0) {
+			LOG_WRN("Redundant copy queue failed: %d", dup_ret);
+		} else {
+			esb_write_dup_queued++;
+		}
+		queue_status = dup_ret;
 	}
 #endif
 	// Record ping history metadata (timing updated after TDMA wait, just before TX)
