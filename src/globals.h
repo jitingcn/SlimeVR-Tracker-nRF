@@ -41,8 +41,15 @@
 #define IGNORE_RESET CONFIG_IGNORE_RESET // If sw0 available, don't change any reset behavior
 #define WOM_USE_DCDC CONFIG_WOM_USE_DCDC // Use DCDC instead of LDO for WOM if it is more efficient
 
-/* Sensor gyroscope, accelerometer, and magnetometer axes should align to the IMU body axes
- * SENSOR_QUATERNION_CORRECTION should align the sensor to the device following Android convention
+/* Sensor gyroscope, accelerometer, and magnetometer axes should align to the IMU body axes.
+ * SENSOR_QUATERNION_CORRECTION right-multiplies the fused sensor quaternion to align sensor axes
+ * to the device/body axes following Android convention: Qdevice = Qfused * Qcorr.
+ * SENSOR_QUATERNION_OUTPUT_BIAS left-multiplies only the reported quaternion to add an optional
+ * preview/world-frame neutral-pose bias after device alignment: Qout = Qbias * Qdevice.
+ * This lets the preview/model pose be adjusted without changing the device-frame linear
+ * acceleration basis, which continues to use only SENSOR_QUATERNION_CORRECTION.
+ * The two transforms intentionally stay separate because left and right quaternion multiplies do
+ * not generally commute.
  * On flat surface / face up:
  * Left from the perspective of the device / right from your perspective is +X
  * Front side (facing up) is +Z
@@ -70,6 +77,17 @@
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz
 #endif
 
+#if defined(CONFIG_BOARD_FOXSNACKLITEV2_UF2)
+#define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f
+#endif
+
+#if defined(CONFIG_BOARD_PROMICRO_UF2) || defined(CONFIG_BOARD_STYRIA_MINI_UF2)
+#define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.0f, 0.0f, -0.7071f
+// Preserve the device-frame -90 deg Z mounting correction, then bias only the reported
+// quaternion so the upright face-forward neutral pose reports near [0.7071, 0.7071, 0, 0].
+#define SENSOR_QUATERNION_OUTPUT_BIAS 0.7071f, 0.0f, 0.0f, 0.7071f
+#endif
+
 // default orientation for most boards with the sensor mounted flat on the PCB
 // with the top side as +X and front side as +Z and left side as +Y from your perspective
 // on stacked promicro with common breakout board
@@ -79,6 +97,15 @@
 // not sure if this is needed or correct, it still seems weird in server without full reset, but leaving it for now
 #ifndef SENSOR_QUATERNION_CORRECTION
 #define SENSOR_QUATERNION_CORRECTION 1.0f, 0.0f, 0.0f, 0.0f
+#endif
+#ifndef SENSOR_QUATERNION_OUTPUT_BIAS
+#define SENSOR_QUATERNION_OUTPUT_BIAS 1.0f, 0.0f, 0.0f, 0.0f
+// Default identity bias lets the compiler elide the extra output-bias multiply entirely.
+#define SENSOR_QUATERNION_OUTPUT_BIAS_IS_IDENTITY 1
+#endif
+#ifndef SENSOR_QUATERNION_OUTPUT_BIAS_IS_IDENTITY
+// If a board explicitly defines SENSOR_QUATERNION_OUTPUT_BIAS as identity, set this to 1 too.
+#define SENSOR_QUATERNION_OUTPUT_BIAS_IS_IDENTITY 0
 #endif
 
 #endif

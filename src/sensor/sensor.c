@@ -58,6 +58,11 @@ static sensor_debug_state_t debug_state = {
 	.output_every_n = 4  // Default: output every 4 accel samples
 };
 
+// Set to 1 to temporarily enable the extra Qdev/Qout debug line
+#ifndef SENSOR_DEBUG_QDEV_QOUT
+#define SENSOR_DEBUG_QDEV_QOUT 0
+#endif
+
 #if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking state - records min/max values during runtime (not persisted)
 static sensor_range_stats_t range_stats = {
@@ -110,7 +115,10 @@ static uint8_t sensor_mag_dev_reg = 0xFF;
 static float q[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // vector to hold quaternion
 static float last_q[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // vector to hold quaternion
 
-static float q3[4] = {SENSOR_QUATERNION_CORRECTION}; // correction quaternion
+static float sensor_to_device_quat[4] = {SENSOR_QUATERNION_CORRECTION};
+#if !SENSOR_QUATERNION_OUTPUT_BIAS_IS_IDENTITY
+static float reported_output_bias_quat[4] = {SENSOR_QUATERNION_OUTPUT_BIAS};
+#endif
 
 static float last_lin_a[3] = {0}; // vector to hold last linear accelerometer
 
@@ -236,6 +244,29 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_DBG);
 #else
 LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 #endif
+
+static inline void sensor_compute_device_quat(const float *fused_quat, float *device_quat)
+{
+	q_multiply(fused_quat, sensor_to_device_quat, device_quat);
+}
+
+static inline void sensor_compute_reported_quat(const float *device_quat, float *reported_quat)
+{
+#if SENSOR_QUATERNION_OUTPUT_BIAS_IS_IDENTITY
+	memcpy(reported_quat, device_quat, sizeof(float) * 4);
+#else
+	q_multiply(reported_output_bias_quat, device_quat, reported_quat);
+#endif
+}
+
+static inline void sensor_compute_device_and_reported_quat(
+	const float *fused_quat,
+	float *device_quat,
+	float *reported_quat)
+{
+	sensor_compute_device_quat(fused_quat, device_quat);
+	sensor_compute_reported_quat(device_quat, reported_quat);
+}
 
 static int sensor_scan(void);
 static int sensor_init(void);
@@ -1712,7 +1743,7 @@ void sensor_loop(void)
 #endif
 				}
 
-				v_rotate(m, q3, m); // magnetic field in local device frame, no other transformation will be done
+				v_rotate(m, sensor_to_device_quat, m); // magnetic field in local device frame, no other transformation will be done
 				connection_update_sensor_mag(m);
 			}
 
@@ -1935,6 +1966,14 @@ void sensor_loop(void)
 					printk("     VQF: Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 						(double)q[0], (double)q[1], (double)q[2], (double)q[3],
 						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2]);
+#if SENSOR_DEBUG_QDEV_QOUT
+					float debug_device_quat[4];
+					float debug_reported_quat[4];
+					sensor_compute_device_and_reported_quat(q, debug_device_quat, debug_reported_quat);
+					printk("     Qdev[%.3f,%.3f,%.3f,%.3f] Qout[%.3f,%.3f,%.3f,%.3f]\n",
+						(double)debug_device_quat[0], (double)debug_device_quat[1], (double)debug_device_quat[2], (double)debug_device_quat[3],
+						(double)debug_reported_quat[0], (double)debug_reported_quat[1], (double)debug_reported_quat[2], (double)debug_reported_quat[3]);
+#endif
 					printk("     Rest:%c RestDev[G:%.3f,A:%.3f] Bias[%.3f,%.3f,%.3f]°/s Sigma:%.3f°/s Delta:%.2f°\n",
 						vqf_info.rest_detected ? 'Y' : 'N',
 						(double)vqf_info.rest_deviations[0], (double)vqf_info.rest_deviations[1],
@@ -1980,6 +2019,14 @@ void sensor_loop(void)
 					printk("     Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
 						(double)q[0], (double)q[1], (double)q[2], (double)q[3],
 						(double)lin_a[0], (double)lin_a[1], (double)lin_a[2]);
+#if SENSOR_DEBUG_QDEV_QOUT
+					float debug_device_quat[4];
+					float debug_reported_quat[4];
+					sensor_compute_device_and_reported_quat(q, debug_device_quat, debug_reported_quat);
+					printk("     Qdev[%.3f,%.3f,%.3f,%.3f] Qout[%.3f,%.3f,%.3f,%.3f]\n",
+						(double)debug_device_quat[0], (double)debug_device_quat[1], (double)debug_device_quat[2], (double)debug_device_quat[3],
+						(double)debug_reported_quat[0], (double)debug_reported_quat[1], (double)debug_reported_quat[2], (double)debug_reported_quat[3]);
+#endif
 #endif
 				}
 			}
@@ -1998,15 +2045,16 @@ void sensor_loop(void)
 			{
 				memcpy(last_q, q, sizeof(q));
 				memcpy(last_lin_a, lin_a, sizeof(lin_a));
-				float q_offset[4];
-				q_multiply(q, q3, q_offset); // quaternion in device orientation, connection will change format from wxyz to xyzw
-				v_rotate(lin_a, q3, lin_a); // linear acceleration in local device frame, no other transformation will be done
+				float device_quat[4];
+				float reported_quat[4];
+				sensor_compute_device_and_reported_quat(q, device_quat, reported_quat);
+				v_rotate(lin_a, sensor_to_device_quat, lin_a); // linear acceleration stays in device frame; output bias does not apply
 
 				if (!send_quat_data && !send_lin_accel_data) {
 					memset(lin_a, 0, sizeof(lin_a)); // zero out linear acceleration when no motion detected
 				}
 
-				connection_update_sensor_data(q_offset, lin_a, sensor_data_time);
+				connection_update_sensor_data(reported_quat, lin_a, sensor_data_time);
 				last_sensor_send_time = now;
 
 				if (!resting) {
