@@ -46,6 +46,9 @@
  * to the device/body axes following Android convention: Qdevice = Qfused * Qcorr.
  * SENSOR_QUATERNION_OUTPUT_BIAS left-multiplies only the reported quaternion to add an optional
  * preview/world-frame neutral-pose bias after device alignment: Qout = Qbias * Qdevice.
+ * Sensor-frame vectors that are reported in local device coordinates (for example linear
+ * acceleration and packet-4 magnetometer) should use the inverse/conjugate of Qcorr, because
+ * they are active vector rotations rather than right-multiplied orientation composition.
  * This lets the preview/model pose be adjusted without changing the device-frame linear
  * acceleration basis, which continues to use only SENSOR_QUATERNION_CORRECTION.
  * The two transforms intentionally stay separate because left and right quaternion multiplies do

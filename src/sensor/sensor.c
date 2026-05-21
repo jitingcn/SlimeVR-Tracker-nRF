@@ -116,6 +116,7 @@ static float q[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // vector to hold quaternion
 static float last_q[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // vector to hold quaternion
 
 static float sensor_to_device_quat[4] = {SENSOR_QUATERNION_CORRECTION};
+static float sensor_vector_to_device_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 #if !SENSOR_QUATERNION_OUTPUT_BIAS_IS_IDENTITY
 static float reported_output_bias_quat[4] = {SENSOR_QUATERNION_OUTPUT_BIAS};
 #endif
@@ -259,6 +260,13 @@ static inline void sensor_compute_reported_quat(const float *device_quat, float 
 #endif
 }
 
+static inline void sensor_update_frame_transform_cache(void)
+{
+	// Orientation uses Qdevice = Qfused * Qcorr. For active vector rotation from
+	// sensor frame into device frame, we need the inverse of that basis correction.
+	q_conj(sensor_to_device_quat, sensor_vector_to_device_quat);
+}
+
 static inline void sensor_compute_device_and_reported_quat(
 	const float *fused_quat,
 	float *device_quat,
@@ -266,6 +274,13 @@ static inline void sensor_compute_device_and_reported_quat(
 {
 	sensor_compute_device_quat(fused_quat, device_quat);
 	sensor_compute_reported_quat(device_quat, reported_quat);
+}
+
+static inline void sensor_rotate_sensor_vector_to_device_frame(
+	const float *sensor_vector,
+	float *device_vector)
+{
+	v_rotate(sensor_vector, sensor_vector_to_device_quat, device_vector);
 }
 
 static int sensor_scan(void);
@@ -959,6 +974,7 @@ static void sensor_update_sensor_state(void)
 int sensor_init(void)
 {
 	int err;
+	sensor_update_frame_transform_cache();
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
 	if (mag_available && mag_enabled) // shutdown magnetometer first only when enabled
 	{
@@ -1743,8 +1759,9 @@ void sensor_loop(void)
 #endif
 				}
 
-				v_rotate(m, sensor_to_device_quat, m); // magnetic field in local device frame, no other transformation will be done
-				connection_update_sensor_mag(m);
+				float mag_device[3];
+				sensor_rotate_sensor_vector_to_device_frame(m, mag_device);
+				connection_update_sensor_mag(mag_device);
 			}
 
 			// Copy average acceleration for this frame
@@ -2048,7 +2065,7 @@ void sensor_loop(void)
 				float device_quat[4];
 				float reported_quat[4];
 				sensor_compute_device_and_reported_quat(q, device_quat, reported_quat);
-				v_rotate(lin_a, sensor_to_device_quat, lin_a); // linear acceleration stays in device frame; output bias does not apply
+				sensor_rotate_sensor_vector_to_device_frame(lin_a, lin_a);
 
 				if (!send_quat_data && !send_lin_accel_data) {
 					memset(lin_a, 0, sizeof(lin_a)); // zero out linear acceleration when no motion detected
