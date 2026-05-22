@@ -646,9 +646,9 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 //	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	ireg_buf[0] = ICM45686_IPREG_TOP1;
 	ireg_buf[1] = ICM45686_ACCEL_WOM_X_THR;
-	ireg_buf[2] = 0x08; // set wake thresholds // 8 x 3.9 mg is ~31.20 mg
-	ireg_buf[3] = 0x08; // set wake thresholds
-	ireg_buf[4] = 0x08; // set wake thresholds
+	ireg_buf[2] = 0x07; // set wake thresholds // 7 x 3.9 mg is ~27.3 mg
+	ireg_buf[3] = 0x07; // set wake thresholds
+	ireg_buf[4] = 0x07; // set wake thresholds
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 5); // write buffer
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_TMST_WOM_CONFIG, 0x14); // enable WOM, enable WOM interrupt
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG1, 0x0E); // route WOM interrupt

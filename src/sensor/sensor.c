@@ -914,7 +914,7 @@ static enum sensor_sensor_timeout sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 static void sensor_update_sensor_state(void)
 {
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
-	bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.005) : q_epsilon(q, last_q, 0.05); // TODO: Probably okay to use the constantly updating last_q?
+	bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.004) : q_epsilon(q, last_q, 0.05); // TODO: Probably okay to use the constantly updating last_q?
 	bool in_test_mode = test_mode_get();
 	if (!in_test_mode && !calibrating && resting)
 	{
