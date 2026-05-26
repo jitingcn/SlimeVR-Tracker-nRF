@@ -124,7 +124,6 @@ int ssi_write(enum sensor_interface_dev dev, const uint8_t *buf, uint32_t num_by
 		tx_bufs[0].buf = (void *)buf;
 		tx_bufs[0].len = num_bytes;
 		tx.count = 1;
-		k_busy_wait(1);
 #if DEBUG
 		LOG_DBG("ssi_write: dev=%d, num_bytes=%zu", dev, num_bytes);
 		LOG_HEXDUMP_DBG(buf, num_bytes, "ssi_write: buf");
@@ -164,7 +163,6 @@ int ssi_read(enum sensor_interface_dev dev, uint8_t *buf, uint32_t num_bytes)
 		rx_bufs[1].buf = buf;
 		rx_bufs[1].len = num_bytes;
 		rx.count = 2;
-		k_busy_wait(1);
 #if DEBUG
 		LOG_DBG("ssi_read: dev=%d, num_bytes=%zu", dev, num_bytes);
 		int err = spi_transceive_dt(sensor_interface_dev_spi[dev], NULL, &rx);
@@ -203,7 +201,6 @@ int ssi_write_read(enum sensor_interface_dev dev, const void *write_buf, size_t 
 		rx_bufs[1].buf = read_buf;
 		rx_bufs[1].len = num_read;
 		rx.count = 2;
-		k_busy_wait(1);
 #if DEBUG
 		LOG_DBG("ssi_write_read: dev=%d, num_write=%zu, num_read=%zu", dev, num_write, num_read);
 		LOG_HEXDUMP_DBG(write_buf, num_write, "ssi_write_read: write_buf");
@@ -253,7 +250,6 @@ int ssi_burst_write(enum sensor_interface_dev dev, uint8_t start_addr, const uin
 		tx_bufs[1].buf = (void *)buf;
 		tx_bufs[1].len = num_bytes;
 		tx.count = 2;
-		k_busy_wait(1);
 #if DEBUG
 		LOG_DBG("ssi_burst_write: dev=%d, start_addr=0x%02X, num_bytes=%d", dev, start_addr, num_bytes);
 		LOG_HEXDUMP_DBG(&start_addr, 1, "ssi_burst_write: start_addr");
