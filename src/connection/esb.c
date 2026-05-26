@@ -26,6 +26,7 @@
 #include "system/system.h"
 #include "system/test_mode.h"
 #include "system/watchdog.h"
+#include "system/esb_ota.h"
 #include "connection.h"
 #include "zephyr/sys/byteorder.h"
 #include "zephyr/sys/time_units.h"
@@ -122,6 +123,17 @@ static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
 static float received_sens_data[3] = {0};   // Store sensitivity data
 #define REMOTE_COMMAND_DELAY_MS 1500
+
+/* ── OTA packet queue (ISR → thread) ─────────────────────────────
+ * OTA packets received in ESB ISR are queued here and processed
+ * in the connection thread where flash/logging is safe. */
+#define OTA_RX_QUEUE_SIZE 16
+static struct {
+	uint8_t data[48];
+	uint8_t length;
+} ota_rx_queue[OTA_RX_QUEUE_SIZE];
+static volatile uint8_t ota_rx_head;
+static volatile uint8_t ota_rx_tail;
 
 // Server time synchronization for TDMA scheduling (using ticks)
 static bool server_time_synced = false;
@@ -903,6 +915,18 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_TDMA_OFF:
 								cmd_name = "TDMA_OFF";
 								break;
+							case ESB_PONG_FLAG_OTA_QUERY_INFO:
+								cmd_name = "OTA_QUERY_INFO";
+								break;
+							case ESB_PONG_FLAG_OTA_ABORT:
+								cmd_name = "OTA_ABORT";
+								break;
+							case ESB_PONG_FLAG_OTA_SUPPRESS:
+								cmd_name = "OTA_SUPPRESS";
+								break;
+							case ESB_PONG_FLAG_OTA_UNSUPPRESS:
+								cmd_name = "OTA_UNSUPPRESS";
+								break;
 							}
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
 								LOG_INF(
@@ -913,11 +937,14 @@ void event_handler(struct esb_evt const *event)
 									REMOTE_COMMAND_DELAY_MS
 								);
 							} else {
+								bool is_ota = (pong_flags >= ESB_PONG_FLAG_OTA_QUERY_INFO &&
+									       pong_flags <= ESB_PONG_FLAG_OTA_UNSUPPRESS);
 								LOG_INF(
-									"Remote command %s (0x%02X) received, will execute in %dms",
+									"Remote command %s (0x%02X) received, %s",
 									cmd_name,
 									pong_flags,
-									REMOTE_COMMAND_DELAY_MS
+									is_ota ? "executing immediately" :
+									"will execute in 1500ms"
 								);
 							}
 						}
@@ -961,7 +988,23 @@ void event_handler(struct esb_evt const *event)
 							raw_retx_queue[raw_retx_count++] = seq;
 						}
 					}
-				} else {
+				}
+				/* OTA packets from receiver (in ACK payload) —
+				 * queue for deferred processing in thread context
+				 * (flash ops and logging not safe in ISR) */
+				else if (rx_payload.length >= 2 &&
+					 rx_payload.data[0] >= ESB_OTA_DATA_TYPE &&
+					 rx_payload.data[0] <= ESB_OTA_ACTIVATE_TYPE) {
+					uint8_t next = (ota_rx_head + 1) % OTA_RX_QUEUE_SIZE;
+					if (next != ota_rx_tail) {
+						memcpy(ota_rx_queue[ota_rx_head].data,
+						       rx_payload.data, rx_payload.length);
+						ota_rx_queue[ota_rx_head].length = rx_payload.length;
+						__DMB();
+						ota_rx_head = next;
+					}
+				}
+				else {
 					LOG_WRN("Ignoring invalid payload length %u", rx_payload.length);
 				}
 			} // end of rx_payload length switch
@@ -1253,6 +1296,21 @@ void esb_clear_pair(void)
 	sys_write(PAIRED_ID, &retained->paired_addr, paired_addr,
 			  sizeof(paired_addr)); // write zeroes
 	LOG_INF("Pairing data reset");
+}
+
+void esb_process_ota_rx_queue(void)
+{
+	while (ota_rx_tail != ota_rx_head) {
+		uint8_t idx = ota_rx_tail;
+		if (ota_rx_queue[idx].data[0] != ESB_OTA_DATA_TYPE) {
+			LOG_WRN("OTA queue: non-data type=0x%02X len=%u",
+				ota_rx_queue[idx].data[0], ota_rx_queue[idx].length);
+		}
+		esb_ota_process_rx_packet(ota_rx_queue[idx].data,
+					  ota_rx_queue[idx].length);
+		__DMB();
+		ota_rx_tail = (idx + 1) % OTA_RX_QUEUE_SIZE;
+	}
 }
 
 void esb_write(uint8_t *data, bool no_ack, size_t data_length)
@@ -1594,7 +1652,11 @@ static void esb_thread(void)
 
 		if (received_remote_command != ESB_PONG_FLAG_NORMAL && received_remote_command != acked_remote_command
 			&& remote_command_receive_time > 0) {
-			if (now_idle - remote_command_receive_time >= REMOTE_COMMAND_DELAY_MS) {
+			/* OTA commands (0x30-0x33) bypass the safety delay since they are
+			 * time-sensitive and not destructive like SHUTDOWN/CALIBRATE. */
+			bool is_ota_cmd = (received_remote_command >= ESB_PONG_FLAG_OTA_QUERY_INFO &&
+					   received_remote_command <= ESB_PONG_FLAG_OTA_UNSUPPRESS);
+			if (is_ota_cmd || now_idle - remote_command_receive_time >= REMOTE_COMMAND_DELAY_MS) {
 				switch (received_remote_command) {
 				case ESB_PONG_FLAG_SHUTDOWN:
 					LOG_WRN("Executing remote command: SHUTDOWN");
@@ -1846,6 +1908,26 @@ static void esb_thread(void)
 					LOG_INF("Executing remote command: DATA_COLLECT_OFF");
 					connection_set_data_collection(false);
 					test_mode_set(false);
+					break;
+
+				case ESB_PONG_FLAG_OTA_QUERY_INFO:
+					LOG_INF("Executing remote command: OTA_QUERY_INFO");
+					esb_ota_handle_query_info();
+					break;
+
+				case ESB_PONG_FLAG_OTA_ABORT:
+					LOG_WRN("Executing remote command: OTA_ABORT");
+					esb_ota_handle_abort();
+					break;
+
+				case ESB_PONG_FLAG_OTA_SUPPRESS:
+					LOG_INF("Executing remote command: OTA_SUPPRESS (reducing poll rate)");
+					connection_set_ota_suppressed(true);
+					break;
+
+				case ESB_PONG_FLAG_OTA_UNSUPPRESS:
+					LOG_INF("Executing remote command: OTA_UNSUPPRESS (resuming normal rate)");
+					connection_set_ota_suppressed(false);
 					break;
 
 				default:

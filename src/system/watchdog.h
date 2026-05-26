@@ -113,6 +113,12 @@ void watchdog_clear_reset_count(void);
 void watchdog_mark_boot_success(void);
 
 /**
+ * @brief Get OTA RAM engine GPREGRET value saved at boot
+ * @return GPREGRET value (0xD0-0xDE if from OTA engine, 0 otherwise)
+ */
+uint8_t watchdog_get_ota_gpregret(void);
+
+/**
  * @brief Suspend all watchdog channels before entering low power mode
  */
 void watchdog_suspend_all(void);
@@ -149,6 +155,7 @@ static inline bool watchdog_caused_reset(void) { return false; }
 static inline uint8_t watchdog_get_reset_count(void) { return 0; }
 static inline void watchdog_clear_reset_count(void) {}
 static inline void watchdog_mark_boot_success(void) {}
+static inline uint8_t watchdog_get_ota_gpregret(void) { return 0; }
 static inline void watchdog_suspend_all(void) {}
 static inline void watchdog_resume_all(void) {}
 static inline const char *watchdog_get_channel_name(wdt_channel_id_t channel)
