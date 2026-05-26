@@ -590,6 +590,7 @@ static void power_thread(void)
 {
 	static bool boot_success_checked = false;
 	static bool watchdog_registered = false;
+	static bool ota_gpregret_logged = false;
 
 	/* Register power thread with watchdog (watchdog is initialized via SYS_INIT) */
 	if (!watchdog_registered) {
@@ -599,6 +600,15 @@ static void power_thread(void)
 
 	while (1)
 	{
+		/* Log OTA RAM engine GPREGRET once, after USB console is ready (~5s) */
+		if (!ota_gpregret_logged && k_uptime_get() > 5000) {
+			ota_gpregret_logged = true;
+			uint8_t gp = watchdog_get_ota_gpregret();
+			if (gp >= 0xD0 && gp <= 0xDE) {
+				LOG_WRN("OTA RAM engine GPREGRET=0x%02X (last stage before reset)", gp);
+			}
+		}
+
 		/* After 60 seconds of successful operation, mark boot as successful.
 		 * This is long enough to ensure the system is truly stable before
 		 * clearing the WDT reset counter, allowing multiple WDT resets to

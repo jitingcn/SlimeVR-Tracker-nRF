@@ -33,6 +33,7 @@ static uint32_t channel_timeouts[WDT_CHANNEL_COUNT];
 /* Watchdog state */
 static bool watchdog_initialized = false;
 static bool boot_success_marked = false;
+static uint8_t saved_gpregret = 0;  /* Saved at PRE_KERNEL for OTA debug */
 
 /* Channel names for logging */
 static const char *channel_names[] = {
@@ -177,6 +178,13 @@ static int watchdog_early_check(void)
 	/* Check if last reset was caused by watchdog - save for later use */
 	last_reset_was_wdt = watchdog_caused_reset();
 
+	/* Save GPREGRET for OTA RAM engine debug (survives system reset) */
+	saved_gpregret = NRF_POWER->GPREGRET & 0xFF;
+	if (saved_gpregret >= 0xD0 && saved_gpregret <= 0xDE) {
+		/* Clear it so bootloader doesn't see it on next reset */
+		NRF_POWER->GPREGRET = 0;
+	}
+
 	/* Clear reset reason flags early to prevent other code from seeing stale values */
 #ifdef NRF_RESET
 	NRF_RESET->RESETREAS = NRF_RESET->RESETREAS;
@@ -274,6 +282,11 @@ int watchdog_init(void)
 static int watchdog_sys_init(void)
 {
 	return watchdog_init();
+}
+
+uint8_t watchdog_get_ota_gpregret(void)
+{
+	return saved_gpregret;
 }
 
 /* Initialize watchdog at APPLICATION level, after retained memory is validated */
