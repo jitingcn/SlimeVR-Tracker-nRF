@@ -84,12 +84,10 @@
         compatible = "gpio-keys";
         
         button0: button_0 {
-            /* 将主按键（SWO）更正为 P0.20 */
             gpios = <&gpio0 20 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
             label = "Push button switch 0";
         };
 
-        /* 新增：将 TP4057 的状态引脚注册进系统，并强制开启内部上拉 */
         chrg_pin: chrg_pin {
             gpios = <&gpio0 15 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
             label = "Charge Status (CHRG)";
@@ -114,17 +112,13 @@
         led0 = &led0;
         led1 = &led1;
         led2 = &led2;
-        /* 预留给 SlimeVR 电池管理系统的别名 */
-        chrg-state = &chrg_pin;
-        stby-state = &stdby_pin;
-        pwr-en = &pwr_en_pin;
     };
 
     battery-divider {
         compatible = "voltage-divider";
         status = "okay";
-        io-channels = <&adc 12>; // 12号通道即 VDDHDIV5
-        output-ohms = <1>;       // 这里的 1/5 比例对应芯片内部的 5分压
+        io-channels = <&adc 12>;
+        output-ohms = <1>;
         full-ohms = <5>;
     };
 
@@ -174,6 +168,11 @@ zephyr_udc0: &usbd {
     };
 };
 
+&wdt {
+	status = "okay";
+};
+
+
 &nfct {
     status = "disabled";
 };
@@ -185,7 +184,6 @@ zephyr_udc0: &usbd {
     pinctrl-0 = <&spi3_default>;
     pinctrl-1 = <&spi3_sleep>;
     pinctrl-names = "default", "sleep";
-    /* CS 引脚设为 P0.30 */
     cs-gpios = <&gpio0 30 GPIO_ACTIVE_LOW>;
 
     imu_spi: imu_spi@0 {
