@@ -811,8 +811,12 @@ void event_handler(struct esb_evt const *event)
 
 					// handle remote commands and delayed execution
 					if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-						if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
-							// new command received
+						if (received_remote_command == ESB_PONG_FLAG_NORMAL ||
+						    (received_remote_command == acked_remote_command &&
+						     pong_flags != received_remote_command)) {
+							// new command received, or override already-executed command
+							// whose confirmation was superseded by the receiver
+							// (but skip re-accepting the same command repeatedly)
 							received_remote_command = pong_flags;
 							remote_command_receive_time = k_uptime_get();
 
