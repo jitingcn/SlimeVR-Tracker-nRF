@@ -152,8 +152,8 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 	/* ESB radio packet buffers (DPL format) */
 	/* TX: LENGTH(1) + S1(1) + payload(13) = 15 bytes */
 	uint8_t __attribute__((aligned(4))) tx_buf[64];
-	/* RX: LENGTH(1) + S1(1) + payload(48) = 50 bytes */
-	uint8_t __attribute__((aligned(4))) rx_buf[64];
+	/* RX: LENGTH(1) + S1(1) + payload(64) = 66 bytes */
+	uint8_t __attribute__((aligned(4))) rx_buf[68];
 
 	/* ── Ensure HFXO (32 MHz crystal) is running ────────────────── */
 	/* RADIO requires HFXO for proper frequency accuracy.
@@ -327,7 +327,7 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 				if (seq == next_seq) {
 					/* Data payload starts at rx_buf[6], length = rx_len - 4 */
 					uint32_t data_len = rx_len - 4;
-					if (data_len > 44) data_len = 44;
+					if (data_len > 60) data_len = 60;
 
 					/* Copy to page buffer, handling page boundary splits */
 					uint32_t data_off = 0;
@@ -343,6 +343,21 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 							/* Feed WDT before flash ops */
 							*WDT_RR0 = 0x6E524635;
 
+							/* Compare page buffer with existing flash content.
+							 * Skip erase+write if identical — saves flash wear
+							 * and speeds up re-flashing same/similar firmware. */
+							const volatile uint32_t *flash_cmp = (const volatile uint32_t *)page_addr;
+							uint32_t *buf_cmp = (uint32_t *)page_buf;
+							uint32_t cmp_words = p->page_size / 4;
+							bool page_match = true;
+							for (uint32_t w = 0; w < cmp_words; w++) {
+								if (flash_cmp[w] != buf_cmp[w]) {
+									page_match = false;
+									break;
+								}
+							}
+
+							if (!page_match) {
 							/* Erase page */
 							NVMC[N_CONFIG] = 2;  /* Een */
 							__asm volatile("dsb");
@@ -363,6 +378,7 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 
 							NVMC[N_CONFIG] = 0;  /* Ren */
 							__asm volatile("dsb");
+							} /* end if (!page_match) */
 
 							/* Advance to next page */
 							page_addr += p->page_size;

@@ -129,7 +129,7 @@ static float received_sens_data[3] = {0};   // Store sensitivity data
  * in the connection thread where flash/logging is safe. */
 #define OTA_RX_QUEUE_SIZE 16
 static struct {
-	uint8_t data[48];
+	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH];
 	uint8_t length;
 } ota_rx_queue[OTA_RX_QUEUE_SIZE];
 static volatile uint8_t ota_rx_head;
@@ -811,8 +811,12 @@ void event_handler(struct esb_evt const *event)
 
 					// handle remote commands and delayed execution
 					if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-						if (received_remote_command == ESB_PONG_FLAG_NORMAL) {
-							// new command received
+						if (received_remote_command == ESB_PONG_FLAG_NORMAL ||
+						    (received_remote_command == acked_remote_command &&
+						     pong_flags != received_remote_command)) {
+							// new command received, or override already-executed command
+							// whose confirmation was superseded by the receiver
+							// (but skip re-accepting the same command repeatedly)
 							received_remote_command = pong_flags;
 							remote_command_receive_time = k_uptime_get();
 
