@@ -75,13 +75,13 @@
  * Byte  0:     ESB_OTA_DATA_TYPE (0x20)
  * Byte  1:     tracker_id
  * Byte  2-3:   sequence number (big-endian uint16, 0-based)
- * Byte  4-47:  firmware data (up to 44 bytes)
+ * Byte  4-63:  firmware data (up to 60 bytes)
  */
 #define OTA_DATA_HEADER_SIZE    4
-#define OTA_DATA_MAX_PAYLOAD    44  /* 48 - 4 header bytes */
+#define OTA_DATA_MAX_PAYLOAD    60  /* 64 - 4 header bytes */
 
 /*
- * ── OTA Begin Packet Format (Receiver → Tracker, 48 bytes) ─────────
+ * ── OTA Begin Packet Format (Receiver → Tracker, 64 bytes) ─────────
  *
  * Byte  0:     ESB_OTA_BEGIN_TYPE (0x23)
  * Byte  1:     tracker_id
@@ -89,12 +89,12 @@
  * Byte  6-9:   image_crc32 (uint32 LE, CRC32 of firmware binary)
  * Byte 10-11:  total_packets (uint16 BE)
  * Byte 12:     ota_protocol_version (1)
- * Byte 13-44:  board_target (null-terminated string, max 32 chars)
- * Byte 45-46:  flash_base_address (uint16 BE, page-aligned: actual_addr >> 12)
- * Byte 47:     CRC-8 CCITT
+ * Byte 13-60:  board_target (null-terminated string, max 48 bytes)
+ * Byte 61-62:  flash_base_address (uint16 BE, page-aligned: actual_addr >> 12)
+ * Byte 63:     CRC-8 CCITT
  */
-#define OTA_BEGIN_PACKET_SIZE   48
-#define OTA_BOARD_TARGET_MAX    32
+#define OTA_BEGIN_PACKET_SIZE   64
+#define OTA_BOARD_TARGET_MAX    48
 #define OTA_PROTOCOL_VERSION    1
 
 /*
@@ -124,11 +124,11 @@
  * Byte  9-12:  firmware_size (uint32 LE, current running firmware)
  * Byte 13:     bootloader_type (0=none, 1=adafruit_uf2, 2=mcuboot)
  * Byte 14:     ota_protocol_version
- * Byte 15-44:  board_target (null-terminated string, max 30 chars)
- * Byte 45-46:  flash_base_address (uint16 BE, page-aligned: actual_addr >> 12)
- * Byte 47:     CRC-8 CCITT
+ * Byte 15-62:  board_target (null-terminated string, max 48 bytes)
+ * Byte 63-64:  flash_base_address (uint16 BE, page-aligned: actual_addr >> 12)
+ * Byte 65:     CRC-8 CCITT
  */
-#define OTA_FW_INFO_PACKET_SIZE 48
+#define OTA_FW_INFO_PACKET_SIZE 66
 
 /*
  * ── OTA Timing Constants ────────────────────────────────────────────

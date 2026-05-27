@@ -210,8 +210,8 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	}
 
 	/* Validate CRC-8 */
-	uint8_t pkt_crc = data[47];
-	uint8_t calc_crc = esb_ota_crc8(data, 47);
+	uint8_t pkt_crc = data[63];
+	uint8_t calc_crc = esb_ota_crc8(data, 63);
 	if (pkt_crc != calc_crc) {
 		LOG_ERR("OTA BEGIN: CRC mismatch (got 0x%02X, expected 0x%02X)", pkt_crc, calc_crc);
 		return -EINVAL;
@@ -223,7 +223,7 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	uint16_t total_packets = sys_get_be16(&data[10]);
 	uint8_t protocol_ver = data[12];
 	const char *board_target = (const char *)&data[13];
-	uint32_t flash_base = (uint32_t)sys_get_be16(&data[45]) << 12; /* Page-aligned */
+	uint32_t flash_base = (uint32_t)sys_get_be16(&data[61]) << 12; /* Page-aligned */
 
 	LOG_INF("OTA BEGIN: size=%u, crc32=0x%08X, packets=%u, proto=%u, board=%s, base=0x%X",
 		image_size, image_crc32, total_packets, protocol_ver, board_target, flash_base);
@@ -696,9 +696,9 @@ static void ota_send_fw_info(void)
 	strncpy((char *)&pkt[15], board, OTA_BOARD_TARGET_MAX - 1);
 
 	/* Flash base address (page-aligned, >> 12) */
-	sys_put_be16((uint16_t)(OTA_FLASH_BASE >> 12), &pkt[45]);
+	sys_put_be16((uint16_t)(OTA_FLASH_BASE >> 12), &pkt[63]);
 
-	pkt[47] = esb_ota_crc8(pkt, 47);
+	pkt[65] = esb_ota_crc8(pkt, 65);
 
 	esb_write(pkt, false, OTA_FW_INFO_PACKET_SIZE);
 }

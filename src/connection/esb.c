@@ -129,7 +129,7 @@ static float received_sens_data[3] = {0};   // Store sensitivity data
  * in the connection thread where flash/logging is safe. */
 #define OTA_RX_QUEUE_SIZE 16
 static struct {
-	uint8_t data[48];
+	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH];
 	uint8_t length;
 } ota_rx_queue[OTA_RX_QUEUE_SIZE];
 static volatile uint8_t ota_rx_head;
