@@ -473,6 +473,8 @@ K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4
 static uint16_t raw_sequence = 0;
 static bool data_collection_active = false;
 static volatile bool ota_suppressed = false;  /* Reduce poll rate during parallel OTA */
+static int64_t ota_suppress_start_time = 0;   /* Timestamp when suppress was enabled */
+#define OTA_SUPPRESS_TIMEOUT_MS (10 * 60 * 1000)
 
 /*
  * ARQ ring buffer: stores last RAW_RING_SIZE sent packets for retransmission.
@@ -525,6 +527,11 @@ bool connection_get_data_collection(void)
 void connection_set_ota_suppressed(bool suppressed)
 {
 	ota_suppressed = suppressed;
+	if (suppressed) {
+		ota_suppress_start_time = k_uptime_get();
+	} else {
+		ota_suppress_start_time = 0;
+	}
 	LOG_INF("OTA suppression %s", suppressed ? "ENABLED (slow poll)" : "DISABLED (normal poll)");
 }
 
@@ -826,8 +833,14 @@ void connection_thread(void)
 		 * this tracker reduces its poll rate to free radio bandwidth.
 		 */
 		if (ota_suppressed) {
-			k_msleep(500); /* ~2 Hz poll rate */
-			continue;
+			/* Safety timeout: auto-unsuppress after timeout */
+			if (ota_suppress_start_time > 0 &&
+			    (now - ota_suppress_start_time) > OTA_SUPPRESS_TIMEOUT_MS) {
+				LOG_WRN("OTA suppress timeout, auto-unsuppressing");
+				connection_set_ota_suppressed(false);
+			} else {
+				k_msleep(100); /* ~10 Hz poll rate */
+			}
 		}
 
 		/* Skip sensor data during connection error */

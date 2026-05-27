@@ -343,6 +343,21 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 							/* Feed WDT before flash ops */
 							*WDT_RR0 = 0x6E524635;
 
+							/* Compare page buffer with existing flash content.
+							 * Skip erase+write if identical — saves flash wear
+							 * and speeds up re-flashing same/similar firmware. */
+							const volatile uint32_t *flash_cmp = (const volatile uint32_t *)page_addr;
+							uint32_t *buf_cmp = (uint32_t *)page_buf;
+							uint32_t cmp_words = p->page_size / 4;
+							bool page_match = true;
+							for (uint32_t w = 0; w < cmp_words; w++) {
+								if (flash_cmp[w] != buf_cmp[w]) {
+									page_match = false;
+									break;
+								}
+							}
+
+							if (!page_match) {
 							/* Erase page */
 							NVMC[N_CONFIG] = 2;  /* Een */
 							__asm volatile("dsb");
@@ -363,6 +378,7 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 
 							NVMC[N_CONFIG] = 0;  /* Ren */
 							__asm volatile("dsb");
+							} /* end if (!page_match) */
 
 							/* Advance to next page */
 							page_addr += p->page_size;

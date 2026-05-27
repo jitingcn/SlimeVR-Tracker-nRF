@@ -791,6 +791,29 @@ static void ota_flash_copy_from_ram(const struct flash_copy_params *p)
 		 * NRF_WDT->RR[0] = 0x6E524635 (reload register) */
 		((volatile uint32_t *)0x40010600)[0] = 0x6E524635;
 
+		uint32_t src_page = p->src_addr + i * p->page_size;
+
+		/* Determine words to compare/write for this page */
+		uint32_t remaining = p->size - i * p->page_size;
+		uint32_t words = p->page_size / 4;
+		if (remaining < p->page_size) {
+			words = (remaining + 3) / 4;
+		}
+
+		/* Compare destination with source — skip erase+write if identical */
+		const volatile uint32_t *cmp_dst = (const volatile uint32_t *)dst_page;
+		const volatile uint32_t *cmp_src = (const volatile uint32_t *)src_page;
+		bool page_match = true;
+		for (uint32_t w = 0; w < words; w++) {
+			if (cmp_dst[w] != cmp_src[w]) {
+				page_match = false;
+				break;
+			}
+		}
+		if (page_match) {
+			continue;
+		}
+
 		/* Erase destination page via NVMC */
 		NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Een;
 		__DSB();
@@ -801,16 +824,8 @@ static void ota_flash_copy_from_ram(const struct flash_copy_params *p)
 		NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen;
 		__DSB();
 
-		uint32_t src_page = p->src_addr + i * p->page_size;
 		volatile uint32_t *dst = (volatile uint32_t *)dst_page;
 		const volatile uint32_t *src = (const volatile uint32_t *)src_page;
-		uint32_t words = p->page_size / 4;
-
-		/* Last page: only write actual data */
-		uint32_t remaining = p->size - i * p->page_size;
-		if (remaining < p->page_size) {
-			words = (remaining + 3) / 4;
-		}
 
 		for (uint32_t w = 0; w < words; w++) {
 			dst[w] = src[w];
