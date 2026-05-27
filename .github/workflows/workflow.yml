@@ -196,7 +196,8 @@ jobs:
                   {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker"},
                   {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker_SD", with_softdevice: true},
                   {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"},
-                  {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"}
+                  {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"},
+                  {boardname: "nekonya_tracker_uf2/nrf52833", filename: "nekonya_tracker_uf2"}
                 ]
     runs-on: ubuntu-latest
     steps:
