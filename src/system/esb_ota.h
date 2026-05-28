@@ -122,7 +122,7 @@
  *                bits 31-25: year-2020, 24-21: month, 20-16: day,
  *                15-11: hour, 10-5: minute, 4-0: second/2
  * Byte  9-12:  firmware_size (uint32 LE, current running firmware)
- * Byte 13:     bootloader_type (0=none, 1=adafruit_uf2, 2=mcuboot)
+ * Byte 13:     bootloader_type (0=none, 1=adafruit_uf2, 2=nrf5_opendfu)
  * Byte 14:     ota_protocol_version
  * Byte 15-62:  board_target (null-terminated string, max 48 bytes)
  * Byte 63-64:  flash_base_address (uint16 BE, page-aligned: actual_addr >> 12)

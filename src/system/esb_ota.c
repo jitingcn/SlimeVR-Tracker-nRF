@@ -70,7 +70,8 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 #error "CONFIG_FLASH_LOAD_OFFSET must be defined by board defconfig"
 #endif
 
-#define OTA_FLASH_BASE      CONFIG_FLASH_LOAD_OFFSET
+/* MBR occupies 0x0-0x1000 and must not be overwritten via OTA */
+#define OTA_FLASH_BASE      MAX(CONFIG_FLASH_LOAD_OFFSET, 0x1000)
 #define OTA_FLASH_PAGE_SIZE  4096
 
 /*
