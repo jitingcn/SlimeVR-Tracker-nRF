@@ -202,6 +202,17 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 		return -EINVAL;
 	}
 
+	/* nRF5 OpenDFU bootloader sets ACL write-protection on the app region,
+	 * preventing in-place flash copy.  Reject OTA early. */
+#if CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BUILD_OUTPUT_UF2
+	LOG_ERR("OTA: blocked — nRF5 OpenDFU bootloader ACL write-protects "
+		"app region. Use DFU/SWD to update this device.");
+	ota.state = OTA_STATE_ERROR;
+	ota.error_code = OTA_STATUS_ERROR;
+	ota_send_status();
+	return -ENOTSUP;
+#endif
+
 	/* Reject duplicate BEGIN if already in progress */
 	if (ota.state != OTA_STATE_IDLE && ota.state != OTA_STATE_ERROR &&
 	    ota.state != OTA_STATE_COMPLETE) {
