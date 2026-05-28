@@ -4,6 +4,7 @@
 #include "sensor/calibration.h"
 #include "connection/connection.h"
 #include "connection/esb.h"
+#include "system/esb_ota.h"
 #include "watchdog.h"
 
 #include <zephyr/drivers/gpio.h>
@@ -447,10 +448,15 @@ static void button_thread(void)
 			last_press = k_uptime_get();
 			set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
 		}
+		/* Block all button actions during OTA (active or suppressed) */
+		bool ota_busy = esb_ota_is_active() || connection_get_ota_suppressed();
 		if (last_press && k_uptime_get() - last_press > 1000) {
 			LOG_INF("Button was pressed %d times", num_presses);
 			last_press = 0;
-			if (num_presses == 1) {
+			if (ota_busy) {
+				LOG_INF("Button action blocked by OTA");
+				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
+			} else if (num_presses == 1) {
 				if (test_mode_get()) {
 					LOG_INF("Button reboot blocked by test mode");
 				} else {
@@ -458,7 +464,9 @@ static void button_thread(void)
 				}
 			}
 #if CONFIG_USER_EXTRA_ACTIONS // TODO: extra actions are default until server can send commands to trackers
-			sys_reset_mode(num_presses - 1);
+			if (!ota_busy) {
+				sys_reset_mode(num_presses - 1);
+			}
 #endif
 			num_presses = 0;
 			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
@@ -466,7 +474,12 @@ static void button_thread(void)
 		}
 		if (press_time && k_uptime_get() - press_time > 1000 && button_read()) // Button is being held
 		{
-			if (sys_user_shutdown()) // held for 5 seconds, reset pairing
+			if (ota_busy) {
+				LOG_INF("Button hold blocked by OTA");
+				press_time = 0;
+				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
+				set_status(SYS_STATUS_BUTTON_PRESSED, false);
+			} else if (sys_user_shutdown()) // held for 5 seconds, reset pairing
 			{
 				LOG_INF("Pairing requested");
 				esb_reset_pair();

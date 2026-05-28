@@ -536,6 +536,11 @@ void connection_set_ota_suppressed(bool suppressed)
 	LOG_INF("OTA suppression %s", suppressed ? "ENABLED (slow poll)" : "DISABLED (normal poll)");
 }
 
+bool connection_get_ota_suppressed(void)
+{
+	return ota_suppressed;
+}
+
 void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 {
 	if (!data_collection_active) return;

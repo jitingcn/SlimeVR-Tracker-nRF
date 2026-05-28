@@ -63,6 +63,7 @@ bool connection_get_data_collection(void);
 
 // OTA suppression: reduce poll rate when another tracker is being updated
 void connection_set_ota_suppressed(bool suppressed);
+bool connection_get_ota_suppressed(void);
 
 // Queue a raw IMU sample for transmission (called from sensor thread)
 void connection_queue_raw_sample(const struct raw_imu_sample *sample);
