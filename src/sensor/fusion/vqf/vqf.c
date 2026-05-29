@@ -81,17 +81,6 @@
 #define TAU_SMOOTH_ALPHA_UP         0.21f  /* tauAcc increase smoothing (per sample) */
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-/* ---------- Soft motion-bias-estimation gate configuration ---------- */
-#define SOFT_MBE_GYRO_TH_RAD_S       (6.0f * DEG_TO_RAD)
-#define SOFT_MBE_ACC_DEV_TH          (0.009f * CONST_EARTH_GRAVITY)
-#define SOFT_MBE_LIN_ACC_TH          (0.075f * CONST_EARTH_GRAVITY)
-#define SOFT_MBE_SMOOTH_T            10.0f
-#define SOFT_MBE_MIN_QUASI_T         45.0f
-#define SOFT_MBE_MARGIN_T            4.0f
-#define SOFT_MBE_BIAS_NOISE_SCALE    0.001733f
-#endif /* CONFIG_VQF_SOFT_MBE_GATE */
-
 static uint8_t imu_id;
 
 static vqf_params_t params;
@@ -141,17 +130,6 @@ static float current_tau_level = -1; /* current quantized level (-1 = unset) */
 static float smoothed_tau;           /* smoothed tauAcc for gradual transitions */
 #endif
 
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-static float soft_mbe_latest_gyr_norm;
-static float soft_mbe_gyr_norm_lp;
-static float soft_mbe_acc_dev_lp;
-static float soft_mbe_lin_acc_lp;
-static float soft_mbe_quasi_t;
-static float soft_mbe_margin_t;
-static float soft_mbe_scale = 1.0f;
-static float soft_mbe_base_bias_v;
-#endif
-
 /* Rest detection diagnostics */
 static uint32_t rest_enter_count;
 static uint32_t rest_exit_count;
@@ -170,97 +148,6 @@ static struct {
 static uint8_t rest_event_idx;  /* next write position */
 static uint8_t rest_event_total; /* total events (up to log size) */
 
-
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-static inline float vqf_square_f(float v)
-{
-	return v * v;
-}
-
-static void soft_mbe_apply_bias_noise_scale(float scale)
-{
-	if (scale < 1e-6f)
-		scale = 1e-6f;
-
-	soft_mbe_scale = scale;
-	coeffs.biasV = soft_mbe_base_bias_v * scale;
-
-	float sigma_motion = params.biasSigmaMotion * 100.0f;
-	float p_motion = sigma_motion * sigma_motion;
-	coeffs.biasMotionW = vqf_square_f(p_motion) / coeffs.biasV + p_motion;
-	coeffs.biasVerticalW = coeffs.biasMotionW /
-		fmaxf(params.biasVerticalForgettingFactor, 1e-10f);
-
-	float sigma_rest = params.biasSigmaRest * 100.0f;
-	float p_rest = sigma_rest * sigma_rest;
-	coeffs.biasRestW = vqf_square_f(p_rest) / coeffs.biasV + p_rest;
-}
-
-static void soft_mbe_reset(void)
-{
-	soft_mbe_latest_gyr_norm = 0.0f;
-	soft_mbe_gyr_norm_lp = 0.0f;
-	soft_mbe_acc_dev_lp = 0.0f;
-	soft_mbe_lin_acc_lp = 0.0f;
-	soft_mbe_quasi_t = 0.0f;
-	soft_mbe_margin_t = 0.0f;
-	soft_mbe_scale = 1.0f;
-	soft_mbe_base_bias_v = coeffs.biasV;
-}
-
-static void soft_mbe_update_gyro_norm(const float g_rad[3])
-{
-	soft_mbe_latest_gyr_norm = sqrtf(g_rad[0] * g_rad[0] +
-					       g_rad[1] * g_rad[1] +
-					       g_rad[2] * g_rad[2]);
-}
-
-static void soft_mbe_pre_accel_update(const float a_m_s2[3])
-{
-	float dt = coeffs.accTs;
-	float alpha = dt / (SOFT_MBE_SMOOTH_T + dt);
-
-	float a_norm = sqrtf(a_m_s2[0] * a_m_s2[0] +
-				   a_m_s2[1] * a_m_s2[1] +
-				   a_m_s2[2] * a_m_s2[2]);
-	float acc_dev = fabsf(a_norm - CONST_EARTH_GRAVITY);
-
-	float q[4];
-	getQuat6D(&state, q);
-	float gravity_body[3];
-	gravity_body[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]) * CONST_EARTH_GRAVITY;
-	gravity_body[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]) * CONST_EARTH_GRAVITY;
-	gravity_body[2] = 2.0f * (q[0] * q[0] - 0.5f + q[3] * q[3]) * CONST_EARTH_GRAVITY;
-	float lin_x = a_m_s2[0] - gravity_body[0];
-	float lin_y = a_m_s2[1] - gravity_body[1];
-	float lin_z = a_m_s2[2] - gravity_body[2];
-	float lin_acc = sqrtf(lin_x * lin_x + lin_y * lin_y + lin_z * lin_z);
-
-	soft_mbe_gyr_norm_lp += alpha * (soft_mbe_latest_gyr_norm - soft_mbe_gyr_norm_lp);
-	soft_mbe_acc_dev_lp += alpha * (acc_dev - soft_mbe_acc_dev_lp);
-	soft_mbe_lin_acc_lp += alpha * (lin_acc - soft_mbe_lin_acc_lp);
-
-	bool low_energy = !state.restDetected &&
-		soft_mbe_gyr_norm_lp <= SOFT_MBE_GYRO_TH_RAD_S &&
-		soft_mbe_acc_dev_lp <= SOFT_MBE_ACC_DEV_TH &&
-		soft_mbe_lin_acc_lp <= SOFT_MBE_LIN_ACC_TH;
-
-	if (low_energy) {
-		soft_mbe_quasi_t += dt;
-		if (soft_mbe_quasi_t >= SOFT_MBE_MIN_QUASI_T) {
-			soft_mbe_margin_t = SOFT_MBE_MARGIN_T;
-		}
-	} else {
-		soft_mbe_quasi_t = 0.0f;
-		if (soft_mbe_margin_t > 0.0f) {
-			soft_mbe_margin_t = fmaxf(soft_mbe_margin_t - dt, 0.0f);
-		}
-	}
-
-	float scale = soft_mbe_margin_t > 0.0f ? SOFT_MBE_BIAS_NOISE_SCALE : 1.0f;
-	soft_mbe_apply_bias_noise_scale(scale);
-}
-#endif /* CONFIG_VQF_SOFT_MBE_GATE */
 
 void vqf_update_sensor_ids(int imu)
 {
@@ -306,9 +193,6 @@ void vqf_init(float g_time, float a_time, float m_time)
 	current_tau_level = -1.0f;
 	smoothed_tau = params.tauAcc;
 #endif
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	soft_mbe_reset();
-#endif
 	rest_enter_count = 0;
 	rest_exit_count = 0;
 	rest_total_s = 0;
@@ -332,9 +216,6 @@ void vqf_load(const void *data)
 	current_tau_level = -1.0f;
 	smoothed_tau = params.tauAcc;
 #endif
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	soft_mbe_reset();
-#endif
 	rest_enter_count = 0;
 	rest_exit_count = 0;
 	rest_total_s = 0;
@@ -351,14 +232,7 @@ void vqf_save(void *data)
 	BUILD_ASSERT(VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
 		     "VQF state+coeffs exceeds fusion_data buffer in retained memory");
 	memcpy(data, &state, sizeof(state));
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	float saved_scale = soft_mbe_scale;
-	soft_mbe_apply_bias_noise_scale(1.0f);
 	memcpy((uint8_t *)data + sizeof(state), &coeffs, sizeof(coeffs));
-	soft_mbe_apply_bias_noise_scale(saved_scale);
-#else
-	memcpy((uint8_t *)data + sizeof(state), &coeffs, sizeof(coeffs));
-#endif
 }
 
 void vqf_update_gyro(float *g, float time)
@@ -368,9 +242,6 @@ void vqf_update_gyro(float *g, float time)
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++)
 		g_rad[i] = g[i] * DEG_TO_RAD;
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	soft_mbe_update_gyro_norm(g_rad);
-#endif
 	updateGyr(&params, &state, &coeffs, g_rad);
 }
 
@@ -379,9 +250,6 @@ void vqf_update_gyro_ts(float *g, uint64_t timestamp_us)
 	float g_rad[3] = {0};
 	for (int i = 0; i < 3; i++)
 		g_rad[i] = g[i] * DEG_TO_RAD;
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	soft_mbe_update_gyro_norm(g_rad);
-#endif
 	updateGyrTs(&params, &state, &coeffs, g_rad, timestamp_us);
 }
 
@@ -509,9 +377,6 @@ void vqf_update_accel(float *a, float time)
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	vqf_pre_accel_update(a_m_s2);
 #endif
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	soft_mbe_pre_accel_update(a_m_s2);
-#endif
 	updateAcc(&params, &state, &coeffs, a_m_s2);
 	vqf_track_rest_diag();
 }
@@ -525,9 +390,6 @@ void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
 		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	vqf_pre_accel_update(a_m_s2);
-#endif
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	soft_mbe_pre_accel_update(a_m_s2);
 #endif
 	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
 	vqf_track_rest_diag();
@@ -722,15 +584,6 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	// Adaptive tauAcc state
 	info->tau_acc = params.tauAcc;
 	info->motion_intensity = motion_intensity;
-#endif
-#if IS_ENABLED(CONFIG_VQF_SOFT_MBE_GATE)
-	// Soft MBE gate state
-	info->soft_mbe_scale = soft_mbe_scale;
-	info->soft_mbe_quasi_t = soft_mbe_quasi_t;
-	info->soft_mbe_margin_t = soft_mbe_margin_t;
-	info->soft_mbe_gyr_norm = soft_mbe_gyr_norm_lp * 180.0f / M_PI;
-	info->soft_mbe_acc_dev = soft_mbe_acc_dev_lp / CONST_EARTH_GRAVITY;
-	info->soft_mbe_lin_acc = soft_mbe_lin_acc_lp / CONST_EARTH_GRAVITY;
 #endif
 
 	// Rest detection diagnostics

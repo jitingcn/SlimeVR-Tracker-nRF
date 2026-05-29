@@ -315,17 +315,6 @@ config VQF_ADAPTIVE_TAU_ACC
         smoothed transitions to avoid Butterworth LP filter transients.
         This feature is experimental and may affect heading stability.
 
-config VQF_SOFT_MBE_GATE
-    bool "VQF soft motion bias estimation gate (experimental)"
-    default n
-    depends on SENSOR_USE_VQF
-    help
-        Enable quasi-rest detection that reduces VQF bias process noise during
-        long low-energy non-rest periods. This keeps motion bias estimation
-        enabled, but makes bias changes much slower in breathing
-        motion where motion bias estimation can otherwise overcompensate.
-        This feature is experimental and may affect heading stability.
-
 config VQF_BENCH
     bool "Enable VQF benchmark console command"
     default n
