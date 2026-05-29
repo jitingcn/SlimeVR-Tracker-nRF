@@ -70,7 +70,7 @@ struct retained_data {
 
 
 	uint8_t fusion_id; // fusion_data_stored
-	uint8_t fusion_data[512];
+	uint8_t fusion_data[784];
 
 	uint16_t imu_addr;
 	uint16_t mag_addr;
