@@ -143,14 +143,10 @@ target_sources(app PRIVATE ${app_sources})
 
 # NORDIC SDK APP END
 
-FILE(GLOB_RECURSE files Fusion/Fusion/*.c)
-target_sources(app PRIVATE ${files})
-
 FILE(GLOB_RECURSE files vqf-c/src/*.c)
 target_sources(app PRIVATE ${files})
 
 target_include_directories(app PRIVATE src)
-target_include_directories(app PRIVATE Fusion/Fusion)
 target_include_directories(app PRIVATE vqf-c/src)
 
 # Force recompile for updated build timestamp

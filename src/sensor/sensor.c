@@ -213,10 +213,7 @@ static bool mag_calibrated; // true if magnetometer calibration data is valid
 // set when mag toggle reboot is pending, prevents sensor_retained_write from saving fusion state
 static bool skip_fusion_save;
 
-#if CONFIG_SENSOR_USE_XIOFUSION
-static const sensor_fusion_t *sensor_fusion = &sensor_fusion_fusion; // TODO: change from server
-int fusion_id = FUSION_FUSION;
-#elif CONFIG_SENSOR_USE_VQF
+#if CONFIG_SENSOR_USE_VQF
 static const sensor_fusion_t *sensor_fusion = &sensor_fusion_vqf; // TODO: change from server
 int fusion_id = FUSION_VQF;
 #endif
@@ -1296,7 +1293,7 @@ void sensor_loop(void)
 
 			// Reading IMUs will take between 2.5ms (~7 samples, low noise) - 7ms (~33 samples, low power)
 			// Magneto sample will take ~400us
-			// Fusing data will take between 100us (~7 samples, low noise) - 500us (~33 samples, low power) for xiofusion
+			// Fusing data will take between 100us (~7 samples, low noise) - 500us (~33 samples, low power)
 			// TODO: on any errors set main_ok false and skip (make functions return nonzero)
 
 			// At high speed, use oneshot mode to have synced magnetometer data

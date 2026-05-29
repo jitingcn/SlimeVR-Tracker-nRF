@@ -291,12 +291,6 @@ choice
     help
         Select the sensor fusion method.
 
-config SENSOR_USE_XIOFUSION
-    bool "Use x-io Technologies Fusion"
-    help
-        Use x-io Technologies Fusion for sensor fusion.
-        Based on Madgwick filter.
-
 config SENSOR_USE_VQF
     bool "Use VQF"
     help
