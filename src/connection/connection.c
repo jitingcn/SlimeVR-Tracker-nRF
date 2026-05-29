@@ -500,6 +500,14 @@ static bool raw_metadata_sent = false;
 static int64_t raw_metadata_last_ms = 0;
 #define RAW_METADATA_RESEND_MS 60000
 
+/* Deferred metadata: sensor thread buffers here, connection thread sends */
+static bool raw_metadata_pending = false;
+static uint8_t raw_metadata_buf[RAW_PACKET_SIZE];
+
+/* Rate limit for meta/cal drip: max 1 packet per interval, interleaved with IMU data */
+#define RAW_META_CAL_DRIP_MS 200
+static int64_t raw_meta_cal_last_ms = 0;
+
 /* Latest mag data for piggybacking onto IMU packets */
 static float latest_mag[3] = {0};
 static bool latest_mag_valid = false;
@@ -516,6 +524,8 @@ void connection_set_data_collection(bool enable)
 		k_msgq_purge(&raw_imu_msgq);
 		raw_sequence = 0;
 		raw_metadata_sent = false;
+		raw_metadata_pending = false;
+		raw_meta_cal_last_ms = 0;
 		latest_mag_valid = false;
 		raw_cal_pending = false;
 		/* Reset ARQ state */
@@ -577,20 +587,24 @@ void connection_send_raw_metadata(float gyro_range, float accel_range,
 				  float gyro_odr, float accel_odr,
 				  float mag_odr, uint8_t imu, uint8_t mag)
 {
-	uint8_t buf[RAW_PACKET_SIZE];
-	memset(buf, 0, sizeof(buf));
-	buf[0] = ESB_RAW_META_TYPE;
-	buf[1] = tracker_id;
-	memcpy(&buf[2], &gyro_range, 4);
-	memcpy(&buf[6], &accel_range, 4);
-	memcpy(&buf[10], &gyro_odr, 4);
-	memcpy(&buf[14], &accel_odr, 4);
-	memcpy(&buf[18], &mag_odr, 4);
-	buf[22] = imu;
-	buf[23] = mag;
+	/* Buffer metadata for deferred sending by connection thread.
+	 * Never call esb_write() from sensor thread — avoids
+	 * cross-thread ESB TX FIFO contention with raw data flow. */
+	memset(raw_metadata_buf, 0, sizeof(raw_metadata_buf));
+	raw_metadata_buf[0] = ESB_RAW_META_TYPE;
+	raw_metadata_buf[1] = tracker_id;
+	memcpy(&raw_metadata_buf[2], &gyro_range, 4);
+	memcpy(&raw_metadata_buf[6], &accel_range, 4);
+	memcpy(&raw_metadata_buf[10], &gyro_odr, 4);
+	memcpy(&raw_metadata_buf[14], &accel_odr, 4);
+	memcpy(&raw_metadata_buf[18], &mag_odr, 4);
+	raw_metadata_buf[22] = imu;
+	raw_metadata_buf[23] = mag;
 
-	esb_write(buf, false, RAW_PACKET_SIZE);
-	raw_metadata_sent = true;
+	raw_metadata_pending = true;
+	/* Reset 60s resend timer now so sensor loop won't re-trigger
+	 * connection_raw_metadata_resend_due() before connection thread
+	 * actually sends the buffered metadata. */
 	raw_metadata_last_ms = k_uptime_get();
 }
 
@@ -707,13 +721,6 @@ bool connection_process_raw_data(void)
 	if (!data_collection_active)
 		return false;
 
-	/* Send metadata once when data collection starts */
-	if (!raw_metadata_sent) {
-		/* Metadata will be sent by sensor_loop after it detects
-		 * data_collection_active. Skip until it's sent. */
-		return false;
-	}
-
 	/* Priority 1: Process retransmit requests from ARQ ACK payloads */
 	if (raw_retx_count > 0) {
 		uint16_t seq = raw_retx_queue[0];
@@ -735,23 +742,31 @@ bool connection_process_raw_data(void)
 		return true;
 	}
 
-	/* Priority 2: Complete calibration drip before IMU data flows.
-	 * Calibration is only 3-5 packets (~1ms) sent once at startup;
-	 * finishing it first ensures receivers have calibration before
-	 * the first IMU sample triggers metadata writing.
-	 *
-	 * k_msleep(1) between packets prevents ESB TX FIFO overflow:
-	 * each packet + its auto-duplicate uses 2 FIFO slots, and the
-	 * radio needs ~200µs to transmit each 52-byte frame at 2 Mbps.
-	 * Without the delay, rapid back-to-back queuing fills the 8-slot
-	 * FIFO, triggering esb_flush_tx() which discards pending packets. */
-	if (raw_cal_pending) {
-		bool sent = connection_cal_drip_send();
-		if (sent) {
-			k_msleep(1);
+	/* Priority 2: Deferred metadata and calibration drip.
+	 * Rate-limited to 1 packet per RAW_META_CAL_DRIP_MS so meta/cal
+	 * never bursts the ESB TX FIFO when interleaved with IMU data.
+	 * Metadata is buffered by sensor thread and sent here to avoid
+	 * cross-thread esb_write() contention. */
+	if (raw_metadata_pending || raw_cal_pending) {
+		int64_t now = k_uptime_get();
+		if (now - raw_meta_cal_last_ms >= RAW_META_CAL_DRIP_MS) {
+			if (raw_metadata_pending) {
+				esb_write(raw_metadata_buf, false, RAW_PACKET_SIZE);
+				raw_metadata_pending = false;
+				raw_metadata_sent = true;
+				raw_metadata_last_ms = now;
+			} else {
+				connection_cal_drip_send();
+				k_usleep(600);
+			}
+			raw_meta_cal_last_ms = now;
+			return true;
 		}
-		return sent;
+		/* Throttled — fall through to IMU data if metadata already sent */
 	}
+
+	/* Wait for metadata before sending data */
+	if (!raw_metadata_sent) return false;
 
 	/* Priority 3: Send new IMU sample */
 	struct raw_imu_queued sample;
@@ -998,7 +1013,6 @@ void connection_thread(void)
 
 		/* Raw data has priority over fusion data to minimize latency */
 		if (connection_process_raw_data()) {
-			// k_usleep(300); /* Brief delay for ESB TX completion */
 			continue;
 		}
 
