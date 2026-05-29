@@ -86,9 +86,9 @@
 
 #if defined(CONFIG_BOARD_PROMICRO_UF2) || defined(CONFIG_BOARD_STYRIA_MINI_UF2)
 #define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.0f, 0.0f, -0.7071f
-// Preserve the device-frame -90 deg Z mounting correction, then bias only the reported
-// quaternion so the upright face-forward neutral pose reports near [0.7071, 0.7071, 0, 0].
-#define SENSOR_QUATERNION_OUTPUT_BIAS 0.7071f, 0.0f, 0.0f, 0.7071f
+// Output bias disabled: the server's own reset/calibration compensates for yaw offset,
+// so the extra left-multiply (+90° Z to make neutral pose report identity) is unnecessary.
+// #define SENSOR_QUATERNION_OUTPUT_BIAS 0.7071f, 0.0f, 0.0f, 0.7071f
 #endif
 
 // default orientation for most boards with the sensor mounted flat on the PCB
