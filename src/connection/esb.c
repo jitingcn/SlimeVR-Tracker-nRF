@@ -1643,6 +1643,7 @@ static void esb_thread(void)
 				set_status(SYS_STATUS_CONNECTION_ERROR, true);
 #if USER_SHUTDOWN_ENABLED
 			if (!shutdown_requested && connection_error_start_time > 0
+				&& !connection_get_ota_suppressed()
 				&& k_uptime_get() - connection_error_start_time
 					   > CONFIG_CONNECTION_TIMEOUT_DELAY && get_status(SYS_STATUS_CALIBRATION_RUNNING) == false) // shutdown if receiver is not detected and not in calibrating
 			{
