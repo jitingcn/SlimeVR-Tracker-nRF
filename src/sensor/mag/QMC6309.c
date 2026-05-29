@@ -71,6 +71,8 @@ static int64_t oneshot_trigger_time = 0;
 // a separate STAT_REG read that would break the sensor hub fast-path.
 static uint8_t last_rawData[6];
 static bool last_rawData_valid = false;
+static int64_t last_mag_time_ms;
+static int32_t mag_period_ms = 20; // default 50Hz
 
 LOG_MODULE_REGISTER(QMC6309, LOG_LEVEL_INF);
 
@@ -80,6 +82,7 @@ int qmc_init(float time, float *actual_time)
 	lastOvfl = false;
 	oneshot_trigger_time = 0;
 	last_rawData_valid = false;
+	last_mag_time_ms = 0;
 	int err = qmc_update_odr(time, actual_time);
 	return (err < 0 ? err : 0);
 }
@@ -152,6 +155,9 @@ int qmc_update_odr(float time, float *actual_time)
 
 	oneshot_trigger_time = 0;
 
+	if (MD != MD_SUSPEND)
+		mag_period_ms = (int32_t)(time * 1000);
+
 	*actual_time = time;
 	return err;
 }
@@ -204,8 +210,24 @@ bool qmc_mag_read(float m[3])
 	// Normal Mode latches output until next ODR cycle. If the sensor hub (or
 	// direct I2C loop) reads faster than mag ODR, the registers are byte-identical
 	// until a new measurement arrives. Skip VQF to avoid over-feeding.
+	// Timeout fallback: when the magnetic field is stable, consecutive measurements
+	// can produce identical ADC output. Force-accept after 1.1× the expected
+	// measurement period to avoid permanently losing samples.
+	int64_t now = k_uptime_get();
 	if (last_rawData_valid && memcmp(rawData, last_rawData, 6) == 0)
-		return false;
+	{
+		if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10))
+			return false;
+		// Phase-aligned recovery: advance by one period instead of snapping
+		// to current time, so consecutive timeouts maintain correct cadence
+		last_mag_time_ms += mag_period_ms;
+		if (now - last_mag_time_ms > mag_period_ms * 2)
+			last_mag_time_ms = now;
+	}
+	else
+	{
+		last_mag_time_ms = now;
+	}
 	memcpy(last_rawData, rawData, 6);
 	last_rawData_valid = true;
 	qmc_mag_process(rawData, m);
