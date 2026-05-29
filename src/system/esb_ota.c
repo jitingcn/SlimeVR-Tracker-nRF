@@ -75,25 +75,26 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 #define OTA_FLASH_PAGE_SIZE  4096
 
 /*
- * Maximum application image size.
- * nRF52840: half of app flash (staging area needs the other half)
- * nRF52833: full app flash (uses RAM engine for in-place writes)
+ * Flash partition layout and OTA engine selection.
+ * nRF52840: uses staging area (upper flash), needs half of app region free
+ * nRF52833: uses RAM engine for in-place writes (no staging needed)
+ * Other SoCs: OTA disabled at runtime
  */
 #if CONFIG_SOC_NRF52840
 #define OTA_FLASH_END        0xEE000 /* End of app partition (before NVS) */
-#define OTA_FLASH_MAX_SIZE   (OTA_FLASH_END - OTA_FLASH_BASE) / 2
 #define OTA_USE_RAM_ENGINE   0
 #define BOOTLOADER_SETTINGS_ADDR BOOTLOADER_SETTINGS_ADDR_52840
+#define OTA_SUPPORTED        1
 #elif CONFIG_SOC_NRF52833
 #define OTA_FLASH_END        0x74000
-/* Check if staging fits: if image > half of app flash, use RAM engine */
-#define OTA_FLASH_MAX_SIZE   (OTA_FLASH_END - OTA_FLASH_BASE)  /* Full app region */
 #define OTA_USE_RAM_ENGINE   1  /* Use RAM engine for in-place writes */
 #define BOOTLOADER_SETTINGS_ADDR BOOTLOADER_SETTINGS_ADDR_52833
+#define OTA_SUPPORTED        1
 #else
 #define OTA_FLASH_END        (OTA_FLASH_BASE + 256 * 1024)
-#define OTA_FLASH_MAX_SIZE   (128 * 1024)
+#define OTA_USE_RAM_ENGINE   0
 #define BOOTLOADER_SETTINGS_ADDR 0
+#define OTA_SUPPORTED        0
 #endif
 
 /* ── Board target string (set at compile time) ───────────────────── */
@@ -214,6 +215,14 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	return -ENOTSUP;
 #endif
 
+#if !OTA_SUPPORTED
+	LOG_ERR("OTA: not supported on this SoC");
+	ota.state = OTA_STATE_ERROR;
+	ota.error_code = OTA_STATUS_ERROR;
+	ota_send_status();
+	return -ENOTSUP;
+#endif
+
 	/* Reject duplicate BEGIN if already in progress */
 	if (ota.state != OTA_STATE_IDLE && ota.state != OTA_STATE_ERROR &&
 	    ota.state != OTA_STATE_COMPLETE) {
@@ -250,9 +259,12 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 		return -ENOTSUP;
 	}
 
-	/* Validate image size */
-	if (image_size == 0 || image_size > OTA_FLASH_MAX_SIZE) {
-		LOG_ERR("OTA BEGIN: invalid image size %u (max %u)", image_size, OTA_FLASH_MAX_SIZE);
+	/* Validate image size.
+	 * Use theoretical max (flash end - MBR) as the early check.
+	 * The precise bounds check (flash_base + image_size > OTA_FLASH_END) and
+	 * the staging overlap check (nRF52840) below catch the real limits. */
+	if (image_size == 0 || image_size > (OTA_FLASH_END - 0x1000)) {
+		LOG_ERR("OTA BEGIN: invalid image size %u (max %u)", image_size, OTA_FLASH_END - 0x1000);
 		ota.state = OTA_STATE_ERROR;
 		ota.error_code = OTA_STATUS_SIZE_ERROR;
 		ota_send_status();
