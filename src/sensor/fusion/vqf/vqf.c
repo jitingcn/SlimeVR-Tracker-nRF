@@ -47,35 +47,37 @@
  * Three-regime adaptive tauAcc strategy:
  *
  * 1. REST (VQF rest detection active):
- *    tauAcc = TAU_ACC_REST.
- *    At true rest the accelerometer perfectly reflects gravity,
- *    so a small tau enables fast inclination convergence while
- *    the rest bias estimator handles gyro drift.
+ *    tauAcc = TAU_ACC_REST (moderate).
+ *    At rest the accelerometer cleanly reflects gravity and the rest
+ *    bias estimator handles gyro drift, so a moderate tau provides
+ *    stable inclination without needing fast correction.
  *
  * 2. GENTLE MOTION (accel close to gravity, low linear acceleration):
- *    tauAcc = TAU_ACC_GENTLE (high).
- *    Micro-movements (breathing, subtle swaying) contaminate the
- *    accelerometer slightly.  A high tau avoids these perturbations
- *    being coupled into heading via the bias estimator R-matrix.
+ *    tauAcc = TAU_ACC_GENTLE (low).
+ *    Slow orientation changes (rolling, tilting) must be tracked
+ *    quickly.  A low tau enables fast inclination correction so the
+ *    acc LP filter keeps up with the actual gravity direction,
+ *    preventing heading drift from stale inclination estimates.
  *
  * 3. AGGRESSIVE MOTION (significant linear acceleration):
- *    tauAcc = TAU_ACC_AGGRESSIVE (lower).
- *    Active deliberate motion—fast inclination correction helps
- *    prevent pitch/roll drift from coupling into heading.
+ *    tauAcc = TAU_ACC_AGGRESSIVE (higher).
+ *    Centripetal / dynamic accelerations corrupt the gravity estimate.
+ *    A higher tau rejects these transients at the cost of slower
+ *    inclination tracking.
  *
  * The accel deviation |‖a‖ - g| drives a [0,1] motion_intensity
  * with fast-attack / slow-release dynamics.  During motion, tauAcc
- * is linearly interpolated from GENTLE (0) to AGGRESSIVE (1).
- * When rest is detected, TAU_ACC_REST overrides.
+ * is linearly interpolated from GENTLE (intensity=0) to AGGRESSIVE
+ * (intensity=1).  When rest is detected, TAU_ACC_REST overrides.
  */
-#define ADAPTIVE_TAU_ACC_REST       7.6f   /* tauAcc when at rest (seconds) */
+#define ADAPTIVE_TAU_ACC_REST       3.0f   /* tauAcc when at rest (seconds) */
 #define ADAPTIVE_TAU_ACC_GENTLE     1.0f   /* tauAcc during gentle motion (seconds) */
-#define ADAPTIVE_TAU_ACC_AGGRESSIVE 8.5f   /* tauAcc under aggressive motion (seconds) */
+#define ADAPTIVE_TAU_ACC_AGGRESSIVE 4.5f   /* tauAcc under aggressive motion (seconds) */
 #define ADAPTIVE_TAU_ACC_LEVELS     10     /* quantization levels */
 #define ADAPTIVE_ACC_DEV_TH         2.0f   /* accel deviation threshold (m/s²) */
-#define ADAPTIVE_ATTACK_ALPHA       0.27f  /* fast attack coefficient (per sample) */
-#define ADAPTIVE_RELEASE_ALPHA      0.39f  /* slow release coefficient (per sample) */
-#define TAU_SMOOTH_ALPHA_DOWN       0.21f   /* tauAcc decrease smoothing (per sample) */
+#define ADAPTIVE_ATTACK_ALPHA       0.4f   /* attack coefficient: fast increase (per sample) */
+#define ADAPTIVE_RELEASE_ALPHA      0.2f   /* release coefficient: slow decrease (per sample) */
+#define TAU_SMOOTH_ALPHA_DOWN       0.21f  /* tauAcc decrease smoothing (per sample) */
 #define TAU_SMOOTH_ALPHA_UP         0.21f  /* tauAcc increase smoothing (per sample) */
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
@@ -401,7 +403,8 @@ static void vqf_pre_accel_update(const float a_m_s2[3])
 	float a_dev = fabsf(a_norm - CONST_EARTH_GRAVITY);
 	float alpha_inst = fminf(a_dev / ADAPTIVE_ACC_DEV_TH, 1.0f);
 
-	/* Attack-release envelope: fast increase, slow decrease */
+	/* Attack-release envelope: fast increase (detect motion quickly),
+	 * slow decrease (sustain elevated tau after motion stops) */
 	if (alpha_inst > motion_intensity) {
 		motion_intensity += ADAPTIVE_ATTACK_ALPHA * (alpha_inst - motion_intensity);
 	} else {
