@@ -738,9 +738,19 @@ bool connection_process_raw_data(void)
 	/* Priority 2: Complete calibration drip before IMU data flows.
 	 * Calibration is only 3-5 packets (~1ms) sent once at startup;
 	 * finishing it first ensures receivers have calibration before
-	 * the first IMU sample triggers metadata writing. */
+	 * the first IMU sample triggers metadata writing.
+	 *
+	 * k_msleep(1) between packets prevents ESB TX FIFO overflow:
+	 * each packet + its auto-duplicate uses 2 FIFO slots, and the
+	 * radio needs ~200µs to transmit each 52-byte frame at 2 Mbps.
+	 * Without the delay, rapid back-to-back queuing fills the 8-slot
+	 * FIFO, triggering esb_flush_tx() which discards pending packets. */
 	if (raw_cal_pending) {
-		return connection_cal_drip_send();
+		bool sent = connection_cal_drip_send();
+		if (sent) {
+			k_msleep(1);
+		}
+		return sent;
 	}
 
 	/* Priority 3: Send new IMU sample */

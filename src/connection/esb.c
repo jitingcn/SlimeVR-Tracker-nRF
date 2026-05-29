@@ -1406,8 +1406,10 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		queue_status = esb_write_payload(&tx_payload);
 	}
 
-	// manually repeat raw packets for better reliability
-	if (is_raw) {
+	// manually repeat raw IMU/mag packets for better reliability
+	// Skip duplication for metadata (0x12) and calibration (0x14)
+	// which are sent at controlled intervals with guaranteed delivery
+	if (is_raw && data[0] != ESB_RAW_META_TYPE && data[0] != ESB_RAW_CAL_TYPE) {
 		tx_payload.noack = true;
 		queue_status = esb_write_payload(&tx_payload);
 		esb_write_dup_queued++;
