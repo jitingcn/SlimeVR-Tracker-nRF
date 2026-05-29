@@ -1367,7 +1367,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	last_tx.length = data_length;
 	last_tx.timestamp = k_uptime_get();
 
-	bool is_raw = (data[0] >= 0x10 && data[0] <= 0x12);
+	bool is_raw = (data[0] >= 0x10 && data[0] <= 0x14);
 
 	/*
 	 * TDMA slot gating / random backoff for noack sensor-data packets.
@@ -1378,7 +1378,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 *
 	 * PING / ACK packets bypass this (no_ack == false) so time-sync and
 	 * connection-health probes are never delayed.
-	 * Raw data (0x10-0x12) always bypasses for minimum latency.
+	 * Raw data (0x10-0x14) always bypasses for minimum latency.
 	 *
 	 * When TDMA is disabled (compile-time or runtime), use random backoff
 	 * to reduce collision

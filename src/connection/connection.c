@@ -735,7 +735,15 @@ bool connection_process_raw_data(void)
 		return true;
 	}
 
-	/* Priority 2: Send new IMU sample */
+	/* Priority 2: Complete calibration drip before IMU data flows.
+	 * Calibration is only 3-5 packets (~1ms) sent once at startup;
+	 * finishing it first ensures receivers have calibration before
+	 * the first IMU sample triggers metadata writing. */
+	if (raw_cal_pending) {
+		return connection_cal_drip_send();
+	}
+
+	/* Priority 3: Send new IMU sample */
 	struct raw_imu_queued sample;
 	if (k_msgq_get(&raw_imu_msgq, &sample, K_NO_WAIT) == 0) {
 		uint8_t buf[RAW_PACKET_SIZE];
@@ -777,11 +785,6 @@ bool connection_process_raw_data(void)
 
 		esb_write(buf, false, RAW_PACKET_SIZE);
 		return true;
-	}
-
-	/* Priority 3: Drip-feed calibration packets when idle */
-	if (raw_cal_pending) {
-		return connection_cal_drip_send();
 	}
 
 	return false;
