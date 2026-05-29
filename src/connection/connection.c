@@ -29,6 +29,7 @@
 #include "tdma.h"
 #include "build_defines.h"
 #include "hid.h"
+#include "retained.h"
 #include "system/battery_tracker.h"
 #include "system/watchdog.h"
 #include "system/test_mode.h"
@@ -503,6 +504,11 @@ static int64_t raw_metadata_last_ms = 0;
 static float latest_mag[3] = {0};
 static bool latest_mag_valid = false;
 
+/* Calibration drip-feed state (one packet per connection cycle) */
+static bool raw_cal_pending = false;
+static uint8_t raw_cal_phase = 0;      /* 0=accel, 1=mag, 2=gyro, 3=tcal_state, 4=tcal_points */
+static uint16_t raw_cal_point_idx = 0; /* current TCal point index */
+
 void connection_set_data_collection(bool enable)
 {
 	if (enable && !data_collection_active) {
@@ -511,6 +517,7 @@ void connection_set_data_collection(bool enable)
 		raw_sequence = 0;
 		raw_metadata_sent = false;
 		latest_mag_valid = false;
+		raw_cal_pending = false;
 		/* Reset ARQ state */
 		memset(raw_ring_valid, 0, sizeof(raw_ring_valid));
 		raw_retx_count = 0;
@@ -585,6 +592,108 @@ void connection_send_raw_metadata(float gyro_range, float accel_range,
 	esb_write(buf, false, RAW_PACKET_SIZE);
 	raw_metadata_sent = true;
 	raw_metadata_last_ms = k_uptime_get();
+}
+
+void connection_send_raw_calibration(void)
+{
+	/* Mark calibration for drip-feed sending.
+	 * Actual packets are sent one-per-cycle in connection_process_raw_data().
+	 */
+	raw_cal_phase = 0;
+	raw_cal_point_idx = 0;
+	raw_cal_pending = true;
+}
+
+/**
+ * Send one calibration packet per call (drip-feed).
+ * Returns true if a packet was sent, false if calibration is complete.
+ */
+static bool connection_cal_drip_send(void)
+{
+	if (!raw_cal_pending) return false;
+
+	uint8_t buf[RAW_PACKET_SIZE];
+	memset(buf, 0, sizeof(buf));
+	buf[0] = ESB_RAW_CAL_TYPE;
+	buf[1] = tracker_id;
+
+	switch (raw_cal_phase) {
+	case 0: /* Accel calibration */
+		buf[2] = RAW_CAL_SUB_ACCEL;
+		memcpy(&buf[3], retained->accBAinv, sizeof(retained->accBAinv));
+		esb_write(buf, false, RAW_PACKET_SIZE);
+		raw_cal_phase = 1;
+		return true;
+
+	case 1: /* Mag calibration */
+		buf[2] = RAW_CAL_SUB_MAG;
+		memcpy(&buf[3], retained->magBAinv, sizeof(retained->magBAinv));
+		esb_write(buf, false, RAW_PACKET_SIZE);
+		raw_cal_phase = 2;
+		return true;
+
+	case 2: /* Gyro calibration */
+		buf[2] = RAW_CAL_SUB_GYRO;
+		memcpy(&buf[3], retained->gyroBias, sizeof(retained->gyroBias));
+		memcpy(&buf[15], retained->gyroSensScale, sizeof(retained->gyroSensScale));
+		esb_write(buf, false, RAW_PACKET_SIZE);
+#if CONFIG_SENSOR_USE_TCAL
+		raw_cal_phase = 3;
+#else
+		raw_cal_pending = false;
+#endif
+		return true;
+
+#if CONFIG_SENSOR_USE_TCAL
+	case 3: { /* T-Cal state */
+		buf[2] = RAW_CAL_SUB_TCAL;
+		buf[3] = retained->tcal_enabled ? 1 : 0;
+		uint16_t npoints = retained->tempCalState.count;
+		memcpy(&buf[4], &npoints, 2);
+		float temp_min = (float)CONFIG_SENSOR_POLY_TEMP_MIN;
+		float temp_max = (float)CONFIG_SENSOR_POLY_TEMP_MAX;
+		memcpy(&buf[6], &temp_min, 4);
+		memcpy(&buf[10], &temp_max, 4);
+		memcpy(&buf[14], retained->tempCalCorrectionOffset, 12);
+		esb_write(buf, false, RAW_PACKET_SIZE);
+		if (npoints > 0) {
+			raw_cal_phase = 4;
+			raw_cal_point_idx = 0;
+		} else {
+			raw_cal_pending = false;
+		}
+		return true;
+	}
+
+	case 4: { /* T-Cal points (2 per packet) */
+		uint16_t count = retained->tempCalState.count;
+		uint16_t i = raw_cal_point_idx;
+		if (i >= count) {
+			raw_cal_pending = false;
+			return false;
+		}
+		buf[2] = RAW_CAL_SUB_TCAL_POINTS;
+		buf[3] = (uint8_t)(i / 2); /* chunk_idx */
+		memcpy(&buf[4], &count, 2);
+		uint8_t n = (i + 1 < count) ? 2 : 1;
+		buf[6] = n;
+		memcpy(&buf[7], &retained->tempCalPoints[i], 16);
+		if (n == 2) {
+			memcpy(&buf[23], &retained->tempCalPoints[i + 1], 16);
+		}
+		esb_write(buf, false, RAW_PACKET_SIZE);
+		raw_cal_point_idx += 2;
+		if (raw_cal_point_idx >= count) {
+			raw_cal_pending = false;
+		}
+		return true;
+	}
+#endif
+
+	default:
+		raw_cal_pending = false;
+		return false;
+	}
 }
 
 bool connection_raw_metadata_resend_due(void)
@@ -668,6 +777,11 @@ bool connection_process_raw_data(void)
 
 		esb_write(buf, false, RAW_PACKET_SIZE);
 		return true;
+	}
+
+	/* Priority 3: Drip-feed calibration packets when idle */
+	if (raw_cal_pending) {
+		return connection_cal_drip_send();
 	}
 
 	return false;

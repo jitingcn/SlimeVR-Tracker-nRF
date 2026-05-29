@@ -76,6 +76,9 @@ void connection_send_raw_metadata(float gyro_range, float accel_range,
 				  float gyro_odr, float accel_odr,
 				  float mag_odr, uint8_t imu_id, uint8_t mag_id);
 
+// Send calibration data packets (type 0x14, called after metadata)
+void connection_send_raw_calibration(void);
+
 // Check if metadata needs periodic re-send (returns true if due)
 bool connection_raw_metadata_resend_due(void);
 

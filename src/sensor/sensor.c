@@ -1125,7 +1125,8 @@ int sensor_init(void)
 			(uint8_t)sensor_imu_id,
 			(uint8_t)sensor_mag_id
 		);
-		LOG_INF("Data collection mode: metadata sent (gyro %.0fdps, accel %.0fg, gyro ODR %.0fHz)",
+		connection_send_raw_calibration();
+		LOG_INF("Data collection mode: metadata + calibration sent (gyro %.0fdps, accel %.0fg, gyro ODR %.0fHz)",
 			(double)gyro_actual_range, (double)accel_actual_range,
 			1.0 / (double)gyro_actual_time);
 	}
@@ -1270,7 +1271,8 @@ void sensor_loop(void)
 					(uint8_t)sensor_imu_id,
 					(uint8_t)sensor_mag_id
 				);
-				LOG_INF("Data collection activated: metadata sent");
+				connection_send_raw_calibration();
+				LOG_INF("Data collection activated: metadata + calibration sent");
 			} else if (dc_active && connection_raw_metadata_resend_due()) {
 				connection_send_raw_metadata(
 					gyro_actual_range,
@@ -1281,6 +1283,7 @@ void sensor_loop(void)
 					(uint8_t)sensor_imu_id,
 					(uint8_t)sensor_mag_id
 				);
+				connection_send_raw_calibration();
 			}
 			last_data_collection_state = dc_active;
 
