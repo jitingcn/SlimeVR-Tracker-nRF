@@ -139,6 +139,7 @@ static struct {
 	/* Staging area: OTA data is first written to a staging area in upper flash,
 	 * then copied to the final location with interrupts disabled + reset. */
 	uint32_t staging_base;          /* Start of staging area in flash */
+	uint32_t target_flash_base;     /* Destination base address for the new firmware */
 } ota;
 
 static const struct device *flash_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller));
@@ -268,10 +269,28 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 		return -EINVAL;
 	}
 
-	/* Validate flash base address (if provided, 0 = don't check) */
-	if (flash_base != 0 && flash_base != OTA_FLASH_BASE) {
-		LOG_ERR("OTA BEGIN: flash base mismatch (got 0x%X, expected 0x%X)",
+	/* Validate flash base address (if provided, 0 = don't check).
+	 * Allow lower or equal base (e.g., SoftDevice → no-SoftDevice transition).
+	 * Block higher base: target firmware expects SoftDevice that isn't present. */
+	if (flash_base != 0 && flash_base < 0x1000) {
+		LOG_ERR("OTA BEGIN: flash base 0x%X below MBR (minimum 0x1000)", flash_base);
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_SIZE_ERROR;
+		ota_send_status();
+		return -EINVAL;
+	}
+	if (flash_base != 0 && flash_base > OTA_FLASH_BASE) {
+		LOG_ERR("OTA BEGIN: flash base 0x%X > running base 0x%X — "
+			"target firmware requires SoftDevice not present",
 			flash_base, OTA_FLASH_BASE);
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_SIZE_ERROR;
+		ota_send_status();
+		return -EINVAL;
+	}
+	if (flash_base != 0 && (flash_base + image_size) > OTA_FLASH_END) {
+		LOG_ERR("OTA BEGIN: image at 0x%X + %u exceeds flash end 0x%X",
+			flash_base, image_size, OTA_FLASH_END);
 		ota.state = OTA_STATE_ERROR;
 		ota.error_code = OTA_STATUS_SIZE_ERROR;
 		ota_send_status();
@@ -296,7 +315,13 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	ota.bytes_written = 0;
 	ota.last_page_erased = 0;
 	ota.page_buf_offset = 0;
+	ota.target_flash_base = (flash_base != 0) ? flash_base : OTA_FLASH_BASE;
 	strncpy(ota.expected_board, board_target, OTA_BOARD_TARGET_MAX - 1);
+
+	if (ota.target_flash_base != OTA_FLASH_BASE) {
+		LOG_WRN("OTA: Cross-base update: running at 0x%X, target at 0x%X",
+			OTA_FLASH_BASE, ota.target_flash_base);
+	}
 
 #if OTA_USE_RAM_ENGINE
 	/*
@@ -536,7 +561,7 @@ int esb_ota_handle_activate(void)
 
 	LOG_INF("OTA: About to call ota_write_first_page_and_reset");
 	LOG_INF("OTA: staging=0x%05X final=0x%05X size=%u",
-		ota.staging_base, OTA_FLASH_BASE, ota.image_size);
+		ota.staging_base, ota.target_flash_base, ota.image_size);
 	k_msleep(200);
 
 	/* Copy from staging to final location (with IRQs disabled) and reset */
@@ -881,7 +906,7 @@ static void ota_flash_copy_from_ram(const struct flash_copy_params *p)
 static void ota_write_first_page_and_reset(void)
 {
 	LOG_WRN("OTA: Copying %u bytes from staging 0x%05X to final 0x%05X — IRQs off, then reset",
-		ota.image_size, ota.staging_base, OTA_FLASH_BASE);
+		ota.image_size, ota.staging_base, ota.target_flash_base);
 	k_msleep(500); /* Flush logs */
 
 	/* Copy the flash copier function to RAM */
@@ -894,7 +919,7 @@ static void ota_write_first_page_and_reset(void)
 	/* Prepare params */
 	static struct flash_copy_params params;
 	params.src_addr = ota.staging_base;
-	params.dst_addr = OTA_FLASH_BASE;
+	params.dst_addr = ota.target_flash_base;
 	params.size = ota.image_size;
 	params.page_size = OTA_FLASH_PAGE_SIZE;
 
@@ -939,7 +964,7 @@ static void ota_launch_ram_engine(void)
 {
 	LOG_WRN("OTA: Launching RAM engine for in-place update");
 	LOG_WRN("OTA: target=0x%05X size=%u crc32=0x%08X",
-		(uint32_t)OTA_FLASH_BASE, ota.image_size, ota.image_crc32);
+		ota.target_flash_base, ota.image_size, ota.image_crc32);
 	k_msleep(200); /* Flush logs */
 
 	/* Capture RADIO configuration before stopping ESB */
@@ -969,7 +994,7 @@ static void ota_launch_ram_engine(void)
 	/* OTA state */
 	params.image_size        = ota.image_size;
 	params.image_crc32       = ota.image_crc32;
-	params.flash_target      = OTA_FLASH_BASE;
+	params.flash_target      = ota.target_flash_base;
 	params.page_size         = OTA_FLASH_PAGE_SIZE;
 	params.next_expected_seq = 0;
 	params.bytes_received    = 0;
