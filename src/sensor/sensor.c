@@ -1141,6 +1141,11 @@ static int64_t max_loop_time = 0;
 
 static bool last_data_collection_state = false;
 
+/* Raw gyro quaternion accumulator for data collection.
+ * Integrates raw gyro (no bias correction) so offline VQF can re-estimate bias.
+ * Reset when data collection starts. */
+static float raw_gyr_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+
 #if DEBUG
 static int64_t last_acquisition_time = INT64_MAX;
 static uint64_t total_acquisition_time = 0;
@@ -1251,6 +1256,11 @@ void sensor_loop(void)
 			bool dc_active = connection_get_data_collection();
 			if (dc_active && !last_data_collection_state) {
 				sys_interface_resume();
+				/* Reset raw gyro quaternion accumulator */
+				raw_gyr_quat[0] = 1.0f;
+				raw_gyr_quat[1] = 0.0f;
+				raw_gyr_quat[2] = 0.0f;
+				raw_gyr_quat[3] = 0.0f;
 				connection_send_raw_metadata(
 					gyro_actual_range,
 					accel_actual_range,
@@ -1440,7 +1450,32 @@ void sensor_loop(void)
 				if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
 					struct raw_imu_sample raw_sample;
 					if (dc_active) {
-						memcpy(raw_sample.gyro, raw_g, sizeof(raw_sample.gyro));
+						/* Integrate raw gyro into quaternion accumulator.
+						 * raw_g is in deg/s; convert to rad/s for integration. */
+						float g_rad[3] = {
+							raw_g[0] * (float)(M_PI / 180.0f),
+							raw_g[1] * (float)(M_PI / 180.0f),
+							raw_g[2] * (float)(M_PI / 180.0f)
+						};
+						float gyr_norm = sqrtf(g_rad[0]*g_rad[0] + g_rad[1]*g_rad[1] + g_rad[2]*g_rad[2]);
+						if (gyr_norm > 1e-6f) {
+							float angle = gyr_norm * gyro_actual_time;
+							float ha = angle * 0.5f;
+							float s = sinf(ha) / gyr_norm;
+							float step[4] = {cosf(ha), s*g_rad[0], s*g_rad[1], s*g_rad[2]};
+							/* q_new = q_old * step */
+							float q0 = raw_gyr_quat[0]*step[0] - raw_gyr_quat[1]*step[1] - raw_gyr_quat[2]*step[2] - raw_gyr_quat[3]*step[3];
+							float q1 = raw_gyr_quat[0]*step[1] + raw_gyr_quat[1]*step[0] + raw_gyr_quat[2]*step[3] - raw_gyr_quat[3]*step[2];
+							float q2 = raw_gyr_quat[0]*step[2] - raw_gyr_quat[1]*step[3] + raw_gyr_quat[2]*step[0] + raw_gyr_quat[3]*step[1];
+							float q3 = raw_gyr_quat[0]*step[3] + raw_gyr_quat[1]*step[2] - raw_gyr_quat[2]*step[1] + raw_gyr_quat[3]*step[0];
+							float inv_norm = 1.0f / sqrtf(q0*q0 + q1*q1 + q2*q2 + q3*q3);
+							raw_gyr_quat[0] = q0 * inv_norm;
+							raw_gyr_quat[1] = q1 * inv_norm;
+							raw_gyr_quat[2] = q2 * inv_norm;
+							raw_gyr_quat[3] = q3 * inv_norm;
+						}
+
+						memcpy(raw_sample.gyr_quat, raw_gyr_quat, sizeof(raw_sample.gyr_quat));
 						memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
 						raw_sample.temp_c = raw_collect_temp_c;
 						connection_queue_raw_sample(&raw_sample);

@@ -117,6 +117,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_RAW_IMU_TYPE    0x10  // Raw IMU data (float, with piggybacked mag)
 #define ESB_RAW_MAG_TYPE    0x11  // Raw magnetometer data (float, reserved)
 #define ESB_RAW_META_TYPE   0x12  // Metadata (ODR, range, sensor IDs - sent once)
+#define ESB_RAW_IMU_QUAT_TYPE 0x13  // Raw IMU with gyrQuat (52 bytes, packet-loss resistant)
 
 // ESB OTA packet types (used during firmware update over ESB)
 #define ESB_OTA_DATA_TYPE       0x20  // OTA firmware data (receiver → tracker)

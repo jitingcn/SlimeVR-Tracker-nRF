@@ -447,23 +447,23 @@ static int64_t last_runtime_time = 0;
  * Sensor thread queues raw IMU/mag samples via message queues.
  * Connection thread drains them and sends ESB packets with floats.
  *
- * ESB Raw IMU packet (type 0x10, 48 bytes):
- *   [0]    type 0x10
+ * ESB Raw IMU + GyrQuat packet (type 0x13, 52 bytes):
+ *   [0]    type 0x13
  *   [1]    tracker_id
  *   [2-3]  sequence (16-bit BE)
- *   [4-15] gyro x,y,z (float × 3, deg/s)
- *   [16-27] accel x,y,z (float × 3, g)
- *   [28-39] mag x,y,z (float × 3, or zeros)
- *   [40]   flags (bit0: has_new_mag)
- *   [41-44] T-Cal temperature (float, deg C)
- *   [45-47] reserved
+ *   [4-19] gyr_quat w,x,y,z (float × 4, accumulated raw integration)
+ *   [20-31] accel x,y,z (float × 3, g)
+ *   [32-43] mag x,y,z (float × 3, or zeros)
+ *   [44]   flags (bit0: has_new_mag)
+ *   [45-48] T-Cal temperature (float, deg C)
+ *   [49-51] reserved
  */
 #include <zephyr/sys/byteorder.h>
 
 #define RAW_IMU_QUEUE_SIZE  16
 
 struct raw_imu_queued {
-	float gyro[3];
+	float gyr_quat[4];
 	float accel[3];
 	float temp_c;
 };
@@ -481,7 +481,7 @@ static int64_t ota_suppress_start_time = 0;   /* Timestamp when suppress was ena
  * Indexed by (sequence % RAW_RING_SIZE).
  */
 #define RAW_RING_SIZE 512
-#define RAW_PACKET_SIZE 48  /* Fixed raw data packet size (independent of ESB max) */
+#define RAW_PACKET_SIZE 52  /* Fixed raw data packet size (type 0x13 with gyrQuat) */
 static uint8_t raw_ring[RAW_RING_SIZE][RAW_PACKET_SIZE];
 static bool    raw_ring_valid[RAW_RING_SIZE];
 
@@ -546,7 +546,7 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 	if (!data_collection_active) return;
 
 	struct raw_imu_queued entry;
-	memcpy(entry.gyro, sample->gyro, sizeof(entry.gyro));
+	memcpy(entry.gyr_quat, sample->gyr_quat, sizeof(entry.gyr_quat));
 	memcpy(entry.accel, sample->accel, sizeof(entry.accel));
 	entry.temp_c = sample->temp_c;
 
@@ -632,33 +632,34 @@ bool connection_process_raw_data(void)
 		uint8_t buf[RAW_PACKET_SIZE];
 		memset(buf, 0, sizeof(buf));
 
-		buf[0] = ESB_RAW_IMU_TYPE;
+		buf[0] = ESB_RAW_IMU_QUAT_TYPE;
 		buf[1] = tracker_id;
 		uint16_t seq = raw_sequence++;
 		sys_put_be16(seq, &buf[2]);
 
-		/* Gyro float × 3 */
-		memcpy(&buf[4], &sample.gyro[0], 4);
-		memcpy(&buf[8], &sample.gyro[1], 4);
-		memcpy(&buf[12], &sample.gyro[2], 4);
+		/* GyrQuat float × 4 (w, x, y, z) */
+		memcpy(&buf[4], &sample.gyr_quat[0], 4);
+		memcpy(&buf[8], &sample.gyr_quat[1], 4);
+		memcpy(&buf[12], &sample.gyr_quat[2], 4);
+		memcpy(&buf[16], &sample.gyr_quat[3], 4);
 
 		/* Accel float × 3 */
-		memcpy(&buf[16], &sample.accel[0], 4);
-		memcpy(&buf[20], &sample.accel[1], 4);
-		memcpy(&buf[24], &sample.accel[2], 4);
+		memcpy(&buf[20], &sample.accel[0], 4);
+		memcpy(&buf[24], &sample.accel[1], 4);
+		memcpy(&buf[28], &sample.accel[2], 4);
 
 		/* Piggyback latest mag if available */
 		uint8_t flags = 0;
 		if (latest_mag_valid) {
-			memcpy(&buf[28], &latest_mag[0], 4);
-			memcpy(&buf[32], &latest_mag[1], 4);
-			memcpy(&buf[36], &latest_mag[2], 4);
+			memcpy(&buf[32], &latest_mag[0], 4);
+			memcpy(&buf[36], &latest_mag[1], 4);
+			memcpy(&buf[40], &latest_mag[2], 4);
 			flags |= 0x01; /* has_new_mag */
 			latest_mag_valid = false;
 		}
 
-		buf[40] = flags;
-		memcpy(&buf[41], &sample.temp_c, sizeof(sample.temp_c));
+		buf[44] = flags;
+		memcpy(&buf[45], &sample.temp_c, sizeof(sample.temp_c));
 
 		/* Save to ring buffer for potential retransmission */
 		uint16_t ring_idx = seq % RAW_RING_SIZE;
