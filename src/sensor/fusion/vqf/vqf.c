@@ -71,9 +71,9 @@
  * (intensity=1).  When rest is detected, TAU_ACC_REST overrides.
  */
 #define ADAPTIVE_TAU_ACC_REST       3.0f   /* tauAcc when at rest (seconds) */
-#define ADAPTIVE_TAU_ACC_GENTLE     1.0f   /* tauAcc during gentle motion (seconds) */
-#define ADAPTIVE_TAU_ACC_AGGRESSIVE 4.5f   /* tauAcc under aggressive motion (seconds) */
-#define ADAPTIVE_TAU_ACC_LEVELS     10     /* quantization levels */
+#define ADAPTIVE_TAU_ACC_GENTLE     2.0f   /* tauAcc during gentle motion (seconds) */
+#define ADAPTIVE_TAU_ACC_AGGRESSIVE 4.3f   /* tauAcc under aggressive motion (seconds) */
+#define ADAPTIVE_TAU_ACC_LEVELS     5     /* quantization levels */
 #define ADAPTIVE_ACC_DEV_TH         2.0f   /* accel deviation threshold (m/s²) */
 #define ADAPTIVE_ATTACK_ALPHA       0.4f   /* attack coefficient: fast increase (per sample) */
 #define ADAPTIVE_RELEASE_ALPHA      0.2f   /* release coefficient: slow decrease (per sample) */
