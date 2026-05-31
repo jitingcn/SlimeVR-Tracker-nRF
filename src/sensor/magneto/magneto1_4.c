@@ -35,12 +35,16 @@ void magneto_sample(double x, double y, double z, double *ata, double *norm_sum,
 void magneto_current_calibration(float BAinv[4][3], double *ata, double norm_sum, double sample_count)
 {
     S11 = (double *)k_malloc(6 * 6 * sizeof(double));
-    Get_Submatrix(S11, 6, 6, ata, 10, 0, 0);
     S12 = (double *)k_malloc(6 * 4 * sizeof(double));
-    Get_Submatrix(S12, 6, 4, ata, 10, 0, 6);
     S12t = (double *)k_malloc(4 * 6 * sizeof(double));
-    Get_Submatrix(S12t, 4, 6, ata, 10, 6, 0);
     S22 = (double *)k_malloc(4 * 4 * sizeof(double));
+    if (!S11 || !S12 || !S12t || !S22) {
+        k_free(S11); k_free(S12); k_free(S12t); k_free(S22);
+        return;
+    }
+    Get_Submatrix(S11, 6, 6, ata, 10, 0, 0);
+    Get_Submatrix(S12, 6, 4, ata, 10, 0, 6);
+    Get_Submatrix(S12t, 4, 6, ata, 10, 6, 0);
     Get_Submatrix(S22, 4, 4, ata, 10, 6, 6);
 
     double hm = norm_sum / sample_count;
@@ -53,12 +57,20 @@ void magneto_current_calibration(float BAinv[4][3], double *ata, double norm_sum
 
     // Calculate S22a = S22 * S12t   4*6 = 4x4 * 4x6   C = AB
     S22a = (double *)k_malloc(4 * 6 * sizeof(double));
+    if (!S22a) {
+        k_free(S11); k_free(S12); k_free(S12t); k_free(S22);
+        return;
+    }
     Multiply_Matrices(S22a, S22, 4, 4, S12t, 6);
     k_free(S22);
     k_free(S12t);
 
     // Then calculate S22b = S12 * S22a      ( 6x6 = 6x4 * 4x6)
     S22b = (double *)k_malloc(6 * 6 * sizeof(double));
+    if (!S22b) {
+        k_free(S11); k_free(S12); k_free(S22a);
+        return;
+    }
     Multiply_Matrices(S22b, S12, 6, 4, S22a, 6);
     k_free(S12);
 
