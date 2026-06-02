@@ -145,6 +145,11 @@ target_sources(app PRIVATE ${app_sources})
 
 FILE(GLOB_RECURSE files vqf-c/src/*.c)
 target_sources(app PRIVATE ${files})
+set_property(
+  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/vqf-c/src/vqf.c
+  APPEND PROPERTY COMPILE_OPTIONS
+  -Wno-double-promotion
+)
 
 target_include_directories(app PRIVATE src)
 target_include_directories(app PRIVATE vqf-c/src)
