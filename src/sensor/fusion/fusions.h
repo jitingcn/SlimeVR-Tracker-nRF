@@ -24,19 +24,29 @@
 #define SLIMENRF_SENSOR_FUSIONS
 
 #include "vqf/vqf.h"
+#if IS_ENABLED(CONFIG_SENSOR_USE_EQF)
+#include "eqf/eqf.h"
+#endif
 
 enum fusion {
 	FUSION_NONE,
-	FUSION_VQF
+	FUSION_VQF,
+	FUSION_EQF
 };
 
 const char *fusion_names[] = {
 	"None",
-	"VQF"
+	"VQF",
+	"EqF"
 };
 const sensor_fusion_t *sensor_fusions[] = {
 	NULL,
-	&sensor_fusion_vqf
+	&sensor_fusion_vqf,
+#if IS_ENABLED(CONFIG_SENSOR_USE_EQF)
+	&sensor_fusion_eqf
+#else
+	NULL
+#endif
 };
 
 #endif

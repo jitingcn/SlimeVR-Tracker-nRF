@@ -297,6 +297,14 @@ config SENSOR_USE_VQF
         Use VQF for sensor fusion.
         Based on Kalman filter.
 
+config SENSOR_USE_EQF
+    bool "Use EqF"
+    help
+        Use ABC-EqF n=0 (Equivariant Filter) for sensor fusion.
+        Kalman filter on SO(3)×R³ with constant magnetometer trust.
+        Lower heading drift than VQF under moderate magnetic disturbance,
+        but no rest-detection bias estimation (weaker 6-axis fallback).
+
 endchoice
 
 config VQF_ADAPTIVE_TAU_ACC

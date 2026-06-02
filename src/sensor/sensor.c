@@ -216,6 +216,9 @@ static bool skip_fusion_save;
 #if CONFIG_SENSOR_USE_VQF
 static const sensor_fusion_t *sensor_fusion = &sensor_fusion_vqf; // TODO: change from server
 int fusion_id = FUSION_VQF;
+#elif CONFIG_SENSOR_USE_EQF
+static const sensor_fusion_t *sensor_fusion = &sensor_fusion_eqf;
+int fusion_id = FUSION_EQF;
 #endif
 
 static int sensor_imu_id = -1;
@@ -1218,7 +1221,9 @@ static void sensor_mag_ref_accumulate(const float m_cal[3],
 	if (mag_ref_count >= MAG_REF_RECOMPUTE_SAMPLES) {
 		float avg_norm = mag_ref_norm_sum / mag_ref_count;
 		float avg_dip = mag_ref_dip_sum / mag_ref_count;
+#if CONFIG_SENSOR_USE_VQF
 		vqf_set_mag_ref(avg_norm, avg_dip);
+#endif
 		mag_ref_recompute_active = false;
 		LOG_INF("Mag ref recomputed from %d samples: norm=%.4f dip=%.1f deg",
 			mag_ref_count, (double)avg_norm,
