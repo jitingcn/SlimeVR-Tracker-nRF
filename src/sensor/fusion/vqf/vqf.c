@@ -38,7 +38,11 @@
 #include "retained.h" // for BUILD_ASSERT on fusion_data size
 
 #ifndef DEG_TO_RAD
-#define DEG_TO_RAD (M_PI / 180.0f)
+#define DEG_TO_RAD 0.01745329251994329577f  /* (float)(M_PI / 180.0) */
+#endif
+
+#ifndef RAD_TO_DEG
+#define RAD_TO_DEG 57.29577951308232087680f  /* (float)(180.0 / M_PI) */
 #endif
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
@@ -434,7 +438,7 @@ void vqf_get_gyro_bias(float *g_off)
 	getBiasEstimate(&state, &coeffs, g_off);
 	// VQF internal unit is rad/s, fusion interface expects deg/s
 	for (int i = 0; i < 3; i++)
-		g_off[i] *= 180.0f / M_PI;
+		g_off[i] *= RAD_TO_DEG;
 }
 
 void vqf_set_gyro_bias(float *g_off)
@@ -564,21 +568,21 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 
 	// Convert bias from rad/s to °/s
 	for (int i = 0; i < 3; i++) {
-		info->bias[i] *= 180.0f / M_PI;
+		info->bias[i] *= RAD_TO_DEG;
 	}
-	info->bias_sigma *= 180.0f / M_PI;
+	info->bias_sigma *= RAD_TO_DEG;
 
 	// Convert rad-based angles to degrees
-	info->delta *= 180.0f / M_PI;
-	info->mag_ref_dip *= 180.0f / M_PI;
-	info->mag_dip *= 180.0f / M_PI;
-	info->mag_dis_angle *= 180.0f / M_PI;
+	info->delta *= RAD_TO_DEG;
+	info->mag_ref_dip *= RAD_TO_DEG;
+	info->mag_dip *= RAD_TO_DEG;
+	info->mag_dis_angle *= RAD_TO_DEG;
 
 	// Convert angular rates from rad/s to °/s
-	info->mag_corr_rate *= 180.0f / M_PI;
+	info->mag_corr_rate *= RAD_TO_DEG;
 
 	// Convert candidate dip from rad to degrees
-	info->mag_candidate_dip *= 180.0f / M_PI;
+	info->mag_candidate_dip *= RAD_TO_DEG;
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	// Adaptive tauAcc state
