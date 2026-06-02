@@ -55,6 +55,25 @@
 #define EQF_REST_MAX_BIAS 10.0f   /* max plausible bias (deg/s)       */
 #define EQF_REST_ACC_NORM_TH  0.1f /* accel-norm deviation from 1g    */
 
+#if defined(EQF_DISABLE_MAG_DIST_REJECTION)
+#define EQF_MAG_DIST_REJECTION_ENABLED 0
+#else
+#define EQF_MAG_DIST_REJECTION_ENABLED 1
+#endif
+
+/* ── Magnetic disturbance handling (mirrors VQF strategy) ─────────── */
+#define EQF_MAG_CURRENT_TAU          0.50f    /* current norm/dip LP (s)      */
+#define EQF_MAG_REF_TAU             15.0f     /* reference adaptation LP (s)  */
+#define EQF_MAG_NORM_TH              0.25f    /* relative norm threshold      */
+#define EQF_MAG_DIP_TH              12.0f     /* dip threshold (deg)          */
+#define EQF_MAG_NEW_TIME            12.0f     /* accept new field after (s)   */
+#define EQF_MAG_NEW_FIRST_TIME       5.5f     /* first accept with no ref (s) */
+#define EQF_MAG_NEW_MIN_GYR         16.0f     /* motion needed for accept     */
+#define EQF_MAG_MIN_UNDISTURBED_T    0.6f     /* stable time to re-enable     */
+#define EQF_MAG_MAX_REJECTION_TIME 3200.0f    /* full rejection duration (s)  */
+#define EQF_MAG_REJECTION_FACTOR  1150.0f     /* weak trust after long disturb */
+#define EQF_MAG_REJECTION_SIGMA_SCALE 34.0f   /* short-disturbance downweight  */
+
 /* ── Internal state ────────────────────────────────────────────────── */
 
 typedef enum { EQF_INIT, EQF_RUNNING } eqf_mode_t;
@@ -75,7 +94,11 @@ static float dt_gyr, dt_acc, dt_mag;
 
 /* TRIAD init accumulators */
 static float acc_sum[3], mag_sum[3];
+static float mag_norm_sum;
 static int   init_count;
+static int   acc_init_count;
+static int   mag_init_count;
+static int   acc_only_init_count;
 static bool  have_acc, have_mag;
 
 /* Last accel in m/s² for linear-acceleration query */
@@ -92,8 +115,18 @@ static bool  rest_detected;
 static bool  rest_gyr_lp_init;  /* gyro LP initialized              */
 static bool  rest_acc_lp_init;  /* accel LP initialized             */
 
-/* ── 6-axis state ──────────────────────────────────────────────────── */
-static bool  mag_active;         /* true after first mag update         */
+/* ── Magnetic heading-trust state (volatile, not saved) ───────────── */
+static bool  mag_active;           /* true when heading can trust mag    */
+static bool  mag_ref_valid;        /* current reference came from real mag */
+static bool  mag_dist_detected;    /* disturbance gate active            */
+static bool  mag_norm_dip_lp_init; /* current norm/dip LP initialized    */
+static float mag_norm_lp;          /* LP current field norm              */
+static float mag_dip_lp;           /* LP current field dip               */
+static float mag_candidate_norm;   /* alternative field candidate norm   */
+static float mag_candidate_dip;    /* alternative field candidate dip    */
+static float mag_candidate_t;      /* time spent in candidate field      */
+static float mag_undisturbed_t;    /* stable time in current field       */
+static float mag_reject_t;         /* accumulated rejection time         */
 
 /* ── 3×3 matrix helpers (row-major float[9]) ───────────────────────── */
 
@@ -178,6 +211,84 @@ static inline float v3_dot(const float *a, const float *b)
 static inline float v3_norm(const float *v)
 {
 	return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+static inline float eqf_resolve_dt(float time, float fallback_dt)
+{
+	return (isfinite(time) && time > 0.0f && time < 1.0f) ? time : fallback_dt;
+}
+
+static inline float eqf_alpha_from_tau(float tau, float dt)
+{
+	if (!(tau > 0.0f) || !(dt > 0.0f)) {
+		return 1.0f;
+	}
+	float alpha = dt / tau;
+	if (alpha > 1.0f) {
+		alpha = 1.0f;
+	}
+	return alpha;
+}
+
+static inline float eqf_clampf(float x, float lo, float hi)
+{
+	if (x < lo) {
+		return lo;
+	}
+	if (x > hi) {
+		return hi;
+	}
+	return x;
+}
+
+static inline float eqf_get_mag_ref_dip(void)
+{
+	return atan2f(-st.d_mag[2], st.d_mag[0]);
+}
+
+static void eqf_set_mag_ref(float norm, float dip)
+{
+	float c = cosf(dip);
+	float s = sinf(dip);
+
+	st.mag_ref_norm = norm;
+	st.d_mag[0] = c;
+	st.d_mag[1] = 0.0f;
+	st.d_mag[2] = -s;
+}
+
+static void eqf_reset_mag_runtime_state(bool trust_ref_now)
+{
+	float ref_dip = eqf_get_mag_ref_dip();
+
+	mag_norm_dip_lp_init = false;
+	mag_norm_lp = st.mag_ref_norm;
+	mag_dip_lp = ref_dip;
+	mag_candidate_norm = trust_ref_now && mag_ref_valid ? st.mag_ref_norm : 0.0f;
+	mag_candidate_dip = trust_ref_now && mag_ref_valid ? ref_dip : 0.0f;
+	mag_candidate_t = 0.0f;
+	mag_reject_t = 0.0f;
+	mag_undisturbed_t = trust_ref_now && mag_ref_valid ? EQF_MAG_MIN_UNDISTURBED_T : 0.0f;
+	mag_dist_detected = !mag_ref_valid;
+	mag_active = trust_ref_now && mag_ref_valid;
+}
+
+static void eqf_get_mag_norm_dip(const float *m, float *norm_out, float *dip_out)
+{
+	float mn = v3_norm(m);
+	if (mn < 1e-10f) {
+		*norm_out = 0.0f;
+		*dip_out = 0.0f;
+		return;
+	}
+
+	float unit_mag[3] = { m[0] / mn, m[1] / mn, m[2] / mn };
+	float mag_earth[3];
+	m3v(st.A, unit_mag, mag_earth);
+	float sin_dip = eqf_clampf(-mag_earth[2], -1.0f, 1.0f);
+
+	*norm_out = mn;
+	*dip_out = asinf(sin_dip);
 }
 
 static inline void v3_normalise(float *v)
@@ -357,7 +468,7 @@ static void p_set(float *P, int bi, int bj, const float *B)
  * Build an initial R from averaged accel (gravity) and mag readings.
  * Earth frame: X along horizontal mag component, Y east, Z up.
  */
-static void triad_init(const float *acc_avg, const float *mag_avg)
+static void triad_init(const float *acc_avg, const float *mag_avg, float mag_norm_avg)
 {
 	/* ---- body triad ---- */
 	float b1[3] = { acc_avg[0], acc_avg[1], acc_avg[2] };
@@ -405,7 +516,8 @@ static void triad_init(const float *acc_avg, const float *mag_avg)
 	st.A[3] =  b2[0]; st.A[4] =  b2[1]; st.A[5] =  b2[2];
 	st.A[6] =  b1[0]; st.A[7] =  b1[1]; st.A[8] =  b1[2];
 
-	st.mag_ref_norm = v3_norm(mag_avg);
+	st.mag_ref_norm = mag_norm_avg > 0.01f ? mag_norm_avg : v3_norm(mag_avg);
+	mag_ref_valid = true;
 
 	/* bias = 0 */
 	memset(st.a_vec, 0, sizeof(st.a_vec));
@@ -418,6 +530,7 @@ static void triad_init(const float *acc_avg, const float *mag_avg)
 		st.P[i * 6 + i] = EQF_P_INIT_BIAS;
 
 	st.magic = EQF_MAGIC;
+	eqf_reset_mag_runtime_state(true);
 }
 
 /*
@@ -461,6 +574,7 @@ done:
 	/* default mag reference (horizontal north) */
 	st.d_mag[0] = 1.0f; st.d_mag[1] = 0.0f; st.d_mag[2] = 0.0f;
 	st.mag_ref_norm = 1.0f;
+	mag_ref_valid = false;
 
 	memset(st.a_vec, 0, sizeof(st.a_vec));
 	memset(st.P, 0, sizeof(st.P));
@@ -473,14 +587,13 @@ done:
 		st.P[i * 6 + i] = EQF_P_INIT_BIAS;
 
 	st.magic = EQF_MAGIC;
+	eqf_reset_mag_runtime_state(false);
 }
 
 /* ── Core EqF propagation (one gyro sample) ────────────────────────── */
 
-static void eqf_propagate(const float *w)
+static void eqf_propagate(const float *w, float dt)
 {
-	float dt = dt_gyr;
-
 	/* b̂ = −A^T · a_vec */
 	float bh[3];
 	m3Tv(st.A, st.a_vec, bh);
@@ -938,7 +1051,11 @@ void eqf_init(float g_time, float a_time, float m_time)
 	mode = EQF_INIT;
 	memset(acc_sum, 0, sizeof(acc_sum));
 	memset(mag_sum, 0, sizeof(mag_sum));
+	mag_norm_sum = 0.0f;
 	init_count = 0;
+	acc_init_count = 0;
+	mag_init_count = 0;
+	acc_only_init_count = 0;
 	have_acc = false;
 	have_mag = false;
 	ortho_counter = 0;
@@ -953,9 +1070,6 @@ void eqf_init(float g_time, float a_time, float m_time)
 	rest_gyr_lp_init = false;
 	rest_acc_lp_init = false;
 
-	/* reset 6-axis state */
-	mag_active = false;
-
 	/* pre-fill with identity until TRIAD completes */
 	m3_eye(st.A);
 	memset(st.a_vec, 0, sizeof(st.a_vec));
@@ -965,6 +1079,10 @@ void eqf_init(float g_time, float a_time, float m_time)
 	st.d_mag[0] = 1; st.d_mag[1] = 0; st.d_mag[2] = 0;
 	st.mag_ref_norm = 1.0f;
 	st.magic = 0;
+
+	/* reset magnetic state */
+	mag_ref_valid = false;
+	eqf_reset_mag_runtime_state(false);
 }
 
 void eqf_load(const void *data)
@@ -989,7 +1107,14 @@ void eqf_load(const void *data)
 	rest_detected = false;
 	rest_gyr_lp_init = false;
 	rest_acc_lp_init = false;
-	mag_active = false;
+	mag_ref_valid = isfinite(st.mag_ref_norm) && st.mag_ref_norm > 0.01f;
+	if (!mag_ref_valid) {
+		st.d_mag[0] = 1.0f;
+		st.d_mag[1] = 0.0f;
+		st.d_mag[2] = 0.0f;
+		st.mag_ref_norm = 1.0f;
+	}
+	eqf_reset_mag_runtime_state(mag_ref_valid);
 }
 
 void eqf_save(void *data)
@@ -1007,18 +1132,17 @@ void eqf_save(void *data)
 
 void eqf_update_gyro(float *g, float time)
 {
-	(void)time;
 	if (mode != EQF_RUNNING)
 		return;
+	float dt = eqf_resolve_dt(time, dt_gyr);
 
 	/* convert deg/s → rad/s */
 	float w[3] = { g[0] * DEG_TO_RAD, g[1] * DEG_TO_RAD, g[2] * DEG_TO_RAD };
 
-	eqf_propagate(w);
+	eqf_propagate(w, dt);
 
 	/* ── rest detection: gyro LP + deviation ────────────────────── */
-	float alpha = dt_gyr / EQF_REST_TAU;
-	if (alpha > 1.0f) alpha = 1.0f;
+	float alpha = eqf_alpha_from_tau(EQF_REST_TAU, dt);
 
 	if (!rest_gyr_lp_init) {
 		rest_gyr_lp[0] = w[0]; rest_gyr_lp[1] = w[1]; rest_gyr_lp[2] = w[2];
@@ -1037,7 +1161,7 @@ void eqf_update_gyro(float *g, float time)
 
 void eqf_update_accel(float *a, float time)
 {
-	(void)time;
+	float dt = eqf_resolve_dt(time, dt_acc);
 
 	/* store in m/s² for get_lin_a */
 	last_a_ms2[0] = a[0] * CONST_EARTH_GRAVITY;
@@ -1046,28 +1170,29 @@ void eqf_update_accel(float *a, float time)
 
 	if (mode == EQF_INIT) {
 		acc_sum[0] += a[0]; acc_sum[1] += a[1]; acc_sum[2] += a[2];
+		acc_init_count++;
 		have_acc = true;
 		if (have_mag)
 			init_count++;
-		if (init_count >= EQF_INIT_SAMPLES) {
-			float inv = 1.0f / (float)init_count;
-			float aa[3] = { acc_sum[0] * inv, acc_sum[1] * inv, acc_sum[2] * inv };
-			float mm[3] = { mag_sum[0] * inv, mag_sum[1] * inv, mag_sum[2] * inv };
-			triad_init(aa, mm);
+		if (init_count >= EQF_INIT_SAMPLES && acc_init_count > 0 && mag_init_count > 0) {
+			float acc_inv = 1.0f / (float)acc_init_count;
+			float mag_inv = 1.0f / (float)mag_init_count;
+			float aa[3] = { acc_sum[0] * acc_inv, acc_sum[1] * acc_inv, acc_sum[2] * acc_inv };
+			float mm[3] = { mag_sum[0] * mag_inv, mag_sum[1] * mag_inv, mag_sum[2] * mag_inv };
+			triad_init(aa, mm, mag_norm_sum * mag_inv);
 			mode = EQF_RUNNING;
 		}
 		/* fallback: accel-only init if mag never appears */
-		static int acc_only_count;
 		if (mode == EQF_INIT) {
-			acc_only_count++;
-			if (!have_mag && acc_only_count >= EQF_INIT_SAMPLES * 2) {
-				float inv = 1.0f / (float)acc_only_count;
+			acc_only_init_count++;
+			if (!have_mag && acc_only_init_count >= EQF_INIT_SAMPLES * 2) {
+				float inv = 1.0f / (float)acc_only_init_count;
 				float aa[3] = { acc_sum[0] * inv, acc_sum[1] * inv, acc_sum[2] * inv };
 				gravity_init(aa);
 				mode = EQF_RUNNING;
 			}
 		} else {
-			acc_only_count = 0;
+			acc_only_init_count = 0;
 		}
 		return;
 	}
@@ -1089,8 +1214,7 @@ void eqf_update_accel(float *a, float time)
 	eqf_dir_update(a, d_acc, sigma, !mag_active);
 
 	/* ── rest detection: accel LP + combined threshold check ───── */
-	float alpha = dt_acc / EQF_REST_TAU;
-	if (alpha > 1.0f) alpha = 1.0f;
+	float alpha = eqf_alpha_from_tau(EQF_REST_TAU, dt);
 
 	if (!rest_acc_lp_init) {
 		rest_acc_lp[0] = a[0]; rest_acc_lp[1] = a[1]; rest_acc_lp[2] = a[2];
@@ -1120,7 +1244,7 @@ void eqf_update_accel(float *a, float time)
 		rest_t = 0.0f;
 		rest_detected = false;
 	} else {
-		rest_t += dt_acc;
+		rest_t += dt;
 		if (rest_t >= EQF_REST_MIN_T)
 			rest_detected = true;
 	}
@@ -1132,20 +1256,83 @@ void eqf_update_accel(float *a, float time)
 
 void eqf_update_mag(float *m, float time)
 {
-	(void)time;
-
-	if (mode == EQF_INIT) {
-		mag_sum[0] += m[0]; mag_sum[1] += m[1]; mag_sum[2] += m[2];
-		have_mag = true;
-		return;
-	}
-
+	float dt = eqf_resolve_dt(time, dt_mag);
 	float mn = v3_norm(m);
 	if (mn < 1e-10f)
 		return;
 
+	if (mode == EQF_INIT) {
+		mag_sum[0] += m[0]; mag_sum[1] += m[1]; mag_sum[2] += m[2];
+		mag_norm_sum += mn;
+		mag_init_count++;
+		have_mag = true;
+		return;
+	}
+
+#if !EQF_MAG_DIST_REJECTION_ENABLED
+	mag_ref_valid = true;
+	mag_dist_detected = false;
 	mag_active = true;
 	eqf_dir_update(m, st.d_mag, EQF_SIGMA_MAG, false);
+	return;
+#else
+	float curr_norm, curr_dip;
+	eqf_get_mag_norm_dip(m, &curr_norm, &curr_dip);
+
+	if (!mag_norm_dip_lp_init) {
+		mag_norm_lp = curr_norm;
+		mag_dip_lp = curr_dip;
+		mag_norm_dip_lp_init = true;
+	} else if (EQF_MAG_CURRENT_TAU > 0.0f) {
+		float alpha = eqf_alpha_from_tau(EQF_MAG_CURRENT_TAU, dt);
+		mag_norm_lp += alpha * (curr_norm - mag_norm_lp);
+		mag_dip_lp += alpha * (curr_dip - mag_dip_lp);
+	}
+	curr_norm = mag_norm_lp;
+	curr_dip = mag_dip_lp;
+
+	if (!mag_ref_valid) {
+		eqf_set_mag_ref(curr_norm, curr_dip);
+		mag_ref_valid = true;
+		eqf_reset_mag_runtime_state(true);
+		eqf_dir_update(m, st.d_mag, EQF_SIGMA_MAG, false);
+		return;
+	}
+
+	if (mag_ref_valid) {
+		float ref_norm_th = EQF_MAG_NORM_TH * fmaxf(st.mag_ref_norm, 0.01f);
+
+		if (fabsf(curr_norm - st.mag_ref_norm) < ref_norm_th) {
+			mag_undisturbed_t += dt;
+			if (mag_undisturbed_t >= EQF_MAG_MIN_UNDISTURBED_T) {
+				float alpha = eqf_alpha_from_tau(EQF_MAG_REF_TAU, dt);
+				st.mag_ref_norm += alpha * (curr_norm - st.mag_ref_norm);
+				mag_dist_detected = false;
+			}
+		} else {
+			mag_undisturbed_t = 0.0f;
+			mag_dist_detected = true;
+		}
+	} else {
+		mag_undisturbed_t = 0.0f;
+		mag_dist_detected = true;
+	}
+
+	float sigma_mag = EQF_SIGMA_MAG;
+	bool allow_update = mag_ref_valid;
+
+	if (mag_ref_valid && mag_dist_detected) {
+		mag_reject_t = fminf(mag_reject_t + dt, EQF_MAG_MAX_REJECTION_TIME);
+		sigma_mag *= EQF_MAG_REJECTION_SIGMA_SCALE;
+	} else if (mag_ref_valid) {
+		mag_reject_t = fmaxf(mag_reject_t - EQF_MAG_REJECTION_FACTOR * dt, 0.0f);
+	}
+
+	mag_active = mag_ref_valid && !mag_dist_detected;
+	if (allow_update) {
+		eqf_dir_update(m, st.d_mag, sigma_mag, false);
+	}
+#endif
 }
 
 void eqf_update(float *g, float *a, float *m, float time)
@@ -1161,7 +1348,7 @@ void eqf_update(float *g, float *a, float *m, float time)
 void eqf_get_quat(float *q)
 {
 	mat_to_quat(st.A, q);
-	/* normalise for safety */
+	/* normalize for safety */
 	float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
 	if (n > 0.0f) {
 		float inv = 1.0f / n;
