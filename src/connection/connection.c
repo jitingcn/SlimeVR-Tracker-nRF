@@ -515,7 +515,28 @@ static bool latest_mag_valid = false;
 /* Calibration drip-feed state (one packet per connection cycle) */
 static bool raw_cal_pending = false;
 static uint8_t raw_cal_phase = 0;      /* 0=accel, 1=mag, 2=gyro, 3=tcal_state, 4=tcal_points */
-static uint16_t raw_cal_point_idx = 0; /* current TCal point index */
+static uint16_t raw_cal_point_idx = 0; /* current TCal slot index */
+static uint8_t raw_cal_chunk_idx = 0;  /* emitted TCal chunk index */
+
+#if CONFIG_SENSOR_USE_TCAL
+static bool connection_tcal_point_valid(const struct TempCalPoint *point)
+{
+	return point->temp != 0.0f;
+}
+
+static uint16_t connection_tcal_valid_point_count(void)
+{
+	uint16_t count = 0;
+
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (connection_tcal_point_valid(&retained->tempCalPoints[i])) {
+			count++;
+		}
+	}
+
+	return count;
+}
+#endif
 
 void connection_set_data_collection(bool enable)
 {
@@ -615,6 +636,7 @@ void connection_send_raw_calibration(void)
 	 */
 	raw_cal_phase = 0;
 	raw_cal_point_idx = 0;
+	raw_cal_chunk_idx = 0;
 	raw_cal_pending = true;
 }
 
@@ -662,7 +684,7 @@ static bool connection_cal_drip_send(void)
 	case 3: { /* T-Cal state */
 		buf[2] = RAW_CAL_SUB_TCAL;
 		buf[3] = retained->tcal_enabled ? 1 : 0;
-		uint16_t npoints = retained->tempCalState.count;
+		uint16_t npoints = connection_tcal_valid_point_count();
 		memcpy(&buf[4], &npoints, 2);
 		float temp_min = (float)CONFIG_SENSOR_POLY_TEMP_MIN;
 		float temp_max = (float)CONFIG_SENSOR_POLY_TEMP_MAX;
@@ -673,6 +695,7 @@ static bool connection_cal_drip_send(void)
 		if (npoints > 0) {
 			raw_cal_phase = 4;
 			raw_cal_point_idx = 0;
+			raw_cal_chunk_idx = 0;
 		} else {
 			raw_cal_pending = false;
 		}
@@ -680,24 +703,36 @@ static bool connection_cal_drip_send(void)
 	}
 
 	case 4: { /* T-Cal points (2 per packet) */
-		uint16_t count = retained->tempCalState.count;
-		uint16_t i = raw_cal_point_idx;
-		if (i >= count) {
+		uint16_t total_count = connection_tcal_valid_point_count();
+		if (raw_cal_point_idx >= TCAL_BUFFER_SIZE || total_count == 0) {
 			raw_cal_pending = false;
 			return false;
 		}
+
 		buf[2] = RAW_CAL_SUB_TCAL_POINTS;
-		buf[3] = (uint8_t)(i / 2); /* chunk_idx */
-		memcpy(&buf[4], &count, 2);
-		uint8_t n = (i + 1 < count) ? 2 : 1;
-		buf[6] = n;
-		memcpy(&buf[7], &retained->tempCalPoints[i], 16);
-		if (n == 2) {
-			memcpy(&buf[23], &retained->tempCalPoints[i + 1], 16);
+		buf[3] = raw_cal_chunk_idx;
+		memcpy(&buf[4], &total_count, 2);
+		uint8_t n = 0;
+		while (raw_cal_point_idx < TCAL_BUFFER_SIZE && n < 2) {
+			const struct TempCalPoint *point = &retained->tempCalPoints[raw_cal_point_idx++];
+
+			if (!connection_tcal_point_valid(point)) {
+				continue;
+			}
+
+			memcpy(&buf[7 + n * 16], point, sizeof(*point));
+			n++;
 		}
+
+		if (n == 0) {
+			raw_cal_pending = false;
+			return false;
+		}
+
+		buf[6] = n;
 		esb_write(buf, false, RAW_PACKET_SIZE);
-		raw_cal_point_idx += 2;
-		if (raw_cal_point_idx >= count) {
+		raw_cal_chunk_idx++;
+		if (raw_cal_point_idx >= TCAL_BUFFER_SIZE) {
 			raw_cal_pending = false;
 		}
 		return true;
