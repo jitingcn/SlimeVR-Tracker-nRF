@@ -68,7 +68,7 @@ bool connection_get_ota_suppressed(void);
 // Queue a raw IMU sample for transmission (called from sensor thread)
 void connection_queue_raw_sample(const struct raw_imu_sample *sample);
 
-// Queue raw magnetometer data (called from sensor thread)
+// Queue uncalibrated, body-frame magnetometer data (called from sensor thread)
 void connection_queue_raw_mag(const float mag[3]);
 
 // Send metadata packet with ODR/range info (called once when data collection starts)
