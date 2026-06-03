@@ -59,6 +59,8 @@ static int64_t magneto_progress_time;
 // normal hand-rotation usable for calibration.
 #define MAG_CAL_ACCEL_MAG_MIN_SQ 0.75f
 #define MAG_CAL_ACCEL_MAG_MAX_SQ 1.3f
+#define CALIBRATION_SENSOR_INIT_WAIT_MS 10000
+#define CALIBRATION_SENSOR_INIT_POLL_MS 10
 
 // Minimum samples before attempting trial calibration
 #define MAG_CAL_MIN_SAMPLES 64
@@ -3009,25 +3011,27 @@ static void calibration_thread(void)
 
 	sensor_calibration_read();
 
-#if CONFIG_SENSOR_USE_TCAL
-	// Wait for sensor to be initialized before building LUT
-	// This prevents issues when sensor fails to initialize
-	int init_wait_count = 0;
-	while (!sensor_is_initialized()) {
+	// Startup validation and T-Cal LUT build require live sensor state.
+	// If no IMU was detected, keep the retained values as-is and avoid
+	// reporting missing hardware as corrupted calibration.
+	bool sensor_ready = sensor_is_initialized();
+	int64_t init_wait_start = k_uptime_get();
+	while (!sensor_ready) {
 		watchdog_feed(WDT_CHANNEL_CALIBRATION);
-		k_msleep(100);
-		init_wait_count++;
-		// Timeout after 10 seconds to avoid infinite loop if sensor never initializes
-		if (init_wait_count >= 100) {
-			LOG_WRN("T-Cal: Timeout waiting for sensor initialization, skipping LUT build");
+		k_msleep(CALIBRATION_SENSOR_INIT_POLL_MS);
+		sensor_ready = sensor_is_initialized();
+		if (!sensor_ready &&
+		    k_uptime_get() - init_wait_start >= CALIBRATION_SENSOR_INIT_WAIT_MS) {
+			LOG_INF("Sensor not initialized; skipping startup calibration validation");
 			break;
 		}
 	}
 
+#if CONFIG_SENSOR_USE_TCAL
 	// Build LUT at startup if T-Cal data is available and sensor is initialized
 	// LUT is only in RAM and needs to be rebuilt after every boot
 	// Use incremental build: priority zone first, then background completion
-	if (sensor_is_initialized() && retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
+	if (sensor_ready && retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
 		// Validate tempCalState.count to prevent issues with corrupted retained data
 		if (retained->tempCalState.count > TCAL_BUFFER_SIZE) {
 			LOG_ERR("T-Cal: Invalid point count %u (max %d), resetting",
@@ -3051,12 +3055,16 @@ static void calibration_thread(void)
 	// TODO: start and run thread from request?
 	// TODO: replace wait_for_motion with isAccRest
 
-	// Verify calibrations
-	sensor_calibration_validate(NULL, NULL, true);
+	// Verify calibrations only after the sensor stack is initialized.
+	if (sensor_ready) {
+		sensor_calibration_validate(NULL, NULL, true);
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	sensor_calibration_validate_6_side(NULL, true);
+		sensor_calibration_validate_6_side(NULL, true);
 #endif
-	sensor_calibration_validate_mag(NULL, true);
+		if (sensor_get_mag_available()) {
+			sensor_calibration_validate_mag(NULL, true);
+		}
+	}
 
 	// requested calibrations run here
 	while (1) {
