@@ -538,6 +538,48 @@ static uint16_t connection_tcal_valid_point_count(void)
 }
 #endif
 
+static void connection_align_mag_body(const float in[3], float out[3])
+{
+	float mx = in[0];
+	float my = in[1];
+	float mz = in[2];
+	float aligned[3] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
+
+	memcpy(out, aligned, sizeof(aligned));
+}
+
+static void connection_align_mag_BAinv_body(float out[4][3], const float in[4][3])
+{
+	float basis[3][3] = {
+		{1.0f, 0.0f, 0.0f},
+		{0.0f, 1.0f, 0.0f},
+		{0.0f, 0.0f, 1.0f},
+	};
+	float R[3][3];
+
+	for (int col = 0; col < 3; col++) {
+		float aligned[3];
+		connection_align_mag_body(basis[col], aligned);
+		for (int row = 0; row < 3; row++) {
+			R[row][col] = aligned[row];
+		}
+	}
+
+	connection_align_mag_body(in[0], out[0]);
+
+	for (int row = 0; row < 3; row++) {
+		for (int col = 0; col < 3; col++) {
+			float v = 0.0f;
+			for (int i = 0; i < 3; i++) {
+				for (int j = 0; j < 3; j++) {
+					v += R[row][i] * in[i + 1][j] * R[col][j];
+				}
+			}
+			out[row + 1][col] = v;
+		}
+	}
+}
+
 void connection_set_data_collection(bool enable)
 {
 	if (enable && !data_collection_active) {
@@ -600,7 +642,7 @@ void connection_queue_raw_mag(const float mag[3])
 	if (!data_collection_active) return;
 
 	/* Store latest mag for piggybacking onto IMU packets */
-	memcpy(latest_mag, mag, sizeof(latest_mag));
+	connection_align_mag_body(mag, latest_mag);
 	latest_mag_valid = true;
 }
 
@@ -661,12 +703,15 @@ static bool connection_cal_drip_send(void)
 		raw_cal_phase = 1;
 		return true;
 
-	case 1: /* Mag calibration */
+	case 1: { /* Mag calibration */
 		buf[2] = RAW_CAL_SUB_MAG;
-		memcpy(&buf[3], retained->magBAinv, sizeof(retained->magBAinv));
+		float mag_body_BAinv[4][3];
+		connection_align_mag_BAinv_body(mag_body_BAinv, retained->magBAinv);
+		memcpy(&buf[3], mag_body_BAinv, sizeof(mag_body_BAinv));
 		esb_write(buf, false, RAW_PACKET_SIZE);
 		raw_cal_phase = 2;
 		return true;
+	}
 
 	case 2: /* Gyro calibration */
 		buf[2] = RAW_CAL_SUB_GYRO;

@@ -1403,11 +1403,7 @@ void sensor_loop(void)
 				new_mag_data = sensor_mag->mag_read(raw_m); // returns false if no new sample (DRDY not set)
 
 			if (new_mag_data && connection_get_data_collection()) {
-				float mx = raw_m[0];
-				float my = raw_m[1];
-				float mz = raw_m[2];
-				float raw_body_m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
-				connection_queue_raw_mag(raw_body_m);
+				connection_queue_raw_mag(raw_m);
 			}
 
 			if (reconfig) // TODO: get rid of reconfig?
