@@ -481,10 +481,11 @@ static int64_t ota_suppress_start_time = 0;   /* Timestamp when suppress was ena
  * ARQ ring buffer: stores last RAW_RING_SIZE sent packets for retransmission.
  * Indexed by (sequence % RAW_RING_SIZE).
  */
-#define RAW_RING_SIZE 512
+#define RAW_RING_SIZE 256
 #define RAW_PACKET_SIZE 52  /* Fixed raw data packet size (type 0x13 with gyrQuat) */
 static uint8_t raw_ring[RAW_RING_SIZE][RAW_PACKET_SIZE];
 static bool    raw_ring_valid[RAW_RING_SIZE];
+static uint16_t raw_ring_seq[RAW_RING_SIZE];
 
 /*
  * Retransmit queue: filled by ESB event handler when ACK payload carries
@@ -806,7 +807,7 @@ bool connection_process_raw_data(void)
 		uint16_t seq = raw_retx_queue[0];
 		uint16_t idx = seq % RAW_RING_SIZE;
 
-		if (raw_ring_valid[idx]) {
+		if (raw_ring_valid[idx] && raw_ring_seq[idx] == seq) {
 			/* Retransmit from ring buffer */
 			esb_write(raw_ring[idx], false, RAW_PACKET_SIZE);
 			raw_retx_total++;
@@ -886,6 +887,7 @@ bool connection_process_raw_data(void)
 		/* Save to ring buffer for potential retransmission */
 		uint16_t ring_idx = seq % RAW_RING_SIZE;
 		memcpy(raw_ring[ring_idx], buf, RAW_PACKET_SIZE);
+		raw_ring_seq[ring_idx] = seq;
 		raw_ring_valid[ring_idx] = true;
 
 		esb_write(buf, false, RAW_PACKET_SIZE);
