@@ -122,6 +122,8 @@ static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
 static float received_sens_data[3] = {0};   // Store sensitivity data
+static uint8_t received_sens_auto_axis = 0;
+static uint16_t received_sens_auto_revolutions = 0;
 #define REMOTE_COMMAND_DELAY_MS 1500
 
 /* ── OTA packet queue (ISR → thread) ─────────────────────────────
@@ -595,6 +597,9 @@ void event_handler(struct esb_evt const *event)
 					// Check flags field (byte 7)
 					uint8_t pong_flags = rx_payload.data[7];
 					uint32_t rtt_us = 0;
+					float pong_sens_data[3] = {0.0f, 0.0f, 0.0f};
+					uint8_t pong_sens_auto_axis = 0;
+					uint16_t pong_sens_auto_revolutions = 0;
 
 					if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
 						// Special case: SENS_SET command repurposes time sync bytes for data
@@ -603,16 +608,29 @@ void event_handler(struct esb_evt const *event)
 						int16_t y_int = (int16_t)((rx_payload.data[5] << 8) | rx_payload.data[6]);
 						int16_t z_int = (int16_t)((rx_payload.data[8] << 8) | rx_payload.data[9]);
 
-						received_sens_data[0] = (float)x_int / 100.0f;
-						received_sens_data[1] = (float)y_int / 100.0f;
-						received_sens_data[2] = (float)z_int / 100.0f;
+						pong_sens_data[0] = (float)x_int / 100.0f;
+						pong_sens_data[1] = (float)y_int / 100.0f;
+						pong_sens_data[2] = (float)z_int / 100.0f;
 
 						LOG_INF(
 							"Received SENS_SET data: %.2f, %.2f, %.2f",
-							(double)received_sens_data[0],
-							(double)received_sens_data[1],
-							(double)received_sens_data[2]
+							(double)pong_sens_data[0],
+							(double)pong_sens_data[1],
+							(double)pong_sens_data[2]
 						);
+					} else if (pong_flags == ESB_PONG_FLAG_SENS_AUTO) {
+						pong_sens_auto_axis = rx_payload.data[3];
+						pong_sens_auto_revolutions
+							= ((uint16_t)rx_payload.data[4] << 8) | (uint16_t)rx_payload.data[5];
+						if (pong_sens_auto_revolutions == 0) {
+							LOG_INF("Received SENS_AUTO data: axis=%u, revolutions=default", pong_sens_auto_axis);
+						} else {
+							LOG_INF(
+								"Received SENS_AUTO data: axis=%u, revolutions=%u",
+								pong_sens_auto_axis,
+								pong_sens_auto_revolutions
+							);
+						}
 					} else if (ping_ticks_for_this_ctr != 0) {
 						// ====================================================================
 						// RTT and Server Time Offset Calculation (Reference-Point Model)
@@ -825,6 +843,11 @@ void event_handler(struct esb_evt const *event)
 								received_channel_value
 									= ((uint32_t)rx_payload.data[8] << 24) | ((uint32_t)rx_payload.data[9] << 16)
 									| ((uint32_t)rx_payload.data[10] << 8) | ((uint32_t)rx_payload.data[11]);
+							} else if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
+								memcpy(received_sens_data, pong_sens_data, sizeof(received_sens_data));
+							} else if (pong_flags == ESB_PONG_FLAG_SENS_AUTO) {
+								received_sens_auto_axis = pong_sens_auto_axis;
+								received_sens_auto_revolutions = pong_sens_auto_revolutions;
 							}
 
 							const char *cmd_name = "UNKNOWN";
@@ -876,6 +899,9 @@ void event_handler(struct esb_evt const *event)
 								break;
 							case ESB_PONG_FLAG_SENS_RESET:
 								cmd_name = "SENS_RESET";
+								break;
+							case ESB_PONG_FLAG_SENS_AUTO:
+								cmd_name = "SENS_AUTO";
 								break;
 							case ESB_PONG_FLAG_RESET_ZRO:
 								cmd_name = "RESET_ZRO";
@@ -1837,6 +1863,15 @@ static void esb_thread(void)
 				case ESB_PONG_FLAG_SENS_RESET:
 					LOG_INF("Executing remote command: SENS_RESET");
 					cmd_sens_reset();
+					break;
+
+				case ESB_PONG_FLAG_SENS_AUTO:
+					LOG_INF(
+						"Executing remote command: SENS_AUTO axis=%u revolutions=%u",
+						received_sens_auto_axis,
+						received_sens_auto_revolutions
+					);
+					cmd_sens_auto_request(received_sens_auto_axis, received_sens_auto_revolutions);
 					break;
 
 				case ESB_PONG_FLAG_RESET_ZRO:

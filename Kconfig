@@ -340,8 +340,13 @@ config SENSOR_USE_SENS_CALIBRATION
     depends on USE_SLIMENRF_CONSOLE
     help
         Use sensitivity calibration for gyroscope.
-        Calibration can be completed by rotating the tracker specified number of times around all axis.
-        Note any resulting yaw drift in degrees and enter these three observed values in the basic console.
+        There are two ways to calibrate from the console:
+        - Manual: rotate the tracker a number of times around each axis, note the
+          resulting yaw drift in degrees, and enter the three observed values with
+          'sens <x>,<y>,<z>'.
+        - Automated: run 'sens auto <x|y|z> [revolutions]' and spin the tracker the
+          requested number of full turns about one axis; the firmware integrates the
+          gyro rate and computes the scale factor for that axis automatically.
 
 config SENSOR_SENS_REV
     int "Number of rotations (rev)"
