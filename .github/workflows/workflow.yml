@@ -7,11 +7,16 @@ on:
     branches:
       - main
       - dev
+    tags:
+      - "*"
   create:
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.ref }}
+  group: ${{ github.event.pull_request.head.sha || github.ref }}
   cancel-in-progress: true
 
 permissions: write-all
@@ -35,9 +40,15 @@ jobs:
         with:
           path: zephyr-workspace/SlimeNRF-CI
           submodules: recursive
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: 📟 Generate CI Variables
         id: generate-vars
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_REPO_URL: ${{ github.event.pull_request.head.repo.clone_url }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           WEST_FILE="west.yml"
 
@@ -58,10 +69,17 @@ jobs:
           SDK_REVISION=$(grep -A5 "name: sdk-nrf" "$WEST_FILE" | grep "revision:" | sed 's/.*revision: *//')
           SDK_COMMIT=$(git ls-remote "$SDK_URL" "$SDK_REVISION" | awk '{print $1}')
 
-          REPO="$GITHUB_REPOSITORY"
-          REPO_URL="https://github.com/$GITHUB_REPOSITORY.git"
-          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
-          REPO_COMMIT="$GITHUB_SHA"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            REPO="$PR_HEAD_REPO"
+            REPO_URL="$PR_HEAD_REPO_URL"
+            BRANCH="$PR_HEAD_REF"
+            REPO_COMMIT="$PR_HEAD_SHA"
+          else
+            REPO="$GITHUB_REPOSITORY"
+            REPO_URL="https://github.com/$GITHUB_REPOSITORY.git"
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            REPO_COMMIT="$GITHUB_SHA"
+          fi
 
           echo "sdk-hash=$SDK_COMMIT" >> "$GITHUB_OUTPUT"
           echo "sdk-revision=$SDK_REVISION" >> "$GITHUB_OUTPUT"
@@ -159,13 +177,16 @@ jobs:
       - name: 📥 Clone Repository
         id: clone-repository
         if: steps.cache-repository.outputs.cache-hit != 'true'
+        env:
+          REPO_URL: ${{ steps.generate-vars.outputs.repo-url }}
+          REPO_HASH: ${{ steps.generate-vars.outputs.repo-hash }}
         run: |
           cd zephyr-workspace
           rm -rf SlimeVR-Tracker-nRF
 
-          git clone --filter=blob:none --no-checkout "${{ steps.generate-vars.outputs.repo-url }}" SlimeVR-Tracker-nRF
-          git -C SlimeVR-Tracker-nRF fetch origin "${{ steps.generate-vars.outputs.branch }}"
-          git -C SlimeVR-Tracker-nRF checkout "${{ steps.generate-vars.outputs.repo-hash }}"
+          git clone --filter=blob:none --no-checkout "$REPO_URL" SlimeVR-Tracker-nRF
+          git -C SlimeVR-Tracker-nRF fetch --depth=1 origin "$REPO_HASH"
+          git -C SlimeVR-Tracker-nRF checkout "$REPO_HASH"
           git -C SlimeVR-Tracker-nRF submodule update --init --recursive --depth 1
 
   build:
@@ -200,6 +221,7 @@ jobs:
         with:
           path: zephyr-workspace/SlimeNRF-CI
           submodules: recursive
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: 🧰 Cache + Install Apt Dependencies
         id: restore-apt
@@ -332,3 +354,35 @@ jobs:
           if-no-files-found: warn
           path: |
             zephyr-workspace/Releases/${{ matrix.boards.filename }}*
+
+  publish-release:
+    needs: build
+    if: >-
+      ${{
+        needs.build.result == 'success'
+        && (
+          github.event_name == 'release'
+          || github.ref_type == 'tag'
+          || (github.event_name == 'create' && github.event.ref_type == 'tag')
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name || github.event.ref }}
+    steps:
+      - name: 📥 Download Firmware Artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-artifacts
+
+      - name: 🚀 Upload Artifacts to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          fail_on_unmatched_files: true
+          files: |
+            release-artifacts/**/*.hex
+            release-artifacts/**/*.uf2
