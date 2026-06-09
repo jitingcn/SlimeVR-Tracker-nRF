@@ -84,7 +84,9 @@
 #define SENSOR_QUATERNION_CORRECTION 0.0f, 0.7071f, 0.7071f, 0.0f
 #endif
 
-#if defined(CONFIG_BOARD_PROMICRO_UF2) || defined(CONFIG_BOARD_STYRIA_MINI_UF2)
+#if defined(CONFIG_BOARD_PROMICRO_UF2_NRF52840_CHRYSALIS)
+#define SENSOR_QUATERNION_CORRECTION 1.0f, 0.0f, 0.0f, 0.0f
+#elif defined(CONFIG_BOARD_PROMICRO_UF2) || defined(CONFIG_BOARD_STYRIA_MINI_UF2)
 #define SENSOR_QUATERNION_CORRECTION 0.7071f, 0.0f, 0.0f, -0.7071f
 // Output bias disabled: the server's own reset/calibration compensates for yaw offset,
 // so the extra left-multiply (+90° Z to make neutral pose report identity) is unnecessary.
