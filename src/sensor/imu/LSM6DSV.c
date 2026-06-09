@@ -63,6 +63,9 @@ static void lsm_ext_stop_continuous(void);
 // Set during ext_setup() for device scanning, cleared by lsm_init() for normal operation.
 static bool ext_scanning_mode = true;
 
+#define LSM6DSV_SHUB_XLDA_TIMEOUT_MS 80
+#define LSM6DSV_SHUB_OP_TIMEOUT_MS 20
+
 int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
 	// setup interface for SPI
@@ -657,17 +660,18 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_DATAWRITE_SLV0, buf[1]);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x44); // WRITE_ONCE(0x40) + MASTER_ON(0x04)
-	// Wait for transaction: write is triggered on accel XLDA, needs up to 67ms at 15Hz ODR
+	// Wait for transaction: one-shot starts on accel XLDA, which can take up to
+	// 67ms when the accel is still at the 15Hz startup ODR.
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	uint8_t tmp;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear current XLDA
 	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + 10;
+	int64_t timeout = k_uptime_get() + LSM6DSV_SHUB_XLDA_TIMEOUT_MS;
 	while (!(status & 0x01) && k_uptime_get() < timeout) // wait for new XLDA
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
 	status = 0;
-	timeout = k_uptime_get() + 10;
+	timeout = k_uptime_get() + LSM6DSV_SHUB_OP_TIMEOUT_MS;
 	while (!(status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master
@@ -718,16 +722,17 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x44); // WRITE_ONCE(0x40) + MASTER_ON(0x04)
 	// Wait for transaction (AN5922 One-shot read routine):
 	// START_CONFIG=0: sensor hub triggers on accel/gyro data-ready
-	// lsm_ext_setup() ensures accel is running at >=15Hz before scan
+	// lsm_ext_setup() uses 480Hz for scan, but runtime one-shot reads may run
+	// at the configured accel ODR.
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	uint8_t tmp;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear current XLDA by reading accel data
 	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + 10; // 10ms timeout
+	int64_t timeout = k_uptime_get() + LSM6DSV_SHUB_XLDA_TIMEOUT_MS;
 	while (!(status & 0x01) && k_uptime_get() < timeout) // wait for new XLDA (accelerometer data ready)
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
 	status = 0;
-	timeout = k_uptime_get() + 10;
+	timeout = k_uptime_get() + LSM6DSV_SHUB_OP_TIMEOUT_MS;
 	while (!(status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP (bit 0)
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER_MAINPAGE, &status);
 	// Read data
