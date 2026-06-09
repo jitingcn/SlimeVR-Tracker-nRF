@@ -484,7 +484,6 @@ void event_handler(struct esb_evt const *event)
 		}
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
-		uint32_t current_rx_ticks = sys_clock_tick_get_32();
 		int err = 0;
 		err = esb_read_rx_payload(&rx_payload);
 		if (err == -ENODATA) {
@@ -644,12 +643,6 @@ void event_handler(struct esb_evt const *event)
 						//
 						// offset = T2 - T4 (constant one-way bias cancels for TDMA)
 						// ====================================================================
-
-						/* Use ISR-accurate T4 timestamp captured in the RADIO
-						 * ISR (esb_last_ack_rx_ticks) instead of EVENT_IRQ
-						 * current_rx_ticks.  This eliminates 10-25 ticks of
-						 * kernel scheduling jitter from the offset estimate,
-						 * reducing server_time noise from ±15 to ±2 ticks. */
 						uint32_t t4_ticks = esb_last_ack_rx_ticks;
 
 						// Calculate full RTT: from PING send (T1) to PONG receive (T4)
