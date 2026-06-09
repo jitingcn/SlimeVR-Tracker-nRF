@@ -718,7 +718,8 @@ retry_write:
 	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
 								 ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO);
 
-	// Wait for I2C transaction (Fast mode 400kHz: ~25us per byte + overhead)
+	// Short pre-delay before polling. Completion is still guarded by
+	// I2CM_STATUS below, so slower-than-nominal AUX I2C is handled there.
 	k_busy_wait(30 * (num_bytes + 2));
 
 	status = 0;
@@ -789,7 +790,8 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 
 	// Fast path: if a pre-triggered I2CM read matches, just read cached RD_DATA.
 	// The I2C transaction was triggered at the end of the previous call and has
-	// completed in the background during FIFO processing (~6ms >> ~300us I2C).
+	// completed in the background during FIFO processing. If it is still
+	// running, BUSY/DONE checks below keep the cached read from racing it.
 	if (ext_continuous_active && addr == ext_cont_addr &&
 	    sub_addr == ext_cont_sub && num_read == ext_cont_len)
 	{
@@ -854,7 +856,8 @@ retry_read:
 	err |= icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
 								 ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO);
 
-	// Wait for I2C transaction (Fast mode 400kHz: ~25us per byte + overhead)
+	// Short pre-delay before polling. Completion is still guarded by
+	// I2CM_STATUS below, so slower-than-nominal AUX I2C is handled there.
 	k_busy_wait(25 * num_read + 80);
 
 	status = 0;
@@ -897,8 +900,8 @@ retry_read:
 
 	// In operational mode, pre-trigger next read for fast subsequent reads.
 	// DEV_PROFILE + COMMAND persist in IPREG_TOP1, so just writing GO is enough.
-	// The I2CM transaction (~300us) completes in the background during FIFO
-	// processing, so next read finds data ready without any wait.
+	// The I2CM transaction completes in the background during FIFO processing.
+	// The next fast-path read still checks BUSY/DONE before using cached data.
 	if (!err && !ext_scanning_mode)
 	{
 		icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_CONTROL,
