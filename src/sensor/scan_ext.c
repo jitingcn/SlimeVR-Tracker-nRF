@@ -31,6 +31,19 @@
 
 LOG_MODULE_REGISTER(sensor_scan_ext, LOG_LEVEL_DBG);
 
+static int sensor_scan_ext_read_byte(const sensor_ext_ssi_t *ext_ssi, uint16_t addr, uint8_t reg, uint8_t *id)
+{
+	if (addr >= 0x14 && addr <= 0x17) // BMM350 reads have two dummy bytes; keep verification reads framed the same way.
+	{
+		uint8_t buf[3] = {0};
+		int err = ext_ssi->ext_write_read(addr, &reg, 1, buf, 3);
+		*id = buf[2];
+		return err;
+	}
+
+	return ext_ssi->ext_write_read(addr, &reg, 1, id, 1);
+}
+
 int sensor_scan_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uint8_t *ext_dev_reg, int dev_addr_count, const uint8_t dev_addr[], const uint8_t dev_reg[], const uint8_t dev_id[], const int dev_ids[])
 {
 	if (*ext_dev_addr >= 0x7F) // ignoring device
@@ -68,17 +81,18 @@ scan_loop:;
 				uint8_t reg = dev_reg[reg_index + k];
 				if (*ext_dev_reg == 0xFF || *ext_dev_reg == reg)
 				{
-					uint8_t id;
+					uint8_t id = 0;
+					int err;
 					LOG_DBG("Scanning register: 0x%02X", reg);
 					if (reg == 0x40 && addr >= 0x10 && addr <= 0x13) // edge case for BMM150
 					{
-						int err = ext_ssi->ext_write(addr, (const uint8_t[]){0x4B, 0x01}, 2); // BMM150 cannot read chip id without power control enabled
+						err = ext_ssi->ext_write(addr, (const uint8_t[]){0x4B, 0x01}, 2); // BMM150 cannot read chip id without power control enabled
 						if (err)
 							break;
 						LOG_DBG("Power up BMM150");
 						k_msleep(2); // BMM150 start-up
 					}
-					int err = ext_ssi->ext_write_read(addr, &reg, 1, &id, 1);
+					err = sensor_scan_ext_read_byte(ext_ssi, addr, reg, &id);
 					LOG_DBG("Read value: 0x%02X", id);
 					if (err)
 						break;
@@ -102,7 +116,7 @@ scan_loop:;
 								// different registers; stale/ghost data returns the same.
 								uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
 								uint8_t cross_val = 0;
-								int c_err = ext_ssi->ext_write_read(addr, &cross_reg, 1, &cross_val, 1);
+								int c_err = sensor_scan_ext_read_byte(ext_ssi, addr, cross_reg, &cross_val);
 								if (!c_err && cross_val == id)
 								{
 									LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data", addr, reg, cross_reg, id);
@@ -110,7 +124,7 @@ scan_loop:;
 								}
 								// Re-read WHO_AM_I to confirm consistency
 								uint8_t verify_id = 0;
-								int v_err = ext_ssi->ext_write_read(addr, &reg, 1, &verify_id, 1);
+								int v_err = sensor_scan_ext_read_byte(ext_ssi, addr, reg, &verify_id);
 								if (v_err || verify_id != id)
 								{
 									LOG_WRN("Verify failed at 0x%02X reg 0x%02X (expected 0x%02X, got 0x%02X, err %d)", addr, reg, id, verify_id, v_err);

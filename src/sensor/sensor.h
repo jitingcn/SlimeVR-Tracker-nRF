@@ -143,8 +143,8 @@ typedef struct sensor_mag {
 	float (*temp_read)(float[3]); // deg C
 
 	void (*mag_process)(uint8_t*, float[3]); // use if magnetometer is present as an auxiliary sensor, from data read by IMU
-	uint8_t ext_min_burst; // minimum supported burst length for external interface
-	uint8_t ext_burst; // default supported burst length
+	uint8_t ext_min_burst; // minimum external-interface read transaction length
+	uint8_t ext_burst; // preferred full burst length
 } sensor_mag_t;
 
 #endif
