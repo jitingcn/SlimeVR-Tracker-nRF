@@ -36,6 +36,8 @@ enum sys_regulator {
 };
 
 #define BATTERY_SAMPLES 24
+#define BATTERY_PLUG_DEBOUNCE_MS 500
+#define BATTERY_PLUG_SETTLE_MS 3000
 
 static int16_t calibrated_battery_pptt = -1;
 static int16_t current_battery_pptt = INT16_MIN;
@@ -50,6 +52,7 @@ static bool plugged = false;
 static bool power_init = false;
 static bool device_plugged = false;
 static bool device_charged = false;
+static int64_t last_plug_signal_change_ms = -BATTERY_PLUG_SETTLE_MS;
 
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
@@ -530,6 +533,53 @@ static bool battery_pptt_is_valid(int16_t battery_pptt)
 	return battery_pptt >= 0 && battery_pptt <= 10000;
 }
 
+static void reset_battery_filter(void)
+{
+	memset(last_pptt, -1, sizeof(last_pptt));
+	last_pptt_index = 0;
+	samples = 0;
+	average_pptt = -1;
+	hysteresis_pptt = -1;
+}
+
+static bool update_device_plugged_state(bool raw_device_plugged, int64_t now_ms)
+{
+	static bool initialized = false;
+	static bool pending_device_plugged = false;
+	static int64_t pending_device_plugged_since_ms = 0;
+
+	if (!initialized)
+	{
+		initialized = true;
+		pending_device_plugged = raw_device_plugged;
+		pending_device_plugged_since_ms = now_ms;
+		device_plugged = raw_device_plugged;
+		if (device_plugged)
+			set_status(SYS_STATUS_PLUGGED, true);
+		last_plug_signal_change_ms = now_ms - BATTERY_PLUG_SETTLE_MS;
+		return false;
+	}
+
+	if (raw_device_plugged != pending_device_plugged)
+	{
+		pending_device_plugged = raw_device_plugged;
+		pending_device_plugged_since_ms = now_ms;
+		last_plug_signal_change_ms = now_ms;
+		reset_battery_filter();
+	}
+
+	if (pending_device_plugged != device_plugged
+		&& now_ms - pending_device_plugged_since_ms >= BATTERY_PLUG_DEBOUNCE_MS)
+	{
+		device_plugged = pending_device_plugged;
+		set_status(SYS_STATUS_PLUGGED, device_plugged);
+		last_plug_signal_change_ms = now_ms;
+		reset_battery_filter();
+	}
+
+	return pending_device_plugged != device_plugged;
+}
+
 static bool update_battery(int16_t battery_pptt)
 {
 	if (!battery_pptt_is_valid(battery_pptt))
@@ -538,7 +588,8 @@ static bool update_battery(int16_t battery_pptt)
 	// Plugged state will cause a sudden change in SOC >10%, so reset the sample array
 	if (average_pptt >= 0 && NRFX_ABS(battery_pptt - average_pptt) > 1000)
 	{
-		LOG_INF("Change to battery SOC: %5.2f%% -> %5.2f%%", (double)average_pptt / 100.0, (double)battery_pptt / 100.0);
+		if (!device_plugged)
+			LOG_INF("Change to battery SOC: %5.2f%% -> %5.2f%%", (double)average_pptt / 100.0, (double)battery_pptt / 100.0);
 		memset(last_pptt, -1, sizeof(last_pptt)); // reset array
 		samples = 1;
 	}
@@ -663,12 +714,9 @@ static void power_thread(void)
 		if (battery_pptt < 0)
 			LOG_ERR("Failed to read battery voltage: %d", battery_pptt);
 		bool battery_pptt_valid = battery_pptt_is_valid(battery_pptt);
-		if (battery_pptt_valid && samples < BATTERY_SAMPLES)
-			samples++;
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
 		bool battery_available = battery_mV > 1500 && !abnormal_reading; // Keep working without the battery connected, otherwise it is obviously too dead to boot system
-		bool battery_discharged = battery_available && (average_pptt >= 0 ? average_pptt : battery_pptt) == 0;
 		// Separate detection of vin
 		if (!plugged && battery_mV > 4300 && !abnormal_reading)
 			plugged = true;
@@ -679,17 +727,13 @@ static void power_thread(void)
 #else
 		bool usb_plugged = false;
 #endif
-
-		if (!device_plugged && (charging || charged || plugged || usb_plugged))
-		{
-			device_plugged = true;
-			set_status(SYS_STATUS_PLUGGED, true);
-		}
-		else if (device_plugged && !(charging || charged || plugged || usb_plugged))
-		{
-			device_plugged = false;
-			set_status(SYS_STATUS_PLUGGED, false);
-		}
+		int64_t now_ms = k_uptime_get();
+		bool raw_device_plugged = charging || charged || plugged || usb_plugged;
+		bool plug_state_debouncing = update_device_plugged_state(raw_device_plugged, now_ms);
+		bool plug_signal_settling = plug_state_debouncing
+			|| now_ms - last_plug_signal_change_ms < BATTERY_PLUG_SETTLE_MS;
+		bool battery_discharged = !plug_signal_settling && battery_available
+			&& (average_pptt >= 0 ? average_pptt : battery_pptt) == 0;
 
 		device_charged = charged; // TODO: timer on device_plugged could be used to infer charged state
 
@@ -721,20 +765,25 @@ static void power_thread(void)
 
 		// Only feed valid SOC readings into the filter. ADC errors would
 		// otherwise look like real 0%/100% jumps and poison the estimate.
-		if (battery_pptt_valid)
+		// USB/charger contact bounce also shifts the battery ADC, so wait for
+		// the plug signal to settle before accepting the next SOC sample.
+		if (battery_pptt_valid && !plug_signal_settling)
 		{
+			if (samples < BATTERY_SAMPLES)
+				samples++;
 			update_battery(battery_pptt);
 		}
 
-		if (battery_available && !battery_low && current_battery_pptt < 1000)
+		bool current_battery_pptt_valid = battery_pptt_is_valid(current_battery_pptt);
+		if (battery_available && current_battery_pptt_valid && !battery_low && current_battery_pptt < 1000)
 			battery_low = true;
-		else if (!battery_available || (battery_low && current_battery_pptt > 1000)) // hysteresis alrerady provided
+		else if (!battery_available || !current_battery_pptt_valid || (battery_low && current_battery_pptt > 1000)) // hysteresis alrerady provided
 			battery_low = false;
 
-		sys_update_battery_tracker_voltage(battery_mV, device_plugged);
-		if (battery_pptt_valid && (samples == BATTERY_SAMPLES || device_plugged))
+		sys_update_battery_tracker_voltage(battery_mV, device_plugged || plug_signal_settling);
+		if (current_battery_pptt_valid && !plug_signal_settling && (samples == BATTERY_SAMPLES || device_plugged))
 			sys_update_battery_tracker(current_battery_pptt, device_plugged);
-		if (battery_pptt_valid)
+		if (current_battery_pptt_valid)
 			calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
 
 		connection_update_battery(
