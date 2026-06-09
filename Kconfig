@@ -136,6 +136,36 @@ config CONNECTION_TIMEOUT_DELAY
     help
         Connection timeout duration when receiver is not detected.
 
+choice
+    prompt "Sensor rotation"
+    default SENSOR_ROTATION_90
+
+config SENSOR_ROTATION_0
+    bool "0 degrees"
+
+config SENSOR_ROTATION_90
+    bool "90 degrees"
+
+config SENSOR_ROTATION_180
+    bool "180 degrees"
+
+config SENSOR_ROTATION_270
+    bool "270 degrees"
+
+config SENSOR_ROTATION_0_FLIPPED
+    bool "0 degrees flipped"
+
+config SENSOR_ROTATION_90_FLIPPED
+    bool "90 degrees flipped"
+
+config SENSOR_ROTATION_180_FLIPPED
+    bool "180 degrees flipped"
+
+config SENSOR_ROTATION_270_FLIPPED
+    bool "270 degrees flipped"
+
+endchoice
+
 menu "Sensor power saving"
 
 config SENSOR_LP_TIMEOUT
