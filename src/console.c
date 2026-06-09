@@ -4,7 +4,9 @@
 #include "system/test_mode.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration.h"
+#if CONFIG_VQF_BENCH
 #include "sensor/fusion/vqf/vqf.h"
+#endif
 #include "connection/esb.h"
 #include "connection/tdma.h"
 #include "build_defines.h"
@@ -28,8 +30,6 @@
 #include <zephyr/sys/reboot.h>
 
 #include <string.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
@@ -60,6 +60,8 @@ static const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 #define SENS_CAL_DEFAULT_REVOLUTIONS CONFIG_SENSOR_SENS_REV
 #define SENS_CAL_MAX_REVOLUTIONS     100
 #endif
+
+#define CONSOLE_BUTTON_EXISTS DT_NODE_HAS_PROP(DT_ALIAS(sw0), gpios)
 
 static const char *meows[] = {
 	"Mew", "Meww", "Meow", "Meow meow", "Mrrrp", "Mrrf", "Mreow", "Mrrrow", "Mrrr", "Purr",
@@ -102,7 +104,7 @@ static void print_board(void)
 	printk(CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT "\n");
 #endif
 	printk(FW_STRING);
-	printk("Repo: %s | Branch: %s | Author: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH, FW_GIT_AUTHOR);
+	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
 
 	printk("\nBoard: " CONFIG_BOARD "\n");
 	printk("SOC: " CONFIG_SOC "\n");
@@ -458,6 +460,48 @@ static void print_meow(void)
 	printk("%s%s%s\n", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
 
+static void print_button_help(void)
+{
+	printk("Button Functions (current build):\n");
+#if CONSOLE_BUTTON_EXISTS
+	printk("  Short press (1x):          Reboot (blocked in test mode)\n");
+#if CONFIG_USER_EXTRA_ACTIONS
+	printk("  Quick press (2x):          Calibrate sensor ZRO\n");
+	printk("  Quick press (3x):          Reset active pairing\n");
+#if DFU_EXISTS
+#if defined(CONFIG_BOARD_STYRIA_MINI_UF2)
+	printk("  Quick press (6x/7x):       Enter DFU bootloader\n");
+#else
+	printk("  Quick press (4x/5x):       Enter DFU bootloader\n");
+#endif
+#if ADAFRUIT_BOOTLOADER
+	printk("  Quick press (8x/9x):       Enter OTA DFU (BLE) if flashed SD (softdevice) firmware\n");
+#else
+	printk("  Quick press (8x/9x):       Enter DFU bootloader\n");
+#endif
+#endif
+#if USER_SHUTDOWN_ENABLED
+	printk("  Hold (~1s):                Power off; keep holding ~5s to cancel\n");
+#else
+	printk("  Hold (~1s):                Reboot; keep holding ~5s to cancel\n");
+#endif
+#else
+#if USER_SHUTDOWN_ENABLED
+	printk("  Hold (~1s):                Power off; keep holding ~5s to reset pairing\n");
+#else
+	printk("  Hold (~1s):                Reboot; keep holding ~5s to reset pairing\n");
+#endif
+#endif
+#if USB_EXISTS && DFU_EXISTS
+	printk("  Hold while USB connects:   Enter DFU bootloader\n");
+#endif
+	printk("  During OTA:                Button actions are blocked\n");
+#else
+	printk("  No sw0 button is defined for this board\n");
+#endif
+	printk("\n");
+}
+
 static void print_help(void)
 {
 	printk("\n=== Available Commands ===\n\n");
@@ -534,6 +578,7 @@ static void print_help(void)
 	printk("  reset bat                  Reset battery tracker\n");
 	printk("  reset all                  Clear all settings\n");
 	printk("\n");
+	print_button_help();
 }
 
 // --- Command Implementations ---
@@ -772,10 +817,9 @@ static void console_thread(void)
 	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
 #endif
 	printk(FW_STRING);
-	printk("Repo: %s | Branch: %s | Author: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH, FW_GIT_AUTHOR);
+	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
 
-	// Print help on startup
-	print_help();
+	printk("Type 'help' to show available commands.\n");
 
 	uint8_t command_info[] = "info";
 	uint8_t command_uptime[] = "uptime";
