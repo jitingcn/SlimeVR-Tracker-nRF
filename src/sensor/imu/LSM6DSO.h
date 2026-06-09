@@ -19,6 +19,8 @@
 #define LSM6DSO_CTRL7                      0x16
 #define LSM6DSO_CTRL8                      0x17
 
+#define LSM6DSO_STATUS_REG                 0x1E
+#define LSM6DSO_OUTX_H_A                   0x29
 #define LSM6DSO_STATUS_MASTER_MAINPAGE     0x39
 #define LSM6DSO_FIFO_STATUS1               0x3A
 
@@ -30,6 +32,16 @@
 #define LSM6DSO_INTERNAL_FREQ_FINE         0x63
 
 #define LSM6DSO_FIFO_DATA_OUT_TAG          0x78
+
+// Sensor Hub
+#define LSM6DSO_FUNC_CFG_ACCESS            0x01
+#define LSM6DSO_SENSOR_HUB_1               0x02
+#define LSM6DSO_MASTER_CONFIG              0x14
+#define LSM6DSO_SLV0_ADD                   0x15
+#define LSM6DSO_SLV0_SUBADD                0x16
+#define LSM6DSO_SLV0_CONFIG                0x17
+#define LSM6DSO_DATAWRITE_SLV0             0x21
+#define LSM6DSO_STATUS_MASTER              0x22
 
 #define DSO_FS_G_250DPS  0x00 //0bxxxx0000
 #define DSO_FS_G_500DPS  0x04 //0bxxxx0100

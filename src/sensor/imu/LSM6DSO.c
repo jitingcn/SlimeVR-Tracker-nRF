@@ -1,4 +1,5 @@
 #include <math.h>
+#include <string.h>
 
 #include <zephyr/logging/log.h>
 #include <hal/nrf_gpio.h>
@@ -13,6 +14,9 @@ static uint8_t accel_fs = DSO_FS_XL_16G;
 static uint8_t gyro_fs = DSO_FS_G_2000DPS;
 
 static float freq_scale = 1; // ODR is scaled by INTERNAL_FREQ_FINE
+
+#define LSM6DSO_SHUB_XLDA_TIMEOUT_MS 80
+#define LSM6DSO_SHUB_OP_TIMEOUT_MS 20
 
 LOG_MODULE_REGISTER(LSM6DSO, LOG_LEVEL_DBG);
 
@@ -324,8 +328,19 @@ uint8_t lsm6dso_setup_WOM(void)
 
 int lsm6dso_ext_setup(void)
 {
-	sensor_interface_ext_configure(&sensor_ext_lsm6dsv);
-	return 0;
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	k_usleep(350);
+	// One-shot sensor-hub transactions start on accel data-ready, so scan with
+	// accel running before lsm6dso_init() reconfigures the final runtime ODR.
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL1, DSO_ODR_208Hz | DSO_FS_XL_8G);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL6, DSO_OP_MODE_XL_HP);
+	k_msleep(5);
+	if (err)
+		LOG_ERR("Communication error");
+	sensor_interface_ext_configure(&sensor_ext_lsm6dso);
+	return err;
 }
 
 int lsm6dso_ext_passthrough(bool passthrough)
@@ -333,15 +348,15 @@ int lsm6dso_ext_passthrough(bool passthrough)
 	int err = 0;
 	if (passthrough)
 	{
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x10); // passthrough on
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x10); // passthrough on
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	}
 	else
 	{
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x08); // passthrough off
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, passthrough off
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	}
 	if (err)
 		LOG_ERR("Communication error");
@@ -355,24 +370,33 @@ int lsm6dso_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes
 		LOG_ERR("Unsupported write");
 		return -1;
 	}
-	// Configure transaction and begin one-shot (AN5922, page 80, One-shot write routine)
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	// Configure transaction and begin one-shot write.
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
 	uint8_t slv0[3] = {(addr << 1) | 0x00, buf[0], 0x00 | 0x00}; // write, SHUB_ODR = 104Hz, reading no bytes
-	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
-//	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, (addr << 1) | 0x00); // write
-//	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_SUBADD, buf[0]);
-//	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_CONFIG, 0x00 | 0x00); // SHUB_ODR = 104Hz, reading no bytes
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_DATAWRITE_SLV0, buf[1]);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x4C); // WRITE_ONCE, SHUB_PU_EN, enable I2C master
-	// Wait for transaction
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SLV0_ADD, slv0, 3);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_DATAWRITE_SLV0, buf[1]);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x4C); // WRITE_ONCE, SHUB_PU_EN, enable I2C master
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	uint8_t tmp;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_OUTX_H_A, &tmp); // clear current XLDA
 	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + 10;
-	while ((status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
-	k_usleep(300);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
-	if (~status & 0x80)
+	int64_t timeout = k_uptime_get() + LSM6DSO_SHUB_XLDA_TIMEOUT_MS;
+	while (!(status & 0x01) && k_uptime_get() < timeout) // wait for new XLDA
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_REG, &status);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	status = 0;
+	timeout = k_uptime_get() + LSM6DSO_SHUB_OP_TIMEOUT_MS;
+	while (!(status & 0x80) && k_uptime_get() < timeout) // WR_ONCE_DONE
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER, &status);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
+	k_usleep(350);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	if (status & 0x04) // SLAVE0_NACK
+	{
+		LOG_DBG("Ext I2C write NACK from address 0x%02X", addr);
+		return -1;
+	}
+	if (!(status & 0x80))
 	{
 		LOG_ERR("Write timeout");
 		return -1;
@@ -387,32 +411,41 @@ int lsm6dso_ext_write_read(const uint8_t addr, const void *write_buf, size_t num
 		LOG_ERR("Unsupported write_read");
 		return -1;
 	}
-	// Configure transaction and begin one-shot (AN5922, page 79, One-shot read routine)
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
-	uint8_t slv0[3] = {(addr << 1) | 0x01, ((const uint8_t *)write_buf)[0], 0x00 | num_read}; // read, SHUB_ODR = 104Hz, reading num_read bytes
-	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
-//	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, (addr << 1) | 0x01); // read
-//	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_SUBADD, ((const uint8_t *)write_buf)[0]);
-//	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_CONFIG, 0x00 | num_read); // SHUB_ODR = 104Hz, reading num_read bytes
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x4C); // WRITE_ONCE mandatory for read, SHUB_PU_EN, enable I2C master
-	// Wait for transaction
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	uint8_t sub_addr = ((const uint8_t *)write_buf)[0];
+
+	// Configure transaction and begin one-shot read.
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	uint8_t slv0[3] = {(addr << 1) | 0x01, sub_addr, 0x00 | num_read}; // read, SHUB_ODR = 104Hz, reading num_read bytes
+	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SLV0_ADD, slv0, 3);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x4C); // WRITE_ONCE, SHUB_PU_EN, enable I2C master
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	uint8_t tmp;
-	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_H_A, &tmp); // clear XLDA
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_OUTX_H_A, &tmp); // clear current XLDA
 	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + 10;
-	while ((status & 0x01) && k_uptime_get() < timeout) // XLDA
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_REG, &status);
+	int64_t timeout = k_uptime_get() + LSM6DSO_SHUB_XLDA_TIMEOUT_MS;
+	while (!(status & 0x01) && k_uptime_get() < timeout) // wait for new XLDA
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_REG, &status);
 	status = 0;
-	timeout = k_uptime_get() + 10;
-	while ((status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP
+	timeout = k_uptime_get() + LSM6DSO_SHUB_OP_TIMEOUT_MS;
+	while (!(status & 0x01) && k_uptime_get() < timeout) // SENS_HUB_ENDOP
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER_MAINPAGE, &status);
-	// Read data
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
-	k_usleep(300);
-	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, read_buf, num_read);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	uint8_t master_status = 0;
+	ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER, &master_status);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
+	k_usleep(350);
+	if ((master_status & 0x04) || !(status & 0x01)) // SLAVE0_NACK or timeout
+	{
+		if (master_status & 0x04)
+			LOG_DBG("Ext I2C NACK from address 0x%02X", addr);
+		else
+			LOG_DBG("Ext I2C read timeout for address 0x%02X", addr);
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00);
+		memset(read_buf, 0, num_read);
+		return -1;
+	}
+	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SENSOR_HUB_1, read_buf, num_read);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	return err;
 }
 
