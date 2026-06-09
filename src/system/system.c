@@ -479,10 +479,14 @@ static void button_thread(void)
 				press_time = 0;
 				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 				set_status(SYS_STATUS_BUTTON_PRESSED, false);
-			} else if (sys_user_shutdown()) // held for 5 seconds, reset pairing
+			} else if (sys_user_shutdown())
 			{
+#if CONFIG_USER_EXTRA_ACTIONS
+				LOG_INF("Button hold timeout, shutdown canceled");
+#else
 				LOG_INF("Pairing requested");
 				esb_reset_pair();
+#endif
 				press_time = 0;
 				set_status(SYS_STATUS_BUTTON_PRESSED, false); // TODO: is needed?
 			}

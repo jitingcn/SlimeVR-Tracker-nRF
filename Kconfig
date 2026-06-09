@@ -86,7 +86,8 @@ config USER_EXTRA_ACTIONS
     bool "Multiple press actions"
     help
         Allow user to use multiple presses to calibrate, pair, or enter DFU.
-        By default, pairing is available when holding down sw0 for 5 seconds.
+        When enabled, sw0 long-hold pairing reset is disabled; use the
+        multiple-press pairing action instead.
         By default, DFU is available when holding down sw0 and plugging in a USB cable.
 
 config IGNORE_RESET

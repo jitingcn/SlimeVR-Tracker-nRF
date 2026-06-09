@@ -87,7 +87,8 @@ int main(void)
 
 	/* if button is not held after booting from shutdown, power off again
 	 * if button press is normal, continue boot
-	 * if button is held for 5 seconds, reset pairing and continue boot
+	 * if button is held past the long-hold window, reset pairing only
+	 * when multiple-press actions are not enabled
 	 */
 
 	if (button_read()) {
@@ -96,8 +97,12 @@ int main(void)
 				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
 			}
 			if (k_uptime_get() > 5000) {
+#if CONFIG_USER_EXTRA_ACTIONS
+				LOG_INF("Button long hold timeout, continuing boot");
+#else
 				LOG_INF("Pairing requested");
 				esb_reset_pair();
+#endif
 				break;
 			}
 			k_msleep(1);
