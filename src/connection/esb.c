@@ -38,6 +38,7 @@
 #include <hal/nrf_timer.h>
 #include <nrfx_timer.h>
 #include <zephyr/sys/crc.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/kernel.h>
 
 #include <stdlib.h>
@@ -204,6 +205,7 @@ static void set_tracker_id(uint8_t id)
 static uint32_t esb_write_calls = 0;
 static uint32_t esb_write_queued = 0;
 static uint32_t esb_write_dup_queued = 0;
+static uint32_t esb_write_dropped = 0;
 static int64_t esb_rate_last_ts = 0;
 
 void esb_write_rate_tick(void)
@@ -214,11 +216,17 @@ void esb_write_rate_tick(void)
 	}
 	esb_write_calls++;
 	if (now - esb_rate_last_ts >= 5000) {
-		LOG_INF("esb_write rate: calls=%u/s queued=%u/s dup=%u/s",
-			esb_write_calls / 5, esb_write_queued / 5, esb_write_dup_queued / 5);
+		LOG_INF(
+			"esb_write rate: calls=%u/s queued=%u/s dup=%u/s drop=%u/s",
+			esb_write_calls / 5,
+			esb_write_queued / 5,
+			esb_write_dup_queued / 5,
+			esb_write_dropped / 5
+		);
 		esb_write_calls = 0;
 		esb_write_queued = 0;
 		esb_write_dup_queued = 0;
+		esb_write_dropped = 0;
 		esb_rate_last_ts = now;
 	}
 }
@@ -226,8 +234,39 @@ void esb_write_rate_tick(void)
 // ESB recovery mechanism for persistent ENOMEM errors
 static uint32_t consecutive_enomem_errors = 0;
 static int64_t last_enomem_time = 0;
+static atomic_t tx_failed_pop_pending;
 #define ENOMEM_ERROR_THRESHOLD 3    // Force recovery after N consecutive errors
 #define ENOMEM_ERROR_WINDOW_MS 1000 // Reset counter if no error for this duration
+
+static void drop_failed_tx_payload(void)
+{
+	int err = esb_pop_tx();
+
+	if (err == 0) {
+		LOG_DBG("Dropped failed TX payload from ESB FIFO");
+	} else if (err == -EBUSY) {
+		atomic_set(&tx_failed_pop_pending, 1);
+		LOG_DBG("Deferring failed TX payload drop: ESB busy");
+	} else if (err != -ENODATA) {
+		LOG_WRN("Failed to drop failed TX payload: %d", err);
+	}
+}
+
+static void drop_failed_tx_payload_if_pending(void)
+{
+	if (atomic_cas(&tx_failed_pop_pending, 1, 0)) {
+		drop_failed_tx_payload();
+	}
+}
+
+static void esb_start_queued_tx(void)
+{
+	int tx_ret = esb_start_tx();
+
+	if (tx_ret != 0 && tx_ret != -EBUSY && tx_ret != -ENODATA) {
+		LOG_WRN("esb_start_tx failed: %d", tx_ret);
+	}
+}
 
 static void esb_clear_time_sync_state(void)
 {
@@ -418,6 +457,8 @@ void event_handler(struct esb_evt const *event)
 		}
 		break;
 	case ESB_EVENT_TX_FAILED:
+		drop_failed_tx_payload();
+		esb_start_queued_tx();
 		tx_failed_count++;
 
 		// Detailed packet type diagnostics for TX_FAILED
@@ -479,7 +520,7 @@ void event_handler(struct esb_evt const *event)
 			);
 		}
 
-		if (esb_paired && !connection_get_data_collection()) {
+		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
 			clocks_stop();
 		}
 		break;
@@ -1344,10 +1385,15 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	if (!clock_status) {
 		clocks_start();
 	}
+	drop_failed_tx_payload_if_pending();
 	if (data_length < 1) {
 		LOG_ERR("Invalid data length %u", data_length);
 		return;
 	}
+
+	bool is_ping = data[0] == ESB_PING_TYPE;
+	bool is_raw = (data[0] >= 0x10 && data[0] <= 0x14);
+	bool drop_on_fifo_full = no_ack && !is_raw;
 
 	tx_payload.pipe = 1 + (tracker_id % 7);
 	tx_payload.noack = no_ack;
@@ -1357,12 +1403,10 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	// Tick rate counter
 	esb_write_rate_tick();
 
-	if (data[0] == ESB_PING_TYPE) {
+	if (is_ping) {
 		if (!server_time_synced) {
 			LOG_DBG("Sending PING while time not synced - attempting to re-sync");
 		}
-		ping_pending = true;
-		ping_failed = false;
 		// Set sequence number
 		data[2] = ping_counter;
 		if (server_time_synced) {
@@ -1376,7 +1420,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		// Calculate crc8 checksum over first 12 bytes
 		uint8_t crc_calc = crc8_ccitt(0x07, data, ESB_PING_LEN - 1);
 		data[ESB_PING_LEN - 1] = crc_calc;
-		ping_counter++;
 	}
 	memcpy(tx_payload.data, data, data_length);
 
@@ -1385,8 +1428,6 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	last_tx.noack = no_ack;
 	last_tx.length = data_length;
 	last_tx.timestamp = k_uptime_get();
-
-	bool is_raw = (data[0] >= 0x10 && data[0] <= 0x14);
 
 	/*
 	 * TDMA slot gating / random backoff for noack sensor-data packets.
@@ -1419,19 +1460,34 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 
 	// Try to queue the packet (now inside the TDMA slot window)
 	int queue_status = esb_write_payload(&tx_payload);
-	// only flush if tx full
+
+	if (queue_status == -ENOMEM && drop_on_fifo_full) {
+		esb_write_dropped++;
+		if (esb_is_idle()) {
+			esb_start_queued_tx();
+		}
+		return;
+	}
+
 	if (queue_status == -ENOMEM) {
-		esb_flush_tx();
+		if (esb_is_idle()) {
+			(void)esb_flush_tx();
+		} else {
+			k_msleep(1);
+			drop_failed_tx_payload_if_pending();
+		}
 		queue_status = esb_write_payload(&tx_payload);
 	}
 
 	// manually repeat raw IMU/mag packets for better reliability
 	// Skip duplication for metadata (0x12) and calibration (0x14)
 	// which are sent at controlled intervals with guaranteed delivery
-	if (is_raw && data[0] != ESB_RAW_META_TYPE && data[0] != ESB_RAW_CAL_TYPE) {
+	if (queue_status == 0 && is_raw && data[0] != ESB_RAW_META_TYPE && data[0] != ESB_RAW_CAL_TYPE) {
 		tx_payload.noack = true;
-		queue_status = esb_write_payload(&tx_payload);
-		esb_write_dup_queued++;
+		int dup_status = esb_write_payload(&tx_payload);
+		if (dup_status == 0) {
+			esb_write_dup_queued++;
+		}
 	}
 # if 0
 	if (no_ack && !is_raw) {
@@ -1446,15 +1502,19 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	}
 #endif
 	// Record ping history metadata (timing updated after TDMA wait, just before TX)
-	if (data[0] == ESB_PING_TYPE && queue_status == 0 && data_length == ESB_PING_LEN) {
+	if (is_ping && queue_status == 0 && data_length == ESB_PING_LEN) {
+		ping_pending = true;
+		ping_failed = false;
+		ping_counter++;
 		ping_history[ping_history_idx].counter = tx_payload.data[2];
 		ping_ctr_sent = tx_payload.data[2];
 		LOG_DBG("PING queued (ctr=%u)", (unsigned)tx_payload.data[2]);
-	} else if (tx_payload.data[0] == ESB_PING_TYPE && queue_status != 0) {
+	} else if (is_ping && queue_status != 0) {
+		ping_pending = false;
 		// PING failed to queue - this is critical!
 		const char *err_str = "unknown";
 		if (queue_status == -ENOMEM) {
-			err_str = "ENOMEM (ESB not ready)";
+			err_str = "ENOMEM (FIFO full)";
 		} else if (queue_status == -ENOSPC) {
 			err_str = "ENOSPC (FIFO full)";
 		} else if (queue_status == -EACCES) {
@@ -1558,9 +1618,8 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 * the TX chain is already running and our queued packet will be
 	 * sent automatically.  No retry or recovery needed.
 	 */
-	int tx_ret = esb_start_tx();
-	if (tx_ret != 0 && tx_ret != -EBUSY) {
-		LOG_WRN("esb_start_tx failed: %d", tx_ret);
+	if (queue_status == 0) {
+		esb_start_queued_tx();
 	}
 }
 

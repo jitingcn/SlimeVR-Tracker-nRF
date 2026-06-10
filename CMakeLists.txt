@@ -139,6 +139,9 @@ endif()
 
 # NORDIC SDK APP START
 FILE(GLOB_RECURSE app_sources src/*.c)
+if(NOT CONFIG_CONNECTION_OVER_HID)
+  list(FILTER app_sources EXCLUDE REGEX ".*/hid\\.c$")
+endif()
 target_sources(app PRIVATE ${app_sources})
 
 # NORDIC SDK APP END

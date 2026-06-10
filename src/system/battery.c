@@ -13,6 +13,7 @@
 #include <zephyr/init.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>
 
@@ -123,16 +124,20 @@ static int divider_setup(void) {
 		battery_adc_gain, (double)(max_adc_voltage * 1000.0f));
 
 	*accp = (struct adc_channel_cfg){
+		.channel_id = 0,
 		.gain = battery_adc_gain,
 		.reference = ADC_REF_INTERNAL,
 		.acquisition_time = ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 3),
 	};
 
 	if (cfg->output_ohm != 0) {
-		accp->input_positive = 1  // SAADC_CH_PSELP_PSELP_AnalogInput0
-							 + iocp->channel;
+		if (iocp->channel == 12) {
+			accp->input_positive = NRF_SAADC_VDDHDIV5;
+		} else {
+			accp->input_positive = iocp->channel;
+		}
 	} else {
-		accp->input_positive = 9;  // SAADC_CH_PSELP_PSELP_VDD
+		accp->input_positive = NRF_SAADC_VDD;
 	}
 
 	if (iocp->channel == 12) { // VDDHDIV5
@@ -146,7 +151,7 @@ static int divider_setup(void) {
 #endif /* CONFIG_ADC_var */
 
 	rc = adc_channel_setup(ddp->adc, accp);
-	LOG_INF("Setup AIN%u got %d", iocp->channel, rc);
+	LOG_INF("Setup ADC input %u (io-channel %u) got %d", accp->input_positive, iocp->channel, rc);
 
 	return rc;
 }

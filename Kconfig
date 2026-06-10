@@ -462,10 +462,42 @@ config CONNECTION_ENABLE_ACK
 
 config CONNECTION_OVER_HID
     bool "Use HID for data output"
+    depends on USB_DEVICE_STACK_NEXT && USBD_HID_SUPPORT && UART_CONSOLE
     default n
     help
         Use HID if available.
         Otherwise, use ESB only.
+
+config SLIMEVR_USB_DEVICE_VID
+    hex "SlimeVR USB vendor ID"
+    default 0x1209
+    help
+        USB vendor ID used by the SlimeVR USBD_NEXT device.
+
+config SLIMEVR_USB_DEVICE_PID
+    hex "SlimeVR USB product ID"
+    default 0x7692
+    help
+        USB product ID used by the SlimeVR tracker firmware.
+
+config SLIMEVR_USB_DEVICE_MANUFACTURER
+    string "SlimeVR USB manufacturer"
+    default "SlimeVR"
+    help
+        USB manufacturer string and console banner prefix.
+
+config SLIMEVR_USB_DEVICE_PRODUCT
+    string "SlimeVR USB product"
+    default "SlimeNRF Tracker"
+    help
+        USB product string and console banner name.
+
+config SLIMEVR_USB_DEVICE_MAX_POWER
+    int "SlimeVR USB max power"
+    range 0 250
+    default 100
+    help
+        USB bMaxPower value in 2 mA units.
 
 config CLOCK_USE_LFXO
     bool "Use external low-frequency crystal oscillator (LFXO)"

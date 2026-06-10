@@ -216,6 +216,91 @@ static int sub_data_len(uint8_t type)
 	}
 }
 
+static bool connection_hid_output_ready(void)
+{
+#if CONFIG_CONNECTION_OVER_HID
+	return get_status(SYS_STATUS_USB_CONNECTED);
+#else
+	return false;
+#endif
+}
+
+static void fill_normal_packet(uint8_t type, uint8_t data[16])
+{
+	memset(data, 0, 16);
+	data[0] = type;
+	data[1] = tracker_id;
+
+	switch (type) {
+	case 0:
+		fill_sub_info(&data[2]);
+		data[15] = 0;
+		break;
+	case 1:
+		fill_sub_quat_accel(&data[2]);
+		break;
+	case 2:
+		fill_sub_compact_quat(&data[2]);
+		data[15] = 0;
+		break;
+	case 3:
+		fill_sub_status(&data[2]);
+		data[15] = 0;
+		break;
+	case 4:
+		fill_sub_mag(&data[2]);
+		break;
+	case 5:
+		fill_sub_runtime(&data[2]);
+		data[15] = 0;
+		break;
+	default:
+		data[0] = 1;
+		fill_sub_quat_accel(&data[2]);
+		break;
+	}
+}
+
+static void write_normal_packet(const uint8_t data[16])
+{
+#if CONFIG_CONNECTION_OVER_HID
+	if (connection_hid_output_ready()) {
+		hid_write_packet_n(data);
+	}
+#endif
+
+	if (!esb_ready()) {
+		return;
+	}
+
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence++;
+	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+}
+
+#if CONFIG_CONNECTION_OVER_HID
+static void write_hid_packet_type(uint8_t type)
+{
+	if (!connection_hid_output_ready()) {
+		return;
+	}
+
+	uint8_t data[16];
+
+	fill_normal_packet(type, data);
+	hid_write_packet_n(data);
+}
+
+static void write_hid_composite_as_normal_packets(const struct composite_builder *builder)
+{
+	for (int i = 0; i < builder->n; i++) {
+		write_hid_packet_type(builder->types[i]);
+	}
+}
+#endif
+
 static void connection_write_packet_type(uint8_t type)
 {
 	switch (type) {
@@ -300,7 +385,7 @@ void connection_update_sensor_temp(float temp)
 	} else if (temp > 88.5f) {
 		sensor_temp = 255;
 	} else {
-		sensor_temp = ((temp - 25) * 2 + 128.5f); // -38.5 - +88.5 -> 1-255
+		sensor_temp = (uint8_t)((temp - 25) * 2 + 128.5f); // -38.5 - +88.5 -> 1-255
 	}
 }
 
@@ -355,86 +440,51 @@ void connection_update_status(int status)
 
 void connection_write_packet_0() // device info
 {
-	uint8_t data[16] = {0};
-	data[0] = 0;
-	data[1] = tracker_id;
-	fill_sub_info(&data[2]);
-	data[15] = 0; // rssi (supplied by receiver)
+	uint8_t data[16];
 
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence++;
-	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+	fill_normal_packet(0, data);
+	write_normal_packet(data);
 }
 
 void connection_write_packet_1() // full precision quat and accel
 {
-	uint8_t data[16] = {0};
-	data[0] = 1;
-	data[1] = tracker_id;
-	fill_sub_quat_accel(&data[2]);
+	uint8_t data[16];
 
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence++;
-	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+	fill_normal_packet(1, data);
+	write_normal_packet(data);
 }
 
 void connection_write_packet_2() // reduced precision quat and accel with battery,
 								 // temp, and rssi
 {
-	uint8_t data[16] = {0};
-	data[0] = 2;
-	data[1] = tracker_id;
-	fill_sub_compact_quat(&data[2]);
-	data[15] = 0; // rssi (supplied by receiver)
+	uint8_t data[16];
 
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence++;
-	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+	fill_normal_packet(2, data);
+	write_normal_packet(data);
 }
 
 void connection_write_packet_3() // status
 {
-	uint8_t data[16] = {0};
-	data[0] = 3;
-	data[1] = tracker_id;
-	fill_sub_status(&data[2]);
-	data[15] = 0; // rssi (supplied by receiver)
+	uint8_t data[16];
 
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence++;
-	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+	fill_normal_packet(3, data);
+	write_normal_packet(data);
 }
 
 void connection_write_packet_4() // full precision quat and magnetometer
 {
-	uint8_t data[16] = {0};
-	data[0] = 4;
-	data[1] = tracker_id;
-	fill_sub_mag(&data[2]);
+	uint8_t data[16];
 
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence++;
-	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+	fill_normal_packet(4, data);
+	write_normal_packet(data);
 }
 
 void connection_write_packet_5() // runtime estimate
 {
-	uint8_t data[16] = {0};
-	data[0] = 5;
-	data[1] = tracker_id;
-	uint64_t runtime_us = k_ticks_to_us_floor64(sys_get_battery_remaining_time_estimate());
-	memcpy(&data[2], &runtime_us, sizeof(runtime_us));
-	data[15] = 0; // rssi (supplied by receiver)
+	uint8_t data[16];
 
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence++;
-	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+	fill_normal_packet(5, data);
+	write_normal_packet(data);
 }
 
 static int64_t last_info_time = 0;
@@ -976,10 +1026,16 @@ static bool composite_try_add_due(struct composite_builder *builder, uint8_t typ
 
 static void send_composite_or_single(const struct composite_builder *builder, uint8_t fallback_type)
 {
-	if (builder->n > 1)
-		send_composite(builder->types, builder->n);
-	else
+	if (builder->n > 1) {
+		if (esb_ready()) {
+			send_composite(builder->types, builder->n);
+		}
+#if CONFIG_CONNECTION_OVER_HID
+		write_hid_composite_as_normal_packets(builder);
+#endif
+	} else {
 		connection_write_packet_type(fallback_type);
+	}
 }
 
 void connection_thread(void)
@@ -991,6 +1047,8 @@ void connection_thread(void)
 		int64_t now = k_uptime_get();
 
 		watchdog_feed(WDT_CHANNEL_CONNECTION);
+		bool radio_ready = esb_ready();
+		bool hid_ready = connection_hid_output_ready();
 
 		/* Adaptive PING interval based on connection health */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
@@ -999,11 +1057,12 @@ void connection_thread(void)
 			ping_interval_ms = PING_INTERVAL_MS;
 		}
 
-		if (!esb_ready()) {
+		if (!radio_ready && !hid_ready) {
 			k_msleep(100);
 			continue;
 		}
 
+		if (radio_ready) {
 		/*
 		 * Process OTA packets queued from ESB ISR (safe in thread context).
 		 * Must run before esb_ota_is_active() check since BEGIN activates OTA.
@@ -1097,10 +1156,11 @@ void connection_thread(void)
 		if (connection_process_raw_data()) {
 			continue;
 		}
+		} // end of radio_ready block
 
 		/* During data collection, throttle fusion data
 		 * to leave radio bandwidth for raw data. */
-		if (data_collection_active) {
+		if (radio_ready && data_collection_active) {
 			static int64_t last_fusion_dc_time;
 			if (now - last_fusion_dc_time < 9) {
 				k_usleep(300);

@@ -95,13 +95,13 @@ static const struct gpio_dt_spec pwr = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, pwr_gp
 #endif
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, int0_gpios)
 #define INT0_EXISTS true
-static const struct gpio_dt_spec int0 = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, int0_gpios);
+static const struct gpio_dt_spec int0 __attribute__((unused)) = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, int0_gpios);
 #else
 #pragma message "INT0 GPIO does not exist"
 #endif
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, clk_gpios)
 #define CLK_EXISTS true
-static const struct gpio_dt_spec clk = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, clk_gpios);
+static const struct gpio_dt_spec clk __attribute__((unused)) = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, clk_gpios);
 #else
 #pragma message "CLK GPIO does not exist"
 #endif

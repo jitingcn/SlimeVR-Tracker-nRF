@@ -12,8 +12,10 @@
 #include "build_defines.h"
 #include "zephyr/sys/printk.h"
 
-#if CONFIG_USB_DEVICE_STACK
-#define USB DT_NODELABEL(usbd)
+#define USB_EXISTS 0
+#if CONFIG_USB_DEVICE_STACK_NEXT
+#undef USB_EXISTS
+#define USB DT_NODELABEL(zephyr_udc0)
 #define USB_EXISTS (DT_NODE_HAS_STATUS(USB, okay) && CONFIG_UART_CONSOLE)
 #endif
 
@@ -101,7 +103,7 @@ void console_thread_abort(void)
 static void print_board(void)
 {
 #if USB_EXISTS
-	printk(CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT "\n");
+	printk(CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER " " CONFIG_SLIMEVR_USB_DEVICE_PRODUCT "\n");
 #endif
 	printk(FW_STRING);
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
@@ -814,7 +816,7 @@ static void console_thread(void)
 		k_msleep(100);
 	}
 
-	printk("*** " CONFIG_USB_DEVICE_MANUFACTURER " " CONFIG_USB_DEVICE_PRODUCT " ***\n");
+	printk("*** " CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER " " CONFIG_SLIMEVR_USB_DEVICE_PRODUCT " ***\n");
 #endif
 	printk(FW_STRING);
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);

@@ -45,6 +45,18 @@ static inline nrf_clock_lfclk_t normalize_source(nrf_clock_lfclk_t source)
 	return source;
 }
 
+static bool lfclk_running_source_get(nrf_clock_lfclk_t *source)
+{
+	nrf_clock_lfclk_t active_source = NRF_CLOCK_LFCLK_RC;
+	bool running = nrf_clock_is_running(NRF_CLOCK, NRF_CLOCK_DOMAIN_LFCLK, &active_source);
+
+	if (source != NULL) {
+		*source = normalize_source(active_source);
+	}
+
+	return running;
+}
+
 // Safely switch LF clock source
 void clock_switch(nrf_clock_lfclk_t source)
 {
@@ -63,19 +75,24 @@ void clock_switch(nrf_clock_lfclk_t source)
 #endif
 
 	/* Check if already running with the requested source */
-	nrf_clock_lfclk_t current_source = nrf_clock_lf_actv_src_get(NRF_CLOCK);
+	nrf_clock_lfclk_t current_source;
+	bool running = lfclk_running_source_get(&current_source);
 	nrf_clock_lfclk_t normalized_requested = normalize_source(source);
 
-	if (current_source == normalized_requested) {
+	if (running && current_source == normalized_requested) {
 		LOG_INF("clock_switch: already running with source=%d", current_source);
 		return;
 	}
 
 	LOG_INF("clock_switch: %d -> %d", current_source, normalized_requested);
 
-	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
+	if (running) {
+		nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
 
-	while (nrf_clock_lf_is_running(NRF_CLOCK) && nrf_clock_lf_actv_src_get(NRF_CLOCK) != NRF_CLOCK_LFCLK_RC) {}
+		do {
+			running = lfclk_running_source_get(&current_source);
+		} while (running && current_source != NRF_CLOCK_LFCLK_RC);
+	}
 
 	/*
 	 * Start and wait for LFCLKSTARTED event, as used in sdk-nrf board init hooks.
@@ -89,7 +106,7 @@ void clock_switch(nrf_clock_lfclk_t source)
 		// RC starts very quickly, just wait for the event without sleeping
 		while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {}
 	} else {
-	uint32_t waited_us = 0;
+		uint32_t waited_us = 0;
 		while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {
 			k_usleep(LFCLK_WAIT_STEP_US);
 			waited_us += LFCLK_WAIT_STEP_US;
@@ -100,8 +117,9 @@ void clock_switch(nrf_clock_lfclk_t source)
 	}
 
 	/* Verify the actual clock source matches what we requested */
-	nrf_clock_lfclk_t actual_source = nrf_clock_lf_actv_src_get(NRF_CLOCK);
-	if (actual_source != normalized_requested) {
+	nrf_clock_lfclk_t actual_source;
+	bool actual_running = lfclk_running_source_get(&actual_source);
+	if (!actual_running || actual_source != normalized_requested) {
 		LOG_ERR("clock_switch: source mismatch! requested=%d, actual=%d", normalized_requested, actual_source);
 	} else {
 		LOG_INF("clock_switch: switched to source=%d successfully", actual_source);
@@ -111,9 +129,10 @@ void clock_switch(nrf_clock_lfclk_t source)
 // Switch to RC clock before shut down to avoid any problems with the bootloader
 void clock_pre_shutdown(void)
 {
-	nrf_clock_lfclk_t current_source = nrf_clock_lf_actv_src_get(NRF_CLOCK);
+	nrf_clock_lfclk_t current_source;
+	bool running = lfclk_running_source_get(&current_source);
 
-	if (current_source != NRF_CLOCK_LFCLK_RC) {
+	if (running && current_source != NRF_CLOCK_LFCLK_RC) {
 		clock_switch(NRF_CLOCK_LFCLK_RC);
 	}
 }
