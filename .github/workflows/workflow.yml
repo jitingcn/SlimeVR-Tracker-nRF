@@ -214,6 +214,10 @@ jobs:
                   {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"},
                   {boardname: "nekonya_tracker_uf2/nrf52833", filename: "nekonya_tracker_uf2"}
                 ]
+        variants: [
+                  {filename_suffix: "", extra_conf: ""},
+                  {filename_suffix: "_NoIdleWOM", extra_conf: "no_idle_wom.conf"}
+                ]
     runs-on: ubuntu-latest
     steps:
       - name: 💻 Checkout Repository
@@ -306,6 +310,11 @@ jobs:
               -DCONFIG_FLASH_LOAD_OFFSET=0x27000
             )
           fi
+          if [ -n "${{ matrix.variants.extra_conf }}" ]; then
+            EXTRA_CMAKE_ARGS+=(
+              -DEXTRA_CONF_FILE=${{ matrix.variants.extra_conf }}
+            )
+          fi
           rm -rf "$REPO_DIR/build"
           west build \
               --board ${{ matrix.boards.boardname }} \
@@ -318,9 +327,9 @@ jobs:
 
           if [ "${{ matrix.boards.with_softdevice }}" = "true" ]; then
             for artifact in \
-              "zephyr.hex:${{ matrix.boards.filename }}_OTA.hex" \
-              "zephyr_sd.hex:${{ matrix.boards.filename }}.hex" \
-              "zephyr_sd.uf2:${{ matrix.boards.filename }}.uf2"; do
+              "zephyr.hex:${{ matrix.boards.filename }}${{ matrix.variants.filename_suffix }}_OTA.hex" \
+              "zephyr_sd.hex:${{ matrix.boards.filename }}${{ matrix.variants.filename_suffix }}.hex" \
+              "zephyr_sd.uf2:${{ matrix.boards.filename }}${{ matrix.variants.filename_suffix }}.uf2"; do
               src_name="${artifact%%:*}"
               dst_name="${artifact#*:}"
               src="$REPO_DIR/build/$REPO_DIR/zephyr/$src_name"
@@ -335,7 +344,7 @@ jobs:
           else
             for ext in uf2 hex; do
               src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.${ext}"
-              dst="Releases/${{ matrix.boards.filename }}.${ext}"
+              dst="Releases/${{ matrix.boards.filename }}${{ matrix.variants.filename_suffix }}.${ext}"
               if [ -f "$src" ]; then
                 cp "$src" "$dst"
                 echo "Saved: $dst"
@@ -350,10 +359,10 @@ jobs:
         if: ${{ steps.build-firmware.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.boards.filename }}
+          name: ${{ matrix.boards.filename }}${{ matrix.variants.filename_suffix }}
           if-no-files-found: warn
           path: |
-            zephyr-workspace/Releases/${{ matrix.boards.filename }}*
+            zephyr-workspace/Releases/${{ matrix.boards.filename }}${{ matrix.variants.filename_suffix }}*
 
   publish-release:
     needs: build

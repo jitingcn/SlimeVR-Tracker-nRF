@@ -137,6 +137,14 @@ config CONNECTION_TIMEOUT_DELAY
     help
         Connection timeout duration when receiver is not detected.
 
+config CONNECTION_TIMEOUT_USE_WOM
+    bool "Use IMU wake up on connection timeout"
+    default n
+    depends on USER_SHUTDOWN && USE_IMU_WAKE_UP
+    help
+        Enter IMU wake up mode instead of system off when the receiver is not
+        detected for the connection timeout duration.
+
 choice
     prompt "Sensor rotation"
     default SENSOR_ROTATION_90
