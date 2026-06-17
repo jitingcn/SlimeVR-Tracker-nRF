@@ -86,6 +86,9 @@ struct retained_data {
 	// Persists across WoM resumes so online mag cal does not re-enter
 	// early bootstrap after every wake, but is cleared on full reboot/shutdown.
 	struct {
+		uint32_t norm_count;
+		float norm_ema;
+		float norm_var_ema;
 		float last_buf_avg_norm;
 		uint8_t update_count;
 		uint8_t reserved[3];

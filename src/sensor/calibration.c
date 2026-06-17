@@ -739,12 +739,18 @@ static void magneto_online_runtime_load_retained(void)
 	magneto_online_reset();
 	online_update_count = retained->onlineMagState.update_count;
 	online_last_buf_avg_norm = retained->onlineMagState.last_buf_avg_norm;
+	cal_norm_ema = retained->onlineMagState.norm_ema;
+	cal_norm_var_ema = retained->onlineMagState.norm_var_ema;
+	cal_norm_count = retained->onlineMagState.norm_count;
 }
 
 void sensor_calibration_online_mag_retained_save(void)
 {
 	retained->onlineMagState.update_count = (uint8_t)CLAMP(online_update_count, 0, 255);
 	retained->onlineMagState.last_buf_avg_norm = online_last_buf_avg_norm;
+	retained->onlineMagState.norm_ema = cal_norm_ema;
+	retained->onlineMagState.norm_var_ema = cal_norm_var_ema;
+	retained->onlineMagState.norm_count = cal_norm_count;
 }
 
 void sensor_calibration_online_mag_retained_clear(void)
@@ -2930,9 +2936,6 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	// Exception 2: if VQF has been reporting disturbance continuously for a long time,
 	// the "disturbance" is likely a calibration drift or environment change rather than
 	// transient interference.  Allow samples through to enable recalibration.
-	// Without this, a deadlock occurs: VQF reports disturbance → gate blocks samples →
-	// cal_norm_count stops updating (guarded by !magDistDetected in sensor.c) → CV
-	// stays frozen at a low value → gate never opens → no recalibration possible.
 #if CONFIG_SENSOR_USE_VQF
 	{
 		float zero[3] = {0};
@@ -2951,6 +2954,7 @@ void sensor_calibration_online_mag_sample(const float m[3])
 #endif
 
 	// Rate limit: minimum interval between samples
+
 	if (now - online_last_sample_time < ONLINE_MIN_INTERVAL_MS) {
 		return;
 	}

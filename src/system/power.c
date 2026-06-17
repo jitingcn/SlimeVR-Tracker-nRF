@@ -141,7 +141,8 @@ static void sys_disconnect_interface_pins(void)
 #endif
 #if VCC_EXISTS
 	LOG_INF("VCC GPIO pin: %u", vcc.pin);
-	nrf_gpio_cfg_default(vcc.pin);
+	if (device_is_ready(vcc.port))
+		gpio_pin_configure_dt(&vcc, GPIO_DISCONNECTED);
 	LOG_INF("Disconnected VCC GPIO");
 #endif
 }

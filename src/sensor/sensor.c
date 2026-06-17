@@ -287,6 +287,7 @@ static inline void sensor_rotate_sensor_vector_to_device_frame(
 static int sensor_scan(void);
 static int sensor_init(void);
 static void sensor_loop(void);
+static void sensor_log_quat(const char *tag, const float quat[4]);
 #if CONFIG_SENSOR_RANGE_STATS
 static void sensor_update_range_stats_gyro(float g[3]);
 static void sensor_update_range_stats_accel(float a[3]);
@@ -578,6 +579,22 @@ int sensor_scan(void)
 }
 
 static bool main_running = false;
+static volatile bool fusion_reset_pending = false;
+static volatile uint32_t fusion_reset_request_id = 0;
+static uint32_t fusion_reset_debug_active_id = 0;
+static uint8_t fusion_reset_debug_frames_remaining = 0;
+
+#define FUSION_RESET_DEBUG_FRAMES 3
+
+static void sensor_log_quat(const char *tag, const float quat[4])
+{
+	LOG_INF("%s Q[%.6f, %.6f, %.6f, %.6f]",
+		tag,
+		(double)quat[0],
+		(double)quat[1],
+		(double)quat[2],
+		(double)quat[3]);
+}
 
 int sensor_request_scan(bool force)
 {
@@ -810,19 +827,47 @@ void sensor_refresh_sensor_ids(void)
 	connection_update_sensor_ids(sensor_imu_id, sensor_mag_id);
 }
 
-void sensor_fusion_invalidate(void)
+static void sensor_fusion_do_reset(void)
 {
-	main_imu_restart(); // reinitialize fusion (resets quaternion to identity)
+	uint32_t reset_id = fusion_reset_request_id;
+
+	LOG_INF("Fusion reset #%u: do_reset enter main_ok=%d fusion_init=%d",
+		reset_id, main_ok, sensor_fusion_init);
+	sensor_log_quat("Fusion reset: cached q before main_imu_restart", q);
+	sensor_log_quat("Fusion reset: last sent/reference q before main_imu_restart", last_q);
+
+	main_imu_restart();
+
 	if (sensor_fusion_init)
-	{ // clear fusion gyro offset
+	{
+		float reset_q[4];
+		sensor_fusion->get_quat(reset_q);
+		q_normalize(reset_q, reset_q);
+		sensor_log_quat("Fusion reset: fusion q immediately after main_imu_restart", reset_q);
+	}
+
+	if (sensor_fusion_init)
+	{
 		sensor_fusion_update_bias(NULL);
 		sensor_retained_write();
 	}
 	else
-	{ // TODO: always clearing the fusion?
-		retained->fusion_id = 0; // Invalidate retained fusion data
+	{
+		retained->fusion_id = 0;
 		retained_update();
 	}
+}
+
+void sensor_fusion_invalidate(void)
+{
+	uint32_t reset_id = ++fusion_reset_request_id;
+
+	LOG_INF("Fusion reset #%u requested: pending=%d main_ok=%d fusion_init=%d main_running=%d main_suspended=%d",
+		reset_id, fusion_reset_pending, main_ok, sensor_fusion_init, main_running, main_suspended);
+	sensor_log_quat("Fusion reset request: cached q", q);
+	sensor_log_quat("Fusion reset request: last sent/reference q", last_q);
+
+	fusion_reset_pending = true;
 }
 
 void sensor_fusion_update_bias(float *g_off)
@@ -1260,6 +1305,20 @@ void sensor_loop(void)
 	while (1)
 	{
 		int64_t time_begin = k_uptime_get();
+
+		if (fusion_reset_pending)
+		{
+			uint32_t reset_id = fusion_reset_request_id;
+			LOG_INF("Fusion reset #%u: pending observed at sensor loop top", reset_id);
+			sensor_log_quat("Fusion reset loop top: cached q before do_reset", q);
+			fusion_reset_pending = false;
+			sensor_fusion_do_reset();
+			fusion_reset_debug_active_id = reset_id;
+			fusion_reset_debug_frames_remaining = FUSION_RESET_DEBUG_FRAMES;
+			LOG_INF("Fusion reset #%u: do_reset complete, tracing next %u frame(s)",
+				reset_id, fusion_reset_debug_frames_remaining);
+		}
+
 		if (main_ok)
 		{
 #if DEBUG
@@ -1932,6 +1991,13 @@ void sensor_loop(void)
 			// Get updated quaternion from fusion
 			sensor_fusion->get_quat(q);
 			q_normalize(q, q); // safe to use self as output
+			bool fusion_reset_debug_frame = fusion_reset_debug_frames_remaining > 0;
+			if (fusion_reset_debug_frame)
+			{
+				LOG_INF("Fusion reset #%u: frame trace after fusion updates, remaining=%u",
+					fusion_reset_debug_active_id, fusion_reset_debug_frames_remaining);
+				sensor_log_quat("Fusion reset frame: q from get_quat", q);
+			}
 
 			// Get linear acceleration
 			float lin_a[3] = {0};
@@ -2109,6 +2175,17 @@ void sensor_loop(void)
 			bool resting = sensor_fusion->get_gyro_sanity() == 0 ? q_epsilon(q, last_q, 0.003f) : q_epsilon(q, last_q, 0.05f);
 			int64_t min_interval = test_mode_get() ? TEST_MODE_MIN_SEND_INTERVAL_MS : 1000;
 			bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
+			if (fusion_reset_debug_frame)
+			{
+				LOG_INF("Fusion reset #%u: send decision quat=%d lin=%d force=%d dt=%lldms resting=%d",
+					fusion_reset_debug_active_id,
+					send_quat_data,
+					send_lin_accel_data,
+					force_send_by_time,
+					(long long)(now - last_sensor_send_time),
+					resting);
+				sensor_log_quat("Fusion reset frame: last_q before send decision", last_q);
+			}
 
 			if (send_quat_data || send_lin_accel_data || force_send_by_time)
 			{
@@ -2118,6 +2195,10 @@ void sensor_loop(void)
 				float reported_quat[4];
 				sensor_compute_device_and_reported_quat(q, device_quat, reported_quat);
 				sensor_rotate_sensor_vector_to_device_frame(lin_a, lin_a);
+				if (fusion_reset_debug_frame)
+				{
+					sensor_log_quat("Fusion reset frame: reported_quat sent to connection", reported_quat);
+				}
 
 				if (!send_quat_data && !send_lin_accel_data) {
 					memset(lin_a, 0, sizeof(lin_a)); // zero out linear acceleration when no motion detected
@@ -2125,10 +2206,25 @@ void sensor_loop(void)
 
 				connection_update_sensor_data(reported_quat, lin_a, sensor_data_time);
 				last_sensor_send_time = now;
+				if (fusion_reset_debug_frame)
+				{
+					LOG_INF("Fusion reset #%u: connection_update_sensor_data called",
+						fusion_reset_debug_active_id);
+				}
 
 				if (!resting) {
 					last_data_time = now;
 				}
+			}
+			else if (fusion_reset_debug_frame)
+			{
+				LOG_INF("Fusion reset #%u: frame not sent by threshold filters",
+					fusion_reset_debug_active_id);
+			}
+
+			if (fusion_reset_debug_frame)
+			{
+				fusion_reset_debug_frames_remaining--;
 			}
 
 #if CONFIG_SENSOR_USE_TCAL
@@ -2282,6 +2378,15 @@ void main_imu_restart(void)
 {
 	if (main_ok) // only restart fusion if initialized
 	{
+		LOG_INF("main_imu_restart: enter fusion_init=%d", sensor_fusion_init);
+		if (sensor_fusion_init)
+		{
+			float before_restart_q[4];
+			sensor_fusion->get_quat(before_restart_q);
+			q_normalize(before_restart_q, before_restart_q);
+			sensor_log_quat("main_imu_restart: fusion q before init", before_restart_q);
+		}
+
 		// Determine effective gyro time step for fusion (must match sensor_init logic)
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 		float fusion_gyro_time = gyro_effective_time;
@@ -2300,15 +2405,34 @@ void main_imu_restart(void)
 #if CONFIG_SENSOR_USE_VQF
 		float saved_ref_norm, saved_ref_dip;
 		vqf_get_mag_ref(&saved_ref_norm, &saved_ref_dip);
+		LOG_INF("main_imu_restart: saved mag ref norm=%.6f dip=%.6f",
+			(double)saved_ref_norm, (double)saved_ref_dip);
 #endif
+		LOG_INF("main_imu_restart: init Ts gyro=%.6f accel=%.6f mag=%.6f",
+			(double)fusion_gyro_time, (double)fusion_accel_time, (double)fusion_mag_time);
 		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, fusion_mag_time);
+		if (sensor_fusion_init)
+		{
+			float after_init_q[4];
+			sensor_fusion->get_quat(after_init_q);
+			q_normalize(after_init_q, after_init_q);
+			sensor_log_quat("main_imu_restart: fusion q after init before mag ref restore", after_init_q);
+		}
 #if CONFIG_SENSOR_USE_VQF
 		if (saved_ref_norm > 0)
+		{
 			vqf_set_mag_ref(saved_ref_norm, saved_ref_dip);
+			LOG_INF("main_imu_restart: restored mag ref");
+		}
 #endif
 		// Reset mag timing so the first post-restart update uses the nominal fallback
 		// instead of a potentially stale diff (which could be > 10s → updateMag fallback path).
 		last_mag_fusion_ticks = 0;
+		LOG_INF("main_imu_restart: exit");
+	}
+	else
+	{
+		LOG_INF("main_imu_restart: skipped because main_ok=0");
 	}
 }
 
