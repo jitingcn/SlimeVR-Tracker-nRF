@@ -1,0 +1,162 @@
+diff --git a/src/vqf.c b/src/vqf.c
+index 5c4d29d..0a2752b 100644
+--- a/src/vqf.c
++++ b/src/vqf.c
+@@ -256,19 +256,18 @@ static void filterCoeffs(vqf_real_t tau, vqf_real_t Ts, vqf_double_t outB[3], vq
+         return;
+     }
+     // second order Butterworth filter based on https://stackoverflow.com/a/52764064
+-    vqf_double_t fc = (M_SQRT2 / (2.0f*M_PIf))/(vqf_double_t)(tau); // time constant of dampened, non-oscillating part of step response
+-    // tan_fast can be replaced by sin/cos from CMSIS_DSP lib
+-    vqf_double_t C = tanf(M_PIf*fc*(vqf_double_t)(Ts));
+-    // sqrt can be replaced by arm_sqrt_f32 from CMSIS_DSP
+-    vqf_double_t D = C*C + VQF_SQRT(2)*C + 1;
+-    vqf_double_t b0 = C*C/D;
+-    outB[0] = b0;
+-    outB[1] = 2*b0;
+-    outB[2] = b0;
++    const double sqrt2 = 1.41421356237309504880;
++    const double pi = 3.14159265358979323846;
++    double fc = (sqrt2 / (2.0*pi))/(double)(tau); // time constant of dampened, non-oscillating part of step response
++    double C = tan(pi*fc*(double)(Ts));
++    double D = C*C + sqrt2*C + 1.0;
++    double b0 = C*C/D;
++    outB[0] = (vqf_double_t)b0;
++    outB[1] = (vqf_double_t)(2.0*b0);
++    outB[2] = (vqf_double_t)b0;
+     // a0 = 1.0
+-    outA[0] = 2*(C*C-1)/D; // a1
+-    // sqrt can be replaced by arm_sqrt_f32 from CMSIS_DSP
+-    outA[1] = (1-VQF_SQRT(2)*C+C*C)/D; // a2
++    outA[0] = (vqf_double_t)(2.0*(C*C-1.0)/D); // a1
++    outA[1] = (vqf_double_t)((1.0-sqrt2*C+C*C)/D); // a2
+ }
+ 
+ static void filterInitialState(vqf_real_t x0, const vqf_double_t b[], const vqf_double_t a[], vqf_double_t out[2])
+@@ -347,6 +346,45 @@ static void matrix3SetToScaledIdentity(vqf_real_t scale, vqf_real_t out[9])
+     out[8] = scale;
+ }
+ 
++static void matrix3Multiply(const vqf_real_t in1[9], const vqf_real_t in2[9], vqf_real_t out[9]);
++
++static void matrix3JosephCovarianceUpdate(const vqf_real_t P[9], const vqf_real_t K[9], const vqf_real_t R[9],
++                                          const vqf_real_t w[3], vqf_real_t out[9])
++{
++    vqf_real_t A[9];
++    vqf_real_t tmp[9];
++
++    matrix3Multiply(K, R, A); // A = K R
++    for (size_t i = 0; i < 9; i++) {
++        A[i] = -A[i];
++    }
++    A[0] += 1.0f;
++    A[4] += 1.0f;
++    A[8] += 1.0f; // A = I - K R
++
++    for (size_t row = 0; row < 3; row++) {
++        for (size_t col = row; col < 3; col++) {
++            vqf_real_t value = 0.0f;
++
++            for (size_t m = 0; m < 3; m++) {
++                vqf_real_t AP = A[3*row + 0]*P[0*3 + m]
++                               + A[3*row + 1]*P[1*3 + m]
++                               + A[3*row + 2]*P[2*3 + m];
++                value += AP * A[3*col + m];
++            }
++
++            value += K[3*row + 0]*w[0]*K[3*col + 0]
++                   + K[3*row + 1]*w[1]*K[3*col + 1]
++                   + K[3*row + 2]*w[2]*K[3*col + 2];
++
++            tmp[3*row + col] = value;
++            tmp[3*col + row] = value;
++        }
++    }
++
++    memcpy(out, tmp, sizeof(tmp));
++}
++
+ static void matrix3Multiply(const vqf_real_t in1[9], const vqf_real_t in2[9], vqf_real_t out[9])
+ {
+ #if 0 && USE_CMSIS_DSP
+@@ -467,33 +505,43 @@ static bool matrix3Inv(const vqf_real_t in[9], vqf_real_t out[9])
+     return true;
+ #else
+     // in = [a b c; d e f; g h i]
+-    vqf_double_t A = in[4]*in[8] - in[5]*in[7]; // (e*i - f*h)
+-    vqf_double_t D = in[2]*in[7] - in[1]*in[8]; // -(b*i - c*h)
+-    vqf_double_t G = in[1]*in[5] - in[2]*in[4]; // (b*f - c*e)
+-    vqf_double_t B = in[5]*in[6] - in[3]*in[8]; // -(d*i - f*g)
+-    vqf_double_t E = in[0]*in[8] - in[2]*in[6]; // (a*i - c*g)
+-    vqf_double_t H = in[2]*in[3] - in[0]*in[5]; // -(a*f - c*d)
+-    vqf_double_t C = in[3]*in[7] - in[4]*in[6]; // (d*h - e*g)
+-    vqf_double_t F = in[1]*in[6] - in[0]*in[7]; // -(a*h - b*g)
+-    vqf_double_t I = in[0]*in[4] - in[1]*in[3]; // (a*e - b*d)
+-
+-    vqf_double_t det = in[0]*A + in[1]*B + in[2]*C; // a*A + b*B + c*C;
+-
+-    if (det >= -VQF_DET_TOL && det <= VQF_DET_TOL) {
++    const double a = in[0];
++    const double b = in[1];
++    const double c = in[2];
++    const double d = in[3];
++    const double e = in[4];
++    const double f = in[5];
++    const double g = in[6];
++    const double h = in[7];
++    const double i = in[8];
++
++    double A = e*i - f*h; // (e*i - f*h)
++    double D = c*h - b*i; // -(b*i - c*h)
++    double G = b*f - c*e; // (b*f - c*e)
++    double B = f*g - d*i; // -(d*i - f*g)
++    double E = a*i - c*g; // (a*i - c*g)
++    double H = c*d - a*f; // -(a*f - c*d)
++    double C = d*h - e*g; // (d*h - e*g)
++    double F = b*g - a*h; // -(a*h - b*g)
++    double I = a*e - b*d; // (a*e - b*d)
++
++    double det = a*A + b*B + c*C; // a*A + b*B + c*C;
++
++    if (det >= -(double)VQF_DET_TOL && det <= (double)VQF_DET_TOL) {
+         vqf_fill_real(out, 9, 0);
+         return false;
+     }
+ 
+     // out = [A D G; B E H; C F I]/det
+-    out[0] = A/det;
+-    out[1] = D/det;
+-    out[2] = G/det;
+-    out[3] = B/det;
+-    out[4] = E/det;
+-    out[5] = H/det;
+-    out[6] = C/det;
+-    out[7] = F/det;
+-    out[8] = I/det;
++    out[0] = (vqf_real_t)(A/det);
++    out[1] = (vqf_real_t)(D/det);
++    out[2] = (vqf_real_t)(G/det);
++    out[3] = (vqf_real_t)(B/det);
++    out[4] = (vqf_real_t)(E/det);
++    out[5] = (vqf_real_t)(H/det);
++    out[6] = (vqf_real_t)(C/det);
++    out[7] = (vqf_real_t)(F/det);
++    out[8] = (vqf_real_t)(I/det);
+ 
+     return true;
+ #endif
+@@ -708,12 +756,8 @@ static void updateAcc_internal(vqf_params_t *const params, vqf_state_t *const st
+             state->bias[1] += K[3]*e[0] + K[4]*e[1] + K[5]*e[2];
+             state->bias[2] += K[6]*e[0] + K[7]*e[1] + K[8]*e[2];
+ 
+-            // step 4: P = P - K R P
+-            matrix3Multiply(K, R, K); // K = K R
+-            matrix3Multiply(K, state->biasP, K); // K = K R P
+-            for(size_t i = 0; i < 9; i++) {
+-                state->biasP[i] -= K[i];
+-            }
++            // step 4: P = (I - K R) P (I - K R)^T + K W K^T
++            matrix3JosephCovarianceUpdate(state->biasP, K, R, w, state->biasP);
+ 
+             // clip bias estimate to -2..2 °/s
+             clip(state->bias, 3, -biasClip, biasClip);

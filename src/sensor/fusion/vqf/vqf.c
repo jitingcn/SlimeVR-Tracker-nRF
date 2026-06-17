@@ -31,6 +31,10 @@
 #include <cmsis_core.h>
 #endif
 
+#if defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
+#include <cmsis_core.h>
+#endif
+
 #include "../src/vqf.h" // conflicting with vqf.h in local path
 
 #include "../vqf/vqf.h" // conflicting with vqf.h in vqf-c
@@ -175,7 +179,7 @@ static void set_params()
 	params.restThGyr = 0.68f;
 	params.restThAcc = 0.21f;
 	params.magDistRejectionEnabled = true;
-	params.tauMag = 9.0f;
+	params.tauMag = 6.0f;
 	params.magCurrentTau = 0.50f;
 	params.magNormTh = 0.09f;
 	params.magDipTh = 6.0f;
