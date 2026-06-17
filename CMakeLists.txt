@@ -77,6 +77,55 @@ string(STRIP ${GIT_VERSION} GIT_VERSION)
 string(STRIP ${GIT_REPO_URL} GIT_REPO_URL)
 string(STRIP ${GIT_AUTHOR} GIT_AUTHOR)
 
+# Unix build time (seconds, UTC) for USB build-info and reproducible builds (SOURCE_DATE_EPOCH)
+if(DEFINED ENV{SOURCE_DATE_EPOCH})
+  set(FW_BUILD_UNIX_TIME $ENV{SOURCE_DATE_EPOCH})
+else()
+  execute_process(
+    COMMAND date -u +%s
+    OUTPUT_VARIABLE FW_BUILD_UNIX_TIME
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+endif()
+if(NOT FW_BUILD_UNIX_TIME MATCHES "^[0-9]+$")
+  set(FW_BUILD_UNIX_TIME 0)
+  message(WARNING "Could not determine Unix build time; using 0")
+endif()
+
+# Short git hash (12 hex chars) and commit count (for version_tweak)
+set(FW_GIT_HASH_SHORT "")
+set(GIT_COMMIT_COUNT 0)
+if(GIT_EXECUTABLE)
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE FW_GIT_HASH_SHORT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_COUNT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+endif()
+if(FW_GIT_HASH_SHORT STREQUAL "")
+  set(FW_GIT_HASH_SHORT "000000000000")
+endif()
+if(NOT GIT_COMMIT_COUNT MATCHES "^[0-9]+$")
+  set(GIT_COMMIT_COUNT 0)
+endif()
+if(GIT_COMMIT_COUNT GREATER 65535)
+  set(GIT_COMMIT_COUNT 65535)
+endif()
+
+string(FIND "${GIT_VERSION}" "-dirty" FW_GIT_DIRTY_POS)
+if(FW_GIT_DIRTY_POS GREATER -1)
+  set(FW_GIT_DIRTY 1)
+else()
+  set(FW_GIT_DIRTY 0)
+endif()
+
 string(REPLACE "-" ";" GIT_VERSION ${GIT_VERSION})
 list(GET GIT_VERSION 0 GIT_RELEASE)
 list(GET GIT_VERSION 1 GIT_TWEAK)
@@ -93,18 +142,17 @@ add_compile_definitions(
   FW_GIT_BRANCH="${GIT_BRANCH}"
   FW_GIT_REPO_URL="${GIT_REPO_URL}"
   FW_GIT_AUTHOR="${GIT_AUTHOR}"
+  FW_BUILD_UNIX_TIME=${FW_BUILD_UNIX_TIME}U
+  FW_GIT_HASH_SHORT="${FW_GIT_HASH_SHORT}"
+  FW_VERSION_TWEAK=${GIT_COMMIT_COUNT}
+  FW_GIT_DIRTY=${FW_GIT_DIRTY}
 )
 
 # Zephyr
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(NONE)
 
-find_package(Python3 QUIET COMPONENTS Interpreter)
-
-if(NOT Python3_Interpreter_FOUND)
-  find_program(PYTHON_EXECUTABLE NAMES python3 python REQUIRED)
-  set(Python3_EXECUTABLE ${PYTHON_EXECUTABLE})
-endif()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(SOFTDEVICE_HEX_52840 ${CMAKE_SOURCE_DIR}/softdevice/s140_nrf52_7.3.0_softdevice.hex)
 set(UF2_FAMILY_ID_52840 0xADA52840)

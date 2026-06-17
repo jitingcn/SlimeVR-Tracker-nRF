@@ -45,6 +45,20 @@
 #define FW_GIT_AUTHOR "unknown"
 #endif
 
+/* Injected by CMake (Unix epoch seconds, tweak = git rev-list count, 12-char hash). */
+#ifndef FW_BUILD_UNIX_TIME
+#define FW_BUILD_UNIX_TIME 0U
+#endif
+#ifndef FW_VERSION_TWEAK
+#define FW_VERSION_TWEAK 0
+#endif
+#ifndef FW_GIT_HASH_SHORT
+#define FW_GIT_HASH_SHORT "000000000000"
+#endif
+#ifndef FW_GIT_DIRTY
+#define FW_GIT_DIRTY 0
+#endif
+
 static uint8_t get_server_constant_imu_id(int id) __attribute__((unused));
 static uint8_t get_server_constant_mag_id(int id) __attribute__((unused));
 static uint8_t get_server_constant_tracker_status(int status) __attribute__((unused));
@@ -142,6 +156,8 @@ static uint8_t get_server_constant_tracker_status(int status) __attribute__((unu
 #elif CONFIG_BOARD_PROMICRO_UF2
 #define FW_BOARD 0
 #elif CONFIG_BOARD_XIAO_BLE
+#define FW_BOARD 0
+#elif CONFIG_BOARD_FOXSMOLV1_SPI_UF2 || CONFIG_BOARD_FOXSMOL40_UF2 || CONFIG_BOARD_FOXSNACKLITE_UF2
 #define FW_BOARD 0
 #else
 #define FW_BOARD 0
