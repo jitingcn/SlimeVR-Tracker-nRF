@@ -207,10 +207,12 @@ jobs:
                   {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker"},
                   # {boardname: "styria_mini_uf2/nrf52840/spi", filename: "Styria_Mini_Tracker_SD", with_softdevice: true},
                   {boardname: "foxsnacklite_uf2/nrf52840", filename: "FoxApplication_FoxSnackLite_Tracker"},
+                  {boardname: "foxsnacklitev2_uf2/nrf52840", filename: "FoxApplication_FoxSnackLiteV2_Tracker"},
                   {boardname: "mochi_uf2/nrf52833", filename: "Mochi_Tracker"},
                   {boardname: "dawn_tracker_mini_uf2/nrf52833", filename: "Dawn_Tracker_Mini"},
                   {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker"},
                   {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"},
+                  {boardname: "hulimiao_tracker/nrf52833", filename: "Hulimiao_Tracker"},
                   {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"},
                   {boardname: "nekonya_tracker_uf2/nrf52833", filename: "nekonya_tracker_uf2"}
                 ]

@@ -158,10 +158,6 @@ zephyr_udc0: &usbd {
 	};
 };
 
-&wdt {
-	status = "okay";
-};
-
 &cryptocell {
 	status = "disabled";
 };
