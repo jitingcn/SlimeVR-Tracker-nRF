@@ -261,6 +261,12 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 		return -1;
 	}
 
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x00);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG0, 0x00);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_TMST_WOM_CONFIG, 0x00);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG0, 0x00);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG1, 0x00);
+
 	if (clock_rate > 0)
 	{
 		clock_scale = clock_rate / clock_reference;
@@ -276,7 +282,6 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_59;
 	ireg_buf[2] = 0xB6 & ~0x92; // disable internal pull resistors for AP pins (pin 7, 1, 14)
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
-	// Re-enable I2CM mode after the pre-init shutdown reset (if ext was configured during scan)
 	ireg_buf[1] = ICM45686_IPREG_BAR_REG_60;
 	ireg_buf[2] = ICM45686_BIT_AUX1_I2CM_MODE; // I2CM mode only, no internal pull-ups
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
@@ -290,22 +295,6 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	ireg_buf[2] = 0x02; // set big endian
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 
-
-	// Power on sensors first (PWR_MGMT0 only)
-	uint8_t pwr_mgmt = GYRO_MODE_LN << 2 | ACCEL_MODE_LN; // Both in Low Noise mode
-	LOG_INF("PWR_MGMT0 write = 0x%02X (powering on sensors)", pwr_mgmt);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, pwr_mgmt);
-
-	// Wait for gyro startup BEFORE configuring ODR
-	LOG_INF("Waiting 50ms for gyroscope startup...");
-	k_msleep(30); // datasheet minimum (30ms)
-
-	// Check sensor status
-	uint8_t status = 0;
-	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_STATUS0, &status);
-	LOG_INF("INT1_STATUS0 after startup = 0x%02X", status);
-
-	// Now configure ODR after sensors are fully powered on
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
 	err |= icm45_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);

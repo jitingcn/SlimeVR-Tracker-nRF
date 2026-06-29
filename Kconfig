@@ -248,7 +248,27 @@ config DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
         Disable all sensor related GPIOs when system shutdown.
         May reduce power consumption.
 
+config SENSOR_FAST_WOM_WAKE
+    bool "Fast wake-on-motion sensor resume"
+    default y
+    depends on USE_IMU_WAKE_UP
+    help
+        Mark IMU wake-on-motion poweroff entries so the next boot can use a
+        narrower sensor resume path. Supported IMU drivers may skip their
+        pre-init soft reset after a real WoM wake and rebuild runtime FIFO/ODR
+        state directly from the known WOM configuration.
+
 endmenu
+
+config SENSOR_RETAINED_SCAN_POWER_UP_DELAY_MS
+    int "Sensor scan delay with retained sensor identity (ms)"
+    default 5
+    range 0 50
+    help
+        Delay before probing sensors when retained memory already names the IMU.
+        Cold scans still wait 50 ms, and failed fast scans wait the remaining
+        time before retrying, so this mainly reduces normal wake-from-WOM boot
+        latency without removing the conservative cold-start fallback.
 
 config SENSOR_ACCEL_ODR
     int "Accelerometer output data rate (Hz)"

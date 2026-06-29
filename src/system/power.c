@@ -15,6 +15,7 @@
 #include <zephyr/sys/poweroff.h>
 #include <zephyr/sys/reboot.h>
 #include <hal/nrf_gpio.h>
+#include <hal/nrf_power.h>
 #include <zephyr/pm/device.h>
 #include <zephyr/device.h>
 #include <hal/nrf_spim.h>
@@ -402,6 +403,11 @@ static void sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	// Set system off
 	uint8_t pin_config = sensor_setup_WOM(); // enable WOM feature
 	LOG_INF("Configured IMU wake up");
+#if CONFIG_SENSOR_FAST_WOM_WAKE && NRF_POWER_HAS_GPREGRET \
+	&& (defined(POWER_GPREGRET2_GPREGRET_Msk) || defined(POWER_GPREGRET_MaxCount))
+	if (pin_config != 0)
+		nrf_power_gpregret_set(NRF_POWER, 1, SENSOR_WOM_FAST_WAKE_GPREGRET);
+#endif
 	// Configure WOM interrupt
 	uint32_t int0_gpios = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
 	LOG_INF("Wake up GPIO pin: %u, config: %u", int0_gpios, pin_config);

@@ -32,6 +32,7 @@
 
 #include <math.h>
 #include <hal/nrf_gpio.h>
+#include <hal/nrf_power.h>
 
 #if CONFIG_CMSIS_DSP
 #include <arm_math.h>
@@ -231,6 +232,8 @@ static float gyro_actual_range;   // Actual gyroscope full scale range (deg/s)
 static float sensor_actual_time;
 static int16_t sensor_fifo_threshold;
 static int64_t sensor_data_time; // ticks
+static bool sensor_fast_first_update_pending;
+static bool sensor_wom_fast_wake_resume_pending;
 
 static bool sensor_fusion_init;
 static bool sensor_sensor_init;
@@ -278,6 +281,45 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_DBG);
 #else
 LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 #endif
+
+#define SENSOR_SCAN_COLD_POWER_UP_DELAY_MS 50
+
+static int sensor_scan_last_power_up_delay_ms = SENSOR_SCAN_COLD_POWER_UP_DELAY_MS;
+
+static int sensor_scan_retry_delay_ms(void)
+{
+	if (sensor_scan_last_power_up_delay_ms < SENSOR_SCAN_COLD_POWER_UP_DELAY_MS)
+		return SENSOR_SCAN_COLD_POWER_UP_DELAY_MS - sensor_scan_last_power_up_delay_ms;
+	return 5;
+}
+
+static uint16_t sensor_fifo_setup_threshold(void)
+{
+	if (sensor_fast_first_update_pending && sensor_fifo_threshold > 1)
+		return 1;
+	return (uint16_t)sensor_fifo_threshold;
+}
+
+#if CONFIG_SENSOR_FAST_WOM_WAKE && NRF_POWER_HAS_GPREGRET \
+	&& (defined(POWER_GPREGRET2_GPREGRET_Msk) || defined(POWER_GPREGRET_MaxCount))
+static bool sensor_consume_wom_fast_wake_hint(void)
+{
+	if (nrf_power_gpregret_get(NRF_POWER, 1) != SENSOR_WOM_FAST_WAKE_GPREGRET)
+		return false;
+	nrf_power_gpregret_set(NRF_POWER, 1, 0);
+	return true;
+}
+#else
+static bool sensor_consume_wom_fast_wake_hint(void)
+{
+	return false;
+}
+#endif
+
+static bool sensor_imu_fast_wom_wake_supported(void)
+{
+	return sensor_imu == &sensor_imu_lsm6dsv || sensor_imu == &sensor_imu_icm45686;
+}
 
 static inline void sensor_compute_device_quat(const float *fused_quat, float *device_quat)
 {
@@ -551,44 +593,13 @@ int sensor_get_sensor_temperature(float *ptr)
 
 void sensor_scan_thread(void)
 {
-	int err;
 	sys_interface_resume(); // make sure interfaces are enabled
-	err = sensor_scan(); // IMUs discovery
-	if (err)
-	{
-		k_msleep(5);
-		LOG_INF("Retrying sensor detection");
-
-		// Reset address before retrying sensor detection
-		sensor_imu_dev.addr = 0x00;
-
-		err = sensor_scan(); // on POR, the sensor may not be ready yet
-	}
+	(void)sensor_scan(); // IMUs discovery
 	sys_interface_suspend();
-//	if (err)
-//		return err;
 }
 
-int sensor_scan(void)
+static int sensor_scan_imu_once(void)
 {
-	while (sensor_sensor_scanning)
-		k_usleep(1); // already scanning
-	if (sensor_sensor_init)
-		return 0; // already initialized
-	sensor_sensor_scanning = true;
-
-	sensor_scan_read();
-	// Enable external clock for IMU if hardware is available
-	float clock_actual_rate = 0;
-	int clock_err = set_sensor_clock(true, 32768, &clock_actual_rate);
-	if (clock_err == 0 && clock_actual_rate != 0)
-	{
-		LOG_INF("Sensor clock enabled: %.2fHz", (double)clock_actual_rate);
-	}
-
-	// Wait for sensors to power up and stabilize
-	k_msleep(50);
-
 	int imu_id = -1;
 #if SENSOR_IMU_SPI_EXISTS
 	// for SPI scan, set frequency of 10MHz, it will be set later by the driver initialization if needed
@@ -610,6 +621,47 @@ int sensor_scan(void)
 #if !SENSOR_IMU_SPI_EXISTS && !SENSOR_IMU_EXISTS
 	LOG_ERR("IMU node does not exist");
 #endif
+	return imu_id;
+}
+
+int sensor_scan(void)
+{
+	while (sensor_sensor_scanning)
+		k_usleep(1); // already scanning
+	if (sensor_sensor_init)
+		return 0; // already initialized
+	sensor_sensor_scanning = true;
+	sensor_wom_fast_wake_resume_pending = sensor_consume_wom_fast_wake_hint();
+	if (sensor_wom_fast_wake_resume_pending)
+		LOG_INF("WOM fast-wake sensor resume requested");
+
+	sensor_scan_read();
+	// Enable external clock for IMU if hardware is available
+	float clock_actual_rate = 0;
+	int clock_err = set_sensor_clock(true, 32768, &clock_actual_rate);
+	if (clock_err == 0 && clock_actual_rate != 0)
+	{
+		LOG_INF("Sensor clock enabled: %.2fHz", (double)clock_actual_rate);
+	}
+
+	bool retained_imu_known = sensor_imu_dev.addr != 0 || sensor_imu_dev_reg != 0xFF;
+	sensor_scan_last_power_up_delay_ms = retained_imu_known
+		? CONFIG_SENSOR_RETAINED_SCAN_POWER_UP_DELAY_MS
+		: SENSOR_SCAN_COLD_POWER_UP_DELAY_MS;
+	if (sensor_scan_last_power_up_delay_ms > 0)
+		k_msleep(sensor_scan_last_power_up_delay_ms);
+
+	int imu_id = sensor_scan_imu_once();
+	if (imu_id < 0)
+	{
+		int retry_delay_ms = sensor_scan_retry_delay_ms();
+		if (retry_delay_ms > 0)
+			k_msleep(retry_delay_ms);
+		LOG_INF("Retrying sensor detection");
+		sensor_imu_dev.addr = 0x00;
+		sensor_imu_dev_reg = 0xFF;
+		imu_id = sensor_scan_imu_once();
+	}
 	if (imu_id >= (int)ARRAY_SIZE(dev_imu_names))
 		LOG_WRN("Found unknown device");
 	else if (imu_id < 0)
@@ -1062,9 +1114,11 @@ static void set_update_time_ms(int time_ms)
 	// TODO: return pin_config and replace call in sensor_init
 #if IMU_INT_EXISTS
 	float fifo_threshold = (float)time_ms / 1000.0f / sensor_actual_time; // target loop rate
-	sensor_fifo_threshold = (int16_t)fifo_threshold;
-	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d", (double)fifo_threshold, sensor_fifo_threshold);
-	sensor_imu->setup_DRDY(sensor_fifo_threshold); // do not need to reset pin config
+	sensor_fifo_threshold = MAX(1, (int16_t)fifo_threshold);
+	uint16_t setup_threshold = sensor_fifo_setup_threshold();
+	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d%s", (double)fifo_threshold,
+		sensor_fifo_threshold, setup_threshold != sensor_fifo_threshold ? " (startup 1)" : "");
+	sensor_imu->setup_DRDY(setup_threshold); // do not need to reset pin config
 #endif
 	sensor_update_time_ms = time_ms; // TODO: terrible naming
 }
@@ -1193,7 +1247,12 @@ int sensor_init(void)
 			sensor_imu->ext_passthrough(true);
 		sensor_mag->shutdown(); // TODO: is this needed?
 	}
-	sensor_imu->shutdown(); // TODO: is this needed?
+	bool fast_wom_wake = sensor_wom_fast_wake_resume_pending && sensor_imu_fast_wom_wake_supported();
+	sensor_wom_fast_wake_resume_pending = false;
+	if (fast_wom_wake)
+		LOG_INF("Skipping IMU pre-init reset after WOM wake");
+	else
+		sensor_imu->shutdown(); // TODO: is this needed?
 
 	// Clock already enabled during sensor scan, just ensure it's still on
 	float clock_actual_rate = 0;
@@ -1304,9 +1363,12 @@ int sensor_init(void)
 #if IMU_INT_EXISTS
 	// Setup interrupt
 	float fifo_threshold = sensor_update_time_ms / 1000.0f / sensor_actual_time; // target loop rate
-	sensor_fifo_threshold = fifo_threshold;
-	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d", (double)fifo_threshold, sensor_fifo_threshold);
-	uint8_t pin_config = sensor_imu->setup_DRDY(sensor_fifo_threshold);
+	sensor_fifo_threshold = MAX(1, (int16_t)fifo_threshold);
+	sensor_fast_first_update_pending = true;
+	uint16_t setup_threshold = sensor_fifo_setup_threshold();
+	LOG_INF("FIFO THS/WM/WTM: %.2f -> %d%s", (double)fifo_threshold,
+		sensor_fifo_threshold, setup_threshold != sensor_fifo_threshold ? " (startup 1)" : "");
+	uint8_t pin_config = sensor_imu->setup_DRDY(setup_threshold);
 	if (pin_config == 0)
 		return -1;
 	uint32_t int0_gpios = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
@@ -1529,6 +1591,20 @@ void sensor_loop(void)
 			// - With 4x oversampling at 1600Hz: effectively same as 400Hz but with 4x raw packets
 			uint8_t *rawData = sensor_fifo_raw_buffer;
 			uint16_t packets = sensor_imu->fifo_read(rawData, sizeof(sensor_fifo_raw_buffer));
+#if IMU_INT_EXISTS
+			if (sensor_fast_first_update_pending && packets > 0)
+			{
+				sensor_fast_first_update_pending = false;
+				if (sensor_fifo_threshold > 1)
+				{
+					uint8_t restored_pin_config = sensor_imu->setup_DRDY(sensor_fifo_threshold);
+					if (!restored_pin_config)
+						LOG_WRN("Failed to restore FIFO THS/WM/WTM to %d", sensor_fifo_threshold);
+					else
+						LOG_INF("Restored FIFO THS/WM/WTM to %d", sensor_fifo_threshold);
+				}
+			}
+#endif
 
 #if CONFIG_SENSOR_USE_TCAL
 			// Read IMU temperature after FIFO read so FIFO-backed drivers
