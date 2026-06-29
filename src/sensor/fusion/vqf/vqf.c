@@ -23,6 +23,7 @@
 #include "util.h"
 
 #include <math.h>
+#include <stddef.h>
 #if defined(CONFIG_VQF_BENCH)
 #include <zephyr/kernel.h>
 #endif
@@ -43,6 +44,27 @@
 
 #ifndef RAD_TO_DEG
 #define RAD_TO_DEG 57.29577951308232087680f  /* (float)(180.0 / M_PI) */
+#endif
+
+#define VQF_PI 3.14159265358979323846f
+
+#ifndef VQF_NO_MAG_HEADING_HOLD_ENTER_S
+#define VQF_NO_MAG_HEADING_HOLD_ENTER_S 0.6f
+#endif
+#ifndef VQF_NO_MAG_HEADING_HOLD_ENTER_DEV
+#define VQF_NO_MAG_HEADING_HOLD_ENTER_DEV 0.8f
+#endif
+#ifndef VQF_NO_MAG_HEADING_HOLD_EXIT_DEV
+#define VQF_NO_MAG_HEADING_HOLD_EXIT_DEV 1.5f
+#endif
+#ifndef VQF_NO_MAG_HEADING_HOLD_DEADBAND_RAD
+#define VQF_NO_MAG_HEADING_HOLD_DEADBAND_RAD 0.0018f
+#endif
+#ifndef VQF_NO_MAG_HEADING_HOLD_RESET_S
+#define VQF_NO_MAG_HEADING_HOLD_RESET_S 2.0f
+#endif
+#ifndef VQF_NO_MAG_HEADING_HOLD_MAX_CORR_DPS
+#define VQF_NO_MAG_HEADING_HOLD_MAX_CORR_DPS 1.00f
 #endif
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
@@ -143,6 +165,15 @@ static float rest_last_duration_s;
 static float uptime_s;
 static bool prev_rest_detected;
 
+static bool vqf_mag_enabled = true;
+static bool no_mag_heading_hold_active;
+static bool no_mag_heading_hold_target_valid;
+static float no_mag_heading_hold_rest_s;
+static float no_mag_heading_hold_unsteady_s;
+static float no_mag_heading_hold_target;
+static uint8_t no_mag_heading_hold_axis = 2;
+static vqf_real_t no_mag_heading_hold_frame[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+
 /* Circular rest event log */
 #define REST_EVENT_LOG_SIZE 5
 static struct {
@@ -153,9 +184,226 @@ static uint8_t rest_event_idx;  /* next write position */
 static uint8_t rest_event_total; /* total events (up to log size) */
 
 
+static void vqf_reset_no_mag_heading_hold(void);
+
 void vqf_update_sensor_ids(int imu)
 {
 	imu_id = imu;
+}
+
+void vqf_set_mag_enabled(bool enabled)
+{
+	vqf_mag_enabled = enabled;
+	vqf_reset_no_mag_heading_hold();
+}
+
+void vqf_set_heading_hold_frame(const float correction_q[4])
+{
+	if (correction_q == NULL) {
+		no_mag_heading_hold_frame[0] = 1.0f;
+		no_mag_heading_hold_frame[1] = 0.0f;
+		no_mag_heading_hold_frame[2] = 0.0f;
+		no_mag_heading_hold_frame[3] = 0.0f;
+	} else {
+		for (int i = 0; i < 4; i++)
+			no_mag_heading_hold_frame[i] = correction_q[i];
+	}
+	vqf_reset_no_mag_heading_hold();
+}
+
+static float vqf_wrap_angle(float angle)
+{
+	while (angle > VQF_PI)
+		angle -= 2.0f * VQF_PI;
+	while (angle < -VQF_PI)
+		angle += 2.0f * VQF_PI;
+	return angle;
+}
+
+static void vqf_quat_multiply(const vqf_real_t a[4], const vqf_real_t b[4], vqf_real_t out[4])
+{
+	vqf_real_t w = a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3];
+	vqf_real_t x = a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2];
+	vqf_real_t y = a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1];
+	vqf_real_t z = a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0];
+	out[0] = w;
+	out[1] = x;
+	out[2] = y;
+	out[3] = z;
+}
+
+static void vqf_apply_heading_hold_frame(const vqf_real_t q[4], vqf_real_t out[4])
+{
+	vqf_quat_multiply(q, no_mag_heading_hold_frame, out);
+}
+
+static void vqf_quat_rotated_axis(const vqf_real_t q[4], uint8_t axis, float out[3])
+{
+	float w = q[0];
+	float x = q[1];
+	float y = q[2];
+	float z = q[3];
+
+	switch (axis) {
+	case 0:
+		out[0] = 1.0f - 2.0f * (y * y + z * z);
+		out[1] = 2.0f * (x * y + w * z);
+		out[2] = 2.0f * (x * z - w * y);
+		break;
+	case 1:
+		out[0] = 2.0f * (x * y - w * z);
+		out[1] = 1.0f - 2.0f * (x * x + z * z);
+		out[2] = 2.0f * (y * z + w * x);
+		break;
+	default:
+		out[0] = 2.0f * (x * z + w * y);
+		out[1] = 2.0f * (y * z - w * x);
+		out[2] = 1.0f - 2.0f * (x * x + y * y);
+		break;
+	}
+}
+
+static float vqf_heading_from_axis(const vqf_real_t q[4], uint8_t axis)
+{
+	float axis_world[3];
+	vqf_quat_rotated_axis(q, axis, axis_world);
+	return atan2f(axis_world[1], axis_world[0]);
+}
+
+static uint8_t vqf_select_heading_axis(const vqf_real_t q[4])
+{
+	uint8_t best_axis = 2;
+	float best_horizontal_sq = -1.0f;
+
+	for (uint8_t axis = 0; axis < 3; axis++) {
+		float axis_world[3];
+		vqf_quat_rotated_axis(q, axis, axis_world);
+		float horizontal_sq = axis_world[0] * axis_world[0] + axis_world[1] * axis_world[1];
+		if (horizontal_sq > best_horizontal_sq) {
+			best_horizontal_sq = horizontal_sq;
+			best_axis = axis;
+		}
+	}
+
+	return best_axis;
+}
+
+static float vqf_max_rest_deviation(void)
+{
+	vqf_real_t deviations[2];
+	getRelativeRestDeviations(&params, &state, deviations);
+	return fmaxf(deviations[0], deviations[1]);
+}
+
+static float vqf_rest_gyr_lp_norm(void)
+{
+	return sqrtf(
+		state.restLastGyrLp[0] * state.restLastGyrLp[0] +
+		state.restLastGyrLp[1] * state.restLastGyrLp[1] +
+		state.restLastGyrLp[2] * state.restLastGyrLp[2]);
+}
+
+static float vqf_accel_dt_from_timestamp(uint64_t timestamp_us)
+{
+	if (state.lastAccTsUs != 0 && timestamp_us > state.lastAccTsUs) {
+		uint64_t diff = timestamp_us - state.lastAccTsUs;
+		if (diff > 0 && diff <= 10000000ULL)
+			return (float)diff / 1e6f;
+	}
+	return coeffs.accTs;
+}
+
+static void vqf_reset_no_mag_heading_hold(void)
+{
+	no_mag_heading_hold_active = false;
+	no_mag_heading_hold_target_valid = false;
+	no_mag_heading_hold_rest_s = 0.0f;
+	no_mag_heading_hold_unsteady_s = 0.0f;
+	no_mag_heading_hold_target = 0.0f;
+	no_mag_heading_hold_axis = 2;
+}
+
+static void vqf_capture_no_mag_heading_hold_target(void)
+{
+	vqf_real_t quat[4];
+	vqf_real_t heading_quat[4];
+	getQuat9D(&state, quat);
+	vqf_apply_heading_hold_frame(quat, heading_quat);
+	no_mag_heading_hold_axis = vqf_select_heading_axis(heading_quat);
+	no_mag_heading_hold_target = vqf_heading_from_axis(heading_quat, no_mag_heading_hold_axis);
+	no_mag_heading_hold_target_valid = true;
+}
+
+static void vqf_update_no_mag_heading_hold(float dt)
+{
+	if (vqf_mag_enabled) {
+		vqf_reset_no_mag_heading_hold();
+		return;
+	}
+
+	float rest_dev = vqf_max_rest_deviation();
+	float rest_gyr_lp_norm = vqf_rest_gyr_lp_norm();
+	float enter_gyr_lp_norm = params.biasClip * DEG_TO_RAD * 0.5f;
+	float exit_gyr_lp_norm = params.biasClip * DEG_TO_RAD * 0.8f;
+
+	if (state.restDetected) {
+		vqf_reset_no_mag_heading_hold();
+		return;
+	}
+
+	bool near_static = rest_dev <= VQF_NO_MAG_HEADING_HOLD_ENTER_DEV
+		&& rest_gyr_lp_norm <= enter_gyr_lp_norm;
+	bool unsteady = rest_dev > VQF_NO_MAG_HEADING_HOLD_EXIT_DEV
+		|| rest_gyr_lp_norm > exit_gyr_lp_norm;
+	if (near_static) {
+		no_mag_heading_hold_rest_s += dt;
+		no_mag_heading_hold_unsteady_s = 0.0f;
+	} else if (!no_mag_heading_hold_active) {
+		no_mag_heading_hold_rest_s = 0.0f;
+		if (unsteady && no_mag_heading_hold_target_valid) {
+			no_mag_heading_hold_unsteady_s += dt;
+			if (no_mag_heading_hold_unsteady_s >= VQF_NO_MAG_HEADING_HOLD_RESET_S)
+				vqf_reset_no_mag_heading_hold();
+		} else {
+			no_mag_heading_hold_unsteady_s = 0.0f;
+		}
+	} else if (unsteady) {
+		no_mag_heading_hold_unsteady_s += dt;
+		if (no_mag_heading_hold_unsteady_s >= VQF_NO_MAG_HEADING_HOLD_RESET_S) {
+			vqf_reset_no_mag_heading_hold();
+			return;
+		}
+	} else {
+		no_mag_heading_hold_unsteady_s = 0.0f;
+	}
+
+	if (!no_mag_heading_hold_active) {
+		if (no_mag_heading_hold_rest_s < VQF_NO_MAG_HEADING_HOLD_ENTER_S)
+			return;
+
+		if (!no_mag_heading_hold_target_valid)
+			vqf_capture_no_mag_heading_hold_target();
+		no_mag_heading_hold_active = true;
+	}
+
+	if (unsteady)
+		return;
+
+	vqf_real_t quat9d[4];
+	vqf_real_t heading_quat[4];
+	getQuat9D(&state, quat9d);
+	vqf_apply_heading_hold_frame(quat9d, heading_quat);
+	float error = vqf_wrap_angle(
+		no_mag_heading_hold_target - vqf_heading_from_axis(heading_quat, no_mag_heading_hold_axis));
+	float abs_error = fabsf(error);
+
+	if (abs_error > VQF_NO_MAG_HEADING_HOLD_DEADBAND_RAD) {
+		float correction = error - copysignf(VQF_NO_MAG_HEADING_HOLD_DEADBAND_RAD, error);
+		float max_correction = VQF_NO_MAG_HEADING_HOLD_MAX_CORR_DPS * DEG_TO_RAD * dt;
+		if (fabsf(correction) > max_correction)
+			correction = copysignf(max_correction, correction);
+		state.delta = vqf_wrap_angle(state.delta + correction);
+	}
 }
 
 static void set_params()
@@ -206,6 +454,7 @@ void vqf_init(float g_time, float a_time, float m_time)
 	prev_rest_detected = false;
 	rest_event_idx = 0;
 	rest_event_total = 0;
+	vqf_reset_no_mag_heading_hold();
 }
 
 void vqf_load(const void *data)
@@ -229,6 +478,7 @@ void vqf_load(const void *data)
 	prev_rest_detected = false;
 	rest_event_idx = 0;
 	rest_event_total = 0;
+	vqf_reset_no_mag_heading_hold();
 }
 
 void vqf_save(void *data)
@@ -338,9 +588,8 @@ static void vqf_pre_accel_update(const float a_m_s2[3])
  * @brief Track rest detection transitions and accumulate diagnostics.
  * Called after each accelerometer update (which runs rest detection).
  */
-static void vqf_track_rest_diag(void)
+static void vqf_track_rest_diag(float dt)
 {
-	float dt = coeffs.accTs;
 	uptime_s += dt;
 
 	bool cur = state.restDetected;
@@ -382,11 +631,13 @@ void vqf_update_accel(float *a, float time)
 	vqf_pre_accel_update(a_m_s2);
 #endif
 	updateAcc(&params, &state, &coeffs, a_m_s2);
-	vqf_track_rest_diag();
+	vqf_update_no_mag_heading_hold(coeffs.accTs);
+	vqf_track_rest_diag(coeffs.accTs);
 }
 
 void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
 {
+	float dt = vqf_accel_dt_from_timestamp(timestamp_us);
 	float a_m_s2[3] = {0};
 	for (int i = 0; i < 3; i++)
 		a_m_s2[i] = a[i] * CONST_EARTH_GRAVITY;
@@ -396,7 +647,8 @@ void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
 	vqf_pre_accel_update(a_m_s2);
 #endif
 	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
-	vqf_track_rest_diag();
+	vqf_update_no_mag_heading_hold(dt);
+	vqf_track_rest_diag(dt);
 }
 
 void vqf_update_mag(float *m, float time)

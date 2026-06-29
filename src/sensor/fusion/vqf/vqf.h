@@ -28,6 +28,8 @@
 #include "sensor/sensor.h"
 
 void vqf_update_sensor_ids(int imu);
+void vqf_set_mag_enabled(bool enabled);
+void vqf_set_heading_hold_frame(const float correction_q[4]);
 
 void vqf_init(float g_time, float a_time, float m_time);
 void vqf_load(const void *data);
