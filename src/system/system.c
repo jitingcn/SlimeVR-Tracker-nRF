@@ -213,6 +213,14 @@ static int sys_retained_init(void)
 #endif
 		sys_read(RF_CHANNEL_ID, &retained->rf_channel, sizeof(retained->rf_channel));
 		sys_read(MAG_ENABLED_ID, &retained->mag_enabled, sizeof(retained->mag_enabled));
+		sys_read(
+			MAG_ONLINE_CALIBRATION_ID,
+			&retained->mag_online_calibration_mode,
+			sizeof(retained->mag_online_calibration_mode)
+		);
+		if (retained->mag_online_calibration_mode > MAG_ONLINE_CALIBRATION_DISABLED) {
+			retained->mag_online_calibration_mode = MAG_ONLINE_CALIBRATION_DEFAULT;
+		}
 		retained_update();
 	} else {
 		LOG_INF("Validated RAM");

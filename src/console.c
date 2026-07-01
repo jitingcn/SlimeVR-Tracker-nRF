@@ -209,12 +209,17 @@ static void print_sensor(void)
 		bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
 		                 || retained->magBAinv[0][1] != 0.0f
 		                 || retained->magBAinv[0][2] != 0.0f);
-		float dir_bias = 0;
-		int online_samples = sensor_calibration_online_mag_status(&dir_bias);
-		float mag_cv = sensor_calibration_get_mag_quality();
-		printk("Mag cal: %s | norm_cv=%.3f | Online: %d samples, dir_bias=%.2f\n",
-		       mag_has_cal ? "active" : "none",
-		       (double)mag_cv, online_samples, (double)dir_bias);
+		if (sensor_calibration_get_online_mag_enabled()) {
+			float dir_bias = 0;
+			int online_samples = sensor_calibration_online_mag_status(&dir_bias);
+			float mag_cv = sensor_calibration_get_mag_quality();
+			printk("Mag cal: %s | norm_cv=%.3f | Online: enabled, %d samples, dir_bias=%.2f\n",
+			       mag_has_cal ? "active" : "none",
+			       (double)mag_cv,
+			       online_samples, (double)dir_bias);
+		} else {
+			printk("Mag cal: %s | Online: disabled\n", mag_has_cal ? "active" : "none");
+		}
 	}
 
 	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
@@ -520,6 +525,7 @@ static void print_help(void)
 #endif
 	printk("  mag                        Show magnetometer status\n");
 	printk("  mag on|off                 Enable/disable magnetometer\n");
+	printk("  mag auto on|off     Enable/disable online magnetometer calibration\n");
 	printk("  mag clear                  Clear magnetometer calibration\n");
 	printk("  mag cal                    Start magnetometer calibration\n");
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -1155,24 +1161,46 @@ static void console_thread(void)
 						(double)retained->magBAinv[2][i],
 						(double)retained->magBAinv[3][i]);
 				}
-				float dir_bias = 0;
-				int online_samples = sensor_calibration_online_mag_status(&dir_bias);
 				bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
 				                 || retained->magBAinv[0][1] != 0.0f
 				                 || retained->magBAinv[0][2] != 0.0f);
-				float mag_cv = sensor_calibration_get_mag_quality();
-				printk("Calibration: %s (norm_cv=%.3f)\n",
-				       mag_has_cal ? "active" : "none", (double)mag_cv);
-				printk("Online: %d samples, dir_bias=%.2f\n",
-				       online_samples, (double)dir_bias);
+				if (sensor_calibration_get_online_mag_enabled()) {
+					float dir_bias = 0;
+					int online_samples = sensor_calibration_online_mag_status(&dir_bias);
+					float mag_cv = sensor_calibration_get_mag_quality();
+					printk("Calibration: %s (norm_cv=%.3f)\n",
+					       mag_has_cal ? "active" : "none", (double)mag_cv);
+					printk("Online: enabled, %d samples, dir_bias=%.2f\n",
+					       online_samples, (double)dir_bias);
+				} else {
+					printk("Calibration: %s\n", mag_has_cal ? "active" : "none");
+					printk("Online: disabled\n");
+				}
 			} else {
 				char *subcmd = strtok((char *)arg, " ");
-				if (strcmp(subcmd, "on") == 0) {
+				if (subcmd == NULL) {
+					printk("Usage: mag [on|off|clear|cal|auto <on|off>]\n");
+				} else if (strcmp(subcmd, "on") == 0) {
 					printk("Enabling magnetometer\n");
 					sensor_set_mag_enabled(true);
 				} else if (strcmp(subcmd, "off") == 0) {
 					printk("Disabling magnetometer\n");
 					sensor_set_mag_enabled(false);
+				} else if (strcmp(subcmd, "auto") == 0 || strcmp(subcmd, "online") == 0) {
+					char *state = strtok(NULL, " ");
+					char *extra = strtok(NULL, " ");
+
+					if (state == NULL || extra != NULL) {
+						printk("Usage: mag %s <on|off>\n", subcmd);
+					} else if (strcmp(state, "on") == 0) {
+						sensor_calibration_set_online_mag_enabled(true);
+						printk("Online magnetometer calibration enabled\n");
+					} else if (strcmp(state, "off") == 0) {
+						sensor_calibration_set_online_mag_enabled(false);
+						printk("Online magnetometer calibration disabled\n");
+					} else {
+						printk("Usage: mag %s <on|off>\n", subcmd);
+					}
 				} else if (strcmp(subcmd, "clear") == 0) {
 					sensor_calibration_clear_mag(NULL, true);
 					printk("Magnetometer calibration cleared\n");
@@ -1181,7 +1209,7 @@ static void console_thread(void)
 					sensor_request_calibration_mag();
 					printk("Magnetometer calibration started\n");
 				} else {
-					printk("Usage: mag [on|off|clear|cal]\n");
+					printk("Usage: mag [on|off|clear|cal|auto <on|off>]\n");
 				}
 			}
 		}

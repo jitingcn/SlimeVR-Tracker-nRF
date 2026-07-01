@@ -175,6 +175,7 @@ static uint32_t cal_norm_count;   // number of norm samples processed
 // Minimum time between online calibration updates (prevents frequent VQF mag ref resets)
 #define ONLINE_MIN_UPDATE_INTERVAL_S 6  // 6 seconds cooldown
 static int64_t online_last_update_time;
+static bool sensor_calibration_online_mag_enabled_from_retained(void);
 
 // Suppress online sample collection for N ms after buffer resets (wake-up,
 // reboot, environment change, calibration update).  This lets sensor data
@@ -741,8 +742,45 @@ static void magneto_online_runtime_load_retained(void)
 	online_last_buf_avg_norm = retained->onlineMagState.last_buf_avg_norm;
 }
 
+static bool sensor_calibration_online_mag_enabled_from_retained(void)
+{
+	return retained->mag_online_calibration_mode != MAG_ONLINE_CALIBRATION_DISABLED;
+}
+
+bool sensor_calibration_get_online_mag_enabled(void)
+{
+	return sensor_calibration_online_mag_enabled_from_retained();
+}
+
+void sensor_calibration_set_online_mag_enabled(bool enabled)
+{
+	uint8_t mode = enabled ? MAG_ONLINE_CALIBRATION_ENABLED : MAG_ONLINE_CALIBRATION_DISABLED;
+
+	if (sensor_calibration_get_online_mag_enabled() == enabled &&
+	    retained->mag_online_calibration_mode == mode) {
+		LOG_INF("Online mag calibration already %s", enabled ? "enabled" : "disabled");
+		return;
+	}
+
+	magneto_online_runtime_reset();
+	if (!enabled) {
+		sensor_calibration_online_mag_retained_clear();
+	}
+	sys_write(
+		MAG_ONLINE_CALIBRATION_ID,
+		&retained->mag_online_calibration_mode,
+		&mode,
+		sizeof(mode)
+	);
+	LOG_INF("Online mag calibration %s (persisted)", enabled ? "enabled" : "disabled");
+}
+
 void sensor_calibration_online_mag_retained_save(void)
 {
+	if (!sensor_calibration_get_online_mag_enabled()) {
+		sensor_calibration_online_mag_retained_clear();
+		return;
+	}
 	retained->onlineMagState.update_count = (uint8_t)CLAMP(online_update_count, 0, 255);
 	retained->onlineMagState.last_buf_avg_norm = online_last_buf_avg_norm;
 }
@@ -766,7 +804,14 @@ void sensor_calibration_read(void)
 	memcpy(magBias, retained->magBias, sizeof(magBias));
 	memcpy(magBAinv, retained->magBAinv, sizeof(magBAinv));
 	memcpy(accBAinv, retained->accBAinv, sizeof(accBAinv));
-	{
+	if (retained->mag_online_calibration_mode > MAG_ONLINE_CALIBRATION_DISABLED) {
+		retained->mag_online_calibration_mode = MAG_ONLINE_CALIBRATION_DEFAULT;
+	}
+	LOG_INF(
+		"Online mag calibration: %s",
+		sensor_calibration_get_online_mag_enabled() ? "enabled" : "disabled"
+	);
+	if (sensor_calibration_get_online_mag_enabled()) {
 		float zero[3] = {0};
 		if (v_diff_mag(magBAinv[0], zero) != 0) {
 			magneto_online_runtime_load_retained();
@@ -777,6 +822,8 @@ void sensor_calibration_read(void)
 		} else {
 			magneto_online_runtime_reset();
 		}
+	} else {
+		magneto_online_runtime_reset();
 	}
 #if CONFIG_SENSOR_USE_TCAL
 	tcal_compensation_enabled = retained->tcal_enabled;
@@ -2897,6 +2944,10 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 // Gated by: VQF disturbance detection, accel magnitude, time interval, and direction change.
 void sensor_calibration_online_mag_sample(const float m[3])
 {
+	if (!sensor_calibration_get_online_mag_enabled()) {
+		return;
+	}
+
 	// Don't accumulate during manual calibration
 	if (magneto_progress & 0x80) {
 		return;
@@ -3037,6 +3088,10 @@ void sensor_calibration_online_mag_sample(const float m[3])
 
 static bool sensor_calibration_online_mag_check(void)
 {
+	if (!sensor_calibration_get_online_mag_enabled()) {
+		return false;
+	}
+
 	int recent_sample_count_now = magneto_online_recent_sample_count();
 	int64_t now = k_uptime_get();
 
@@ -3171,6 +3226,10 @@ static bool sensor_calibration_online_mag_check(void)
 		        (int)recent_sample_count, (double)dbias);
 		return false;
 	}
+	if (!sensor_calibration_get_online_mag_enabled()) {
+		LOG_INF("Online mag cal: disabled before apply, skipping update");
+		return false;
+	}
 
 	if (has_existing) {
 		// Enforce minimum cooldown between updates to avoid frequent VQF mag ref resets.
@@ -3277,6 +3336,12 @@ static bool sensor_calibration_online_mag_check(void)
 
 int sensor_calibration_online_mag_status(float *dir_bias)
 {
+	if (!sensor_calibration_get_online_mag_enabled()) {
+		if (dir_bias) {
+			*dir_bias = 1.0f;
+		}
+		return 0;
+	}
 	if (dir_bias) {
 		*dir_bias = magneto_online_recent_dir_bias();
 	}
@@ -3287,6 +3352,9 @@ int sensor_calibration_online_mag_status(float *dir_bias)
 // Called from sensor.c after applying BAinv calibration.
 void sensor_calibration_track_mag_norm(float cal_norm)
 {
+	if (!sensor_calibration_get_online_mag_enabled()) {
+		return;
+	}
 	if (cal_norm < 1e-6f) {
 		return;
 	}

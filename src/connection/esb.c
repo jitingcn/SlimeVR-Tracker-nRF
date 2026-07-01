@@ -913,6 +913,12 @@ void event_handler(struct esb_evt const *event)
 							case ESB_PONG_FLAG_MAG_OFF:
 								cmd_name = "MAG_OFF";
 								break;
+							case ESB_PONG_FLAG_MAG_AUTO_ON:
+								cmd_name = "MAG_AUTO_ON";
+								break;
+							case ESB_PONG_FLAG_MAG_AUTO_OFF:
+								cmd_name = "MAG_AUTO_OFF";
+								break;
 							case ESB_PONG_FLAG_REBOOT:
 								cmd_name = "REBOOT";
 								break;
@@ -1791,6 +1797,16 @@ static void esb_thread(void)
 				case ESB_PONG_FLAG_MAG_OFF:
 					LOG_INF("Executing remote command: MAG_OFF");
 					sensor_set_mag_enabled(false);
+					break;
+
+				case ESB_PONG_FLAG_MAG_AUTO_ON:
+					LOG_INF("Executing remote command: MAG_AUTO_ON");
+					sensor_calibration_set_online_mag_enabled(true);
+					break;
+
+				case ESB_PONG_FLAG_MAG_AUTO_OFF:
+					LOG_INF("Executing remote command: MAG_AUTO_OFF");
+					sensor_calibration_set_online_mag_enabled(false);
 					break;
 
 				case ESB_PONG_FLAG_TCAL_ON:

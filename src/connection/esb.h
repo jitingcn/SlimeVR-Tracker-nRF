@@ -109,6 +109,8 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_DATA_COLLECT_ON 0x22  // Start raw data collection
 #define ESB_PONG_FLAG_DATA_COLLECT_OFF 0x23 // Stop raw data collection
 #define ESB_PONG_FLAG_SENS_AUTO 0x24        // Auto-calibrate gyro sensitivity
+#define ESB_PONG_FLAG_MAG_AUTO_ON 0x25      // Enable online magnetometer calibration
+#define ESB_PONG_FLAG_MAG_AUTO_OFF 0x26     // Disable online magnetometer calibration
 #define ESB_PONG_FLAG_OTA_QUERY_INFO 0x30   // Request firmware info for ESB OTA
 #define ESB_PONG_FLAG_OTA_ABORT 0x31        // Abort ESB OTA update
 #define ESB_PONG_FLAG_OTA_SUPPRESS 0x32     // Suppress tracker during OTA (reduce poll rate)

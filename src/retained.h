@@ -81,6 +81,7 @@ struct retained_data {
 	uint8_t rf_channel; // RF channel (0-100), 0xFF means use default
 
 	bool mag_enabled;
+	uint8_t mag_online_calibration_mode;
 
 	// Online magnetometer calibration runtime state.
 	// Persists across WoM resumes so online mag cal does not re-enter
