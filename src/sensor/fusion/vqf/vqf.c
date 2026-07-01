@@ -426,7 +426,7 @@ static void set_params()
 	params.tauMag = 6.0f;
 	params.magCurrentTau = 0.50f;
 	params.magNormTh = 0.08f;
-	params.magDipTh = 6.0f;
+	params.magDipTh = 3.5f;
 	params.magRefTau = 15.0f;
 	params.magNewTime = 12.0f;
 	params.magNewFirstTime = 5.5f;
