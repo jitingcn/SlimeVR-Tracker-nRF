@@ -10,6 +10,7 @@
 #include "connection/esb.h"
 #include "connection/tdma.h"
 #include "build_defines.h"
+#include "parse_args.h"
 #include "zephyr/sys/printk.h"
 
 #define USB_EXISTS 0
@@ -783,6 +784,13 @@ void cmd_shutdown(void)
 	sys_command_shutdown();
 }
 
+static inline void strtolower(char *str)
+{
+	for (int i = 0; str[i] != '\0'; i++) {
+		str[i] = (char)tolower((unsigned char)str[i]);
+	}
+}
+
 static void console_thread(void)
 {
 #if USB_EXISTS && DFU_EXISTS
@@ -829,121 +837,117 @@ static void console_thread(void)
 
 	printk("Type 'help' to show available commands.\n");
 
-	uint8_t command_info[] = "info";
-	uint8_t command_uptime[] = "uptime";
-	uint8_t command_shutdown[] = "shutdown";
-	uint8_t command_reboot[] = "reboot";
-	uint8_t command_battery[] = "battery";
-	uint8_t command_scan[] = "scan";
-	uint8_t command_calibrate[] = "calibrate";
-	uint8_t command_help[] = "help";
-	uint8_t command_debug[] = "debug";
-	uint8_t command_range[] = "range";
+	const char command_info[] = "info";
+	const char command_uptime[] = "uptime";
+	const char command_shutdown[] = "shutdown";
+	const char command_reboot[] = "reboot";
+	const char command_battery[] = "battery";
+	const char command_scan[] = "scan";
+	const char command_calibrate[] = "calibrate";
+	const char command_help[] = "help";
+	const char command_debug[] = "debug";
+	const char command_range[] = "range";
 #if CONFIG_VQF_BENCH
-	uint8_t command_vqfbench[] = "vqfbench";
+	const char command_vqfbench[] = "vqfbench";
 #endif
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	uint8_t command_6_side[] = "6-side";
+	const char command_6_side[] = "6-side";
 #endif
 
-	uint8_t command_mag[] = "mag";
+	const char command_mag[] = "mag";
 
-	uint8_t command_set[] = "set";
-	uint8_t command_pair[] = "pair";
-	uint8_t command_clear[] = "clear";
-	uint8_t command_channel[] = "channel";
-	uint8_t command_clearchannel[] = "clearchannel";
+	const char command_set[] = "set";
+	const char command_pair[] = "pair";
+	const char command_clear[] = "clear";
+	const char command_channel[] = "channel";
+	const char command_clearchannel[] = "clearchannel";
 
 #if DFU_EXISTS
-	uint8_t command_dfu[] = "dfu";
+	const char command_dfu[] = "dfu";
 #endif
 
-	uint8_t command_ping[] = "ping";
-	uint8_t command_meow[] = "meow";
-	uint8_t command_nvs[] = "nvs";
+	const char command_ping[] = "ping";
+	const char command_meow[] = "meow";
+	const char command_nvs[] = "nvs";
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	uint8_t command_sens[] = "sens";
+	const char command_sens[] = "sens";
 #endif
 #if CONFIG_SENSOR_USE_TCAL
-	uint8_t command_tcal[] = "tcal";
+	const char command_tcal[] = "tcal";
 #endif
 	// debug
-	uint8_t command_reset[] = "reset";
-	uint8_t command_reset_arg_zro[] = "zro";
+	const char command_reset[] = "reset";
+	const char command_reset_arg_zro[] = "zro";
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	uint8_t command_reset_arg_acc[] = "acc";
+	const char command_reset_arg_acc[] = "acc";
 #endif
-	uint8_t command_reset_arg_mag[] = "mag";
+	const char command_reset_arg_mag[] = "mag";
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	uint8_t command_reset_arg_sens[] = "sens";
+	const char command_reset_arg_sens[] = "sens";
 #endif
 #if CONFIG_SENSOR_USE_TCAL
-	uint8_t command_reset_arg_tcal[] = "tcal";
+	const char command_reset_arg_tcal[] = "tcal";
 #endif
-	uint8_t command_reset_arg_bat[] = "bat";
-	uint8_t command_reset_arg_fusion[] = "fusion";
-	uint8_t command_reset_arg_all[] = "all";
+	const char command_reset_arg_bat[] = "bat";
+	const char command_reset_arg_fusion[] = "fusion";
+	const char command_reset_arg_all[] = "all";
 
 	while (1) {
 #if USB_EXISTS
-		uint8_t *line = console_getline();
+		char *line = console_getline();
 #else
-		uint8_t *line = rtt_console_getline();
+		char *line = rtt_console_getline();
 #endif
-		uint8_t *arg = NULL;
-		for (uint8_t *p = line; *p; ++p) {
-			*p = tolower(*p);
-			if (*p == ' ' && !arg) {
-				*p = 0;
-				p++;
-				*p = tolower(*p);
-				if (*p) {
-					arg = p;
-				}
-			}
+		char *argv[8] = {NULL};
+		size_t argc = parse_args(line, argv, ARRAY_SIZE(argv));
+		if (argc == 0) {
+			continue;
+		}
+		for (size_t i = 0; i < argc; i++) {
+			strtolower(argv[i]);
 		}
 
-		if (memcmp(line, command_help, sizeof(command_help)) == 0) {
+		char *arg = argc > 1 ? argv[1] : NULL;
+		char *arg2 = argc > 2 ? argv[2] : NULL;
+		char *arg3 = argc > 3 ? argv[3] : NULL;
+
+		if (strcmp(argv[0], command_help) == 0) {
 			print_help();
-		} else if (memcmp(line, command_info, sizeof(command_info)) == 0) {
+		} else if (strcmp(argv[0], command_info) == 0) {
 			print_info();
-		} else if (memcmp(line, command_uptime, sizeof(command_uptime)) == 0) {
+		} else if (strcmp(argv[0], command_uptime) == 0) {
 			uint64_t uptime = k_uptime_ticks();
 			print_uptime(uptime, "Uptime");
 			print_uptime(uptime - retained->uptime_latest + retained->uptime_sum, "Accumulated");
-		} else if (memcmp(line, command_shutdown, sizeof(command_shutdown)) == 0) {
+		} else if (strcmp(argv[0], command_shutdown) == 0) {
 			cmd_shutdown();
-		} else if (memcmp(line, command_reboot, sizeof(command_reboot)) == 0) {
+		} else if (strcmp(argv[0], command_reboot) == 0) {
 			sys_request_system_reboot(false);
-		} else if (memcmp(line, command_battery, sizeof(command_battery)) == 0) {
+		} else if (strcmp(argv[0], command_battery) == 0) {
 			print_battery_tracker();
-		} else if (memcmp(line, command_scan, sizeof(command_scan)) == 0) {
+		} else if (strcmp(argv[0], command_scan) == 0) {
 			sensor_request_scan(true);
-		} else if (memcmp(line, command_calibrate, sizeof(command_calibrate)) == 0) {
+		} else if (strcmp(argv[0], command_calibrate) == 0) {
 			sensor_request_calibration();
 		}
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-		else if (memcmp(line, command_sens, sizeof(command_sens)) == 0) {
+		else if (strcmp(argv[0], command_sens) == 0) {
 			// check if there are any arguments at all.
 			if (arg == NULL) {
 				printk("Error: Missing arguments. Use 'sens <x>,<y>,<z>', 'sens auto <x|y|z> [rev]', or 'sens reset'.\n");
 			}
 			// check if this is the auto-calibration subcommand
-			else if (strncmp((char *)arg, "auto", 4) == 0 && (arg[4] == '\0' || arg[4] == ' ')) {
-				strtok((char *)arg, " "); // consume "auto"
-				char *axis_str = strtok(NULL, " ");
-				char *rev_str = strtok(NULL, " ");
-				char *extra_str = strtok(NULL, " ");
-				if (extra_str != NULL) {
+			else if (strcmp(arg, "auto") == 0) {
+				if (argc > 4) {
 					printk("Error: Too many arguments. Use: 'sens auto <x|y|z> [revolutions]'.\n");
 				} else {
-					cmd_sens_auto(axis_str, rev_str);
+					cmd_sens_auto(arg2, arg3);
 				}
 			}
 			// check if the argument is "reset"
-			else if (strcmp((char *)arg, "reset") == 0) {
+			else if (strcmp(arg, "reset") == 0) {
 				cmd_sens_reset();
 			} else {
 				char *token;
@@ -951,7 +955,7 @@ static void console_thread(void)
 				int token_count = 0;
 				float values[3];
 
-				token = strtok((char *)arg, ",");
+				token = strtok(arg, ",");
 				while (token != NULL && token_count < 3) {
 					values[token_count] = strtof(token, &endptr);
 					if (token == endptr || *endptr != '\0') {
@@ -971,13 +975,12 @@ static void console_thread(void)
 		}
 #endif
 #if CONFIG_SENSOR_USE_TCAL
-		else if (memcmp(line, command_tcal, sizeof(command_tcal)) == 0) {
+		else if (strcmp(argv[0], command_tcal) == 0) {
 			// check if there are any arguments
 			if (arg == NULL) {
 				printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 			} else {
-				// Tokenize the argument string by space to get the subcommand
-				char *subcmd = strtok((char *)arg, " ");
+				char *subcmd = arg;
 
 				if (subcmd == NULL) {
 					// Handling case where arg might contain only spaces
@@ -995,7 +998,7 @@ static void console_thread(void)
 				} else if (strcmp(subcmd, "clear") == 0) {
 					cmd_reset_tcal();
 				} else if (strcmp(subcmd, "auto") == 0) {
-					char *auto_arg = strtok(NULL, " ");
+					char *auto_arg = arg2;
 					if (auto_arg == NULL) {
 						printk("Error: Missing argument. Use: tcal auto <on|off>\n");
 					} else if (strcmp(auto_arg, "on") == 0) {
@@ -1043,8 +1046,7 @@ static void console_thread(void)
 					printk("--------------------------------------------------\n");
 					printk("End of dump. Total points printed: %u\n", points_printed);
 				} else if (strcmp(subcmd, "remove") == 0) {
-					// Get the next token (the index number)
-					char *idx_str = strtok(NULL, " ");
+					char *idx_str = arg2;
 
 					if (idx_str == NULL) {
 						printk("Error: Missing index. Use: tcal remove <index>\n");
@@ -1070,7 +1072,7 @@ static void console_thread(void)
 						}
 					}
 				} else if (strcmp(subcmd, "test") == 0) {
-					char *temp_str = strtok(NULL, " ");
+					char *temp_str = arg2;
 					if (temp_str == NULL) {
 						// Use current temperature if no argument provided
 						float current_temp = sensor_get_current_imu_temperature();
@@ -1113,7 +1115,7 @@ static void console_thread(void)
 						}
 					}
 				} else if (strcmp(subcmd, "boot") == 0) {
-					char *boot_arg = strtok(NULL, " ");
+					char *boot_arg = arg2;
 					if (boot_arg == NULL) {
 						// Show current boot calibration status
 						printk("Boot Calibration Status:\n");
@@ -1144,11 +1146,11 @@ static void console_thread(void)
 		}
 #endif
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		else if (memcmp(line, command_6_side, sizeof(command_6_side)) == 0) {
+		else if (strcmp(argv[0], command_6_side) == 0) {
 			sensor_request_calibration_6_side();
 		}
 #endif
-		else if (memcmp(line, command_mag, sizeof(command_mag)) == 0) {
+		else if (strcmp(argv[0], command_mag) == 0) {
 			if (arg == NULL) {
 				// No argument: show status
 				printk("Magnetometer: %s\n", sensor_get_mag_enabled() ? "enabled" : "disabled");
@@ -1177,7 +1179,7 @@ static void console_thread(void)
 					printk("Online: disabled\n");
 				}
 			} else {
-				char *subcmd = strtok((char *)arg, " ");
+				char *subcmd = arg;
 				if (subcmd == NULL) {
 					printk("Usage: mag [on|off|clear|cal|auto <on|off>]\n");
 				} else if (strcmp(subcmd, "on") == 0) {
@@ -1187,8 +1189,8 @@ static void console_thread(void)
 					printk("Disabling magnetometer\n");
 					sensor_set_mag_enabled(false);
 				} else if (strcmp(subcmd, "auto") == 0 || strcmp(subcmd, "online") == 0) {
-					char *state = strtok(NULL, " ");
-					char *extra = strtok(NULL, " ");
+					char *state = arg2;
+					char *extra = arg3;
 
 					if (state == NULL || extra != NULL) {
 						printk("Usage: mag %s <on|off>\n", subcmd);
@@ -1213,20 +1215,24 @@ static void console_thread(void)
 				}
 			}
 		}
-		else if (memcmp(line, command_set, sizeof(command_set)) == 0) {
-			uint64_t addr = strtoull(arg, NULL, 16);
-			uint8_t buf[17];
+		else if (strcmp(argv[0], command_set) == 0) {
+			if (argc != 2) {
+				printk("Invalid number of arguments\n");
+				continue;
+			}
+			uint64_t addr = parse_u64(arg, 16);
+			char buf[17];
 			snprintk(buf, 17, "%016llx", addr);
-			if (addr != 0 && memcmp(buf, arg, 17) == 0) {
+			if (addr != 0 && strcmp(buf, arg) == 0) {
 				esb_set_pair(addr);
 			} else {
 				printk("Invalid address\n");
 			}
-		} else if (memcmp(line, command_pair, sizeof(command_pair)) == 0) {
+		} else if (strcmp(argv[0], command_pair) == 0) {
 			esb_reset_pair();
-		} else if (memcmp(line, command_clear, sizeof(command_clear)) == 0) {
+		} else if (strcmp(argv[0], command_clear) == 0) {
 			esb_clear_pair();
-		} else if (memcmp(line, command_channel, sizeof(command_channel)) == 0) {
+		} else if (strcmp(argv[0], command_channel) == 0) {
 			if (!arg) {
 				printk("Usage: channel <1-100>\n");
 				printk("Example: channel 25 - Set RF channel to 25\n");
@@ -1256,7 +1262,7 @@ static void console_thread(void)
 					printk("ESB reinitialized with channel %u\n", retained->rf_channel);
 				}
 			}
-		} else if (memcmp(line, command_clearchannel, sizeof(command_clearchannel)) == 0) {
+		} else if (strcmp(argv[0], command_clearchannel) == 0) {
 			printk("Clearing RF channel setting (restore default)\n");
 			// Clear saved channel (set to 0xFF = use default)
 			retained->rf_channel = 0xFF;
@@ -1270,15 +1276,12 @@ static void console_thread(void)
 			printk("ESB reinitialized with default channel\n");
 		}
 #if DFU_EXISTS
-		else if (memcmp(line, command_dfu, sizeof(command_dfu)) == 0) {
+		else if (strcmp(argv[0], command_dfu) == 0) {
 #if ADAFRUIT_BOOTLOADER
 			// Subcommands:
 			//   dfu      -> UF2 DFU (USB MSC/CDC)
 			//   dfu ota  -> OTA DFU (BLE)
-			char *mode = NULL;
-			if (arg) {
-				mode = strtok((char *)arg, " ");
-			}
+			char *mode = arg;
 
 			if (mode && strcmp(mode, "ota") == 0) {
 				printk("Entering OTA DFU (BLE)...\n");
@@ -1299,30 +1302,29 @@ static void console_thread(void)
 #endif
 		}
 #endif
-		else if (memcmp(line, command_ping, sizeof(command_ping)) == 0) {
+		else if (strcmp(argv[0], command_ping) == 0) {
 			cmd_ping_start();
 		}
-		else if (memcmp(line, command_nvs, sizeof(command_nvs)) == 0) {
+		else if (strcmp(argv[0], command_nvs) == 0) {
 			sys_nvs_stats();
 		}
-		else if (memcmp(line, command_meow, sizeof(command_meow)) == 0) {
+		else if (strcmp(argv[0], command_meow) == 0) {
 			print_meow();
-		} else if (memcmp(line, command_debug, sizeof(command_debug)) == 0) {
+		} else if (strcmp(argv[0], command_debug) == 0) {
 			uint32_t duration = 1; // Default 1 second
 			if (arg) {
 				char *endptr;
-				char *arg_char = (char *)arg;
-				long dur = strtol(arg_char, &endptr, 10);
-				if (endptr != arg_char && *endptr == '\0' && dur >= 1 && dur <= 60) {
+				long dur = strtol(arg, &endptr, 10);
+				if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 60) {
 					duration = (uint32_t)dur;
 				} else {
 					printk("Invalid duration (1-60s). Using default 1 seconds.\n");
 				}
 			}
 			sensor_debug_start(duration);
-		} else if (memcmp(line, command_range, sizeof(command_range)) == 0) {
+		} else if (strcmp(argv[0], command_range) == 0) {
 #if CONFIG_SENSOR_RANGE_STATS
-			if (arg && strcmp((char *)arg, "reset") == 0) {
+			if (arg && strcmp(arg, "reset") == 0) {
 				sensor_reset_range_stats();
 				printk("Sensor range statistics have been reset.\n");
 			} else {
@@ -1332,12 +1334,12 @@ static void console_thread(void)
 			printk("Sensor range statistics not enabled in configuration.\n");
 #endif // CONFIG_SENSOR_RANGE_STATS
 #if CONFIG_VQF_BENCH
-		} else if (memcmp(line, command_vqfbench, sizeof(command_vqfbench)) == 0) {
+		} else if (strcmp(argv[0], command_vqfbench) == 0) {
 			uint32_t iterations = 1000;
 			if (arg) {
 				char *endptr;
-				long parsed = strtol((char *)arg, &endptr, 10);
-				if (endptr != (char *)arg && *endptr == '\0' && parsed > 0 && parsed <= 20000) {
+				long parsed = strtol(arg, &endptr, 10);
+				if (endptr != arg && *endptr == '\0' && parsed > 0 && parsed <= 20000) {
 					iterations = (uint32_t)parsed;
 				} else {
 					printk("Invalid iteration count. Using default 1000.\n");
@@ -1345,52 +1347,52 @@ static void console_thread(void)
 			}
 			vqf_run_benchmark(iterations);
 #endif // CONFIG_VQF_BENCH
-		}	else if (memcmp(line, command_reset, sizeof(command_reset)) == 0) {
-			if (arg && memcmp(arg, command_reset_arg_zro, sizeof(command_reset_arg_zro)) == 0) {
+		} else if (strcmp(argv[0], command_reset) == 0) {
+			if (arg && strcmp(arg, command_reset_arg_zro) == 0) {
 				cmd_reset_zro();
 			}
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-			else if (arg && memcmp(arg, command_reset_arg_acc, sizeof(command_reset_arg_acc)) == 0) {
+			else if (arg && strcmp(arg, command_reset_arg_acc) == 0) {
 				cmd_reset_acc();
 			}
 #endif
-			else if (arg && memcmp(arg, command_reset_arg_mag, sizeof(command_reset_arg_mag)) == 0) {
+			else if (arg && strcmp(arg, command_reset_arg_mag) == 0) {
 				sensor_calibration_clear_mag(NULL, true);
 			}
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-			else if (arg && memcmp(arg, command_reset_arg_sens, sizeof(command_reset_arg_sens)) == 0) {
+			else if (arg && strcmp(arg, command_reset_arg_sens) == 0) {
 				cmd_sens_reset();
 			}
 #endif
 #if CONFIG_SENSOR_USE_TCAL
-			else if (arg && memcmp(arg, command_reset_arg_tcal, sizeof(command_reset_arg_tcal)) == 0) {
+			else if (arg && strcmp(arg, command_reset_arg_tcal) == 0) {
 				cmd_reset_tcal();
 			}
 #endif
-			else if (arg && memcmp(arg, command_reset_arg_bat, sizeof(command_reset_arg_bat)) == 0) {
+			else if (arg && strcmp(arg, command_reset_arg_bat) == 0) {
 				cmd_reset_bat();
-			} else if (arg && memcmp(arg, command_reset_arg_fusion, sizeof(command_reset_arg_fusion)) == 0) {
+			} else if (arg && strcmp(arg, command_reset_arg_fusion) == 0) {
 				cmd_fusion_reset();
-			} else if (arg && memcmp(arg, command_reset_arg_all, sizeof(command_reset_arg_all)) == 0) {
+			} else if (arg && strcmp(arg, command_reset_arg_all) == 0) {
 				sys_clear();
 			} else {
 				printk("Invalid argument\n");
 			}
-		} else if (memcmp(line, "tdma", 4) == 0) {
-			if (arg && strcmp((char *)arg, "on") == 0) {
+		} else if (strcmp(argv[0], "tdma") == 0) {
+			if (arg && strcmp(arg, "on") == 0) {
 				tdma_set_enabled(true);
 				printk("TDMA enabled\n");
-			} else if (arg && strcmp((char *)arg, "off") == 0) {
+			} else if (arg && strcmp(arg, "off") == 0) {
 				tdma_set_enabled(false);
 				printk("TDMA disabled\n");
 			} else {
 				printk("TDMA: %s\n", tdma_is_enabled() ? "enabled" : "disabled");
 			}
-		} else if (memcmp(line, "test", 4) == 0) {
-			if (arg && strcmp((char *)arg, "on") == 0) {
+		} else if (strcmp(argv[0], "test") == 0) {
+			if (arg && strcmp(arg, "on") == 0) {
 				test_mode_set(true);
 				printk("Test mode enabled\n");
-			} else if (arg && strcmp((char *)arg, "off") == 0) {
+			} else if (arg && strcmp(arg, "off") == 0) {
 				test_mode_set(false);
 				printk("Test mode disabled\n");
 			} else {
