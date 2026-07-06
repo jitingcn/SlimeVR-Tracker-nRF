@@ -1445,7 +1445,7 @@ static uint32_t mag_vqf_updates_since_status = 0;
  *
  * Triggered by sensor_mag_ref_reset(); does NOT run on startup.
  */
-#define MAG_REF_RECOMPUTE_SAMPLES 50
+#define MAG_REF_RECOMPUTE_SAMPLES 100
 #define MAG_REF_ACCEL_TOL 0.3f
 
 static bool mag_ref_recompute_active;

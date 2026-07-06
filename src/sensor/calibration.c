@@ -73,9 +73,9 @@ static uint16_t sens_cal_revolutions;
 #define CALIBRATION_SENSOR_INIT_POLL_MS 10
 
 // Minimum samples before attempting trial calibration
-#define MAG_CAL_MIN_SAMPLES 64
+#define MAG_CAL_MIN_SAMPLES 192
 // Attempt trial calibration every this many new samples (manual cal)
-#define MAG_CAL_TRIAL_INTERVAL 80
+#define MAG_CAL_TRIAL_INTERVAL (MAG_CAL_MIN_SAMPLES / 2)
 
 static int64_t mag_cal_last_status_log;
 
@@ -112,10 +112,9 @@ static mag_center_estimator_t online_center_estimator;
 // per-quadrant sliding windows. Each octant independently wraps after
 // QUADRANT_BUF_SIZE samples — staying in one orientation only updates
 // that octant, leaving the other 7 with diverse data.
-// 8 × 16 = 128 samples total (matching magcal's proven size),
-// ~1.5KB vs 3.3KB for the old 4×80 segment design.
-#define QUADRANT_BUF_SIZE 16
+#define QUADRANT_BUF_SIZE 32
 #define ONLINE_QUADRANT_COUNT 8
+#define ONLINE_BUFFER_SAMPLE_CAPACITY (ONLINE_QUADRANT_COUNT * QUADRANT_BUF_SIZE)
 
 typedef struct {
 	float x, y, z;
@@ -146,7 +145,7 @@ static int64_t online_last_sample_time; // rate limiting
 // Drop octants that have not been refreshed for too long.
 // This is kept separate from the check cadence: stale-history rejection should
 // not depend on how often the background thread decides to run Magneto.
-#define ONLINE_STALE_QUADRANT_MAX_AGE 320
+#define ONLINE_STALE_QUADRANT_MAX_AGE (ONLINE_BUFFER_SAMPLE_CAPACITY * 5 / 2)
 // Minimum direction change to accept an online sample. The configured value is
 // expressed in degrees and converted to the equivalent 1 - cos(theta) threshold.
 static float online_last_dir[3];
@@ -161,7 +160,7 @@ static float manual_last_accel_dir[3];
 // Background checks should not run on every calibration-thread pass.
 // Tie the minimum check spacing to roughly one fresh fit's worth of accepted
 // samples at the maximum online sampling rate.
-#define ONLINE_MIN_CHECK_INTERVAL_MS (MAG_CAL_MIN_SAMPLES * ONLINE_MIN_INTERVAL_MS * 2)
+#define ONLINE_MIN_CHECK_INTERVAL_MS (ONLINE_BUFFER_SAMPLE_CAPACITY * ONLINE_MIN_INTERVAL_MS)
 
 // Runtime calibrated norm tracking (exponential moving average)
 // Used to assess current calibration quality and decide if online update is needed
