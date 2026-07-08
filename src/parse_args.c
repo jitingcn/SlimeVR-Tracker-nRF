@@ -22,6 +22,7 @@
 */
 #include "parse_args.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +42,7 @@ size_t parse_args(char *str, char *argv[], size_t size)
 		return 0;
 	}
 
-	while (*str == ' ') {
+	while (isspace((unsigned char)*str)) {
 		str++;
 	}
 
@@ -54,13 +55,16 @@ size_t parse_args(char *str, char *argv[], size_t size)
 
 		argv[argc++] = str;
 
-		str = strchr(str, ' ');
-		if (str == NULL) {
+		while (*str != '\0' && !isspace((unsigned char)*str)) {
+			str++;
+		}
+
+		if (*str == '\0') {
 			break;
 		}
 
 		*str++ = '\0';
-		while (*str == ' ') {
+		while (isspace((unsigned char)*str)) {
 			str++;
 		}
 	}
