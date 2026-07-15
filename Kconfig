@@ -241,6 +241,41 @@ config ACTIVE_TIMEOUT_DELAY
     help
         Activity timeout duration when triggered.
 
+config DYNAMIC_ACTIVE_TIMEOUT
+    bool "Adapt activity timeout after wake-on-motion"
+    default y
+    depends on USE_ACTIVE_TIMEOUT && SLEEP_ON_ACTIVE_TIMEOUT
+    help
+        Shorten the activity timeout after low-activity wake-on-motion cycles.
+        Meaningful activity restores ACTIVE_TIMEOUT_DELAY.
+
+config ACTIVE_TIMEOUT_IDLE_WAKE_DELAY
+    int "Low-activity wake timeout (ms)"
+    default 90000
+    range 1000 3600000
+    depends on DYNAMIC_ACTIVE_TIMEOUT
+
+config ACTIVE_TIMEOUT_REPEAT_WAKE_DELAY
+    int "Repeated low-activity wake timeout (ms)"
+    default 60000
+    range 1000 3600000
+    depends on DYNAMIC_ACTIVE_TIMEOUT
+
+config ACTIVE_TIMEOUT_REPEAT_WAKE_COUNT
+    int "Low-activity wakes before shortest timeout"
+    default 2
+    range 1 255
+    depends on DYNAMIC_ACTIVE_TIMEOUT
+
+config ACTIVE_TIMEOUT_MEANINGFUL_MOTION_MS
+    int "Weighted motion score needed to restore normal timeout"
+    default 25000
+    range 1000 600000
+    depends on DYNAMIC_ACTIVE_TIMEOUT
+    help
+        Integer motion score threshold. Strong motion adds three points per
+        millisecond, moderate motion adds one, and weak motion subtracts one.
+
 config DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
     bool "Disable Sensor GPIOs on shutdown"
     default y

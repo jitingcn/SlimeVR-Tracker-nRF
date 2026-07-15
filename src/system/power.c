@@ -394,6 +394,7 @@ static void sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 #endif
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sensor_calibration_online_mag_retained_save();
+	sensor_record_wom_sleep();
 	sensor_retained_write();
 #if WOM_USE_DCDC // In case DCDC is more efficient in the ~10-100uA range
 	set_regulator(SYS_REGULATOR_DCDC); // Make sure DCDC is selected

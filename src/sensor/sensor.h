@@ -40,6 +40,7 @@ void sensor_scan_clear(void);
 
 void sensor_retained_read(void);
 void sensor_retained_write(void);
+void sensor_record_wom_sleep(void);
 
 void sensor_shutdown(void);
 uint8_t sensor_setup_WOM(void);

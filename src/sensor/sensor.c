@@ -29,6 +29,7 @@
 #include "util.h"
 #include "connection/connection.h"
 #include "calibration.h"
+#include "motion_state.h"
 
 #include <math.h>
 #include <hal/nrf_gpio.h>
@@ -69,32 +70,10 @@ static sensor_debug_state_t debug_state = {
 #define SENSOR_REST_ENTER_STABLE_MS 1500
 #endif
 #ifndef SENSOR_REST_EXIT_MOTION_MS
-#define SENSOR_REST_EXIT_MOTION_MS 120
+#define SENSOR_REST_EXIT_MOTION_MS 250
 #endif
-#ifndef SENSOR_REST_ENTER_GYRO_DPS
-#define SENSOR_REST_ENTER_GYRO_DPS 0.8f
-#endif
-#ifndef SENSOR_REST_EXIT_GYRO_DPS
-#define SENSOR_REST_EXIT_GYRO_DPS 2.0f
-#endif
-#ifndef SENSOR_REST_ENTER_LIN_ACCEL_MS2
-#define SENSOR_REST_ENTER_LIN_ACCEL_MS2 0.35f
-#endif
-#ifndef SENSOR_REST_EXIT_LIN_ACCEL_MS2
-#define SENSOR_REST_EXIT_LIN_ACCEL_MS2 0.9f
-#endif
-#ifndef SENSOR_REST_ENTER_QUAT_RAD
-#define SENSOR_REST_ENTER_QUAT_RAD 0.010f
-#endif
-#ifndef SENSOR_REST_EXIT_QUAT_RAD
-#define SENSOR_REST_EXIT_QUAT_RAD 0.015f
-#endif
-#ifndef SENSOR_REST_VQF_ENTER_DEV
-#define SENSOR_REST_VQF_ENTER_DEV 1.0f
-#endif
-#ifndef SENSOR_REST_VQF_EXIT_DEV
-#define SENSOR_REST_VQF_EXIT_DEV 1.2f
-#endif
+
+#define SENSOR_ACTIVITY_STARTUP_GUARD_MS 5000
 
 #if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking state - records min/max values during runtime (not persisted)
@@ -173,6 +152,15 @@ static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
 static int64_t last_sensor_send_time = 0;
 static int64_t last_retained_save_time = 0;
+
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+static bool sensor_wom_history_initialized;
+static bool sensor_session_woke_from_wom;
+static bool sensor_session_meaningful_motion;
+static struct sensor_activity_score sensor_session_activity_score = {
+	.last_update_ms = -1
+};
+#endif
 
 // Track forced scan requests to allow override when requested 3 times within 1 minute
 #define FORCE_SCAN_WINDOW_MS 60000  // 1 minute window
@@ -417,71 +405,20 @@ static sensor_fusion_rest_sample_t sensor_get_fusion_rest_sample(void)
 	return sample;
 }
 
-static bool sensor_fusion_rest_deviations_under(
-	const sensor_fusion_rest_sample_t *fusion_rest,
-	float threshold)
-{
-	return fusion_rest->available
-		&& fusion_rest->deviations[0] < threshold
-		&& fusion_rest->deviations[1] < threshold;
-}
-
-static bool sensor_fusion_rest_deviations_over(
-	const sensor_fusion_rest_sample_t *fusion_rest,
-	float threshold)
-{
-	return fusion_rest->available
-		&& (fusion_rest->deviations[0] > threshold
-			|| fusion_rest->deviations[1] > threshold);
-}
-
-static bool sensor_rest_sample_is_quiet(
-	float gyro_speed,
-	float lin_accel,
-	float quat_delta,
-	const sensor_fusion_rest_sample_t *fusion_rest)
-{
-	bool local_quiet = gyro_speed < SENSOR_REST_ENTER_GYRO_DPS
-		&& lin_accel < SENSOR_REST_ENTER_LIN_ACCEL_MS2
-		&& quat_delta < SENSOR_REST_ENTER_QUAT_RAD;
-
-	if (!fusion_rest->available)
-		return local_quiet;
-
-	bool fusion_quiet = sensor_fusion_rest_deviations_under(fusion_rest, SENSOR_REST_VQF_ENTER_DEV);
-	return fusion_quiet
-		&& quat_delta < SENSOR_REST_ENTER_QUAT_RAD
-		&& (fusion_rest->detected || local_quiet);
-}
-
-static bool sensor_rest_sample_is_active(
-	float gyro_speed,
-	float lin_accel,
-	float quat_delta,
-	const sensor_fusion_rest_sample_t *fusion_rest)
-{
-	bool strong_motion = gyro_speed > SENSOR_REST_EXIT_GYRO_DPS
-		|| lin_accel > SENSOR_REST_EXIT_LIN_ACCEL_MS2;
-	bool slow_orientation_motion = quat_delta > SENSOR_REST_EXIT_QUAT_RAD;
-	bool local_motion_hint = gyro_speed > SENSOR_REST_ENTER_GYRO_DPS
-		|| lin_accel > SENSOR_REST_ENTER_LIN_ACCEL_MS2
-		|| quat_delta > SENSOR_REST_ENTER_QUAT_RAD;
-	bool fusion_motion = sensor_fusion_rest_deviations_over(fusion_rest, SENSOR_REST_VQF_EXIT_DEV)
-		|| (fusion_rest->available
-			&& !fusion_rest->detected
-			&& sensor_fusion_rest_deviations_over(fusion_rest, SENSOR_REST_VQF_ENTER_DEV)
-			&& local_motion_hint);
-
-	return strong_motion || slow_orientation_motion || fusion_motion;
-}
-
-static bool sensor_update_resting_state(const float *current_q, const float *lin_a, int64_t now_ms)
+static bool sensor_update_resting_state(
+	const float *current_q,
+	const float *lin_a,
+	int64_t now_ms,
+	float *gyro_speed_out,
+	float *lin_accel_out)
 {
 	if (!rest_state.initialized) {
 		memcpy(rest_state.reference_q, current_q, sizeof(rest_state.reference_q));
 		rest_state.quiet_since_ms = 0;
 		rest_state.motion_since_ms = 0;
 		rest_state.initialized = true;
+		*gyro_speed_out = 0.0f;
+		*lin_accel_out = 0.0f;
 		return false;
 	}
 
@@ -490,8 +427,13 @@ static bool sensor_update_resting_state(const float *current_q, const float *lin
 	float lin_accel = v_diff_mag(lin_a, zero);
 	float quat_delta = q_diff_mag(current_q, rest_state.reference_q);
 	sensor_fusion_rest_sample_t fusion_rest = sensor_get_fusion_rest_sample();
-	bool quiet = sensor_rest_sample_is_quiet(gyro_speed, lin_accel, quat_delta, &fusion_rest);
-	bool active = sensor_rest_sample_is_active(gyro_speed, lin_accel, quat_delta, &fusion_rest);
+	const float *fusion_deviations = fusion_rest.available ? fusion_rest.deviations : NULL;
+	bool quiet = sensor_motion_is_quiet(
+		gyro_speed, lin_accel, quat_delta, fusion_rest.detected, fusion_deviations);
+	bool active = sensor_motion_is_active(
+		gyro_speed, lin_accel, quat_delta, fusion_deviations);
+	*gyro_speed_out = gyro_speed;
+	*lin_accel_out = lin_accel;
 
 	if (rest_state.resting) {
 		if (active) {
@@ -631,6 +573,16 @@ int sensor_scan(void)
 	if (sensor_sensor_init)
 		return 0; // already initialized
 	sensor_sensor_scanning = true;
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+	if (!sensor_wom_history_initialized) {
+		sensor_session_woke_from_wom = retained->wom_sleep_pending;
+		retained->wom_sleep_pending = false;
+		retained_update();
+		sensor_wom_history_initialized = true;
+		if (sensor_session_woke_from_wom)
+			LOG_INF("WOM activity history: %u low-activity wakes", retained->wom_idle_wake_streak);
+	}
+#endif
 	sensor_wom_fast_wake_resume_pending = sensor_consume_wom_fast_wake_hint();
 	if (sensor_wom_fast_wake_resume_pending)
 		LOG_INF("WOM fast-wake sensor resume requested");
@@ -991,6 +943,20 @@ void sensor_retained_write(void) // TODO: move to sys?
 	retained_update();
 }
 
+void sensor_record_wom_sleep(void)
+{
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+	if (sensor_session_woke_from_wom && !sensor_session_meaningful_motion) {
+		if (retained->wom_idle_wake_streak < UINT8_MAX)
+			retained->wom_idle_wake_streak++;
+	} else {
+		retained->wom_idle_wake_streak = 0;
+	}
+	retained->wom_sleep_pending = true;
+	retained_update();
+#endif
+}
+
 void sensor_shutdown(void) // Communicate all imus to shut down
 {
 	int err = sensor_request_scan(false); // try initialization if possible
@@ -1164,26 +1130,60 @@ enum sensor_sensor_timeout {
 static enum sensor_sensor_timeout sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 static bool was_ota_suppressed = false;
 
+static int64_t sensor_get_active_timeout_delay(void)
+{
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+	if (sensor_session_woke_from_wom && !sensor_session_meaningful_motion) {
+		if (retained->wom_idle_wake_streak >= CONFIG_ACTIVE_TIMEOUT_REPEAT_WAKE_COUNT)
+			return CONFIG_ACTIVE_TIMEOUT_REPEAT_WAKE_DELAY;
+		return CONFIG_ACTIVE_TIMEOUT_IDLE_WAKE_DELAY;
+	}
+#endif
+	return CONFIG_ACTIVE_TIMEOUT_DELAY;
+}
+
+static void sensor_update_session_motion(float gyro_speed, float lin_accel, int64_t now_ms)
+{
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+	if (sensor_session_woke_from_wom && !sensor_session_meaningful_motion) {
+		if (sensor_activity_score_update(
+			&sensor_session_activity_score,
+			gyro_speed,
+			lin_accel,
+			now_ms,
+			SENSOR_ACTIVITY_STARTUP_GUARD_MS,
+			CONFIG_ACTIVE_TIMEOUT_MEANINGFUL_MOTION_MS)) {
+			sensor_session_meaningful_motion = true;
+			retained->wom_idle_wake_streak = 0;
+			retained_update();
+			LOG_INF("Meaningful activity restored normal sleep timeout");
+		}
+	}
+#endif
+}
+
 // Check the IMU gyroscope // TODO: gyro sanity not used
  // TODO: timeouts and power management should be outside sensor! (ie. sleeping/shutdown even if the imu completely errored out)
  // all this really means is that this should be called in sensor loop while the sensor is in an error state
-static void sensor_update_sensor_state(bool resting)
+static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin_accel)
 {
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
 	bool in_test_mode = test_mode_get();
 	bool ota_suppressed_now = esb_ota_is_active() || connection_get_ota_suppressed();
+	int64_t now_ms = k_uptime_get();
+	sensor_update_session_motion(gyro_speed, lin_accel, now_ms);
 
 	/* Reset activity timer on OTA suppression→unsuppression transition
 	 * to prevent accumulated idle time from immediately triggering sleep
 	 * when suppression lifts between OTA batches. */
 	if (was_ota_suppressed && !ota_suppressed_now) {
-		last_data_time = k_uptime_get();
+		last_data_time = now_ms;
 	}
 	was_ota_suppressed = ota_suppressed_now;
 
 	if (!in_test_mode && !calibrating && !ota_suppressed_now && resting)
 	{
-		int64_t last_data_delta = k_uptime_get() - last_data_time;
+		int64_t last_data_delta = now_ms - last_data_time;
 		if (sensor_mode < SENSOR_SENSOR_MODE_LOW_POWER && last_data_delta > CONFIG_SENSOR_LP_TIMEOUT) // No motion in lp timeout
 		{
 			LOG_INF("No motion from sensors in %dms", CONFIG_SENSOR_LP_TIMEOUT);
@@ -1199,12 +1199,13 @@ static void sensor_update_sensor_state(bool resting)
 #if CONFIG_USE_ACTIVE_TIMEOUT
 		if (sensor_timeout < SENSOR_SENSOR_TIMEOUT_ACTIVITY && last_data_delta > CONFIG_ACTIVE_TIMEOUT_THRESHOLD) // higher priority than IMU timeout
 		{
-			LOG_INF("Switching to activity timeout");
+			LOG_INF("Switching to activity timeout (%llds)", sensor_get_active_timeout_delay() / 1000);
 			sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY;
 		}
-		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_ACTIVITY && last_data_delta > CONFIG_ACTIVE_TIMEOUT_DELAY)
+		int64_t active_timeout_delay = sensor_get_active_timeout_delay();
+		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_ACTIVITY && last_data_delta > active_timeout_delay)
 		{
-			LOG_INF("No motion from sensors in %dm", CONFIG_ACTIVE_TIMEOUT_DELAY / 60000);
+			LOG_INF("No motion from sensors in %llds", active_timeout_delay / 1000);
 #if CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
 			// Queue power state request, it is possible for the request to be overridden so the thread may continue unaware
 			sys_request_WOM(true, false);
@@ -2220,8 +2221,10 @@ void sensor_loop(void)
 				a_to_lin_a(q, a, lin_a);
 
 			int64_t now = k_uptime_get();
-			bool resting = sensor_update_resting_state(q, lin_a, now);
-			sensor_update_sensor_state(resting);
+			float gyro_speed;
+			float lin_accel;
+			bool resting = sensor_update_resting_state(q, lin_a, now, &gyro_speed, &lin_accel);
+			sensor_update_sensor_state(resting, gyro_speed, lin_accel);
 
 			// Update magnetometer mode
 #if !CONFIG_SENSOR_MAG_FIXED_ODR
