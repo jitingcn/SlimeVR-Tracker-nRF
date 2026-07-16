@@ -1,6 +1,7 @@
 {
     "recommendations": [
         "nordic-semiconductor.nrf-connect-extension-pack",
-        "nordic-semiconductor.nrf-connect"
+        "nordic-semiconductor.nrf-connect",
+        "llvm-vs-code-extensions.vscode-clangd"
     ]
 }
