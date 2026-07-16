@@ -21,7 +21,6 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
-#include "sensor/fusion/vqf/vqf.h"
 #include "sensor/sensor.h"
 #include "connection.h"
 #include "util.h"
@@ -37,12 +36,40 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <string.h>
+#include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
+/* Published under irq_lock so connection_thread never reads a torn quat/accel/mag. */
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
+static bool send_precise_quat;
+
+static void connection_sensor_snap_q_a(float q_out[4], float a_out[3])
+{
+	unsigned key = irq_lock();
+	memcpy(q_out, sensor_q, sizeof(sensor_q));
+	memcpy(a_out, sensor_a, sizeof(sensor_a));
+	irq_unlock(key);
+}
+
+static void connection_sensor_snap_q_m(float q_out[4], float m_out[3])
+{
+	unsigned key = irq_lock();
+	memcpy(q_out, sensor_q, sizeof(sensor_q));
+	memcpy(m_out, sensor_m, sizeof(sensor_m));
+	irq_unlock(key);
+}
+
+static bool connection_sensor_get_precise_quat(void)
+{
+	unsigned key = irq_lock();
+	bool precise = send_precise_quat;
+	irq_unlock(key);
+	return precise;
+}
 
 static uint8_t packet_sequence = 0;
 static int64_t last_ping_time = 0;
@@ -107,11 +134,11 @@ uint8_t connection_get_packet_sequence(void)
  * These define how much data each sub-packet type contributes
  * when embedded inside a composite packet.
  */
-#define SUB_DATA_LEN_INFO   13  /* type 0: batt..patch (no rssi) */
-#define SUB_DATA_LEN_QUAT   14  /* type 1: q0-q3 + a0-a2 */
+#define SUB_DATA_LEN_INFO 13    /* type 0: batt..patch (no rssi) */
+#define SUB_DATA_LEN_QUAT 14    /* type 1: q0-q3 + a0-a2 */
 #define SUB_DATA_LEN_COMPACT 13 /* type 2: batt+temp+q_buf+a (no rssi) */
-#define SUB_DATA_LEN_STATUS  2  /* type 3: svr_stat + status */
-#define SUB_DATA_LEN_MAG    14  /* type 4: q0-q3 + m0-m2 */
+#define SUB_DATA_LEN_STATUS 2   /* type 3: svr_stat + status */
+#define SUB_DATA_LEN_MAG 14     /* type 4: q0-q3 + m0-m2 */
 #define SUB_DATA_LEN_RUNTIME 8  /* type 5: remaining runtime estimate */
 
 /* Fill sub-packet payload (without type/id prefix) into buf, return bytes written */
@@ -135,37 +162,39 @@ static int fill_sub_info(uint8_t *buf)
 
 static int fill_sub_quat_accel(uint8_t *buf)
 {
+	float q[4], a[3];
+	connection_sensor_snap_q_a(q, a);
 	uint16_t *b = (uint16_t *)buf;
-	b[0] = TO_FIXED_15(sensor_q[1]);
-	b[1] = TO_FIXED_15(sensor_q[2]);
-	b[2] = TO_FIXED_15(sensor_q[3]);
-	b[3] = TO_FIXED_15(sensor_q[0]);
-	b[4] = TO_FIXED_7(sensor_a[0]);
-	b[5] = TO_FIXED_7(sensor_a[1]);
-	b[6] = TO_FIXED_7(sensor_a[2]);
+	b[0] = TO_FIXED_15(q[1]);
+	b[1] = TO_FIXED_15(q[2]);
+	b[2] = TO_FIXED_15(q[3]);
+	b[3] = TO_FIXED_15(q[0]);
+	b[4] = TO_FIXED_7(a[0]);
+	b[5] = TO_FIXED_7(a[1]);
+	b[6] = TO_FIXED_7(a[2]);
 	return SUB_DATA_LEN_QUAT;
 }
 
 static int fill_sub_compact_quat(uint8_t *buf)
 {
+	float q[4], a[3];
+	connection_sensor_snap_q_a(q, a);
 	buf[0] = batt;
 	buf[1] = batt_v;
 	buf[2] = sensor_temp;
 	float v[3] = {0};
-	q_fem(sensor_q, v);
-	for (int i = 0; i < 3; i++)
+	q_fem(q, v);
+	for (int i = 0; i < 3; i++) {
 		v[i] = (v[i] + 1) / 2;
-	uint16_t v_buf[3] = {
-		SATURATE_UINT10((1 << 10) * v[0]),
-		SATURATE_UINT11((1 << 11) * v[1]),
-		SATURATE_UINT11((1 << 11) * v[2])
-	};
+	}
+	uint16_t v_buf[3]
+		= {SATURATE_UINT10((1 << 10) * v[0]), SATURATE_UINT11((1 << 11) * v[1]), SATURATE_UINT11((1 << 11) * v[2])};
 	uint32_t *q_buf = (uint32_t *)&buf[3];
 	*q_buf = v_buf[0] | (v_buf[1] << 10) | (v_buf[2] << 21);
 	uint16_t *ab = (uint16_t *)&buf[7];
-	ab[0] = TO_FIXED_7(sensor_a[0]);
-	ab[1] = TO_FIXED_7(sensor_a[1]);
-	ab[2] = TO_FIXED_7(sensor_a[2]);
+	ab[0] = TO_FIXED_7(a[0]);
+	ab[1] = TO_FIXED_7(a[1]);
+	ab[2] = TO_FIXED_7(a[2]);
 	return SUB_DATA_LEN_COMPACT;
 }
 
@@ -178,14 +207,16 @@ static int fill_sub_status(uint8_t *buf)
 
 static int fill_sub_mag(uint8_t *buf)
 {
+	float q[4], m[3];
+	connection_sensor_snap_q_m(q, m);
 	uint16_t *b = (uint16_t *)buf;
-	b[0] = TO_FIXED_15(sensor_q[1]);
-	b[1] = TO_FIXED_15(sensor_q[2]);
-	b[2] = TO_FIXED_15(sensor_q[3]);
-	b[3] = TO_FIXED_15(sensor_q[0]);
-	b[4] = TO_FIXED_10(sensor_m[0]);
-	b[5] = TO_FIXED_10(sensor_m[1]);
-	b[6] = TO_FIXED_10(sensor_m[2]);
+	b[0] = TO_FIXED_15(q[1]);
+	b[1] = TO_FIXED_15(q[2]);
+	b[2] = TO_FIXED_15(q[3]);
+	b[3] = TO_FIXED_15(q[0]);
+	b[4] = TO_FIXED_10(m[0]);
+	b[5] = TO_FIXED_10(m[1]);
+	b[6] = TO_FIXED_10(m[2]);
 	return SUB_DATA_LEN_MAG;
 }
 
@@ -202,18 +233,36 @@ struct composite_builder {
 	int used;
 };
 
-/* Return sub-packet data size for a given type */
+typedef int (*sub_fill_fn)(uint8_t *buf);
+
+struct sub_packet_desc {
+	uint8_t data_len;
+	bool pad_byte15; /* normal 16-byte packet: force data[15]=0 after fill */
+	sub_fill_fn fill;
+};
+
+/* Indexed by sub-packet type. One source for len + fill used by normal + composite. */
+static const struct sub_packet_desc sub_packet_table[] = {
+	[0] = {SUB_DATA_LEN_INFO, true, fill_sub_info},
+	[1] = {SUB_DATA_LEN_QUAT, false, fill_sub_quat_accel},
+	[2] = {SUB_DATA_LEN_COMPACT, true, fill_sub_compact_quat},
+	[3] = {SUB_DATA_LEN_STATUS, true, fill_sub_status},
+	[4] = {SUB_DATA_LEN_MAG, false, fill_sub_mag},
+	[5] = {SUB_DATA_LEN_RUNTIME, true, fill_sub_runtime},
+};
+
+static const struct sub_packet_desc *sub_packet_get(uint8_t type)
+{
+	if (type >= ARRAY_SIZE(sub_packet_table) || sub_packet_table[type].fill == NULL) {
+		return NULL;
+	}
+	return &sub_packet_table[type];
+}
+
 static int sub_data_len(uint8_t type)
 {
-	switch (type) {
-	case 0: return SUB_DATA_LEN_INFO;
-	case 1: return SUB_DATA_LEN_QUAT;
-	case 2: return SUB_DATA_LEN_COMPACT;
-	case 3: return SUB_DATA_LEN_STATUS;
-	case 4: return SUB_DATA_LEN_MAG;
-	case 5: return SUB_DATA_LEN_RUNTIME;
-	default: return 0;
-	}
+	const struct sub_packet_desc *d = sub_packet_get(type);
+	return d ? d->data_len : 0;
 }
 
 static bool connection_hid_output_ready(void)
@@ -228,36 +277,16 @@ static bool connection_hid_output_ready(void)
 static void fill_normal_packet(uint8_t type, uint8_t data[16])
 {
 	memset(data, 0, 16);
+	const struct sub_packet_desc *d = sub_packet_get(type);
+	if (!d) {
+		type = 1;
+		d = sub_packet_get(1);
+	}
 	data[0] = type;
 	data[1] = tracker_id;
-
-	switch (type) {
-	case 0:
-		fill_sub_info(&data[2]);
+	d->fill(&data[2]);
+	if (d->pad_byte15) {
 		data[15] = 0;
-		break;
-	case 1:
-		fill_sub_quat_accel(&data[2]);
-		break;
-	case 2:
-		fill_sub_compact_quat(&data[2]);
-		data[15] = 0;
-		break;
-	case 3:
-		fill_sub_status(&data[2]);
-		data[15] = 0;
-		break;
-	case 4:
-		fill_sub_mag(&data[2]);
-		break;
-	case 5:
-		fill_sub_runtime(&data[2]);
-		data[15] = 0;
-		break;
-	default:
-		data[0] = 1;
-		fill_sub_quat_accel(&data[2]);
-		break;
 	}
 }
 
@@ -303,29 +332,9 @@ static void write_hid_composite_as_normal_packets(const struct composite_builder
 
 static void connection_write_packet_type(uint8_t type)
 {
-	switch (type) {
-	case 0:
-		connection_write_packet_0();
-		break;
-	case 1:
-		connection_write_packet_1();
-		break;
-	case 2:
-		connection_write_packet_2();
-		break;
-	case 3:
-		connection_write_packet_3();
-		break;
-	case 4:
-		connection_write_packet_4();
-		break;
-	case 5:
-		connection_write_packet_5();
-		break;
-	default:
-		connection_write_packet_1();
-		break;
-	}
+	uint8_t data[16];
+	fill_normal_packet(type, data);
+	write_normal_packet(data);
 }
 
 void connection_update_sensor_ids(int imu, int mag)
@@ -337,7 +346,6 @@ void connection_update_sensor_ids(int imu, int mag)
 
 static int64_t quat_update_time = 0;
 static int64_t last_quat_time = 0;
-static bool send_precise_quat;
 
 void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 {
@@ -350,9 +358,11 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 		return;
 	}
 
+	unsigned key = irq_lock();
 	send_precise_quat = q_epsilon(q, sensor_q, 0.005f);
 	memcpy(sensor_q, q, sizeof(sensor_q));
 	memcpy(sensor_a, a, sizeof(sensor_a));
+	irq_unlock(key);
 	quat_update_time = k_uptime_get();
 }
 
@@ -361,25 +371,24 @@ static int64_t last_mag_time = 0;
 
 void connection_update_sensor_mag(float *m)
 {
+	unsigned key = irq_lock();
 	memcpy(sensor_m, m, sizeof(sensor_m));
+	irq_unlock(key);
 	mag_update_time = k_uptime_get();
 }
 
 void connection_update_sensor_temp(float temp)
 {
 	// sensor_temp == zero means no data
-#if CONFIG_SENSOR_USE_VQF
 	if (sensor_get_mag_available() && sensor_get_mag_enabled()) {
-		// temp hack to display vqf mag disturbance detection status
-		vqf_debug_info_t vqf_info;
-		vqf_get_debug_info(&vqf_info);
-		if (vqf_info.mag_dist_detected) {
-			if (temp < 38.5f) {  // assume normal operating should be below 38.5C
-				temp = -temp; // invert temp to indicate mag disturbance, negative means disturbed, positive means normal
+		// temp hack to display fusion mag disturbance detection status
+		if (sensor_fusion_get_mag_dist_detected()) {
+			if (temp < 38.5f) { // assume normal operating should be below 38.5C
+				temp
+					= -temp; // invert temp to indicate mag disturbance, negative means disturbed, positive means normal
 			}
 		}
 	}
-#endif
 	if (temp < -38.5f) {
 		sensor_temp = 1;
 	} else if (temp > 88.5f) {
@@ -390,7 +399,13 @@ void connection_update_sensor_temp(float temp)
 }
 
 // format for packet send
-void connection_update_battery(bool battery_available, bool plugged, bool charged, uint32_t battery_pptt, int battery_mV)
+void connection_update_battery(
+	bool battery_available,
+	bool plugged,
+	bool charged,
+	uint32_t battery_pptt,
+	int battery_mV
+)
 {
 	if (!battery_available) // No battery, and voltage is <=1500mV
 	{
@@ -511,7 +526,7 @@ static int64_t last_runtime_time = 0;
  */
 #include <zephyr/sys/byteorder.h>
 
-#define RAW_IMU_QUEUE_SIZE  16
+#define RAW_IMU_QUEUE_SIZE 16
 
 struct raw_imu_queued {
 	float gyr_quat[4];
@@ -523,8 +538,8 @@ K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4
 
 static uint16_t raw_sequence = 0;
 static bool data_collection_active = false;
-static volatile bool ota_suppressed = false;  /* Reduce poll rate during parallel OTA */
-static int64_t ota_suppress_start_time = 0;   /* Timestamp when suppress was enabled */
+static volatile bool ota_suppressed = false; /* Reduce poll rate during parallel OTA */
+static int64_t ota_suppress_start_time = 0;  /* Timestamp when suppress was enabled */
 #define OTA_SUPPRESS_TIMEOUT_MS (10 * 60 * 1000)
 
 /*
@@ -532,21 +547,20 @@ static int64_t ota_suppress_start_time = 0;   /* Timestamp when suppress was ena
  * Indexed by (sequence % RAW_RING_SIZE).
  */
 #define RAW_RING_SIZE 256
-#define RAW_PACKET_SIZE 52  /* Fixed raw data packet size (type 0x13 with gyrQuat) */
+#define RAW_PACKET_SIZE 52 /* Fixed raw data packet size (type 0x13 with gyrQuat) */
 static uint8_t raw_ring[RAW_RING_SIZE][RAW_PACKET_SIZE];
-static bool    raw_ring_valid[RAW_RING_SIZE];
+static bool raw_ring_valid[RAW_RING_SIZE];
 static uint16_t raw_ring_seq[RAW_RING_SIZE];
 
 /*
  * Retransmit queue: filled by ESB event handler when ACK payload carries
- * retransmit requests (marker 0xAA).  Up to RAW_RETX_MAX entries.
+ * retransmit requests (RAW_ARQ_MARKER).  Up to RAW_RETX_MAX entries.
  * Connection thread drains this before sending new data.
  */
 #define RAW_RETX_MAX 16
-#define RAW_ARQ_MARKER 0xAA
 volatile uint16_t raw_retx_queue[RAW_RETX_MAX];
-volatile uint8_t  raw_retx_count;
-static volatile uint32_t raw_retx_total;  /* lifetime retransmit count */
+volatile uint8_t raw_retx_count;
+static volatile uint32_t raw_retx_total; /* lifetime retransmit count */
 static bool raw_metadata_sent = false;
 static int64_t raw_metadata_last_ms = 0;
 #define RAW_METADATA_RESEND_MS 60000
@@ -674,7 +688,9 @@ bool connection_get_ota_suppressed(void)
 
 void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 {
-	if (!data_collection_active) return;
+	if (!data_collection_active) {
+		return;
+	}
 
 	struct raw_imu_queued entry;
 	memcpy(entry.gyr_quat, sample->gyr_quat, sizeof(entry.gyr_quat));
@@ -690,16 +706,24 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 
 void connection_queue_raw_mag(const float mag[3])
 {
-	if (!data_collection_active) return;
+	if (!data_collection_active) {
+		return;
+	}
 
 	/* Store latest mag for piggybacking onto IMU packets */
 	connection_align_mag_body(mag, latest_mag);
 	latest_mag_valid = true;
 }
 
-void connection_send_raw_metadata(float gyro_range, float accel_range,
-				  float gyro_odr, float accel_odr,
-				  float mag_odr, uint8_t imu, uint8_t mag)
+void connection_send_raw_metadata(
+	float gyro_range,
+	float accel_range,
+	float gyro_odr,
+	float accel_odr,
+	float mag_odr,
+	uint8_t imu,
+	uint8_t mag
+)
 {
 	/* Buffer metadata for deferred sending by connection thread.
 	 * Never call esb_write() from sensor thread — avoids
@@ -739,7 +763,9 @@ void connection_send_raw_calibration(void)
  */
 static bool connection_cal_drip_send(void)
 {
-	if (!raw_cal_pending) return false;
+	if (!raw_cal_pending) {
+		return false;
+	}
 
 	uint8_t buf[RAW_PACKET_SIZE];
 	memset(buf, 0, sizeof(buf));
@@ -843,14 +869,17 @@ static bool connection_cal_drip_send(void)
 
 bool connection_raw_metadata_resend_due(void)
 {
-	if (!data_collection_active || !raw_metadata_sent) return false;
+	if (!data_collection_active || !raw_metadata_sent) {
+		return false;
+	}
 	return (k_uptime_get() - raw_metadata_last_ms) >= RAW_METADATA_RESEND_MS;
 }
 
 bool connection_process_raw_data(void)
 {
-	if (!data_collection_active)
+	if (!data_collection_active) {
 		return false;
+	}
 
 	/* Priority 1: Process retransmit requests from ARQ ACK payloads */
 	if (raw_retx_count > 0) {
@@ -897,7 +926,9 @@ bool connection_process_raw_data(void)
 	}
 
 	/* Wait for metadata before sending data */
-	if (!raw_metadata_sent) return false;
+	if (!raw_metadata_sent) {
+		return false;
+	}
 
 	/* Priority 3: Send new IMU sample */
 	struct raw_imu_queued sample;
@@ -948,7 +979,7 @@ bool connection_process_raw_data(void)
 }
 
 static int64_t last_sensor_quat_time = 0;
-#define SENSOR_QUAT_INTERVAL_TDMA_MS   1
+#define SENSOR_QUAT_INTERVAL_TDMA_MS 1
 #define SENSOR_QUAT_INTERVAL_NOTDMA_MS 6
 
 /* Lookahead window: if a low-freq packet is within this many ms of being due,
@@ -978,14 +1009,9 @@ static void send_composite(const uint8_t *types, int n)
 	for (int i = 0; i < n; i++) {
 		uint8_t t = types[i];
 		buf[pos++] = t;
-		switch (t) {
-		case 0: pos += fill_sub_info(&buf[pos]); break;
-		case 1: pos += fill_sub_quat_accel(&buf[pos]); break;
-		case 2: pos += fill_sub_compact_quat(&buf[pos]); break;
-		case 3: pos += fill_sub_status(&buf[pos]); break;
-		case 4: pos += fill_sub_mag(&buf[pos]); break;
-		case 5: pos += fill_sub_runtime(&buf[pos]); break;
-		default: break;
+		const struct sub_packet_desc *d = sub_packet_get(t);
+		if (d) {
+			pos += d->fill(&buf[pos]);
 		}
 	}
 
@@ -1006,20 +1032,24 @@ static void composite_builder_reset(struct composite_builder *builder)
 static bool composite_try_add(struct composite_builder *builder, uint8_t type)
 {
 	int need = 1 + sub_data_len(type); /* 1 for type byte + data */
-	if (builder->used + need > COMPOSITE_MAX_SUB_DATA)
+	if (builder->used + need > COMPOSITE_MAX_SUB_DATA) {
 		return false;
+	}
 	builder->types[builder->n] = type;
 	builder->n++;
 	builder->used += need;
 	return true;
 }
 
-static bool composite_try_add_due(struct composite_builder *builder, uint8_t type, bool wanted, int64_t *last_time, int64_t now)
+static bool
+composite_try_add_due(struct composite_builder *builder, uint8_t type, bool wanted, int64_t *last_time, int64_t now)
 {
-	if (!wanted)
+	if (!wanted) {
 		return false;
-	if (!composite_try_add(builder, type))
+	}
+	if (!composite_try_add(builder, type)) {
 		return false;
+	}
 	*last_time = now;
 	return true;
 }
@@ -1063,99 +1093,99 @@ void connection_thread(void)
 		}
 
 		if (radio_ready) {
-		/*
-		 * Process OTA packets queued from ESB ISR (safe in thread context).
-		 * Must run before esb_ota_is_active() check since BEGIN activates OTA.
-		 * Also must run before PING to process ACK payloads from previous PINGs.
-		 */
-		esb_process_ota_rx_queue();
+			/*
+			 * Process OTA packets queued from ESB ISR (safe in thread context).
+			 * Must run before esb_ota_is_active() check since BEGIN activates OTA.
+			 * Also must run before PING to process ACK payloads from previous PINGs.
+			 */
+			esb_process_ota_rx_queue();
 
-		/* PING has highest priority.
-		 *
-		 * When TDMA is enabled and the last sync is getting stale
-		 * (>2× PING interval), force an early PING to re-sync before
-		 * the TDMA slot estimate drifts too far.  This prevents the
-		 * gradual TPS degradation caused by transmitting in wrong slots.
-		 */
-		uint32_t effective_ping_interval_ms = get_ping_interval_ms();
-		bool ping_due = (now - last_ping_time >= effective_ping_interval_ms);
+			/* PING has highest priority.
+			 *
+			 * When TDMA is enabled and the last sync is getting stale
+			 * (>2× PING interval), force an early PING to re-sync before
+			 * the TDMA slot estimate drifts too far.  This prevents the
+			 * gradual TPS degradation caused by transmitting in wrong slots.
+			 */
+			uint32_t effective_ping_interval_ms = get_ping_interval_ms();
+			bool ping_due = (now - last_ping_time >= effective_ping_interval_ms);
 #if CONFIG_CONNECTION_TDMA
-		if (!ping_due && tdma_is_enabled()) {
-			int64_t sync_age = esb_get_sync_age_ms();
-			uint32_t resync_interval_ms = effective_ping_interval_ms / 2;
-			if (resync_interval_ms < PING_RESYNC_MIN_INTERVAL_MS) {
-				resync_interval_ms = PING_RESYNC_MIN_INTERVAL_MS;
-			}
-			if (sync_age > (int64_t)effective_ping_interval_ms * 2 && (now - last_ping_time) >= resync_interval_ms) {
-				ping_due = true;
-			}
-		}
-#endif
-		if (ping_due) {
-			uint8_t ping[ESB_PING_LEN] = {0};
-			ping[0] = ESB_PING_TYPE;
-			ping[1] = connection_get_id();
-			ping[2] = 0;
-			memset(&ping[3], 0x00, 4);
-			ping[7] = esb_get_ping_ack_flag();
-			memset(&ping[8], 0x00, 4);
-			ping[ESB_PING_LEN - 1] = 0;
-			esb_write(ping, false, ESB_PING_LEN);
-			last_ping_time = now;
-			// k_usleep(400);
-			continue;
-		}
-
-		/*
-		 * ESB OTA mode: when active, stop sending sensor data and instead
-		 * send frequent OTA status/poll packets. The receiver responds
-		 * with OTA data in the ACK payload.
-		 */
-		if (esb_ota_is_active()) {
-			esb_ota_check_timeout();
-			esb_ota_periodic_status();
-			k_msleep(2);
-			continue;
-		}
-
-		/*
-		 * OTA suppression: when another tracker is being updated,
-		 * this tracker reduces its poll rate to free radio bandwidth.
-		 */
-		if (ota_suppressed) {
-			/* Safety timeout: auto-unsuppress after timeout */
-			if (ota_suppress_start_time > 0 &&
-			    (now - ota_suppress_start_time) > OTA_SUPPRESS_TIMEOUT_MS) {
-				LOG_WRN("OTA suppress timeout, auto-unsuppressing");
-				connection_set_ota_suppressed(false);
-			} else {
-				k_msleep(100); /* ~10 Hz poll rate */
-			}
-		}
-
-		/* Skip sensor data during connection error */
-		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-			/* Auto-stop data collection after prolonged connection error
-			 * to avoid indefinite battery drain and stuck state. */
-			if (data_collection_active) {
-				static int64_t dc_conn_error_start;
-				if (dc_conn_error_start == 0) {
-					dc_conn_error_start = now;
-				} else if (now - dc_conn_error_start > 60000) {
-					connection_set_data_collection(false);
-					test_mode_set(false);
-					dc_conn_error_start = 0;
-					LOG_WRN("Data collection auto-stopped (connection error for 60s)");
+			if (!ping_due && tdma_is_enabled()) {
+				int64_t sync_age = esb_get_sync_age_ms();
+				uint32_t resync_interval_ms = effective_ping_interval_ms / 2;
+				if (resync_interval_ms < PING_RESYNC_MIN_INTERVAL_MS) {
+					resync_interval_ms = PING_RESYNC_MIN_INTERVAL_MS;
+				}
+				if (sync_age > (int64_t)effective_ping_interval_ms * 2
+					&& (now - last_ping_time) >= resync_interval_ms) {
+					ping_due = true;
 				}
 			}
-			k_msleep(100);
-			continue;
-		}
+#endif
+			if (ping_due) {
+				uint8_t ping[ESB_PING_LEN] = {0};
+				ping[0] = ESB_PING_TYPE;
+				ping[1] = connection_get_id();
+				ping[2] = 0;
+				memset(&ping[3], 0x00, 4);
+				ping[7] = esb_get_ping_ack_flag();
+				memset(&ping[8], 0x00, 4);
+				ping[ESB_PING_LEN - 1] = 0;
+				esb_write(ping, false, ESB_PING_LEN);
+				last_ping_time = now;
+				// k_usleep(400);
+				continue;
+			}
 
-		/* Raw data has priority over fusion data to minimize latency */
-		if (connection_process_raw_data()) {
-			continue;
-		}
+			/*
+			 * ESB OTA mode: when active, stop sending sensor data and instead
+			 * send frequent OTA status/poll packets. The receiver responds
+			 * with OTA data in the ACK payload.
+			 */
+			if (esb_ota_is_active()) {
+				esb_ota_check_timeout();
+				esb_ota_periodic_status();
+				k_msleep(2);
+				continue;
+			}
+
+			/*
+			 * OTA suppression: when another tracker is being updated,
+			 * this tracker reduces its poll rate to free radio bandwidth.
+			 */
+			if (ota_suppressed) {
+				/* Safety timeout: auto-unsuppress after timeout */
+				if (ota_suppress_start_time > 0 && (now - ota_suppress_start_time) > OTA_SUPPRESS_TIMEOUT_MS) {
+					LOG_WRN("OTA suppress timeout, auto-unsuppressing");
+					connection_set_ota_suppressed(false);
+				} else {
+					k_msleep(100); /* ~10 Hz poll rate */
+				}
+			}
+
+			/* Skip sensor data during connection error */
+			if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
+				/* Auto-stop data collection after prolonged connection error
+				 * to avoid indefinite battery drain and stuck state. */
+				if (data_collection_active) {
+					static int64_t dc_conn_error_start;
+					if (dc_conn_error_start == 0) {
+						dc_conn_error_start = now;
+					} else if (now - dc_conn_error_start > 60000) {
+						connection_set_data_collection(false);
+						test_mode_set(false);
+						dc_conn_error_start = 0;
+						LOG_WRN("Data collection auto-stopped (connection error for 60s)");
+					}
+				}
+				k_msleep(100);
+				continue;
+			}
+
+			/* Raw data has priority over fusion data to minimize latency */
+			if (connection_process_raw_data()) {
+				continue;
+			}
 		} // end of radio_ready block
 
 		/* During data collection, throttle fusion data
@@ -1170,11 +1200,8 @@ void connection_thread(void)
 		}
 
 		/* Determine which data types are due or nearly due */
-		int quat_interval_ms = tdma_is_enabled()
-			? SENSOR_QUAT_INTERVAL_TDMA_MS
-			: SENSOR_QUAT_INTERVAL_NOTDMA_MS;
-		bool quat_ready = quat_update_time &&
-				  (now - last_sensor_quat_time >= quat_interval_ms);
+		int quat_interval_ms = tdma_is_enabled() ? SENSOR_QUAT_INTERVAL_TDMA_MS : SENSOR_QUAT_INTERVAL_NOTDMA_MS;
+		bool quat_ready = quat_update_time && (now - last_sensor_quat_time >= quat_interval_ms);
 		bool mag_due = mag_update_time && (now - last_mag_time > 100);
 		bool info_due = sensor_ids_set && (now - last_info_time > 100);
 		bool status_due = (now - last_status_time > 1000);
@@ -1202,7 +1229,7 @@ void connection_thread(void)
 				mag_update_time = 0;
 				last_mag_time = now;
 				fallback_type = 4;
-			} else if (!send_precise_quat && info_wanted) {
+			} else if (!connection_sensor_get_precise_quat() && info_wanted) {
 				/* compact quat (type 2) contains batt/temp but NOT imu_id/mag_id.
 				 * Don't update last_info_time here so that a real type 0 info
 				 * sub-packet is still piggybacked to keep IMU model visible. */
