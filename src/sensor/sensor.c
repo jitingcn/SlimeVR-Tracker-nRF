@@ -168,15 +168,9 @@ static int force_scan_request_count = 0;
 // Periodic retained save interval (ms) for crash recovery
 #define RETAINED_SAVE_INTERVAL_MS 5000
 
-static float max_gyro_speed_square;
 static float rest_max_gyro_speed_square;
-static bool mag_use_oneshot;
-#if !CONFIG_SENSOR_MAG_FIXED_ODR
-static bool mag_skip_oneshot;
-#endif
 // Wall-clock tick of the most recent updateMag call, used to compute actual dt
 static int64_t last_mag_fusion_ticks = 0;
-// Last raw mag value fed to VQF, used to skip repeat sensor register reads
 // Time-gating for mag VQF updates: only feed update_mag once per mag ODR period.
 // (Loop runs at ~gyro-FIFO rate >> mag ODR; bitwise equality is unreliable because
 // some mag sensors return slightly different register values on repeated reads.)
@@ -1697,21 +1691,6 @@ static void feed_calibrated_gyro(float *g, float dt, int *g_count, float *debug_
 	// Process fusion with calibrated gyro data
 	sensor_fusion->update_gyro(g, dt);
 	(*g_count)++;
-
-	if (mag_available && mag_enabled) {
-		// Get fusion's corrected gyro data (or get gyro bias from fusion) and use it here
-		float g_off[3] = {};
-		sensor_fusion->get_gyro_bias(g_off);
-		for (int j = 0; j < 3; j++) {
-			g_off[j] = g[j] - g_off[j];
-		}
-
-		// Get the highest gyro speed
-		float gyro_speed_square = g_off[0] * g_off[0] + g_off[1] * g_off[1] + g_off[2] * g_off[2];
-		if (gyro_speed_square > max_gyro_speed_square) {
-			max_gyro_speed_square = gyro_speed_square;
-		}
-	}
 }
 
 #if (CONFIG_SENSOR_GYRO_OVERSAMPLING > 1) || (CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1)
@@ -1919,12 +1898,6 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 	// Fusing data will take between 100us (~7 samples, low noise) - 500us (~33 samples, low power)
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
 
-	// At high speed, use oneshot mode to have synced magnetometer data
-	// Call before FIFO and get the data after
-	if (mag_available && mag_enabled && mag_use_oneshot) {
-		sensor_mag->mag_oneshot();
-	}
-
 	// Read gyroscope (FIFO)
 	// Buffer size calculation:
 	// - Worst case is ICM 20 byte packet
@@ -2061,7 +2034,6 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 	frame->a_sum[1] = 0;
 	frame->a_sum[2] = 0;
 	frame->a_count = 0;
-	max_gyro_speed_square = 0;
 	rest_max_gyro_speed_square = 0;
 	frame->processed_packets = 0;
 
@@ -2228,13 +2200,9 @@ static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 		// so new_mag_data=true already means a genuinely fresh sample for that driver.
 		// For other drivers that always return true, the time-gate below acts as a
 		// safety net.
-		// Oneshot mode is self-gated (DRDY wait in driver), but we still measure
-		// actual elapsed time so VQF gets the correct dt (mag_actual_time=INFINITY
-		// for oneshot, which would otherwise force fallback to coeffs->magTs).
 		if (mag_calibrated) {
 			int64_t now_ticks = k_uptime_ticks();
-			// Nominal fallback: use mag_actual_time if valid, else config-based rate.
-			// mag_actual_time is INFINITY in oneshot mode, so we need a real fallback.
+			// Prefer mag_actual_time; some drivers can still return INFINITY from update_odr.
 			float mag_dt
 				= (mag_actual_time > 0.0f && mag_actual_time < 1.0f) ? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
 			if (last_mag_fusion_ticks > 0) {
@@ -2378,52 +2346,6 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 	}
 }
 
-#if !CONFIG_SENSOR_MAG_FIXED_ODR
-// Dynamic magnetometer ODR from max gyro speed (~0.25 deg error target).
-static void sensor_mag_pick_odr(void)
-{
-	if (!(mag_available && mag_enabled)) {
-		return;
-	}
-
-	float gyro_speed = sqrtf(max_gyro_speed_square);
-	float mag_target_time = 1.0f / (4 * gyro_speed); // target mag ODR for ~0.25 deg error
-	// Avoid oneshot mode when mag is on I2CM (EXT interface) - the DRDY
-	// polling loop through I2CM is extremely expensive (~4-5ms per read),
-	// consuming nearly all available loop time.
-	bool mag_via_i2cm = (sensor_mag_dev.addr & 0x80) && (sensor_imu_dev_reg & 0x80);
-	if (mag_target_time < 0.005f && (mag_skip_oneshot || mag_via_i2cm)) {
-		mag_target_time = 0.005f;
-	}
-	if (mag_target_time > 0.1f) { // limit to 0.1 (minimum 10Hz)
-		mag_target_time = 0.1f;
-	}
-	sys_interface_resume();
-	if (mag_target_time < 0.005f) { // cap at 0.005 (200Hz), above this the sensor will use oneshot mode instead
-		int err = sensor_mag->update_odr(INFINITY, &mag_actual_time);
-		if (mag_actual_time == INFINITY) {
-			if (!err) {
-				LOG_DBG("Switching magnetometer to oneshot");
-			}
-			mag_use_oneshot = true;
-		} else { // magnetometer did not have a oneshot mode, try 200Hz
-			if (!err) {
-				mag_skip_oneshot = true;
-			}
-			mag_target_time = 0.005f;
-		}
-	}
-	if (mag_target_time >= 0.005f || mag_actual_time != INFINITY) { // under 200Hz or magnetometer did not have a oneshot mode
-		int err = sensor_mag->update_odr(mag_target_time, &mag_actual_time);
-		if (!err) {
-			LOG_DBG("Switching magnetometer ODR to %.2fHz", 1.0 / (double)mag_actual_time);
-		}
-		mag_use_oneshot = false;
-	}
-	sys_interface_suspend();
-}
-#endif // !CONFIG_SENSOR_MAG_FIXED_ODR
-
 static void sensor_loop_publish(sensor_loop_frame_t *frame)
 {
 	// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
@@ -2444,10 +2366,6 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	float lin_accel;
 	bool resting = sensor_update_resting_state(q, lin_a, now, &gyro_speed, &lin_accel);
 	sensor_update_sensor_state(resting, gyro_speed, lin_accel);
-
-#if !CONFIG_SENSOR_MAG_FIXED_ODR
-	sensor_mag_pick_odr();
-#endif
 
 	// Debug mode output - based on accel sample count, not time interval
 	if (sensor_debug_is_active() && frame->debug_a_samples > 0) {
@@ -2913,7 +2831,7 @@ void main_imu_restart(void)
 #else
 		float fusion_accel_time = accel_actual_time;
 #endif
-		// Use actual mag rate; guard against INFINITY (oneshot mode) with config-based fallback.
+		// Prefer mag_actual_time; some drivers can still return INFINITY from update_odr.
 		float fusion_mag_time
 			= (mag_actual_time > 0.0f && mag_actual_time < 10.0f) ? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
 		float saved_ref_norm = 0.0f, saved_ref_dip = 0.0f;

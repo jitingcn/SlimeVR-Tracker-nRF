@@ -361,15 +361,8 @@ config SENSOR_MAG_ODR
     default 200
     help
         Requested magnetometer output data rate in Hz.
+        Fixed at magnetometer init for the session (nearest supported continuous rate).
         Common values: 100, 200. Higher rates may not be supported by all sensors.
-
-config SENSOR_MAG_FIXED_ODR
-    bool "Use fixed magnetometer ODR"
-    default y
-    help
-        If enabled, use a fixed magnetometer ODR instead of dynamic adjustment.
-        This ensures VQF fusion receives consistent timing information.
-        When disabled, ODR is dynamically adjusted based on gyroscope speed.
 
 choice
 	prompt "Sensor fusion"
