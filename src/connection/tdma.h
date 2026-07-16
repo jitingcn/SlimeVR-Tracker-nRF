@@ -47,8 +47,8 @@
  *
  * Architecture:
  *   - Connection thread prepares packets and calls esb_write()
- *   - esb_write() queues payload (ESB MANUAL TX mode)
  *   - For noack data: tdma_wait_for_slot() blocks until assigned slot
+ *   - esb_write() then queues payload (ESB MANUAL TX mode)
  *   - For PING/ACK packets: esb_start_tx() is called immediately (bypasses TDMA)
  */
 
@@ -75,10 +75,10 @@ void tdma_init(uint8_t tracker_id);
 /**
  * Block the calling thread until this tracker's TDMA slot begins.
  *
- * Must be called from esb_write() AFTER esb_write_payload() but BEFORE
- * esb_start_tx().  This is the ONLY safe placement: the packet is already
- * in the FIFO, the caller is suspended (no second esb_write() call can race
- * in and flush the FIFO), and esb_start_tx() is called immediately on wakeup.
+ * Must be called from esb_write() BEFORE esb_write_payload() (and thus
+ * before esb_start_tx()). Waiting before queue avoids the radio auto-draining
+ * a newly queued packet during the wait. After wakeup, queue + start_tx run
+ * immediately inside the slot window.
  *
  * Returns immediately if:
  *   - CONFIG_CONNECTION_TDMA is disabled

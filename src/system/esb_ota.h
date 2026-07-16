@@ -42,14 +42,10 @@
 
 /*
  * ── ESB OTA Packet Types ────────────────────────────────────────────
- * These are used in byte[0] of ESB packets during OTA mode.
+ * Wire-format values (byte[0] during OTA) live in connection/esb.h.
+ * Re-export so OTA consumers keep a single include.
  */
-#define ESB_OTA_DATA_TYPE       0x20  /* Receiver → Tracker: firmware data chunk */
-#define ESB_OTA_STATUS_TYPE     0x21  /* Tracker → Receiver: OTA status report */
-#define ESB_OTA_FW_INFO_TYPE    0x22  /* Tracker → Receiver: firmware info report */
-#define ESB_OTA_BEGIN_TYPE      0x23  /* Receiver → Tracker: begin OTA session */
-#define ESB_OTA_VERIFY_TYPE     0x24  /* Receiver → Tracker: request CRC verify */
-#define ESB_OTA_ACTIVATE_TYPE   0x25  /* Receiver → Tracker: activate new firmware */
+#include "connection/esb.h"
 
 /*
  * ── OTA Status Codes ────────────────────────────────────────────────

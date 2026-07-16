@@ -117,11 +117,16 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define ESB_PONG_FLAG_OTA_UNSUPPRESS 0x33   // Resume normal poll rate after OTA
 
 // Raw data collection packet types
-#define ESB_RAW_IMU_TYPE    0x10  // Raw IMU data (float, with piggybacked mag)
-#define ESB_RAW_MAG_TYPE    0x11  // Raw magnetometer data (float, reserved)
+// DEPRECATED on tracker: 0x10/0x11 unused here; live TX path is ESB_RAW_IMU_QUAT_TYPE.
+// Kept for wire-format docs / receiver + analyzer compatibility.
+#define ESB_RAW_IMU_TYPE    0x10  // DEPRECATED: legacy raw IMU (float); use 0x13
+#define ESB_RAW_MAG_TYPE    0x11  // DEPRECATED: reserved raw mag; use 0x13
 #define ESB_RAW_META_TYPE   0x12  // Metadata (ODR, range, sensor IDs - sent once)
 #define ESB_RAW_IMU_QUAT_TYPE 0x13  // Raw IMU with gyrQuat (52 bytes, packet-loss resistant)
 #define ESB_RAW_CAL_TYPE    0x14  // Extended calibration metadata (sub-typed)
+
+// ACK payload marker for raw-data ARQ retransmit requests (receiver → tracker)
+#define RAW_ARQ_MARKER 0xAA
 
 // ESB_RAW_CAL_TYPE sub-types (byte[2] of 0x14 packet)
 #define RAW_CAL_SUB_ACCEL   0x01  // Accel calibration: accBAinv[4][3] (48 bytes)
