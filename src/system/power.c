@@ -1,6 +1,6 @@
 #include "globals.h"
 #include "sensor/sensor.h"
-#include "sensor/calibration.h"
+#include "sensor/calibration/calibration.h"
 #include "battery.h"
 #include "battery_tracker.h"
 #include "connection/connection.h"
@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include "power.h"
+#include "power_battery.h"
 #include "clock_control.h"
 
 #define DFU_DBL_RESET_MEM 0x20007F7C
@@ -36,32 +37,26 @@ enum sys_regulator {
 	SYS_REGULATOR_LDO
 };
 
-#define BATTERY_SAMPLES 24
-#define BATTERY_PLUG_DEBOUNCE_MS 500
-#define BATTERY_PLUG_SETTLE_MS 3000
-
-static int16_t calibrated_battery_pptt = -1;
-static int16_t current_battery_pptt = INT16_MIN;
-static int32_t hysteresis_pptt = -1;
-static int32_t average_pptt = -1;
-static int16_t last_pptt[BATTERY_SAMPLES - 1] = {[0 ... BATTERY_SAMPLES - 2] = -1};
-static int last_pptt_index = 0;
-static uint8_t samples = 0;
-static bool battery_low = false;
-
 static bool plugged = false;
 static bool power_init = false;
-static bool device_plugged = false;
-static bool device_charged = false;
-static int64_t last_plug_signal_change_ms = -BATTERY_PLUG_SETTLE_MS;
 
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
-static void sys_WOM(bool force);
+static bool sys_WOM(bool force);
 static void sys_system_off(void);
 static void sys_system_reboot(void);
 
-static int sys_power_state_request(int id);
+enum sys_power_request {
+	SYS_POWER_REQ_NONE = 0,
+	SYS_POWER_REQ_WOM = 1,
+	SYS_POWER_REQ_WOM_FORCE = 2,
+	SYS_POWER_REQ_SYSTEM_OFF = 3,
+	SYS_POWER_REQ_REBOOT = 4,
+};
+
+static int sys_power_state_request(enum sys_power_request id);
+static enum sys_power_request sys_power_state_peek(void);
+static void sys_power_state_clear(void);
 
 static void disable_DFU_thread(void);
 K_THREAD_DEFINE(disable_DFU_thread_id, 128, disable_DFU_thread, NULL, NULL, NULL, 6, 0, 500); // disable DFU if the system is running correctly
@@ -343,10 +338,11 @@ void sys_request_WOM(bool force, bool immediate)
 		sys_WOM(force);
 		return;
 	}
-	if (force)
-		sys_power_state_request(2);
-	else
-		sys_power_state_request(1);
+	if (force) {
+		sys_power_state_request(SYS_POWER_REQ_WOM_FORCE);
+	} else {
+		sys_power_state_request(SYS_POWER_REQ_WOM);
+	}
 }
 
 void sys_request_system_off(bool immediate)
@@ -356,7 +352,7 @@ void sys_request_system_off(bool immediate)
 		sys_system_off();
 		return;
 	}
-	sys_power_state_request(3);
+	sys_power_state_request(SYS_POWER_REQ_SYSTEM_OFF);
 }
 
 void sys_request_system_reboot(bool immediate)
@@ -366,16 +362,17 @@ void sys_request_system_reboot(bool immediate)
 		sys_system_reboot();
 		return;
 	}
-	sys_power_state_request(4);
+	sys_power_state_request(SYS_POWER_REQ_REBOOT);
 }
 
-static void sys_WOM(bool force) // TODO: if IMU interrupt does not exist what does the system do?
+/* Returns true when the power request is consumed; false to keep it queued. */
+static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what does the system do?
 {
 	LOG_INF("IMU wake up requested");
 	/* Block sleep during OTA (active or suppressed) */
 	if (esb_ota_is_active() || connection_get_ota_suppressed()) {
 		LOG_INF("IMU wake up blocked by OTA");
-		return;
+		return true; /* consume; sensor re-requests after next idle cycle */
 	}
 #if IMU_INT_EXISTS
 #if CONFIG_DELAY_SLEEP_ON_STATUS
@@ -386,10 +383,9 @@ static void sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 		if (k_uptime_get() < system_off_timeout)
 		{
 			LOG_INF("IMU wake up not available, waiting on ESB/status ready");
-			return; // not timed out yet, skip system off
+			return false; /* keep request so power_thread retries after timeout */
 		}
 		LOG_INF("ESB/status ready timed out");
-		// TODO: this may mean the system never enters system off if sys_request_WOM is not called again after the timeout
 	}
 #endif
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
@@ -416,16 +412,18 @@ static void sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	nrf_gpio_cfg_sense_set(int0_gpios, pin_config & 0xF);
 	LOG_INF("Configured IMU wake up GPIO");
 	LOG_INF("Powering off nRF");
-	sys_update_battery_tracker(current_battery_pptt, device_plugged);
+	sys_update_battery_tracker(power_battery_current_pptt(), power_battery_device_plugged());
 //	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
 #endif
 	sys_poweroff();
+	return true;
 #else
 	LOG_WRN("IMU wake up GPIO does not exist");
 	LOG_WRN("IMU wake up not available");
+	return true;
 #endif
 }
 
@@ -461,7 +459,7 @@ static void sys_system_off(void) // TODO: add timeout
 #if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
 	disconnect_sensor_pins();
 #endif
-	sys_update_battery_tracker(current_battery_pptt, device_plugged);
+	sys_update_battery_tracker(power_battery_current_pptt(), power_battery_device_plugged());
 	// retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
@@ -482,7 +480,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 	sensor_retained_write();
 	// Set system reboot
 	LOG_INF("Rebooting nRF");
-	sys_update_battery_tracker(current_battery_pptt, device_plugged);
+	sys_update_battery_tracker(power_battery_current_pptt(), power_battery_device_plugged());
 //	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
@@ -491,25 +489,29 @@ static void sys_system_reboot(void) // TODO: add timeout
 	sys_reboot(SYS_REBOOT_COLD);
 }
 
-static int sys_power_state_request(int id)
+static enum sys_power_request power_request = SYS_POWER_REQ_NONE;
+
+static int sys_power_state_request(enum sys_power_request id)
 {
-	static int requested = 0;
-	switch (id)
-	{
-	case -1:
-		requested = 0;
-		return 0;
-	case 0:
-		return requested;
-	default:
-		if (requested != 0)
-		{
-			LOG_ERR("System is already entering a new power state");
-			return -1;
-		}
-		requested = id;
-		return 0;
+	if (id == SYS_POWER_REQ_NONE) {
+		return -1;
 	}
+	if (power_request != SYS_POWER_REQ_NONE) {
+		LOG_ERR("System is already entering a new power state");
+		return -1;
+	}
+	power_request = id;
+	return 0;
+}
+
+static enum sys_power_request sys_power_state_peek(void)
+{
+	return power_request;
+}
+
+static void sys_power_state_clear(void)
+{
+	power_request = SYS_POWER_REQ_NONE;
 }
 
 bool vin_read(void) // blocking
@@ -533,123 +535,6 @@ static void disable_DFU_thread(void)
 #if ADAFRUIT_BOOTLOADER
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
 #endif
-}
-
-static bool battery_pptt_is_valid(int16_t battery_pptt)
-{
-	return battery_pptt >= 0 && battery_pptt <= 10000;
-}
-
-static void reset_battery_filter(void)
-{
-	memset(last_pptt, -1, sizeof(last_pptt));
-	last_pptt_index = 0;
-	samples = 0;
-	average_pptt = -1;
-	hysteresis_pptt = -1;
-}
-
-static bool update_device_plugged_state(bool raw_device_plugged, int64_t now_ms)
-{
-	static bool initialized = false;
-	static bool pending_device_plugged = false;
-	static int64_t pending_device_plugged_since_ms = 0;
-
-	if (!initialized)
-	{
-		initialized = true;
-		pending_device_plugged = raw_device_plugged;
-		pending_device_plugged_since_ms = now_ms;
-		device_plugged = raw_device_plugged;
-		if (device_plugged)
-			set_status(SYS_STATUS_PLUGGED, true);
-		last_plug_signal_change_ms = now_ms - BATTERY_PLUG_SETTLE_MS;
-		return false;
-	}
-
-	if (raw_device_plugged != pending_device_plugged)
-	{
-		pending_device_plugged = raw_device_plugged;
-		pending_device_plugged_since_ms = now_ms;
-		last_plug_signal_change_ms = now_ms;
-		reset_battery_filter();
-	}
-
-	if (pending_device_plugged != device_plugged
-		&& now_ms - pending_device_plugged_since_ms >= BATTERY_PLUG_DEBOUNCE_MS)
-	{
-		device_plugged = pending_device_plugged;
-		set_status(SYS_STATUS_PLUGGED, device_plugged);
-		last_plug_signal_change_ms = now_ms;
-		reset_battery_filter();
-	}
-
-	return pending_device_plugged != device_plugged;
-}
-
-static bool update_battery(int16_t battery_pptt)
-{
-	if (!battery_pptt_is_valid(battery_pptt))
-		return false;
-
-	// Plugged state will cause a sudden change in SOC >10%, so reset the sample array
-	if (average_pptt >= 0 && NRFX_ABS(battery_pptt - average_pptt) > 1000)
-	{
-		if (!device_plugged)
-			LOG_INF("Change to battery SOC: %5.2f%% -> %5.2f%%", (double)average_pptt / 100.0, (double)battery_pptt / 100.0);
-		memset(last_pptt, -1, sizeof(last_pptt)); // reset array
-		samples = 1;
-	}
-
-	// Initalize sorted array
-	int16_t sorted_pptt[BATTERY_SAMPLES];
-	memcpy(sorted_pptt, last_pptt, sizeof(last_pptt));
-	sorted_pptt[BATTERY_SAMPLES - 1] = battery_pptt;
-
-	// Now add the last reading to the sample array
-	last_pptt[last_pptt_index] = battery_pptt;
-	last_pptt_index++;
-	last_pptt_index %= BATTERY_SAMPLES - 1;
-
-	// Sort sample array
-	for (int i = 1; i < BATTERY_SAMPLES; i++)
-	{
-		int16_t key = sorted_pptt[i];
-		int8_t j = i - 1;
-		while (j >= 0 && sorted_pptt[j] > key)
-		{
-			sorted_pptt[j + 1] = sorted_pptt[j];
-			j = j - 1;
-		}
-		sorted_pptt[j + 1] = key;
-	}
-
-	// Average across median 75% of samples
-	average_pptt = 0;
-	uint8_t valid_samples = 0;
-	for (uint8_t i = BATTERY_SAMPLES - (samples - samples / 8); i < (BATTERY_SAMPLES - samples / 8); i++)
-	{
-		if (sorted_pptt[i] != -1)
-		{
-			average_pptt += sorted_pptt[i];
-			valid_samples++;
-		}
-	}
-	if (valid_samples > 0)
-		average_pptt /= valid_samples;
-	else
-		average_pptt = battery_pptt;
-
-	// Store the average battery level with hysteresis (Effectively 100-10000 -> 1-100%)
-	if (average_pptt + 100 < hysteresis_pptt) // Lower bound -100pptt
-		hysteresis_pptt = average_pptt + 100;
-	else if (average_pptt > hysteresis_pptt) // Upper bound +0pptt
-		hysteresis_pptt = average_pptt;
-
-	// 0% to battery tracker will reset it, as >1% to 0% is invalid change
-	// Instead, remap 1-100 to 0-100
-	current_battery_pptt = (hysteresis_pptt - 100) * 100 / 99;
-	return true;
 }
 
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
@@ -692,25 +577,28 @@ static void power_thread(void)
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 		pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
 #endif
-		int requested = sys_power_state_request(0);
-		switch (requested)
-		{
-		case 1:
-			sys_WOM(false);
+		enum sys_power_request requested = sys_power_state_peek();
+		bool consumed = true;
+		switch (requested) {
+		case SYS_POWER_REQ_WOM:
+			consumed = sys_WOM(false);
 			break;
-		case 2:
-			sys_WOM(true);
+		case SYS_POWER_REQ_WOM_FORCE:
+			consumed = sys_WOM(true);
 			break;
-		case 3:
+		case SYS_POWER_REQ_SYSTEM_OFF:
 			sys_system_off();
 			break;
-		case 4:
+		case SYS_POWER_REQ_REBOOT:
 			sys_system_reboot();
 			break;
+		case SYS_POWER_REQ_NONE:
 		default:
 			break;
 		}
-		sys_power_state_request(-1); // clear request
+		if (consumed) {
+			sys_power_state_clear();
+		}
 
 		bool docked = dock_read();
 		bool charging = chg_read();
@@ -720,7 +608,7 @@ static void power_thread(void)
 		int16_t battery_pptt = read_batt_mV(&battery_mV);
 		if (battery_pptt < 0)
 			LOG_ERR("Failed to read battery voltage: %d", battery_pptt);
-		bool battery_pptt_valid = battery_pptt_is_valid(battery_pptt);
+		bool battery_pptt_valid = power_battery_pptt_is_valid(battery_pptt);
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
 		bool battery_available = battery_mV > 1500 && !abnormal_reading; // Keep working without the battery connected, otherwise it is obviously too dead to boot system
@@ -736,13 +624,15 @@ static void power_thread(void)
 #endif
 		int64_t now_ms = k_uptime_get();
 		bool raw_device_plugged = charging || charged || plugged || usb_plugged;
-		bool plug_state_debouncing = update_device_plugged_state(raw_device_plugged, now_ms);
-		bool plug_signal_settling = plug_state_debouncing
-			|| now_ms - last_plug_signal_change_ms < BATTERY_PLUG_SETTLE_MS;
+		bool plug_state_debouncing = power_battery_update_plugged_state(raw_device_plugged, now_ms);
+		bool plug_signal_settling = power_battery_plug_signal_settling(plug_state_debouncing, now_ms);
+		int32_t average_pptt = power_battery_average_pptt();
 		bool battery_discharged = !plug_signal_settling && battery_available
 			&& (average_pptt >= 0 ? average_pptt : battery_pptt) == 0;
 
-		device_charged = charged; // TODO: timer on device_plugged could be used to infer charged state
+		power_battery_set_charged(charged); // TODO: timer on device_plugged could be used to infer charged state
+		bool device_plugged = power_battery_device_plugged();
+		bool device_charged = power_battery_device_charged();
 
 		if (!power_init)
 		{
@@ -770,29 +660,10 @@ static void power_thread(void)
 			sys_request_system_off(true);
 		}
 
-		// Only feed valid SOC readings into the filter. ADC errors would
-		// otherwise look like real 0%/100% jumps and poison the estimate.
-		// USB/charger contact bounce also shifts the battery ADC, so wait for
-		// the plug signal to settle before accepting the next SOC sample.
-		if (battery_pptt_valid && !plug_signal_settling)
-		{
-			if (samples < BATTERY_SAMPLES)
-				samples++;
-			update_battery(battery_pptt);
-		}
+		power_battery_feed_and_track(battery_pptt_valid, plug_signal_settling, battery_pptt,
+					     battery_available, battery_mV);
 
-		bool current_battery_pptt_valid = battery_pptt_is_valid(current_battery_pptt);
-		if (battery_available && current_battery_pptt_valid && !battery_low && current_battery_pptt < 1000)
-			battery_low = true;
-		else if (!battery_available || !current_battery_pptt_valid || (battery_low && current_battery_pptt > 1000)) // hysteresis alrerady provided
-			battery_low = false;
-
-		sys_update_battery_tracker_voltage(battery_mV, device_plugged || plug_signal_settling);
-		if (current_battery_pptt_valid && !plug_signal_settling && (samples == BATTERY_SAMPLES || device_plugged))
-			sys_update_battery_tracker(current_battery_pptt, device_plugged);
-		if (current_battery_pptt_valid)
-			calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
-
+		int16_t calibrated_battery_pptt = power_battery_calibrated_pptt();
 		connection_update_battery(
 			battery_available,
 			device_plugged,
@@ -807,7 +678,7 @@ static void power_thread(void)
 			set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (plugged || usb_plugged)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (battery_low)
+		else if (power_battery_is_low())
 			set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else
 			set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
