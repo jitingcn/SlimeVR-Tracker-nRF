@@ -52,6 +52,14 @@ bool sensor_get_mag_calibrated(void);
 void sensor_refresh_sensor_ids(void);
 void sensor_mag_ref_reset(void);
 
+/* Fusion policy accessors (backend-agnostic; prefer over vqf_* / eqf_*). */
+bool sensor_fusion_get_rest_detected(void);
+bool sensor_fusion_get_relative_rest_deviations(float out[2]);
+bool sensor_fusion_get_mag_dist_detected(void);
+void sensor_fusion_reset_mag_ref(void);
+void sensor_fusion_set_mag_ref(float norm, float dip);
+bool sensor_fusion_get_mag_ref(float *norm, float *dip);
+
 void sensor_fusion_invalidate(void);
 void sensor_fusion_update_bias(float *g_off);
 
@@ -111,6 +119,14 @@ typedef struct sensor_fusion {
 
 	void (*get_lin_a)(float*);
 	void (*get_quat)(float*);
+
+	/* Rest / mag-quality policy (both VQF and EqF implement these). */
+	bool (*get_rest_detected)(void);
+	void (*get_relative_rest_deviations)(float out[2]); /* [gyr, acc] vs thresholds */
+	bool (*get_mag_dist_detected)(void);
+	void (*reset_mag_ref)(void);
+	void (*set_mag_ref)(float norm, float dip);
+	void (*get_mag_ref)(float *norm, float *dip);
 } sensor_fusion_t;
 
 typedef struct sensor_imu {

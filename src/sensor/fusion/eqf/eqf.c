@@ -110,6 +110,7 @@ static int ortho_counter;
 static float rest_gyr_lp[3];    /* LP filtered gyro (rad/s)          */
 static float rest_acc_lp[3];    /* LP filtered accel (g)             */
 static float rest_gyr_dev;      /* last gyro squared deviation       */
+static float rest_acc_dev;      /* last accel squared deviation      */
 static float rest_t;            /* accumulated rest time (s)         */
 static bool  rest_detected;
 static bool  rest_gyr_lp_init;  /* gyro LP initialized              */
@@ -246,7 +247,7 @@ static inline float eqf_get_mag_ref_dip(void)
 	return atan2f(-st.d_mag[2], st.d_mag[0]);
 }
 
-static void eqf_set_mag_ref(float norm, float dip)
+void eqf_set_mag_ref(float norm, float dip)
 {
 	float c = cosf(dip);
 	float s = sinf(dip);
@@ -1065,6 +1066,7 @@ void eqf_init(float g_time, float a_time, float m_time)
 	memset(rest_gyr_lp, 0, sizeof(rest_gyr_lp));
 	memset(rest_acc_lp, 0, sizeof(rest_acc_lp));
 	rest_gyr_dev = 0.0f;
+	rest_acc_dev = 0.0f;
 	rest_t = 0.0f;
 	rest_detected = false;
 	rest_gyr_lp_init = false;
@@ -1103,6 +1105,7 @@ void eqf_load(const void *data)
 	memset(rest_gyr_lp, 0, sizeof(rest_gyr_lp));
 	memset(rest_acc_lp, 0, sizeof(rest_acc_lp));
 	rest_gyr_dev = 0.0f;
+	rest_acc_dev = 0.0f;
 	rest_t = 0.0f;
 	rest_detected = false;
 	rest_gyr_lp_init = false;
@@ -1228,7 +1231,7 @@ void eqf_update_accel(float *a, float time)
 	float da0 = a[0] - rest_acc_lp[0];
 	float da1 = a[1] - rest_acc_lp[1];
 	float da2 = a[2] - rest_acc_lp[2];
-	float acc_dev_sq = da0 * da0 + da1 * da1 + da2 * da2;
+	rest_acc_dev = da0 * da0 + da1 * da1 + da2 * da2;
 
 	float gyr_th_rad = EQF_REST_TH_GYR * DEG_TO_RAD;
 	float max_bias_rad = EQF_REST_MAX_BIAS * DEG_TO_RAD;
@@ -1236,7 +1239,7 @@ void eqf_update_accel(float *a, float time)
 	/* reject rest if: gyro deviation too high, accel deviation too high,
 	 * accel norm not near 1g, or LP'd gyro exceeds max plausible bias */
 	if (rest_gyr_dev >= gyr_th_rad * gyr_th_rad
-	    || acc_dev_sq >= EQF_REST_TH_ACC * EQF_REST_TH_ACC
+	    || rest_acc_dev >= EQF_REST_TH_ACC * EQF_REST_TH_ACC
 	    || fabsf(anorm - 1.0f) > EQF_REST_ACC_NORM_TH
 	    || fabsf(rest_gyr_lp[0]) > max_bias_rad
 	    || fabsf(rest_gyr_lp[1]) > max_bias_rad
@@ -1401,6 +1404,36 @@ int eqf_get_gyro_sanity(void)
 	return 0;
 }
 
+bool eqf_get_rest_detected(void)
+{
+	return rest_detected;
+}
+
+void eqf_get_relative_rest_deviations(float out[2])
+{
+	float gyr_th_rad = EQF_REST_TH_GYR * DEG_TO_RAD;
+	out[0] = sqrtf(rest_gyr_dev) / gyr_th_rad;
+	out[1] = sqrtf(rest_acc_dev) / EQF_REST_TH_ACC;
+}
+
+bool eqf_get_mag_dist_detected(void)
+{
+	return mag_dist_detected;
+}
+
+void eqf_reset_mag_ref(void)
+{
+	eqf_set_mag_ref(0.0f, 0.0f);
+	mag_ref_valid = false;
+	eqf_reset_mag_runtime_state(false);
+}
+
+void eqf_get_mag_ref(float *norm, float *dip)
+{
+	*norm = st.mag_ref_norm;
+	*dip = eqf_get_mag_ref_dip();
+}
+
 
 /* ── Fusion vtable ─────────────────────────────────────────────────── */
 
@@ -1418,4 +1451,10 @@ const sensor_fusion_t sensor_fusion_eqf = {
 	.get_gyro_sanity  = eqf_get_gyro_sanity,
 	.get_lin_a        = eqf_get_lin_a,
 	.get_quat         = eqf_get_quat,
+	.get_rest_detected = eqf_get_rest_detected,
+	.get_relative_rest_deviations = eqf_get_relative_rest_deviations,
+	.get_mag_dist_detected = eqf_get_mag_dist_detected,
+	.reset_mag_ref    = eqf_reset_mag_ref,
+	.set_mag_ref      = eqf_set_mag_ref,
+	.get_mag_ref      = eqf_get_mag_ref,
 };

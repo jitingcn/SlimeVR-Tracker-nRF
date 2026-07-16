@@ -30,6 +30,13 @@ int eqf_get_gyro_sanity(void);
 void eqf_get_lin_a(float *lin_a);
 void eqf_get_quat(float *q);
 
+bool eqf_get_rest_detected(void);
+void eqf_get_relative_rest_deviations(float out[2]);
+bool eqf_get_mag_dist_detected(void);
+void eqf_reset_mag_ref(void);
+void eqf_set_mag_ref(float norm, float dip);
+void eqf_get_mag_ref(float *norm, float *dip);
+
 extern const sensor_fusion_t sensor_fusion_eqf;
 
 #endif
