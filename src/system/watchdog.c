@@ -41,7 +41,6 @@ static const char *channel_names[] = {
 	"esb",
 	"connection",
 	"power",
-	"button",
 	"led",
 	"status",
 	"calibration"
@@ -56,7 +55,6 @@ static const uint32_t default_timeouts[] = {
 	10000,    // esb - wireless retransmits
 	10000,    // connection - depends on esb
 	10000,    // power - increased for boot delay
-	10000,    // button - increased for boot delay
 	30000,   // led - can be suspended
 	15000,   // status - error display cycles
 	60000    // calibration - long operations

@@ -490,6 +490,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 }
 
 static enum sys_power_request power_request = SYS_POWER_REQ_NONE;
+static K_SEM_DEFINE(power_wake_sem, 0, 1);
 
 static int sys_power_state_request(enum sys_power_request id)
 {
@@ -501,6 +502,7 @@ static int sys_power_state_request(enum sys_power_request id)
 		return -1;
 	}
 	power_request = id;
+	k_sem_give(&power_wake_sem);
 	return 0;
 }
 
@@ -687,6 +689,6 @@ static void power_thread(void)
 		/* Feed watchdog at end of each loop iteration */
 		watchdog_feed(WDT_CHANNEL_POWER);
 
-		k_msleep(100);
+		(void)k_sem_take(&power_wake_sem, K_MSEC(100));
 	}
 }

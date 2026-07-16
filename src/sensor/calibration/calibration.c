@@ -58,6 +58,12 @@ float magBAinv[4][3];
 
 K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
+static K_SEM_DEFINE(calibration_wake_sem, 0, 1);
+
+static void calibration_signal_wake(void)
+{
+	k_sem_give(&calibration_wake_sem);
+}
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 // Parameters for the requested gyro sensitivity calibration, latched by
@@ -400,6 +406,7 @@ int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions)
 	sens_cal_revolutions = revolutions;
 	requested_calibration = 5;
 	k_mutex_unlock(&calibration_request_lock);
+	calibration_signal_wake();
 	return 0;
 }
 #endif
@@ -433,6 +440,7 @@ void sensor_request_calibration_mag(void)
 	magneto_reset();            // Clear ata / progress / status-log timer
 	magneto_online_reset();     // Clear online accumulator
 	magneto_progress |= 1 << 7; // Set collection active flag
+	calibration_signal_wake();
 	LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
 }
 
@@ -461,6 +469,9 @@ int sensor_calibration_request(int id)
 		break;
 	}
 	k_mutex_unlock(&calibration_request_lock);
+	if (result == 0 && id > 0) {
+		calibration_signal_wake();
+	}
 	return result;
 }
 
@@ -600,11 +611,11 @@ static void calibration_thread(void)
 		watchdog_feed(WDT_CHANNEL_CALIBRATION);
 
 		if (requested < 0) {
-			k_msleep(5);
+			(void)k_sem_take(&calibration_wake_sem, K_MSEC(5));
 		} else if (requested > 0) {
-			k_msleep(20); // Mag cal in progress - short sleep for fast sampling
+			(void)k_sem_take(&calibration_wake_sem, K_MSEC(20));
 		} else {
-			k_msleep(100);
+			(void)k_sem_take(&calibration_wake_sem, K_MSEC(100));
 		}
 	}
 }

@@ -5,7 +5,6 @@
 #include "connection/connection.h"
 #include "connection/esb.h"
 #include "system/esb_ota.h"
-#include "watchdog.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
@@ -395,6 +394,7 @@ int set_sensor_clock(bool enable, float rate, float *actual_rate)
 static const struct gpio_dt_spec button0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 static int64_t press_time = 0;
 static int64_t last_press_duration = 0;
+static K_SEM_DEFINE(button_wake_sem, 0, 1);
 
 static void button_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -406,6 +406,7 @@ static void button_interrupt_handler(const struct device *dev, struct gpio_callb
 		return;
 	}
 	press_time = pressed ? current_time : 0;
+	k_sem_give(&button_wake_sem);
 }
 
 static struct gpio_callback button_cb_data;
@@ -436,9 +437,6 @@ static void button_thread(void)
 {
 	int num_presses = 0;
 	int64_t last_press = 0;
-
-	/* Register button thread with watchdog */
-	watchdog_register_thread(WDT_CHANNEL_BUTTON, 0);
 
 	while (1) {
 		if (press_time && k_uptime_get() - press_time > 50) // debounce
@@ -507,10 +505,14 @@ static void button_thread(void)
 			}
 		}
 
-		/* Feed watchdog at end of each loop iteration */
-		watchdog_feed(WDT_CHANNEL_BUTTON);
+		bool active = (press_time != 0) || (last_press != 0) || (last_press_duration > 0)
+			|| (num_presses > 0);
 
-		k_msleep(20);
+		if (!active) {
+			(void)k_sem_take(&button_wake_sem, K_FOREVER);
+		} else {
+			(void)k_sem_take(&button_wake_sem, K_MSEC(20));
+		}
 	}
 }
 #endif

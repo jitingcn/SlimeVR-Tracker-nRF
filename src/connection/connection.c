@@ -46,6 +46,7 @@ static uint8_t tracker_svr_status = SVR_STATUS_OK;
 static float sensor_q[4], sensor_a[3], sensor_m[3];
 static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
 static bool send_precise_quat;
+static K_SEM_DEFINE(connection_wake_sem, 0, 1);
 
 static void connection_sensor_snap_q_a(float q_out[4], float a_out[3])
 {
@@ -90,6 +91,7 @@ uint32_t get_ping_interval_ms(void)
 	return ping_interval_ms + esb_get_ping_backoff_ms();
 }
 
+static void connection_signal_wake(void);
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 2048, connection_thread, NULL, NULL, NULL, 5, 0, 0);
 
@@ -364,6 +366,7 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 	memcpy(sensor_a, a, sizeof(sensor_a));
 	irq_unlock(key);
 	quat_update_time = k_uptime_get();
+	connection_signal_wake();
 }
 
 static int64_t mag_update_time = 0;
@@ -375,6 +378,7 @@ void connection_update_sensor_mag(float *m)
 	memcpy(sensor_m, m, sizeof(sensor_m));
 	irq_unlock(key);
 	mag_update_time = k_uptime_get();
+	connection_signal_wake();
 }
 
 void connection_update_sensor_temp(float temp)
@@ -702,6 +706,7 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 		k_msgq_get(&raw_imu_msgq, &discard, K_NO_WAIT);
 		k_msgq_put(&raw_imu_msgq, &entry, K_NO_WAIT);
 	}
+	connection_signal_wake();
 }
 
 void connection_queue_raw_mag(const float mag[3])
@@ -1068,6 +1073,70 @@ static void send_composite_or_single(const struct composite_builder *builder, ui
 	}
 }
 
+static void connection_signal_wake(void)
+{
+	k_sem_give(&connection_wake_sem);
+}
+
+static int64_t connection_next_deadline_ms(int64_t now)
+{
+	int64_t deadline = now + 1000; /* bounded fallback */
+	int quat_interval_ms = tdma_is_enabled() ? SENSOR_QUAT_INTERVAL_TDMA_MS
+						 : SENSOR_QUAT_INTERVAL_NOTDMA_MS;
+
+	if (esb_ready()) {
+		uint32_t ping_iv = get_ping_interval_ms();
+		int64_t ping_dl = last_ping_time + (int64_t)ping_iv;
+		if (ping_dl < deadline) {
+			deadline = ping_dl;
+		}
+	}
+	if (quat_update_time) {
+		int64_t q_dl = last_sensor_quat_time + quat_interval_ms;
+		if (q_dl < deadline) {
+			deadline = q_dl;
+		}
+	}
+	if (mag_update_time) {
+		int64_t m_dl = last_mag_time + 100;
+		if (m_dl < deadline) {
+			deadline = m_dl;
+		}
+	}
+	if (sensor_ids_set) {
+		int64_t i_dl = last_info_time + 100;
+		if (i_dl < deadline) {
+			deadline = i_dl;
+		}
+	}
+	{
+		int64_t s_dl = last_status_time + 1000;
+		if (s_dl < deadline) {
+			deadline = s_dl;
+		}
+	}
+	{
+		int64_t r_dl = last_runtime_time + 1000;
+		if (r_dl < deadline) {
+			deadline = r_dl;
+		}
+	}
+	return deadline;
+}
+
+static void connection_idle_wait(int64_t now)
+{
+	int64_t wait_ms = connection_next_deadline_ms(now) - now;
+	if (wait_ms <= 0) {
+		(void)k_sem_take(&connection_wake_sem, K_NO_WAIT);
+		return;
+	}
+	if (wait_ms > 1000) {
+		wait_ms = 1000;
+	}
+	(void)k_sem_take(&connection_wake_sem, K_MSEC(wait_ms));
+}
+
 void connection_thread(void)
 {
 	/* Register connection thread with watchdog */
@@ -1306,6 +1375,6 @@ void connection_thread(void)
 			continue;
 		}
 
-		k_usleep(600);
+		connection_idle_wait(now);
 	}
 }
