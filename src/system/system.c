@@ -1,7 +1,7 @@
 #include "globals.h"
 #include "test_mode.h"
 #include "sensor/sensor.h"
-#include "sensor/calibration.h"
+#include "sensor/calibration/calibration.h"
 #include "connection/connection.h"
 #include "connection/esb.h"
 #include "system/esb_ota.h"
