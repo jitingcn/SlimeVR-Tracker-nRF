@@ -21,7 +21,7 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
-#include "sensor/calibration.h"
+#include "sensor/calibration/calibration.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
 #include "system/test_mode.h"
@@ -127,6 +127,405 @@ static uint8_t received_sens_auto_axis = 0;
 static uint16_t received_sens_auto_revolutions = 0;
 #define REMOTE_COMMAND_DELAY_MS 1500
 
+
+typedef void (*esb_remote_cmd_fn)(void);
+
+struct esb_remote_cmd {
+	uint8_t flag;
+	const char *name;
+	esb_remote_cmd_fn fn;
+};
+
+static void remote_print_meow(void);
+
+static void esb_remote_cmd_shutdown(void)
+{
+	LOG_WRN("Executing remote command: SHUTDOWN");
+	sys_command_shutdown();
+}
+
+static void esb_remote_cmd_calibrate(void)
+{
+	LOG_INF("Executing remote command: CALIBRATE");
+	sensor_request_calibration();
+}
+
+static void esb_remote_cmd_six_side_cal(void)
+{
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	LOG_INF("Executing remote command: SIX_SIDE_CAL");
+	sensor_request_calibration_6_side();
+#else
+	LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
+#endif
+}
+
+static void esb_remote_cmd_meow(void)
+{
+	LOG_INF("Executing remote command: MEOW");
+	remote_print_meow();
+}
+
+static void esb_remote_cmd_scan(void)
+{
+	LOG_INF("Executing remote command: SCAN");
+	sensor_request_scan(true);
+}
+
+static void esb_remote_cmd_mag_clear(void)
+{
+	LOG_INF("Executing remote command: MAG_CLEAR");
+	sensor_calibration_clear_mag(NULL, true);
+}
+
+static void esb_remote_cmd_mag_cal(void)
+{
+	LOG_INF("Executing remote command: MAG_CAL");
+	sensor_calibration_clear_mag(NULL, true);
+	sensor_request_calibration_mag();
+}
+
+static void esb_remote_cmd_mag_on(void)
+{
+	LOG_INF("Executing remote command: MAG_ON");
+	sensor_set_mag_enabled(true);
+}
+
+static void esb_remote_cmd_mag_off(void)
+{
+	LOG_INF("Executing remote command: MAG_OFF");
+	sensor_set_mag_enabled(false);
+}
+
+static void esb_remote_cmd_mag_auto_on(void)
+{
+	LOG_INF("Executing remote command: MAG_AUTO_ON");
+	sensor_calibration_set_online_mag_enabled(true);
+}
+
+static void esb_remote_cmd_mag_auto_off(void)
+{
+	LOG_INF("Executing remote command: MAG_AUTO_OFF");
+	sensor_calibration_set_online_mag_enabled(false);
+}
+
+static void esb_remote_cmd_tcal_on(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	LOG_INF("Executing remote command: TCAL_ON");
+	sensor_tcal_set_enabled(true);
+#endif
+}
+
+static void esb_remote_cmd_tcal_off(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	LOG_INF("Executing remote command: TCAL_OFF");
+	sensor_tcal_set_enabled(false);
+#endif
+}
+
+static void esb_remote_cmd_tdma_on(void)
+{
+	LOG_INF("Executing remote command: TDMA_ON");
+	tdma_set_enabled(true);
+}
+
+static void esb_remote_cmd_tdma_off(void)
+{
+	LOG_INF("Executing remote command: TDMA_OFF");
+	tdma_set_enabled(false);
+}
+
+static void esb_remote_cmd_test_mode_on(void)
+{
+	LOG_INF("Executing remote command: TEST_MODE_ON");
+	test_mode_set(true);
+}
+
+static void esb_remote_cmd_test_mode_off(void)
+{
+	LOG_INF("Executing remote command: TEST_MODE_OFF");
+	test_mode_set(false);
+}
+
+static void esb_remote_cmd_reboot(void)
+{
+	LOG_WRN("Executing remote command: REBOOT");
+	sys_request_system_reboot(false);
+}
+
+static void esb_remote_cmd_clear(void)
+{
+	LOG_WRN("Executing remote command: CLEAR (clear pairing)");
+	esb_clear_pair();
+}
+
+static void esb_remote_cmd_dfu(void)
+{
+#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+	LOG_WRN("Executing remote command: DFU (enter bootloader)");
+#if CONFIG_BUILD_OUTPUT_UF2
+	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	k_msleep(100);
+#endif
+	sys_request_system_reboot(false);
+#else
+	LOG_WRN("Remote command: DFU not supported (no bootloader)");
+#endif
+}
+
+static void esb_remote_cmd_dfu_ota(void)
+{
+#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+	LOG_WRN("Executing remote command: DFU_OTA (enter OTA bootloader)");
+#if CONFIG_BUILD_OUTPUT_UF2
+	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
+	k_msleep(2);
+#endif
+	sys_request_system_reboot(false);
+#else
+	LOG_WRN("Remote command: DFU_OTA not supported (no bootloader)");
+#endif
+}
+
+static void esb_remote_cmd_set_channel(void)
+{
+	// Validate channel value (0-100)
+	if (received_channel_value <= 100) {
+		LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
+		// Save to retained memory
+		retained->rf_channel = (uint8_t)received_channel_value;
+		retained_update();
+		// Save to NVS
+		sys_write(
+			RF_CHANNEL_ID,
+			&retained->rf_channel,
+			&retained->rf_channel,
+			sizeof(retained->rf_channel)
+		);
+		LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
+		// Reinitialize ESB with new channel
+		esb_deinitialize();
+		k_msleep(10);
+		esb_initialize(true); // Channel will be applied inside esb_initialize
+		LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
+	} else {
+		LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
+	}
+}
+
+static void esb_remote_cmd_clear_channel(void)
+{
+	LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
+	// Clear saved channel (set to 0xFF = use default)
+	retained->rf_channel = 0xFF;
+	retained_update();
+	sys_write(
+		RF_CHANNEL_ID,
+		&retained->rf_channel,
+		&retained->rf_channel,
+		sizeof(retained->rf_channel)
+	);
+	LOG_INF("RF channel cleared, will use default on next boot");
+	// Reinitialize ESB with default channel
+	esb_deinitialize();
+	k_msleep(10);
+	esb_initialize(true); // Will use default channel since rf_channel is 0xFF
+	LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
+}
+
+static void esb_remote_cmd_sens_set(void)
+{
+	LOG_INF("Executing remote command: SENS_SET");
+	cmd_sens_set(received_sens_data[0], received_sens_data[1], received_sens_data[2]);
+}
+
+static void esb_remote_cmd_sens_reset(void)
+{
+	LOG_INF("Executing remote command: SENS_RESET");
+	cmd_sens_reset();
+}
+
+static void esb_remote_cmd_sens_auto(void)
+{
+	LOG_INF(
+		"Executing remote command: SENS_AUTO axis=%u revolutions=%u",
+		received_sens_auto_axis,
+		received_sens_auto_revolutions
+	);
+	cmd_sens_auto_request(received_sens_auto_axis, received_sens_auto_revolutions);
+}
+
+static void esb_remote_cmd_reset_zro(void)
+{
+	LOG_INF("Executing remote command: RESET_ZRO");
+	cmd_reset_zro();
+}
+
+static void esb_remote_cmd_reset_acc(void)
+{
+	LOG_INF("Executing remote command: RESET_ACC");
+	cmd_reset_acc();
+}
+
+static void esb_remote_cmd_reset_bat(void)
+{
+	LOG_INF("Executing remote command: RESET_BAT");
+	cmd_reset_bat();
+}
+
+static void esb_remote_cmd_reset_tcal(void)
+{
+	LOG_INF("Executing remote command: RESET_TCAL");
+	cmd_reset_tcal();
+}
+
+static void esb_remote_cmd_tcal_auto_on(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	LOG_INF("Executing remote command: TCAL_AUTO_ON");
+	sensor_tcal_set_auto_calibration(true);
+#else
+	LOG_WRN("Remote command: TCAL_AUTO_ON not supported (T-Cal disabled in config)");
+#endif
+}
+
+static void esb_remote_cmd_tcal_auto_off(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	LOG_INF("Executing remote command: TCAL_AUTO_OFF");
+	sensor_tcal_set_auto_calibration(false);
+#else
+	LOG_WRN("Remote command: TCAL_AUTO_OFF not supported (T-Cal disabled in config)");
+#endif
+}
+
+static void esb_remote_cmd_ping(void)
+{
+	LOG_INF("Executing remote command: PING");
+	cmd_ping_start();
+}
+
+static void esb_remote_cmd_fusion_reset(void)
+{
+	LOG_INF("Executing remote command: FUSION_RESET");
+	cmd_fusion_reset();
+}
+
+static void esb_remote_cmd_tcal_boot_on(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	LOG_INF("Executing remote command: TCAL_BOOT_ON");
+	sensor_boot_cal_set_enabled(true);
+#else
+	LOG_WRN("Remote command: TCAL_BOOT_ON not supported (T-Cal disabled in config)");
+#endif
+}
+
+static void esb_remote_cmd_tcal_boot_off(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	LOG_INF("Executing remote command: TCAL_BOOT_OFF");
+	sensor_boot_cal_set_enabled(false);
+#else
+	LOG_WRN("Remote command: TCAL_BOOT_OFF not supported (T-Cal disabled in config)");
+#endif
+}
+
+static void esb_remote_cmd_data_collect_on(void)
+{
+	LOG_INF("Executing remote command: DATA_COLLECT_ON");
+	connection_set_data_collection(true);
+	test_mode_set(true);  // Prevent sleep during data collection
+}
+
+static void esb_remote_cmd_data_collect_off(void)
+{
+	LOG_INF("Executing remote command: DATA_COLLECT_OFF");
+	connection_set_data_collection(false);
+	test_mode_set(false);
+}
+
+static void esb_remote_cmd_ota_query_info(void)
+{
+	LOG_INF("Executing remote command: OTA_QUERY_INFO");
+	esb_ota_handle_query_info();
+}
+
+static void esb_remote_cmd_ota_abort(void)
+{
+	LOG_WRN("Executing remote command: OTA_ABORT");
+	esb_ota_handle_abort();
+}
+
+static void esb_remote_cmd_ota_suppress(void)
+{
+	LOG_INF("Executing remote command: OTA_SUPPRESS (reducing poll rate)");
+	connection_set_ota_suppressed(true);
+}
+
+static void esb_remote_cmd_ota_unsuppress(void)
+{
+	LOG_INF("Executing remote command: OTA_UNSUPPRESS (resuming normal rate)");
+	connection_set_ota_suppressed(false);
+}
+
+static const struct esb_remote_cmd esb_remote_cmds[] = {
+	{ESB_PONG_FLAG_SHUTDOWN, "SHUTDOWN", esb_remote_cmd_shutdown},
+	{ESB_PONG_FLAG_CALIBRATE, "CALIBRATE", esb_remote_cmd_calibrate},
+	{ESB_PONG_FLAG_SIX_SIDE_CAL, "SIX_SIDE_CAL", esb_remote_cmd_six_side_cal},
+	{ESB_PONG_FLAG_MEOW, "MEOW", esb_remote_cmd_meow},
+	{ESB_PONG_FLAG_SCAN, "SCAN", esb_remote_cmd_scan},
+	{ESB_PONG_FLAG_MAG_CLEAR, "MAG_CLEAR", esb_remote_cmd_mag_clear},
+	{ESB_PONG_FLAG_MAG_CAL, "MAG_CAL", esb_remote_cmd_mag_cal},
+	{ESB_PONG_FLAG_MAG_ON, "MAG_ON", esb_remote_cmd_mag_on},
+	{ESB_PONG_FLAG_MAG_OFF, "MAG_OFF", esb_remote_cmd_mag_off},
+	{ESB_PONG_FLAG_MAG_AUTO_ON, "MAG_AUTO_ON", esb_remote_cmd_mag_auto_on},
+	{ESB_PONG_FLAG_MAG_AUTO_OFF, "MAG_AUTO_OFF", esb_remote_cmd_mag_auto_off},
+	{ESB_PONG_FLAG_REBOOT, "REBOOT", esb_remote_cmd_reboot},
+	{ESB_PONG_FLAG_CLEAR, "CLEAR", esb_remote_cmd_clear},
+	{ESB_PONG_FLAG_DFU, "DFU", esb_remote_cmd_dfu},
+	{ESB_PONG_FLAG_DFU_OTA, "DFU_OTA", esb_remote_cmd_dfu_ota},
+	{ESB_PONG_FLAG_SET_CHANNEL, "SET_CHANNEL", esb_remote_cmd_set_channel},
+	{ESB_PONG_FLAG_CLEAR_CHANNEL, "CLEAR_CHANNEL", esb_remote_cmd_clear_channel},
+	{ESB_PONG_FLAG_SENS_SET, "SENS_SET", esb_remote_cmd_sens_set},
+	{ESB_PONG_FLAG_SENS_RESET, "SENS_RESET", esb_remote_cmd_sens_reset},
+	{ESB_PONG_FLAG_SENS_AUTO, "SENS_AUTO", esb_remote_cmd_sens_auto},
+	{ESB_PONG_FLAG_RESET_ZRO, "RESET_ZRO", esb_remote_cmd_reset_zro},
+	{ESB_PONG_FLAG_RESET_ACC, "RESET_ACC", esb_remote_cmd_reset_acc},
+	{ESB_PONG_FLAG_RESET_BAT, "RESET_BAT", esb_remote_cmd_reset_bat},
+	{ESB_PONG_FLAG_RESET_TCAL, "RESET_TCAL", esb_remote_cmd_reset_tcal},
+	{ESB_PONG_FLAG_TCAL_AUTO_ON, "TCAL_AUTO_ON", esb_remote_cmd_tcal_auto_on},
+	{ESB_PONG_FLAG_TCAL_AUTO_OFF, "TCAL_AUTO_OFF", esb_remote_cmd_tcal_auto_off},
+	{ESB_PONG_FLAG_PING, "PING", esb_remote_cmd_ping},
+	{ESB_PONG_FLAG_FUSION_RESET, "FUSION_RESET", esb_remote_cmd_fusion_reset},
+	{ESB_PONG_FLAG_TCAL_BOOT_ON, "TCAL_BOOT_ON", esb_remote_cmd_tcal_boot_on},
+	{ESB_PONG_FLAG_TCAL_BOOT_OFF, "TCAL_BOOT_OFF", esb_remote_cmd_tcal_boot_off},
+	{ESB_PONG_FLAG_TCAL_ON, "TCAL_ON", esb_remote_cmd_tcal_on},
+	{ESB_PONG_FLAG_TCAL_OFF, "TCAL_OFF", esb_remote_cmd_tcal_off},
+	{ESB_PONG_FLAG_TDMA_ON, "TDMA_ON", esb_remote_cmd_tdma_on},
+	{ESB_PONG_FLAG_TDMA_OFF, "TDMA_OFF", esb_remote_cmd_tdma_off},
+	{ESB_PONG_FLAG_TEST_MODE_ON, "TEST_MODE_ON", esb_remote_cmd_test_mode_on},
+	{ESB_PONG_FLAG_TEST_MODE_OFF, "TEST_MODE_OFF", esb_remote_cmd_test_mode_off},
+	{ESB_PONG_FLAG_DATA_COLLECT_ON, "DATA_COLLECT_ON", esb_remote_cmd_data_collect_on},
+	{ESB_PONG_FLAG_DATA_COLLECT_OFF, "DATA_COLLECT_OFF", esb_remote_cmd_data_collect_off},
+	{ESB_PONG_FLAG_OTA_QUERY_INFO, "OTA_QUERY_INFO", esb_remote_cmd_ota_query_info},
+	{ESB_PONG_FLAG_OTA_ABORT, "OTA_ABORT", esb_remote_cmd_ota_abort},
+	{ESB_PONG_FLAG_OTA_SUPPRESS, "OTA_SUPPRESS", esb_remote_cmd_ota_suppress},
+	{ESB_PONG_FLAG_OTA_UNSUPPRESS, "OTA_UNSUPPRESS", esb_remote_cmd_ota_unsuppress},
+};
+
+static const char *esb_remote_cmd_name(uint8_t flag)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(esb_remote_cmds); i++) {
+		if (esb_remote_cmds[i].flag == flag) {
+			return esb_remote_cmds[i].name;
+		}
+	}
+	return "UNKNOWN";
+}
+
 /* ── OTA packet queue (ISR → thread) ─────────────────────────────
  * OTA packets received in ESB ISR are queued here and processed
  * in the connection thread where flash/logging is safe. */
@@ -194,6 +593,23 @@ static void remote_print_meow(void)
 	uint8_t suffix = ticks % ARRAY_SIZE(meow_suffixes);
 	LOG_INF("%s%s%s", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
+
+
+static void esb_remote_command_execute(uint8_t cmd)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(esb_remote_cmds); i++) {
+		if (esb_remote_cmds[i].flag == cmd) {
+			if (esb_remote_cmds[i].fn) {
+				esb_remote_cmds[i].fn();
+			}
+			return;
+		}
+	}
+	LOG_WRN("Unknown remote command: 0x%02X", cmd);
+}
+
+
+
 
 static uint8_t tracker_id = 0;
 static void set_tracker_id(uint8_t id)
@@ -884,120 +1300,7 @@ void event_handler(struct esb_evt const *event)
 								received_sens_auto_revolutions = pong_sens_auto_revolutions;
 							}
 
-							const char *cmd_name = "UNKNOWN";
-							switch (pong_flags) {
-							case ESB_PONG_FLAG_SHUTDOWN:
-								cmd_name = "SHUTDOWN";
-								break;
-							case ESB_PONG_FLAG_CALIBRATE:
-								cmd_name = "CALIBRATE";
-								break;
-							case ESB_PONG_FLAG_SIX_SIDE_CAL:
-								cmd_name = "SIX_SIDE_CAL";
-								break;
-							case ESB_PONG_FLAG_MEOW:
-								cmd_name = "MEOW";
-								break;
-							case ESB_PONG_FLAG_SCAN:
-								cmd_name = "SCAN";
-								break;
-							case ESB_PONG_FLAG_MAG_CLEAR:
-								cmd_name = "MAG_CLEAR";
-								break;
-							case ESB_PONG_FLAG_MAG_CAL:
-								cmd_name = "MAG_CAL";
-								break;
-							case ESB_PONG_FLAG_MAG_ON:
-								cmd_name = "MAG_ON";
-								break;
-							case ESB_PONG_FLAG_MAG_OFF:
-								cmd_name = "MAG_OFF";
-								break;
-							case ESB_PONG_FLAG_MAG_AUTO_ON:
-								cmd_name = "MAG_AUTO_ON";
-								break;
-							case ESB_PONG_FLAG_MAG_AUTO_OFF:
-								cmd_name = "MAG_AUTO_OFF";
-								break;
-							case ESB_PONG_FLAG_REBOOT:
-								cmd_name = "REBOOT";
-								break;
-							case ESB_PONG_FLAG_CLEAR:
-								cmd_name = "CLEAR";
-								break;
-							case ESB_PONG_FLAG_DFU:
-								cmd_name = "DFU";
-								break;
-							case ESB_PONG_FLAG_DFU_OTA:
-								cmd_name = "DFU_OTA";
-								break;
-							case ESB_PONG_FLAG_SET_CHANNEL:
-								cmd_name = "SET_CHANNEL";
-								break;
-							case ESB_PONG_FLAG_SENS_SET:
-								cmd_name = "SENS_SET";
-								break;
-							case ESB_PONG_FLAG_SENS_RESET:
-								cmd_name = "SENS_RESET";
-								break;
-							case ESB_PONG_FLAG_SENS_AUTO:
-								cmd_name = "SENS_AUTO";
-								break;
-							case ESB_PONG_FLAG_RESET_ZRO:
-								cmd_name = "RESET_ZRO";
-								break;
-							case ESB_PONG_FLAG_RESET_ACC:
-								cmd_name = "RESET_ACC";
-								break;
-							case ESB_PONG_FLAG_RESET_BAT:
-								cmd_name = "RESET_BAT";
-								break;
-							case ESB_PONG_FLAG_RESET_TCAL:
-								cmd_name = "RESET_TCAL";
-								break;
-							case ESB_PONG_FLAG_TCAL_AUTO_ON:
-								cmd_name = "TCAL_AUTO_ON";
-								break;
-							case ESB_PONG_FLAG_TCAL_AUTO_OFF:
-								cmd_name = "TCAL_AUTO_OFF";
-								break;
-							case ESB_PONG_FLAG_PING:
-								cmd_name = "PING";
-								break;
-							case ESB_PONG_FLAG_FUSION_RESET:
-								cmd_name = "FUSION_RESET";
-								break;
-							case ESB_PONG_FLAG_TCAL_BOOT_ON:
-								cmd_name = "TCAL_BOOT_ON";
-								break;
-							case ESB_PONG_FLAG_TCAL_BOOT_OFF:
-								cmd_name = "TCAL_BOOT_OFF";
-								break;
-							case ESB_PONG_FLAG_TCAL_ON:
-								cmd_name = "TCAL_ON";
-								break;
-							case ESB_PONG_FLAG_TCAL_OFF:
-								cmd_name = "TCAL_OFF";
-								break;
-							case ESB_PONG_FLAG_TDMA_ON:
-								cmd_name = "TDMA_ON";
-								break;
-							case ESB_PONG_FLAG_TDMA_OFF:
-								cmd_name = "TDMA_OFF";
-								break;
-							case ESB_PONG_FLAG_OTA_QUERY_INFO:
-								cmd_name = "OTA_QUERY_INFO";
-								break;
-							case ESB_PONG_FLAG_OTA_ABORT:
-								cmd_name = "OTA_ABORT";
-								break;
-							case ESB_PONG_FLAG_OTA_SUPPRESS:
-								cmd_name = "OTA_SUPPRESS";
-								break;
-							case ESB_PONG_FLAG_OTA_UNSUPPRESS:
-								cmd_name = "OTA_UNSUPPRESS";
-								break;
-							}
+							const char *cmd_name = esb_remote_cmd_name(pong_flags);
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
 								LOG_INF(
 									"Remote command %s (0x%02X) received, channel=%u, will execute in %dms",
@@ -1035,7 +1338,7 @@ void event_handler(struct esb_evt const *event)
 			default:
 				/* ACK payload from receiver carrying ARQ retransmit requests */
 				if (rx_payload.length >= 4 &&
-				    rx_payload.data[0] == 0xAA &&
+				    rx_payload.data[0] == RAW_ARQ_MARKER &&
 				    connection_get_data_collection()) {
 					uint8_t retx_n = rx_payload.data[1];
 					uint8_t max_entries = (rx_payload.length - 2) / 2;
@@ -1748,302 +2051,7 @@ static void esb_thread(void)
 			bool is_ota_cmd = (received_remote_command >= ESB_PONG_FLAG_OTA_QUERY_INFO &&
 					   received_remote_command <= ESB_PONG_FLAG_OTA_UNSUPPRESS);
 			if (is_ota_cmd || now_idle - remote_command_receive_time >= REMOTE_COMMAND_DELAY_MS) {
-				switch (received_remote_command) {
-				case ESB_PONG_FLAG_SHUTDOWN:
-					LOG_WRN("Executing remote command: SHUTDOWN");
-					sys_command_shutdown();
-					break;
-
-				case ESB_PONG_FLAG_CALIBRATE:
-					LOG_INF("Executing remote command: CALIBRATE");
-					sensor_request_calibration();
-					break;
-
-				case ESB_PONG_FLAG_SIX_SIDE_CAL:
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-					LOG_INF("Executing remote command: SIX_SIDE_CAL");
-					sensor_request_calibration_6_side();
-#else
-					LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
-#endif
-					break;
-
-				case ESB_PONG_FLAG_MEOW:
-					LOG_INF("Executing remote command: MEOW");
-					remote_print_meow();
-					break;
-
-				case ESB_PONG_FLAG_SCAN:
-					LOG_INF("Executing remote command: SCAN");
-					sensor_request_scan(true);
-					break;
-
-				case ESB_PONG_FLAG_MAG_CLEAR:
-					LOG_INF("Executing remote command: MAG_CLEAR");
-					sensor_calibration_clear_mag(NULL, true);
-					break;
-
-				case ESB_PONG_FLAG_MAG_CAL:
-					LOG_INF("Executing remote command: MAG_CAL");
-					sensor_calibration_clear_mag(NULL, true);
-					sensor_request_calibration_mag();
-					break;
-
-				case ESB_PONG_FLAG_MAG_ON:
-					LOG_INF("Executing remote command: MAG_ON");
-					sensor_set_mag_enabled(true);
-					break;
-
-				case ESB_PONG_FLAG_MAG_OFF:
-					LOG_INF("Executing remote command: MAG_OFF");
-					sensor_set_mag_enabled(false);
-					break;
-
-				case ESB_PONG_FLAG_MAG_AUTO_ON:
-					LOG_INF("Executing remote command: MAG_AUTO_ON");
-					sensor_calibration_set_online_mag_enabled(true);
-					break;
-
-				case ESB_PONG_FLAG_MAG_AUTO_OFF:
-					LOG_INF("Executing remote command: MAG_AUTO_OFF");
-					sensor_calibration_set_online_mag_enabled(false);
-					break;
-
-				case ESB_PONG_FLAG_TCAL_ON:
-#if CONFIG_SENSOR_USE_TCAL
-					LOG_INF("Executing remote command: TCAL_ON");
-					sensor_tcal_set_enabled(true);
-#endif
-					break;
-
-				case ESB_PONG_FLAG_TCAL_OFF:
-#if CONFIG_SENSOR_USE_TCAL
-					LOG_INF("Executing remote command: TCAL_OFF");
-					sensor_tcal_set_enabled(false);
-#endif
-					break;
-
-				case ESB_PONG_FLAG_TDMA_ON:
-					LOG_INF("Executing remote command: TDMA_ON");
-					tdma_set_enabled(true);
-					break;
-
-				case ESB_PONG_FLAG_TDMA_OFF:
-					LOG_INF("Executing remote command: TDMA_OFF");
-					tdma_set_enabled(false);
-					break;
-
-				case ESB_PONG_FLAG_TEST_MODE_ON:
-					LOG_INF("Executing remote command: TEST_MODE_ON");
-					test_mode_set(true);
-					break;
-
-				case ESB_PONG_FLAG_TEST_MODE_OFF:
-					LOG_INF("Executing remote command: TEST_MODE_OFF");
-					test_mode_set(false);
-					break;
-
-				case ESB_PONG_FLAG_REBOOT:
-					LOG_WRN("Executing remote command: REBOOT");
-					sys_request_system_reboot(false);
-					break;
-
-				case ESB_PONG_FLAG_CLEAR:
-					LOG_WRN("Executing remote command: CLEAR (clear pairing)");
-					esb_clear_pair();
-					break;
-
-				case ESB_PONG_FLAG_DFU:
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
-					LOG_WRN("Executing remote command: DFU (enter bootloader)");
-#if CONFIG_BUILD_OUTPUT_UF2
-					NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
-					k_msleep(100);
-#endif
-					sys_request_system_reboot(false);
-#else
-					LOG_WRN("Remote command: DFU not supported (no bootloader)");
-#endif
-					break;
-
-				case ESB_PONG_FLAG_DFU_OTA:
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
-					LOG_WRN("Executing remote command: DFU_OTA (enter OTA bootloader)");
-#if CONFIG_BUILD_OUTPUT_UF2
-					NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
-					k_msleep(2);
-#endif
-					sys_request_system_reboot(false);
-#else
-					LOG_WRN("Remote command: DFU_OTA not supported (no bootloader)");
-#endif
-					break;
-
-				case ESB_PONG_FLAG_SET_CHANNEL: {
-					// Validate channel value (0-100)
-					if (received_channel_value <= 100) {
-						LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
-						// Save to retained memory
-						retained->rf_channel = (uint8_t)received_channel_value;
-						retained_update();
-						// Save to NVS
-						sys_write(
-							RF_CHANNEL_ID,
-							&retained->rf_channel,
-							&retained->rf_channel,
-							sizeof(retained->rf_channel)
-						);
-						LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
-						// Reinitialize ESB with new channel
-						esb_deinitialize();
-						k_msleep(10);
-						esb_initialize(true); // Channel will be applied inside esb_initialize
-						LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
-					} else {
-						LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
-					}
-				} break;
-
-				case ESB_PONG_FLAG_CLEAR_CHANNEL:
-					LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
-					// Clear saved channel (set to 0xFF = use default)
-					retained->rf_channel = 0xFF;
-					retained_update();
-					sys_write(
-						RF_CHANNEL_ID,
-						&retained->rf_channel,
-						&retained->rf_channel,
-						sizeof(retained->rf_channel)
-					);
-					LOG_INF("RF channel cleared, will use default on next boot");
-					// Reinitialize ESB with default channel
-					esb_deinitialize();
-					k_msleep(10);
-					esb_initialize(true); // Will use default channel since rf_channel is 0xFF
-					LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
-					break;
-
-				case ESB_PONG_FLAG_SENS_SET:
-					LOG_INF("Executing remote command: SENS_SET");
-					cmd_sens_set(received_sens_data[0], received_sens_data[1], received_sens_data[2]);
-					break;
-
-				case ESB_PONG_FLAG_SENS_RESET:
-					LOG_INF("Executing remote command: SENS_RESET");
-					cmd_sens_reset();
-					break;
-
-				case ESB_PONG_FLAG_SENS_AUTO:
-					LOG_INF(
-						"Executing remote command: SENS_AUTO axis=%u revolutions=%u",
-						received_sens_auto_axis,
-						received_sens_auto_revolutions
-					);
-					cmd_sens_auto_request(received_sens_auto_axis, received_sens_auto_revolutions);
-					break;
-
-				case ESB_PONG_FLAG_RESET_ZRO:
-					LOG_INF("Executing remote command: RESET_ZRO");
-					cmd_reset_zro();
-					break;
-
-				case ESB_PONG_FLAG_RESET_ACC:
-					LOG_INF("Executing remote command: RESET_ACC");
-					cmd_reset_acc();
-					break;
-
-				case ESB_PONG_FLAG_RESET_BAT:
-					LOG_INF("Executing remote command: RESET_BAT");
-					cmd_reset_bat();
-					break;
-
-				case ESB_PONG_FLAG_RESET_TCAL:
-					LOG_INF("Executing remote command: RESET_TCAL");
-					cmd_reset_tcal();
-					break;
-
-				case ESB_PONG_FLAG_TCAL_AUTO_ON:
-#if CONFIG_SENSOR_USE_TCAL
-					LOG_INF("Executing remote command: TCAL_AUTO_ON");
-					sensor_tcal_set_auto_calibration(true);
-#else
-					LOG_WRN("Remote command: TCAL_AUTO_ON not supported (T-Cal disabled in config)");
-#endif
-					break;
-
-				case ESB_PONG_FLAG_TCAL_AUTO_OFF:
-#if CONFIG_SENSOR_USE_TCAL
-					LOG_INF("Executing remote command: TCAL_AUTO_OFF");
-					sensor_tcal_set_auto_calibration(false);
-#else
-					LOG_WRN("Remote command: TCAL_AUTO_OFF not supported (T-Cal disabled in config)");
-#endif
-					break;
-
-				case ESB_PONG_FLAG_PING:
-					LOG_INF("Executing remote command: PING");
-					cmd_ping_start();
-					break;
-
-				case ESB_PONG_FLAG_FUSION_RESET:
-					LOG_INF("Executing remote command: FUSION_RESET");
-					cmd_fusion_reset();
-					break;
-
-				case ESB_PONG_FLAG_TCAL_BOOT_ON:
-#if CONFIG_SENSOR_USE_TCAL
-					LOG_INF("Executing remote command: TCAL_BOOT_ON");
-					sensor_boot_cal_set_enabled(true);
-#else
-					LOG_WRN("Remote command: TCAL_BOOT_ON not supported (T-Cal disabled in config)");
-#endif
-					break;
-
-				case ESB_PONG_FLAG_TCAL_BOOT_OFF:
-#if CONFIG_SENSOR_USE_TCAL
-					LOG_INF("Executing remote command: TCAL_BOOT_OFF");
-					sensor_boot_cal_set_enabled(false);
-#else
-					LOG_WRN("Remote command: TCAL_BOOT_OFF not supported (T-Cal disabled in config)");
-#endif
-					break;
-
-				case ESB_PONG_FLAG_DATA_COLLECT_ON:
-					LOG_INF("Executing remote command: DATA_COLLECT_ON");
-					connection_set_data_collection(true);
-					test_mode_set(true);  // Prevent sleep during data collection
-					break;
-
-				case ESB_PONG_FLAG_DATA_COLLECT_OFF:
-					LOG_INF("Executing remote command: DATA_COLLECT_OFF");
-					connection_set_data_collection(false);
-					test_mode_set(false);
-					break;
-
-				case ESB_PONG_FLAG_OTA_QUERY_INFO:
-					LOG_INF("Executing remote command: OTA_QUERY_INFO");
-					esb_ota_handle_query_info();
-					break;
-
-				case ESB_PONG_FLAG_OTA_ABORT:
-					LOG_WRN("Executing remote command: OTA_ABORT");
-					esb_ota_handle_abort();
-					break;
-
-				case ESB_PONG_FLAG_OTA_SUPPRESS:
-					LOG_INF("Executing remote command: OTA_SUPPRESS (reducing poll rate)");
-					connection_set_ota_suppressed(true);
-					break;
-
-				case ESB_PONG_FLAG_OTA_UNSUPPRESS:
-					LOG_INF("Executing remote command: OTA_UNSUPPRESS (resuming normal rate)");
-					connection_set_ota_suppressed(false);
-					break;
-
-				default:
-					LOG_WRN("Unknown remote command: 0x%02X", received_remote_command);
-					break;
-				}
+				esb_remote_command_execute(received_remote_command);
 
 				acked_remote_command = received_remote_command;
 
