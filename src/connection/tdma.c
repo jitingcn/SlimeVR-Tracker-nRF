@@ -25,17 +25,25 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 LOG_MODULE_REGISTER(tdma, LOG_LEVEL_INF);
 
-static uint8_t tdma_slot_index = 0;
-static bool tdma_runtime_enabled = false; /* disabled until receiver sends config */
+/*
+ * Pack slot_index[7:0] | slot_ticks[15:8] | frame_ticks[31:16] into one atomic
+ * so ESB RX can publish and TX thread can snapshot without irq_lock.
+ */
+static atomic_t tdma_cfg_pack;
+static atomic_t tdma_epoch_at;
+static atomic_t tdma_runtime_enabled;
 
-/* Dynamic TDMA parameters (updated from receiver PONG) */
-static uint8_t tdma_dyn_slot_ticks = TDMA_SLOT_TICKS;
-static uint8_t tdma_dyn_total_slots = TDMA_NUM_TRACKERS;
-static uint16_t tdma_dyn_frame_ticks = TDMA_FRAME_TICKS;
-static uint8_t tdma_dyn_epoch = 0;
+static uint8_t tdma_slot_index_init; /* used only before first dyn config */
+
+#define TDMA_PACK(slot, sticks, frame) \
+	(((uint32_t)(uint8_t)(slot)) | ((uint32_t)(uint8_t)(sticks) << 8) | ((uint32_t)(uint16_t)(frame) << 16))
+#define TDMA_UNPACK_SLOT(p) ((uint8_t)((p) & 0xFFu))
+#define TDMA_UNPACK_STICKS(p) ((uint8_t)(((p) >> 8) & 0xFFu))
+#define TDMA_UNPACK_FRAME(p) ((uint16_t)(((p) >> 16) & 0xFFFFu))
 
 /* Diagnostic counters for TDMA slot hit/miss tracking */
 static uint32_t tdma_slot_hits = 0;
@@ -45,10 +53,14 @@ static int64_t tdma_stats_last_ts = 0;
 
 void tdma_init(uint8_t tracker_id)
 {
-	tdma_slot_index = tracker_id % TDMA_NUM_TRACKERS;
+	tdma_slot_index_init = tracker_id % TDMA_NUM_TRACKERS;
+	atomic_set(&tdma_cfg_pack,
+		   (atomic_val_t)TDMA_PACK(tdma_slot_index_init, TDMA_SLOT_TICKS, TDMA_FRAME_TICKS));
+	atomic_set(&tdma_epoch_at, 0);
+	atomic_set(&tdma_runtime_enabled, 0);
 #if CONFIG_CONNECTION_TDMA
 	LOG_INF("TDMA init: slot=%u/%u, frame=%u ticks (~%u.%01u ms), ~%u TPS/tracker",
-		tdma_slot_index, TDMA_NUM_TRACKERS,
+		tdma_slot_index_init, TDMA_NUM_TRACKERS,
 		TDMA_FRAME_TICKS,
 		(TDMA_FRAME_TICKS * 1000) / 32768,
 		((TDMA_FRAME_TICKS * 10000) / 32768) % 10,
@@ -78,14 +90,14 @@ void tdma_wait_for_slot(void)
 #if !CONFIG_CONNECTION_TDMA
 	return;
 #else
-	if (!tdma_runtime_enabled) {
+	if (!atomic_get(&tdma_runtime_enabled)) {
 		return;
 	}
 
-	/* Read dynamic parameters (single-threaded connection thread, no race) */
-	uint16_t frame_ticks = tdma_dyn_frame_ticks;
-	uint8_t slot_ticks = tdma_dyn_slot_ticks;
-	uint8_t slot_index = tdma_slot_index;
+	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
+	uint16_t frame_ticks = TDMA_UNPACK_FRAME(pack);
+	uint8_t slot_ticks = TDMA_UNPACK_STICKS(pack);
+	uint8_t slot_index = TDMA_UNPACK_SLOT(pack);
 
 	if (frame_ticks == 0 || slot_ticks == 0) {
 		return; /* invalid config — transmit immediately */
@@ -203,8 +215,8 @@ void tdma_wait_for_slot(void)
 void tdma_set_enabled(bool enabled)
 {
 #if CONFIG_CONNECTION_TDMA
-	if (tdma_runtime_enabled != enabled) {
-		tdma_runtime_enabled = enabled;
+	atomic_val_t prev = atomic_set(&tdma_runtime_enabled, enabled ? 1 : 0);
+	if ((prev != 0) != enabled) {
 		LOG_INF("TDMA %s at runtime", enabled ? "enabled" : "disabled");
 	}
 #else
@@ -216,7 +228,7 @@ void tdma_set_enabled(bool enabled)
 bool tdma_is_enabled(void)
 {
 #if CONFIG_CONNECTION_TDMA
-	return tdma_runtime_enabled;
+	return atomic_get(&tdma_runtime_enabled) != 0;
 #else
 	return false;
 #endif
@@ -235,21 +247,19 @@ void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 		return;
 	}
 
-	tdma_slot_index = slot_index;
-	tdma_dyn_total_slots = total_slots;
-	tdma_dyn_slot_ticks = slot_ticks;
-	tdma_dyn_frame_ticks = (uint16_t)slot_ticks * total_slots;
-	tdma_dyn_epoch = epoch;
+	uint16_t frame_ticks = (uint16_t)slot_ticks * total_slots;
+	atomic_set(&tdma_cfg_pack, (atomic_val_t)TDMA_PACK(slot_index, slot_ticks, frame_ticks));
+	atomic_set(&tdma_epoch_at, epoch);
+	bool newly_enabled = (atomic_set(&tdma_runtime_enabled, 1) == 0);
 
-	if (!tdma_runtime_enabled) {
-		tdma_runtime_enabled = true;
+	if (newly_enabled) {
 		LOG_INF("TDMA auto-enabled by receiver config");
 	}
 
 	LOG_INF("TDMA config: slot=%u/%u, slot_ticks=%u, frame=%u ticks, ~%u TPS (epoch=%u)",
 		slot_index, total_slots, slot_ticks,
-		tdma_dyn_frame_ticks,
-		tdma_dyn_frame_ticks > 0 ? 32768 / tdma_dyn_frame_ticks : 0,
+		frame_ticks,
+		frame_ticks > 0 ? 32768 / frame_ticks : 0,
 		epoch);
 #else
 	ARG_UNUSED(slot_index);
@@ -262,7 +272,7 @@ void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 uint8_t tdma_get_config_epoch(void)
 {
 #if CONFIG_CONNECTION_TDMA
-	return tdma_dyn_epoch;
+	return (uint8_t)atomic_get(&tdma_epoch_at);
 #else
 	return 0;
 #endif

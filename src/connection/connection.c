@@ -39,36 +39,63 @@
 #include <string.h>
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
-/* Published under irq_lock so connection_thread never reads a torn quat/accel/mag. */
+/*
+ * Seqlock publish: sensor thread writes, connection thread reads.
+ * Odd seq = write in progress; reader retries. No irq_lock.
+ */
 static float sensor_q[4], sensor_a[3], sensor_m[3];
-static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
 static bool send_precise_quat;
+static atomic_t sensor_qa_seq;
+static atomic_t sensor_m_seq;
+static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
 static K_SEM_DEFINE(connection_wake_sem, 0, 1);
 
 static void connection_sensor_snap_q_a(float q_out[4], float a_out[3])
 {
-	unsigned key = irq_lock();
-	memcpy(q_out, sensor_q, sizeof(sensor_q));
-	memcpy(a_out, sensor_a, sizeof(sensor_a));
-	irq_unlock(key);
+	unsigned s;
+	do {
+		s = (unsigned)atomic_get(&sensor_qa_seq);
+		if (s & 1U) {
+			k_yield(); /* writer mid-update; never busy-spin to WDT */
+			continue;
+		}
+		memcpy(q_out, sensor_q, sizeof(sensor_q));
+		memcpy(a_out, sensor_a, sizeof(sensor_a));
+	} while ((unsigned)atomic_get(&sensor_qa_seq) != s);
 }
 
 static void connection_sensor_snap_q_m(float q_out[4], float m_out[3])
 {
-	unsigned key = irq_lock();
-	memcpy(q_out, sensor_q, sizeof(sensor_q));
-	memcpy(m_out, sensor_m, sizeof(sensor_m));
-	irq_unlock(key);
+	unsigned sq;
+	unsigned sm;
+	do {
+		sq = (unsigned)atomic_get(&sensor_qa_seq);
+		sm = (unsigned)atomic_get(&sensor_m_seq);
+		if ((sq | sm) & 1U) {
+			k_yield();
+			continue;
+		}
+		memcpy(q_out, sensor_q, sizeof(sensor_q));
+		memcpy(m_out, sensor_m, sizeof(sensor_m));
+	} while ((unsigned)atomic_get(&sensor_qa_seq) != sq || (unsigned)atomic_get(&sensor_m_seq) != sm);
 }
 
 static bool connection_sensor_get_precise_quat(void)
 {
-	unsigned key = irq_lock();
-	bool precise = send_precise_quat;
-	irq_unlock(key);
+	unsigned s;
+	bool precise;
+	do {
+		s = (unsigned)atomic_get(&sensor_qa_seq);
+		if (s & 1U) {
+			k_yield();
+			continue;
+		}
+		precise = send_precise_quat;
+	} while ((unsigned)atomic_get(&sensor_qa_seq) != s);
 	return precise;
 }
 
@@ -360,11 +387,12 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 		return;
 	}
 
-	unsigned key = irq_lock();
+	unsigned s = (unsigned)atomic_get(&sensor_qa_seq);
+	atomic_set(&sensor_qa_seq, (atomic_val_t)(s + 1U)); /* odd = writing */
 	send_precise_quat = q_epsilon(q, sensor_q, 0.005f);
 	memcpy(sensor_q, q, sizeof(sensor_q));
 	memcpy(sensor_a, a, sizeof(sensor_a));
-	irq_unlock(key);
+	atomic_set(&sensor_qa_seq, (atomic_val_t)(s + 2U)); /* even = stable */
 	quat_update_time = k_uptime_get();
 	connection_signal_wake();
 }
@@ -374,9 +402,10 @@ static int64_t last_mag_time = 0;
 
 void connection_update_sensor_mag(float *m)
 {
-	unsigned key = irq_lock();
+	unsigned s = (unsigned)atomic_get(&sensor_m_seq);
+	atomic_set(&sensor_m_seq, (atomic_val_t)(s + 1U));
 	memcpy(sensor_m, m, sizeof(sensor_m));
-	irq_unlock(key);
+	atomic_set(&sensor_m_seq, (atomic_val_t)(s + 2U));
 	mag_update_time = k_uptime_get();
 	connection_signal_wake();
 }
@@ -577,9 +606,9 @@ static uint8_t raw_metadata_buf[RAW_PACKET_SIZE];
 #define RAW_META_CAL_DRIP_MS 200
 static int64_t raw_meta_cal_last_ms = 0;
 
-/* Latest mag data for piggybacking onto IMU packets */
+/* Latest mag for piggyback: seqlock; 0=empty, odd=writing, even>0=valid */
 static float latest_mag[3] = {0};
-static bool latest_mag_valid = false;
+static atomic_t latest_mag_seq;
 
 /* Calibration drip-feed state (one packet per connection cycle) */
 static bool raw_cal_pending = false;
@@ -658,11 +687,13 @@ void connection_set_data_collection(bool enable)
 		raw_metadata_sent = false;
 		raw_metadata_pending = false;
 		raw_meta_cal_last_ms = 0;
-		latest_mag_valid = false;
+		atomic_set(&latest_mag_seq, 0);
 		raw_cal_pending = false;
 		/* Reset ARQ state */
 		memset(raw_ring_valid, 0, sizeof(raw_ring_valid));
+		unsigned key = irq_lock();
 		raw_retx_count = 0;
+		irq_unlock(key);
 		raw_retx_total = 0;
 	}
 	data_collection_active = enable;
@@ -716,8 +747,12 @@ void connection_queue_raw_mag(const float mag[3])
 	}
 
 	/* Store latest mag for piggybacking onto IMU packets */
-	connection_align_mag_body(mag, latest_mag);
-	latest_mag_valid = true;
+	float aligned[3];
+	connection_align_mag_body(mag, aligned);
+	unsigned s = (unsigned)atomic_get(&latest_mag_seq) & ~1U;
+	atomic_set(&latest_mag_seq, (atomic_val_t)(s + 1U));
+	memcpy(latest_mag, aligned, sizeof(latest_mag));
+	atomic_set(&latest_mag_seq, (atomic_val_t)(s + 2U));
 }
 
 void connection_send_raw_metadata(
@@ -887,23 +922,28 @@ bool connection_process_raw_data(void)
 	}
 
 	/* Priority 1: Process retransmit requests from ARQ ACK payloads */
-	if (raw_retx_count > 0) {
-		uint16_t seq = raw_retx_queue[0];
-		uint16_t idx = seq % RAW_RING_SIZE;
+	uint16_t retx_seq = 0;
+	bool have_retx = false;
+	{
+		unsigned irq_key = irq_lock();
+		if (raw_retx_count > 0) {
+			retx_seq = raw_retx_queue[0];
+			have_retx = true;
+			for (uint8_t i = 0; i + 1 < raw_retx_count; i++) {
+				raw_retx_queue[i] = raw_retx_queue[i + 1];
+			}
+			raw_retx_count--;
+		}
+		irq_unlock(irq_key);
+	}
+	if (have_retx) {
+		uint16_t idx = retx_seq % RAW_RING_SIZE;
 
-		if (raw_ring_valid[idx] && raw_ring_seq[idx] == seq) {
+		if (raw_ring_valid[idx] && raw_ring_seq[idx] == retx_seq) {
 			/* Retransmit from ring buffer */
 			esb_write(raw_ring[idx], false, RAW_PACKET_SIZE);
 			raw_retx_total++;
 		}
-
-		/* Remove from queue (shift remaining entries) */
-		unsigned irq_key = irq_lock();
-		for (uint8_t i = 0; i + 1 < raw_retx_count; i++) {
-			raw_retx_queue[i] = raw_retx_queue[i + 1];
-		}
-		raw_retx_count--;
-		irq_unlock(irq_key);
 		return true;
 	}
 
@@ -959,12 +999,26 @@ bool connection_process_raw_data(void)
 
 		/* Piggyback latest mag if available */
 		uint8_t flags = 0;
-		if (latest_mag_valid) {
-			memcpy(&buf[32], &latest_mag[0], 4);
-			memcpy(&buf[36], &latest_mag[1], 4);
-			memcpy(&buf[40], &latest_mag[2], 4);
+		float mag_snap[3];
+		bool mag_ok = false;
+		{
+			unsigned s;
+			do {
+				s = (unsigned)atomic_get(&latest_mag_seq);
+				if (s == 0U || (s & 1U)) {
+					break;
+				}
+				memcpy(mag_snap, latest_mag, sizeof(mag_snap));
+			} while ((unsigned)atomic_get(&latest_mag_seq) != s);
+			if (s != 0U && !(s & 1U) && atomic_cas(&latest_mag_seq, (atomic_val_t)s, 0)) {
+				mag_ok = true;
+			}
+		}
+		if (mag_ok) {
+			memcpy(&buf[32], &mag_snap[0], 4);
+			memcpy(&buf[36], &mag_snap[1], 4);
+			memcpy(&buf[40], &mag_snap[2], 4);
 			flags |= 0x01; /* has_new_mag */
-			latest_mag_valid = false;
 		}
 
 		buf[44] = flags;
