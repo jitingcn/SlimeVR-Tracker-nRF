@@ -43,11 +43,46 @@ static void console_thread(void);
 #if USB_EXISTS
 static struct k_thread console_thread_id;
 static K_THREAD_STACK_DEFINE(console_thread_id_stack, 2048);
+static bool console_thread_running;
+static bool console_thread_joinable;
+static bool console_start_pending;
+static void console_lifecycle_work_handler(struct k_work *work);
+static K_WORK_DEFINE(console_lifecycle_work, console_lifecycle_work_handler);
+
+static void console_thread_start_now(void)
+{
+	k_thread_create(
+		&console_thread_id,
+		console_thread_id_stack,
+		K_THREAD_STACK_SIZEOF(console_thread_id_stack),
+		(k_thread_entry_t)console_thread,
+		NULL,
+		NULL,
+		NULL,
+		6,
+		0,
+		K_NO_WAIT
+	);
+	console_thread_running = true;
+}
+
+static void console_lifecycle_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (console_thread_joinable) {
+		(void)k_thread_join(&console_thread_id, K_FOREVER);
+		console_thread_joinable = false;
+	}
+	if (console_start_pending && !console_thread_running) {
+		console_start_pending = false;
+		console_thread_start_now();
+	}
+}
 #else
 K_THREAD_DEFINE(console_thread_id, 2048, console_thread, NULL, NULL, NULL, 6, 0, 0);
 #endif
 
-#define DFU_EXISTS CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER)
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
 #define NRF5_BOOTLOADER CONFIG_BOARD_HAS_NRF5_BOOTLOADER
 
@@ -79,25 +114,30 @@ static const char *meow_suffixes[]
 void console_thread_create(void)
 {
 #if USB_EXISTS
-	k_thread_create(
-		&console_thread_id,
-		console_thread_id_stack,
-		K_THREAD_STACK_SIZEOF(console_thread_id_stack),
-		(k_thread_entry_t)console_thread,
-		NULL,
-		NULL,
-		NULL,
-		6,
-		0,
-		K_NO_WAIT
-	);
+	if (console_thread_running) {
+		return;
+	}
+	if (console_thread_joinable) {
+		console_start_pending = true;
+		k_work_submit(&console_lifecycle_work);
+		return;
+	}
+	console_thread_start_now();
 #endif
 }
 
 void console_thread_abort(void)
 {
 #if USB_EXISTS
+	if (!console_thread_running) {
+		return;
+	}
+	console_start_pending = false;
 	k_thread_abort(&console_thread_id);
+	console_thread_running = false;
+	console_thread_joinable = true;
+	/* Join on system workqueue — USB status_cb must not block forever. */
+	k_work_submit(&console_lifecycle_work);
 #endif
 }
 
@@ -1218,11 +1258,11 @@ static void console_cmd_channel(size_t argc, char **argv)
 				sizeof(retained->rf_channel)
 			);
 			printk("RF channel saved to NVS: %u\n", retained->rf_channel);
-			// Reinitialize ESB with new channel
-			esb_deinitialize();
-			k_msleep(10);
-			esb_initialize(true); // Channel will be applied inside esb_initialize
-			printk("ESB reinitialized with channel %u\n", retained->rf_channel);
+			if (esb_reinitialize()) {
+				printk("Error: ESB reinitialize failed\n");
+			} else {
+				printk("ESB reinitialized with channel %u\n", retained->rf_channel);
+			}
 		}
 	}
 }
@@ -1237,11 +1277,11 @@ static void console_cmd_clearchannel(size_t argc, char **argv)
 	retained_update();
 	sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
 	printk("RF channel cleared, will use default on next boot\n");
-	// Reinitialize ESB with default channel
-	esb_deinitialize();
-	k_msleep(10);
-	esb_initialize(true); // Will use default channel since rf_channel is 0xFF
-	printk("ESB reinitialized with default channel\n");
+	if (esb_reinitialize()) {
+		printk("Error: ESB reinitialize failed\n");
+	} else {
+		printk("ESB reinitialized with default channel\n");
+	}
 }
 
 #if DFU_EXISTS
