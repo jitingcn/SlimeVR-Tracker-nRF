@@ -294,6 +294,9 @@ int read_batt_mV(int* out) {
 		return rc;
 	}
 
+	/* Divider GPIO needs settle before first ADC sample. */
+	k_usleep(200);
+
 	int batt_mV = battery_sample();
 
 	if (batt_mV < 0) {

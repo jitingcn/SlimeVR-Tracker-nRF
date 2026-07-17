@@ -29,6 +29,7 @@ struct retained_data *retained = (struct retained_data *)DT_REG_ADDR(MEMORY_REGI
 #define RETAINED_CHECKED_SIZE (RETAINED_CRC_OFFSET + sizeof(retained->crc))
 
 static uint64_t init_time;
+static K_MUTEX_DEFINE(retained_lock);
 
 static int retained_init(void)
 {
@@ -109,6 +110,8 @@ bool retained_validate(void)
 
 void retained_update(void)
 {
+	k_mutex_lock(&retained_lock, K_FOREVER);
+
 	uint64_t now = k_uptime_ticks();
 
 	retained->uptime_sum += (now - retained->uptime_latest);
@@ -118,4 +121,6 @@ void retained_update(void)
 				  RETAINED_CRC_OFFSET);
 
 	retained->crc = sys_cpu_to_le32(crc);
+
+	k_mutex_unlock(&retained_lock);
 }

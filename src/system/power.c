@@ -43,7 +43,7 @@ static bool power_init = false;
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
 static bool sys_WOM(bool force);
-static void sys_system_off(void);
+static bool sys_system_off(void);
 static void sys_system_reboot(void);
 
 enum sys_power_request {
@@ -399,6 +399,12 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 #endif
 	// Set system off
 	uint8_t pin_config = sensor_setup_WOM(); // enable WOM feature
+	if (pin_config == 0xFF) {
+		/* Already past configure_system_off; cannot restore cleanly. */
+		LOG_ERR("IMU wake up setup failed after shutdown prep, rebooting");
+		sys_request_system_reboot(true);
+		return true;
+	}
 	LOG_INF("Configured IMU wake up");
 #if CONFIG_SENSOR_FAST_WOM_WAKE && NRF_POWER_HAS_GPREGRET \
 	&& (defined(POWER_GPREGRET2_GPREGRET_Msk) || defined(POWER_GPREGRET_MaxCount))
@@ -427,13 +433,14 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 #endif
 }
 
-static void sys_system_off(void) // TODO: add timeout
+/* Returns true when the request is consumed; false to keep it queued. */
+static bool sys_system_off(void) // TODO: add timeout
 {
 	LOG_INF("System off requested");
 	/* Block shutdown during OTA (active or suppressed) */
 	if (esb_ota_is_active() || connection_get_ota_suppressed()) {
 		LOG_INF("System off blocked by OTA");
-		return;
+		return false; /* keep queued until OTA finishes */
 	}
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sensor_calibration_online_mag_cold_start();
@@ -466,6 +473,7 @@ static void sys_system_off(void) // TODO: add timeout
 	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
 #endif
 	sys_poweroff();
+	return true;
 }
 
 static void sys_system_reboot(void) // TODO: add timeout
@@ -589,7 +597,7 @@ static void power_thread(void)
 			consumed = sys_WOM(true);
 			break;
 		case SYS_POWER_REQ_SYSTEM_OFF:
-			sys_system_off();
+			consumed = sys_system_off();
 			break;
 		case SYS_POWER_REQ_REBOOT:
 			sys_system_reboot();

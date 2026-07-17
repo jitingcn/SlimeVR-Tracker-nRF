@@ -305,11 +305,11 @@ static void esb_remote_cmd_set_channel(void)
 			sizeof(retained->rf_channel)
 		);
 		LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
-		// Reinitialize ESB with new channel
-		esb_deinitialize();
-		k_msleep(10);
-		esb_initialize(true); // Channel will be applied inside esb_initialize
-		LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
+		if (esb_reinitialize()) {
+			LOG_ERR("ESB reinitialize failed after channel change");
+		} else {
+			LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
+		}
 	} else {
 		LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
 	}
@@ -328,11 +328,11 @@ static void esb_remote_cmd_clear_channel(void)
 		sizeof(retained->rf_channel)
 	);
 	LOG_INF("RF channel cleared, will use default on next boot");
-	// Reinitialize ESB with default channel
-	esb_deinitialize();
-	k_msleep(10);
-	esb_initialize(true); // Will use default channel since rf_channel is 0xFF
-	LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
+	if (esb_reinitialize()) {
+		LOG_ERR("ESB reinitialize failed after channel clear");
+	} else {
+		LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
+	}
 }
 
 static void esb_remote_cmd_sens_set(void)
@@ -1347,6 +1347,7 @@ void event_handler(struct esb_evt const *event)
 					}
 					extern volatile uint16_t raw_retx_queue[];
 					extern volatile uint8_t  raw_retx_count;
+					unsigned retx_key = irq_lock();
 					for (uint8_t i = 0; i < retx_n; i++) {
 						uint16_t seq = sys_get_be16(&rx_payload.data[2 + i * 2]);
 						/* Deduplicate */
@@ -1361,6 +1362,7 @@ void event_handler(struct esb_evt const *event)
 							raw_retx_queue[raw_retx_count++] = seq;
 						}
 					}
+					irq_unlock(retx_key);
 				}
 				/* OTA packets from receiver (in ACK payload) —
 				 * queue for deferred processing in thread context
@@ -1479,11 +1481,19 @@ int esb_initialize(bool tx)
 void esb_deinitialize(void)
 {
 	if (esb_initialized) {
+		/* Clear first so esb_write / connection_thread stop before radio teardown. */
 		esb_initialized = false;
-		k_msleep(3); // wait for pending transmissions
+		k_msleep(5); // wait for in-flight writers to observe flag + drain TX
 		esb_disable();
 	}
 	esb_initialized = false;
+}
+
+int esb_reinitialize(void)
+{
+	esb_deinitialize();
+	k_msleep(10);
+	return esb_initialize(true);
 }
 
 inline void esb_set_addr_discovery(void)
@@ -1810,12 +1820,15 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		queue_status = dup_ret;
 	}
 #endif
-	// Record ping history metadata (timing updated after TDMA wait, just before TX)
+	/* Zero ping_ticks until TX stamp — avoid RX binding new counter to old ticks. */
 	if (is_ping && queue_status == 0 && data_length == ESB_PING_LEN) {
 		ping_pending = true;
 		ping_failed = false;
 		ping_counter++;
+		unsigned key = irq_lock();
 		ping_history[ping_history_idx].counter = tx_payload.data[2];
+		ping_history[ping_history_idx].ping_ticks = 0;
+		irq_unlock(key);
 		ping_ctr_sent = tx_payload.data[2];
 		LOG_DBG("PING queued (ctr=%u)", (unsigned)tx_payload.data[2]);
 	} else if (is_ping && queue_status != 0) {
@@ -1917,9 +1930,11 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 * moment the radio actually begins transmitting.
 	 */
 	if (tx_payload.data[0] == ESB_PING_TYPE && queue_status == 0) {
+		unsigned key = irq_lock();
 		ping_history[ping_history_idx].ping_ticks = sys_clock_tick_get_32();
-		ping_send_time = k_uptime_get();
 		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
+		irq_unlock(key);
+		ping_send_time = k_uptime_get();
 	}
 	/*
 	 * In MANUAL_START mode the radio auto-drains the FIFO once started.

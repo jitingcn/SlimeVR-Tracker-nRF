@@ -46,6 +46,8 @@ void clocks_request_start(uint32_t delay_us);
 void clocks_request_stop(uint32_t delay_us);
 int esb_initialize(bool);
 void esb_deinitialize(void);
+/* Quiesce TX then re-init PTX (channel/NVS already applied in esb_initialize). */
+int esb_reinitialize(void);
 
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);
