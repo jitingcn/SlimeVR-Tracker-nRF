@@ -39,22 +39,24 @@ bool esb_ota_flash_ready(void)
 	return device_is_ready(flash_dev);
 }
 
-void esb_ota_flash_erase_page(uint32_t addr)
+int esb_ota_flash_erase_page(uint32_t addr)
 {
 	LOG_DBG("OTA: Erasing flash page at 0x%05X", addr);
 	int err = flash_erase(flash_dev, addr, OTA_FLASH_PAGE_SIZE);
 	if (err) {
 		LOG_ERR("OTA: Flash erase failed at 0x%05X (err %d)", addr, err);
 	}
+	return err;
 }
 
-void esb_ota_flash_write_page(uint32_t addr, const uint8_t *data, size_t len)
+int esb_ota_flash_write_page(uint32_t addr, const uint8_t *data, size_t len)
 {
 	LOG_DBG("OTA: Writing %zu bytes to flash at 0x%05X", len, addr);
 	int err = flash_write(flash_dev, addr, data, len);
 	if (err) {
 		LOG_ERR("OTA: Flash write failed at 0x%05X (err %d)", addr, err);
 	}
+	return err;
 }
 
 int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb)
@@ -77,21 +79,31 @@ int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb)
 
 	/* Erase and write to staging area */
 	if (flash_addr > *pb->last_erased) {
-		esb_ota_flash_erase_page(flash_addr);
+		int err = esb_ota_flash_erase_page(flash_addr);
+		if (err) {
+			return err;
+		}
 		*pb->last_erased = flash_addr;
 	}
-	esb_ota_flash_write_page(flash_addr, pb->buf, write_len);
+	int err = esb_ota_flash_write_page(flash_addr, pb->buf, write_len);
+	if (err) {
+		return err;
+	}
 
-	/* Advance to next page */
+	/* Advance to next page — current page write already committed. */
 	*pb->flash_addr += OTA_FLASH_PAGE_SIZE;
 	*pb->offset = 0;
 	memset(pb->buf, 0xFF, OTA_FLASH_PAGE_SIZE);
 
-	/* Pre-erase next page in staging area */
+	/* Pre-erase next page (best-effort). Next flush retries via last_erased. */
 	uint32_t next_page = *pb->flash_addr;
 	if (next_page < pb->staging_base + pb->image_size) {
-		esb_ota_flash_erase_page(next_page);
-		*pb->last_erased = next_page;
+		err = esb_ota_flash_erase_page(next_page);
+		if (err) {
+			LOG_WRN("OTA: next-page pre-erase failed at 0x%05X (err %d)", next_page, err);
+		} else {
+			*pb->last_erased = next_page;
+		}
 	}
 
 	return 0;
@@ -262,7 +274,8 @@ uint32_t esb_ota_flash_compute_crc32(uint32_t addr, uint32_t size, uint8_t *scra
 		int err = flash_read(flash_dev, offset, scratch, chunk);
 		if (err) {
 			LOG_ERR("OTA: Flash read failed at 0x%05X (err %d)", offset, err);
-			return 0;
+			/* Nonzero poison so callers cannot treat failure as a valid CRC. */
+			return 0xFFFFFFFFu;
 		}
 		crc = crc32_ieee_update(crc, scratch, chunk);
 		offset += chunk;
@@ -287,7 +300,8 @@ uint16_t esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_
 		int err = flash_read(flash_dev, offset, scratch, chunk);
 		if (err) {
 			LOG_ERR("OTA: Flash read failed at 0x%05X (err %d)", offset, err);
-			return 0;
+			/* 0 means "skip CRC" in Adafruit BL — never return it on I/O fail. */
+			return 0xFFFF;
 		}
 
 		for (size_t i = 0; i < chunk; i++) {
@@ -327,11 +341,18 @@ int esb_ota_flash_prepare_bootloader_settings(uint32_t staging_base, uint32_t im
 	settings.bank_0_crc = esb_ota_flash_compute_crc16_nordic(staging_base, image_size,
 								scratch);
 	LOG_INF(">>> CRC16 computed: 0x%04X", settings.bank_0_crc);
-	if (settings.bank_0_crc == 0) {
-		LOG_WRN("OTA: CRC-16 is 0, bootloader will skip CRC check");
-	} else {
-		LOG_INF("OTA: Bootloader CRC-16 = 0x%04X", settings.bank_0_crc);
+	if (settings.bank_0_crc == 0xFFFF) {
+		LOG_ERR("OTA: CRC-16 read failed, refusing activate");
+		bl_settings_prepared = false;
+		return -EIO;
 	}
+	if (settings.bank_0_crc == 0) {
+		/* Legitimate zero is rare; still refuse skip-check activate. */
+		LOG_ERR("OTA: CRC-16 is 0; refusing activate (bootloader would skip check)");
+		bl_settings_prepared = false;
+		return -EINVAL;
+	}
+	LOG_INF("OTA: Bootloader CRC-16 = 0x%04X", settings.bank_0_crc);
 
 	prepared_bl_settings = settings;
 	bl_settings_prepared = true;

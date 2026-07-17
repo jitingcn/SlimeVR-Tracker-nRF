@@ -328,6 +328,10 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 					/* Data payload starts at rx_buf[6], length = rx_len - 4 */
 					uint32_t data_len = rx_len - 4;
 					if (data_len > 60) data_len = 60;
+					/* Clamp so leftover payload cannot write past image_size. */
+					if (bytes_received + data_len > p->image_size) {
+						data_len = p->image_size - bytes_received;
+					}
 
 					/* Copy to page buffer, handling page boundary splits */
 					uint32_t data_off = 0;

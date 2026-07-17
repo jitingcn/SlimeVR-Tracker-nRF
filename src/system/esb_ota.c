@@ -355,10 +355,17 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	ota.staging_base &= ~(OTA_FLASH_PAGE_SIZE - 1); /* Page-align */
 	ota.page_buf_flash_addr = ota.staging_base;
 
-	/* Verify staging area doesn't overlap with running firmware */
-	if (ota.staging_base < OTA_FLASH_BASE + image_size) {
-		LOG_ERR("OTA BEGIN: image too large for staging (%u bytes, staging at 0x%05X)",
-			image_size, ota.staging_base);
+	/* Verify staging area doesn't overlap with currently running firmware.
+	 * Gate on live image end (_flash_used), not the new image_size — a smaller
+	 * update must not place staging over still-executing code. */
+	extern char _flash_used[];
+	uint32_t running_end = (uint32_t)_flash_used;
+	if (running_end < OTA_FLASH_BASE) {
+		running_end = OTA_FLASH_BASE;
+	}
+	if (ota.staging_base < running_end) {
+		LOG_ERR("OTA BEGIN: staging 0x%05X overlaps running firmware (ends 0x%05X, new size %u)",
+			ota.staging_base, running_end, image_size);
 		ota.state = OTA_STATE_ERROR;
 		ota.error_code = OTA_STATUS_SIZE_ERROR;
 		ota_send_status();

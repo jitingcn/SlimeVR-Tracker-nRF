@@ -22,8 +22,8 @@ struct esb_ota_page_buf {
 
 bool esb_ota_flash_ready(void);
 
-void esb_ota_flash_erase_page(uint32_t addr);
-void esb_ota_flash_write_page(uint32_t addr, const uint8_t *data, size_t len);
+int esb_ota_flash_erase_page(uint32_t addr);
+int esb_ota_flash_write_page(uint32_t addr, const uint8_t *data, size_t len);
 int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb);
 
 uint32_t esb_ota_flash_compute_crc32(uint32_t addr, uint32_t size, uint8_t *scratch);
