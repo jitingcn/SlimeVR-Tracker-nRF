@@ -1087,19 +1087,23 @@ void sensor_record_wom_sleep(void)
 
 void sensor_shutdown(void) // Communicate all imus to shut down
 {
-	int err = sensor_request_scan(false); // try initialization if possible
-	if (mag_available || !err) {
-		sys_interface_resume();
-		if (mag_available && mag_enabled) { // only shutdown magnetometer when it is actively enabled
-			sensor_mag->shutdown();
-		}
-		if (!err) {
-			sensor_imu->shutdown();
-		}
-		sys_interface_suspend();
-	} else {
-		LOG_ERR("Failed to shutdown sensors");
+	/*
+	 * Do not call sensor_request_scan() here. Rescan aborts the sensor thread and
+	 * re-probes the bus; during OTA / power-off the bus or sensor clock may already
+	 * be unavailable, so a probe fails and raises SENSOR_ERROR. Shutdown only talks
+	 * to drivers that are already bound.
+	 */
+	if (!sensor_sensor_init || sensor_imu == NULL || sensor_imu == &sensor_imu_none) {
+		LOG_INF("sensor_shutdown: sensors not initialized, skip");
+		return;
 	}
+
+	sys_interface_resume();
+	if (mag_available && mag_enabled && sensor_mag != NULL && sensor_mag != &sensor_mag_none) {
+		sensor_mag->shutdown();
+	}
+	sensor_imu->shutdown();
+	sys_interface_suspend();
 }
 
 uint8_t sensor_setup_WOM(void)
