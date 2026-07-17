@@ -25,7 +25,8 @@
 #include <zephyr/drivers/i2c.h>
 
 #define SCAN_ADDR_START 8
-#define SCAN_ADDR_STOP 119
+/* Include high 7-bit addrs (e.g. QMC6309 0x7C); 0x7F is "ignored" sentinel elsewhere. */
+#define SCAN_ADDR_STOP 0x7E
 
 LOG_MODULE_REGISTER(sensor_scan, LOG_LEVEL_INF);
 
@@ -102,17 +103,48 @@ int sensor_scan_i2c(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_a
 						err = i2c_reg_read_byte(dev, addr, reg, &id);
 					}
 					LOG_DBG("Read value: 0x%02X", id);
-					if (err)
+					if (err) {
 						break;
-					for (int l = 0; l < id_cnt; l++)
-					{
-						if (id == dev_id[id_ind + l])
-						{
-							i2c_dev->addr = addr;
-							*i2c_dev_reg = reg;
-							LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)", addr, reg, id);
-							return dev_ids[fnd_id + l];
+					}
+					/* Sticky bus / unpowered hub often returns 0x00 or 0xFF. */
+					if (id == 0x00 || id == 0xFF) {
+						continue;
+					}
+					for (int l = 0; l < id_cnt; l++) {
+						if (id != dev_id[id_ind + l]) {
+							continue;
 						}
+						/*
+						 * Match scan_ext ghost filter: some stuck buses echo
+						 * the same byte on every register. Real chips differ.
+						 */
+						uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
+						uint8_t cross_val = 0;
+						int c_err = i2c_reg_read_byte(dev, addr, cross_reg, &cross_val);
+						if (!c_err && cross_val == id) {
+							LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data",
+								addr, reg, cross_reg, id);
+							break;
+						}
+						uint8_t verify_id = 0;
+						int v_err;
+						if (reg == 0x00 && addr >= 0x14 && addr <= 0x17) {
+							uint8_t buf[3] = {0};
+							v_err = i2c_burst_read(dev, addr, reg, buf, 3);
+							verify_id = buf[2];
+						} else {
+							v_err = i2c_reg_read_byte(dev, addr, reg, &verify_id);
+						}
+						if (v_err || verify_id != id) {
+							LOG_WRN("Verify failed at 0x%02X reg 0x%02X (expected 0x%02X, got 0x%02X, err %d)",
+								addr, reg, id, verify_id, v_err);
+							break;
+						}
+						i2c_dev->addr = addr;
+						*i2c_dev_reg = reg;
+						LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)",
+							addr, reg, id);
+						return dev_ids[fnd_id + l];
 					}
 				}
 				id_ind += id_cnt;

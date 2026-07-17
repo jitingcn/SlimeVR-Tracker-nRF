@@ -27,7 +27,8 @@
 #include "interface.h"
 
 #define SCAN_ADDR_START 8
-#define SCAN_ADDR_STOP 119
+/* Include high 7-bit addrs (e.g. QMC6309 0x7C); 0x7F is "ignored" sentinel elsewhere. */
+#define SCAN_ADDR_STOP 0x7E
 
 LOG_MODULE_REGISTER(sensor_scan_ext, LOG_LEVEL_DBG);
 
