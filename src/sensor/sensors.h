@@ -29,23 +29,55 @@
 
 #include "sensor_none.h"
 
+#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
 #include "imu/BMI270.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_ICM42688)
 #include "imu/ICM42688.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_ICM42686)
 #include "imu/ICM42686.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_ICM45686)
 #include "imu/ICM45686.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSM)
 #include "imu/LSM6DSM.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSO)
 #include "imu/LSM6DSO.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSV)
 #include "imu/LSM6DSV.h"
+#endif
 
+#if IS_ENABLED(CONFIG_SENSOR_DRV_AK09940)
 #include "mag/AK09940.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_BMM150)
 #include "mag/BMM150.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_BMM350)
 #include "mag/BMM350.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_IST8306)
 #include "mag/IST8306.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_IST8308)
 #include "mag/IST8308.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL)
 #include "mag/LIS2MDL.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LIS3MDL)
 #include "mag/LIS3MDL.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_MMC5983MA)
 #include "mag/MMC5983MA.h"
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309)
 #include "mag/QMC6309.h"
+#endif
 
 #include "scan.h"
 #include "scan_spi.h"

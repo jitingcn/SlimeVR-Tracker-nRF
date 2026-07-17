@@ -30,7 +30,9 @@
 
 #include "sensor/sensors_enum.h"
 #include "sensor/magneto/magneto1_4.h"
+#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
 #include "sensor/imu/BMI270.h"
+#endif
 
 #include "bias_collect.h"
 #include "cal_imu.h"
@@ -73,6 +75,7 @@ void sensor_calibrate_imu(void)
 	float temp_range = NAN;
 #endif
 
+#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
 	if (sensor_calibration_get_imu_id() == IMU_BMI270) // bmi270 specific
 	{
 		uint8_t *sensor_data = sensor_calibration_get_sensor_data();
@@ -92,6 +95,7 @@ void sensor_calibrate_imu(void)
 		sensor_fusion_invalidate(); // only invalidate fusion if calibration was successful
 		k_msleep(500);              // Delay before beginning acquisition
 	}
+#endif
 
 	LOG_INF("Reading data");
 	sensor_calibration_clear(a_bias, g_bias, false);

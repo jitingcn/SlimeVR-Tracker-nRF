@@ -1,0 +1,112 @@
+config SENSOR_IMU_DRIVERS_MINIMAL
+	bool "Compile only selected IMU drivers"
+	default n
+	help
+	  When disabled (default), every SENSOR_DRV_* IMU option defaults to y.
+	  When enabled, each IMU SENSOR_DRV_* defaults to n; enable the BOM
+	  drivers in the board *_defconfig.
+
+config SENSOR_MAG_DRIVERS_MINIMAL
+	bool "Compile only selected magnetometer drivers"
+	default n
+	help
+	  Same as SENSOR_IMU_DRIVERS_MINIMAL but for magnetometer drivers.
+	  Mag may be entirely disabled (mag-less boards).
+
+menu "IMU drivers"
+
+config SENSOR_DRV_BMI270
+	bool "BMI270"
+	default y if !SENSOR_IMU_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_ICM42688
+	bool "ICM42688"
+	default y if !SENSOR_IMU_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_ICM42686
+	bool "ICM42686"
+	default y if !SENSOR_IMU_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_ICM45686
+	bool "ICM45686 / ICM45688"
+	default y if !SENSOR_IMU_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_LSM6DSM
+	bool "LSM6DSM family (DS3 / DSM)"
+	default y if !SENSOR_IMU_DRIVERS_MINIMAL
+	default n
+	help
+	  Shares helpers compiled from LSM6DSV.c (CMake pulls that TU in
+	  automatically). Enabling this alone does not enable SENSOR_DRV_LSM6DSV
+	  scan/vtable slots.
+
+config SENSOR_DRV_LSM6DSO
+	bool "LSM6DSO family (DSR / DSO)"
+	default y if !SENSOR_IMU_DRIVERS_MINIMAL
+	default n
+	help
+	  Shares helpers compiled from LSM6DSV.c (CMake pulls that TU in
+	  automatically). Enabling this alone does not enable SENSOR_DRV_LSM6DSV
+	  scan/vtable slots.
+
+config SENSOR_DRV_LSM6DSV
+	bool "LSM6DSV family (DSV / ISM330BX)"
+	default y if !SENSOR_IMU_DRIVERS_MINIMAL
+	default n
+	help
+	  Also provides shared LSM6 helpers used by LSM6DSM / LSM6DSO drivers.
+
+endmenu
+
+menu "Magnetometer drivers"
+
+config SENSOR_DRV_AK09940
+	bool "AK09940"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_BMM150
+	bool "BMM150"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_BMM350
+	bool "BMM350"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_IST8306
+	bool "IST8306"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_IST8308
+	bool "IST8308"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_LIS2MDL
+	bool "LIS2MDL / IIS2MDC"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_LIS3MDL
+	bool "LIS3MDL"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_MMC5983MA
+	bool "MMC5983MA"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_QMC6309
+	bool "QMC6309"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+endmenu

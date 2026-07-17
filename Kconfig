@@ -582,4 +582,6 @@ config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
     default y if CLOCK_USE_LF_SYNTH && CONNECTION_TDMA
     default n
 
+rsource "Kconfig.sensors_drivers"
+
 source "Kconfig.zephyr"

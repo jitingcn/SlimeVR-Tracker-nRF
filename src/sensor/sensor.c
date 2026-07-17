@@ -385,7 +385,17 @@ static bool sensor_consume_wom_fast_wake_hint(void)
 
 static bool sensor_imu_fast_wom_wake_supported(void)
 {
-	return sensor_imu == &sensor_imu_lsm6dsv || sensor_imu == &sensor_imu_icm45686;
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSV)
+	if (sensor_imu == &sensor_imu_lsm6dsv) {
+		return true;
+	}
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_ICM45686)
+	if (sensor_imu == &sensor_imu_icm45686) {
+		return true;
+	}
+#endif
+	return false;
 }
 
 static inline void sensor_compute_device_quat(const float *fused_quat, float *device_quat)
@@ -1479,11 +1489,13 @@ int sensor_init(void)
 	}
 
 	sensor_calibration_update_sensor_ids(sensor_imu_id);
+#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
 	if (sensor_imu == &sensor_imu_bmi270) // bmi270 specific
 	{
 		LOG_INF("Applying gyroscope gain");
 		bmi_gain_apply(sensor_calibration_get_sensor_data());
 	}
+#endif
 
 #if IMU_INT_EXISTS
 	// Setup interrupt
