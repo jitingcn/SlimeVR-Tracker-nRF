@@ -3,7 +3,7 @@
 
 board:
   name: nini_slimevr_mag_uf2
-  vendor: NiNi_Unicorn
+  vendor: nini_slimevr
   socs:
     - name: nrf52833
 

@@ -3,7 +3,7 @@
 
 board:
   name: styria_mini_uf2
-  vendor: nordic
+  vendor: styria
   socs:
     - name: nrf52840
       variants:
