@@ -27,6 +27,8 @@
 #include "util.h"
 
 #include <math.h>
+#include <string.h>
+#include <zephyr/irq.h>
 
 #if CONFIG_CMSIS_DSP
 #include <arm_math.h>
@@ -59,6 +61,12 @@ float magBAinv[4][3];
 K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
 static K_SEM_DEFINE(calibration_wake_sem, 0, 1);
+
+/* Also occupies request slot so IMU/TCal/sens cannot overlap magneto_progress collection. */
+#define CAL_REQUEST_MAG 6
+
+/* Identify LED on cal thread — never k_msleep on ESB/connection. */
+static bool mag_cal_led_pending;
 
 static void calibration_signal_wake(void)
 {
@@ -190,7 +198,12 @@ void sensor_calibration_process_mag(float m[3])
 	//	for (int i = 0; i < 3; i++)
 	//		m[i] -= magBias[i];
 	sensor_sample_mag(m);
-	apply_BAinv(m, magBAinv);
+	/* Snap under irq_lock so calibration_thread publish cannot tear the live matrix. */
+	float snap[4][3];
+	unsigned key = irq_lock();
+	memcpy(snap, magBAinv, sizeof(snap));
+	irq_unlock(key);
+	apply_BAinv(m, snap);
 }
 
 void sensor_calibration_update_sensor_ids(int imu)
@@ -214,7 +227,11 @@ void sensor_calibration_read(void)
 	memcpy(accelBias, retained->accelBias, sizeof(accelBias));
 	memcpy(gyroBias, retained->gyroBias, sizeof(gyroBias));
 	memcpy(magBias, retained->magBias, sizeof(magBias));
-	memcpy(magBAinv, retained->magBAinv, sizeof(magBAinv));
+	{
+		unsigned key = irq_lock();
+		memcpy(magBAinv, retained->magBAinv, sizeof(magBAinv));
+		irq_unlock(key);
+	}
 	memcpy(accBAinv, retained->accBAinv, sizeof(accBAinv));
 	if (retained->mag_online_calibration_mode > MAG_ONLINE_CALIBRATION_DISABLED) {
 		retained->mag_online_calibration_mode = MAG_ONLINE_CALIBRATION_DEFAULT;
@@ -293,17 +310,7 @@ int sensor_calibration_validate_mag(float m_inv[][3], bool write)
 	if (m_inv == NULL) {
 		m_inv = magBAinv;
 	}
-	float zero[3] = {0};
-	float diagonal[3];
-	for (int i = 0; i < 3; i++) {
-		diagonal[i] = m_inv[i + 1][i];
-	}
-	float magnitude = v_avg(diagonal);
-	float average[3] = {magnitude, magnitude, magnitude};
-	float max_gain = MAX(MAX(fabsf(diagonal[0]), fabsf(diagonal[1])), fabsf(diagonal[2]));
-	if (!v_epsilon(m_inv[0], zero, magnitude * 2.0f) || !v_epsilon(diagonal, average, MAX(magnitude * 0.2f, 0.1f))
-		|| max_gain > MAG_CAL_MAX_AXIS_GAIN) // check offset, diagonal spread, and reject huge-gain fits
-	{
+	if (!mag_bainv_structurally_ok(m_inv, 0.0f)) {
 		sensor_calibration_clear_mag(m_inv, write);
 		LOG_WRN("Invalidated calibration");
 		LOG_WRN("The magnetometer may be damaged or calibration was not completed properly");
@@ -364,9 +371,13 @@ void sensor_calibration_clear_mag(float m_inv[][3], bool write)
 	if (m_inv == NULL) {
 		m_inv = magBAinv;
 	}
-	memset(m_inv, 0, sizeof(magBAinv)); // zeroed matrix will disable magnetometer in fusion
 	if (clearing_live_state) {
+		unsigned key = irq_lock();
+		memset(m_inv, 0, sizeof(magBAinv)); // zeroed matrix will disable magnetometer in fusion
+		irq_unlock(key);
 		magneto_online_runtime_reset();
+	} else {
+		memset(m_inv, 0, sizeof(magBAinv));
 	}
 	if (write) {
 		LOG_INF("Clearing stored calibration data");
@@ -396,7 +407,7 @@ int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions)
 	}
 
 	k_mutex_lock(&calibration_request_lock, K_FOREVER);
-	if (requested_calibration != 0) {
+	if (requested_calibration != 0 || (magneto_progress & 0x80)) {
 		k_mutex_unlock(&calibration_request_lock);
 		LOG_ERR("Sensor calibration is already running");
 		return -1;
@@ -413,35 +424,29 @@ int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions)
 
 void sensor_request_calibration_mag(void)
 {
-	// If already collecting, just check if ready
-	if (magneto_progress & 0x80) {
+	k_mutex_lock(&calibration_request_lock, K_FOREVER);
+	if (magneto_progress & 0x80 || mag_cal_led_pending) {
+		k_mutex_unlock(&calibration_request_lock);
 		if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 		}
 		return;
 	}
+	if (requested_calibration != 0) {
+		k_mutex_unlock(&calibration_request_lock);
+		LOG_ERR("Sensor calibration is already running");
+		return;
+	}
+	/* Claim slot immediately; LED + magneto_progress arm on cal thread. */
+	requested_calibration = CAL_REQUEST_MAG;
+	mag_cal_led_pending = true;
+	k_mutex_unlock(&calibration_request_lock);
 
 	if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
 		set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 	}
-
-	// LED sequence before calibration:
-	// 1. Flash LED to let user identify tracker
-	LOG_INF("Magnetometer calibration: identify tracker");
-	set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
-	k_msleep(2000); // Wait for pattern to complete
-
-	// 2. Flash twice to indicate calibration is starting
-	//    SYS_LED_PATTERN_ONESHOT_PROGRESS: 200ms on + 200ms off, 2 times = 800ms
-	set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
-	k_msleep(800);
-
-	// Start fresh calibration
-	magneto_reset();            // Clear ata / progress / status-log timer
-	magneto_online_reset();     // Clear online accumulator
-	magneto_progress |= 1 << 7; // Set collection active flag
 	calibration_signal_wake();
-	LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
+	LOG_INF("Magnetometer calibration requested");
 }
 
 
@@ -453,13 +458,14 @@ int sensor_calibration_request(int id)
 	switch (id) {
 	case -1:
 		requested_calibration = 0;
+		mag_cal_led_pending = false;
 		result = 0;
 		break;
 	case 0:
 		result = requested_calibration;
 		break;
 	default:
-		if (requested_calibration != 0) {
+		if (requested_calibration != 0 || (magneto_progress & 0x80)) {
 			LOG_ERR("Sensor calibration is already running");
 			result = -1;
 		} else {
@@ -582,10 +588,34 @@ static void calibration_thread(void)
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #endif
-		default:
+		case CAL_REQUEST_MAG:
+			if (mag_cal_led_pending) {
+				mag_cal_led_pending = false;
+				LOG_INF("Magnetometer calibration: identify tracker");
+				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
+				watchdog_feed(WDT_CHANNEL_CALIBRATION);
+				k_msleep(2000);
+				watchdog_feed(WDT_CHANNEL_CALIBRATION);
+				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
+				k_msleep(800);
+				watchdog_feed(WDT_CHANNEL_CALIBRATION);
+				magneto_reset();
+				magneto_online_reset();
+				magneto_progress |= 1 << 7;
+				LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
+				break;
+			}
 			if (magneto_progress & 0b10000000) {
 				requested = sensor_calibrate_mag();
+				/* 1 = still collecting; 0/-1 = finished or aborted */
+				if (requested != 1) {
+					sensor_calibration_request(-1);
+				}
+			} else {
+				sensor_calibration_request(-1);
 			}
+			break;
+		default:
 			break;
 		}
 

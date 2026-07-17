@@ -139,7 +139,8 @@ void update_tcal_state(void)
 void sensor_tcal_set_auto_calibration(bool enabled)
 {
 	tcal_auto_calibration_enabled = enabled;
-	set_status(SYS_STATUS_CALIBRATION_RUNNING, enabled);
+	/* Do not set SYS_STATUS_CALIBRATION_RUNNING — that flag means blocking cal
+	 * and would stall WOM/status_ready for continuous bucket sampling. */
 	if (!enabled) {
 		tcal_accum_reset();
 	}

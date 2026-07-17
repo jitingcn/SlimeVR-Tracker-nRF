@@ -28,6 +28,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <zephyr/irq.h>
 
 #if CONFIG_CMSIS_DSP
 #include <arm_math.h>
@@ -153,13 +154,15 @@ int sensor_calibrate_mag(void)
 		return -1;
 	} else {
 		LOG_INF("Applying calibration");
+		unsigned key = irq_lock();
 		memcpy(magBAinv, m_inv, sizeof(magBAinv));
+		irq_unlock(key);
 		magneto_online_runtime_reset(); // Restart online calibration from a clean baseline
 		sensor_fusion_reset_mag_ref();
 		sensor_mag_ref_reset(); // Recompute magRef from new calibration
 								// fusion invalidation not necessary
 	}
-	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, magBAinv, sizeof(magBAinv));
+	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
 
 	LOG_INF("Finished calibration");
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);

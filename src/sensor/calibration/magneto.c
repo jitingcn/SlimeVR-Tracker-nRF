@@ -151,6 +151,25 @@ bool magneto_centered_direction(const mag_center_estimator_t *estimator, const f
 	return magneto_normalize_direction(m, dir);
 }
 
+bool mag_bainv_structurally_ok(const float m_inv[4][3], float bias_limit)
+{
+	float zero[3] = {0};
+	float diagonal[3];
+
+	for (int i = 0; i < 3; i++) {
+		diagonal[i] = m_inv[i + 1][i];
+	}
+
+	float magnitude = v_avg(diagonal);
+	float average[3] = {magnitude, magnitude, magnitude};
+	float max_gain = MAX(MAX(fabsf(diagonal[0]), fabsf(diagonal[1])), fabsf(diagonal[2]));
+	float limit = bias_limit > 0.0f ? bias_limit : MAX(fabsf(magnitude) * 2.0f, 0.1f);
+
+	return v_epsilon(m_inv[0], zero, limit)
+		&& v_epsilon(diagonal, average, MAX(fabsf(magnitude) * 0.2f, 0.1f))
+		&& max_gain <= MAG_CAL_MAX_AXIS_GAIN;
+}
+
 /**
  * Check if a Magneto calibration result passes quality checks.
  * Performs silent validation (no warning logs) since this is called speculatively.
@@ -167,19 +186,8 @@ bool magneto_quality_check(double *ata_buf, double norm_sum_val, double sample_c
 	float m_inv[4][3];
 	magneto_current_calibration(m_inv, ata_buf, norm_sum_val, sample_count_val);
 
-	// Silent validation: check bias < 1 and diagonals within 20%
-	// (same as sensor_calibration_validate_mag but without LOG_WRN or clearing)
-	float zero[3] = {0};
-	float diagonal[3];
-	for (int i = 0; i < 3; i++) {
-		diagonal[i] = m_inv[i + 1][i];
-	}
-	float magnitude = v_avg(diagonal);
-	float average[3] = {magnitude, magnitude, magnitude};
-	float max_gain = MAX(MAX(fabsf(diagonal[0]), fabsf(diagonal[1])), fabsf(diagonal[2]));
 	float hm = (float)(norm_sum_val / sample_count_val);
-	if (!v_epsilon(m_inv[0], zero, hm * 2.0f) || !v_epsilon(diagonal, average, MAX(magnitude * 0.2f, 0.1f))
-		|| max_gain > MAG_CAL_MAX_AXIS_GAIN) {
+	if (!mag_bainv_structurally_ok(m_inv, hm * 2.0f)) {
 		return false;
 	}
 

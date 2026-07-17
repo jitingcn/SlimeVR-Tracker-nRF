@@ -58,4 +58,11 @@ bool magneto_centered_direction(const mag_center_estimator_t *estimator, const f
 bool magneto_quality_check(double *ata_buf, double norm_sum_val, double sample_count_val,
 			   float m_inv_out[][3]);
 
+/*
+ * Structural magBAinv gate shared by validate / quality / blend.
+ * bias_limit <= 0 → derive from diagonal magnitude * 2 (stored-cal path).
+ * Callers with sample field strength pass hm * 2.
+ */
+bool mag_bainv_structurally_ok(const float m_inv[4][3], float bias_limit);
+
 #endif /* SLIMENRF_CAL_MAG_COMMON_H */

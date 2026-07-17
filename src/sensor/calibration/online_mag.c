@@ -27,6 +27,8 @@
 
 #include <math.h>
 #include <string.h>
+#include <zephyr/irq.h>
+#include <zephyr/sys/atomic.h>
 
 #include "sensor/magneto/magneto1_4.h"
 
@@ -70,6 +72,10 @@ typedef struct {
 #define ONLINE_BLEND_SIMILARITY_HIGH 0.97f  // above this similarity, use min alpha
 
 static quadrant_buf_t quad_buf[ONLINE_QUADRANT_COUNT];
+/* Cal-thread snapshot (~3KB static: too big for stack). Seqlock vs sensor writes. */
+static quadrant_buf_t quad_buf_snap[ONLINE_QUADRANT_COUNT];
+static K_MUTEX_DEFINE(quad_buf_snap_lock);
+static atomic_t quad_buf_seq;
 static int64_t online_total_sample_count;
 static int64_t online_last_checked_sample_count;
 static int64_t online_last_check_time;
@@ -131,8 +137,6 @@ static float online_last_buf_avg_norm = 0.0f;
 
 
 static void magneto_online_clear_history(void);
-static bool magneto_online_quadrant_is_recent(const quadrant_buf_t *qbuf);
-static double magneto_online_recent_center(mag_center_estimator_t *center);
 static double magneto_online_collect_recent(double ata_out[100], double *norm_sum_out,
 					   float dir_sum_out[3], float *raw_range_out);
 static int magneto_online_recent_sample_count(void);
@@ -233,8 +237,11 @@ void magneto_online_runtime_reset(void)
 
 static void magneto_online_clear_history(void)
 {
+	unsigned s = (unsigned)atomic_get(&quad_buf_seq) & ~1U;
+	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 1U));
 	memset(quad_buf, 0, sizeof(quad_buf));
 	online_total_sample_count = 0;
+	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 2U));
 	online_last_checked_sample_count = 0;
 	online_last_check_time = 0;
 	memset(online_last_dir, 0, sizeof(online_last_dir));
@@ -246,25 +253,42 @@ static void magneto_online_clear_history(void)
 	online_collection_suppress_until = k_uptime_get() + ONLINE_COLLECTION_SUPPRESS_MS;
 }
 
-static bool magneto_online_quadrant_is_recent(const quadrant_buf_t *qbuf)
+static bool magneto_online_quadrant_is_recent_at(const quadrant_buf_t *qbuf, int64_t total_count)
 {
 	if (qbuf->count == 0) {
 		return false;
 	}
-	return (online_total_sample_count - qbuf->last_seq) <= ONLINE_STALE_QUADRANT_MAX_AGE;
+	return (total_count - qbuf->last_seq) <= ONLINE_STALE_QUADRANT_MAX_AGE;
 }
 
-static double magneto_online_recent_center(mag_center_estimator_t *center)
+/* Caller must hold quad_buf_snap_lock. */
+static int64_t magneto_online_quad_buf_snapshot_locked(void)
+{
+	unsigned s;
+	int64_t total;
+	do {
+		s = (unsigned)atomic_get(&quad_buf_seq);
+		if (s & 1U) {
+			k_yield();
+			continue;
+		}
+		memcpy(quad_buf_snap, quad_buf, sizeof(quad_buf));
+		total = online_total_sample_count;
+	} while ((unsigned)atomic_get(&quad_buf_seq) != s);
+	return total;
+}
+
+static double magneto_online_recent_center_from_snap(int64_t total_count, mag_center_estimator_t *center)
 {
 	magneto_center_reset(center);
 
 	double count = 0;
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
-		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+		if (!magneto_online_quadrant_is_recent_at(&quad_buf_snap[q], total_count)) {
 			continue;
 		}
-		for (int i = 0; i < quad_buf[q].count; i++) {
-			quadrant_sample_t *s = &quad_buf[q].samples[i];
+		for (int i = 0; i < quad_buf_snap[q].count; i++) {
+			quadrant_sample_t *s = &quad_buf_snap[q].samples[i];
 			float m[3] = {s->x, s->y, s->z};
 			magneto_center_update(center, m);
 			count++;
@@ -283,19 +307,22 @@ static double magneto_online_collect_recent(double ata_out[100], double *norm_su
 	*norm_sum_out = 0;
 	memset(dir_sum_out, 0, sizeof(float) * 3);
 
+	k_mutex_lock(&quad_buf_snap_lock, K_FOREVER);
+	int64_t total = magneto_online_quad_buf_snapshot_locked();
+
 	mag_center_estimator_t recent_center;
-	double recent_sample_count = magneto_online_recent_center(&recent_center);
+	double recent_sample_count = magneto_online_recent_center_from_snap(total, &recent_center);
 	if (raw_range_out) {
 		*raw_range_out = magneto_center_min_range(&recent_center);
 	}
 
 	double fit_sample_count = 0;
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
-		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+		if (!magneto_online_quadrant_is_recent_at(&quad_buf_snap[q], total)) {
 			continue;
 		}
-		for (int i = 0; i < quad_buf[q].count; i++) {
-			quadrant_sample_t *s = &quad_buf[q].samples[i];
+		for (int i = 0; i < quad_buf_snap[q].count; i++) {
+			quadrant_sample_t *s = &quad_buf_snap[q].samples[i];
 			magneto_sample((double)s->x, (double)s->y, (double)s->z, ata_out, norm_sum_out, &fit_sample_count);
 			float raw[3] = {s->x, s->y, s->z};
 			float coverage_sample[3];
@@ -303,18 +330,22 @@ static double magneto_online_collect_recent(double ata_out[100], double *norm_su
 			magneto_accumulate_direction(dir_sum_out, coverage_sample);
 		}
 	}
+	k_mutex_unlock(&quad_buf_snap_lock);
 	return recent_sample_count;
 }
 
 static int magneto_online_recent_sample_count(void)
 {
+	k_mutex_lock(&quad_buf_snap_lock, K_FOREVER);
+	int64_t total = magneto_online_quad_buf_snapshot_locked();
 	int count = 0;
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
-		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+		if (!magneto_online_quadrant_is_recent_at(&quad_buf_snap[q], total)) {
 			continue;
 		}
-		count += quad_buf[q].count;
+		count += quad_buf_snap[q].count;
 	}
+	k_mutex_unlock(&quad_buf_snap_lock);
 	return count;
 }
 
@@ -322,20 +353,24 @@ static float magneto_online_recent_dir_bias(void)
 {
 	float dir_sum_recent[3] = {0};
 	mag_center_estimator_t recent_center;
-	double recent_sample_count = magneto_online_recent_center(&recent_center);
+
+	k_mutex_lock(&quad_buf_snap_lock, K_FOREVER);
+	int64_t total = magneto_online_quad_buf_snapshot_locked();
+	double recent_sample_count = magneto_online_recent_center_from_snap(total, &recent_center);
 
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
-		if (!magneto_online_quadrant_is_recent(&quad_buf[q])) {
+		if (!magneto_online_quadrant_is_recent_at(&quad_buf_snap[q], total)) {
 			continue;
 		}
-		for (int i = 0; i < quad_buf[q].count; i++) {
-			quadrant_sample_t *s = &quad_buf[q].samples[i];
+		for (int i = 0; i < quad_buf_snap[q].count; i++) {
+			quadrant_sample_t *s = &quad_buf_snap[q].samples[i];
 			float raw[3] = {s->x, s->y, s->z};
 			float coverage_sample[3];
 			magneto_coverage_sample(&recent_center, raw, coverage_sample);
 			magneto_accumulate_direction(dir_sum_recent, coverage_sample);
 		}
 	}
+	k_mutex_unlock(&quad_buf_snap_lock);
 
 	return magneto_directional_bias(dir_sum_recent, recent_sample_count);
 }
@@ -460,44 +495,16 @@ static bool magneto_blend_BAinv(float out[4][3], float existing[4][3],
 		}
 	}
 
-	// Validate blended result
-	float zero[3] = {0};
-	float diagonal[3];
-	for (int i = 0; i < 3; i++) {
-		diagonal[i] = blended[i + 1][i];
-	}
-	float magnitude = v_avg(diagonal);
-	float average[3] = {magnitude, magnitude, magnitude};
-	float max_gain = MAX(MAX(fabsf(diagonal[0]), fabsf(diagonal[1])), fabsf(diagonal[2]));
-	if (v_epsilon(blended[0], zero, 1)
-	    && v_epsilon(diagonal, average, MAX(magnitude * 0.2f, 0.1f))
-	    && max_gain <= MAG_CAL_MAX_AXIS_GAIN) {
-		// Blended result is valid
+	if (mag_bainv_structurally_ok(blended, 0.0f)) {
 		memcpy(out, blended, sizeof(blended));
 		return true;
 	}
 
-	// Fallback: use candidate directly if blend is invalid.
-	// Candidate was already validated by magneto_quality_check before this call,
-	// so validate with its own diagonal here for consistency.
-	{
-		float c_diag[3];
-		for (int i = 0; i < 3; i++) {
-			c_diag[i] = candidate[i + 1][i];
-		}
-		float c_avg = v_avg(c_diag);
-		float c_avg_arr[3] = {c_avg, c_avg, c_avg};
-		float c_max_gain = MAX(MAX(fabsf(c_diag[0]), fabsf(c_diag[1])), fabsf(c_diag[2]));
-		if (v_epsilon(candidate[0], zero, 1)
-		    && v_epsilon(c_diag, c_avg_arr, MAX(c_avg * 0.2f, 0.1f))
-		    && c_max_gain <= MAG_CAL_MAX_AXIS_GAIN) {
-			memcpy(out, candidate, sizeof(float) * 4 * 3);
-			return true;
-		}
+	if (mag_bainv_structurally_ok(candidate, 0.0f)) {
+		memcpy(out, candidate, sizeof(float) * 4 * 3);
+		return true;
 	}
 
-	// Both blend and fallback invalid — should not happen since candidate was
-	// already validated by magneto_quality_check before calling this function
 	return false;
 }
 
@@ -634,6 +641,8 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	if (route_mag[2] < 0) octant |= 4;
 
 	quadrant_buf_t *qbuf = &quad_buf[octant];
+	unsigned s = (unsigned)atomic_get(&quad_buf_seq) & ~1U;
+	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 1U));
 	online_total_sample_count++;
 	qbuf->last_seq = online_total_sample_count;
 	qbuf->samples[qbuf->head].x = m[0];
@@ -643,6 +652,7 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	if (qbuf->count < QUADRANT_BUF_SIZE) {
 		qbuf->count++;
 	}
+	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 2U));
 }
 
 bool sensor_calibration_online_mag_check(void)
@@ -836,7 +846,11 @@ bool sensor_calibration_online_mag_check(void)
 		        online_update_count + 1,
 		        (int)recent_sample_count, (double)dbias, (double)current_cv,
 		        (double)similarity);
-		memcpy(magBAinv, blended, sizeof(magBAinv));
+		{
+			unsigned key = irq_lock();
+			memcpy(magBAinv, blended, sizeof(magBAinv));
+			irq_unlock(key);
+		}
 		memcpy(m_inv, blended, sizeof(m_inv)); // for logging below
 
 		// Start the next cycle from a clean buffer. Keeping pre-update samples
@@ -854,7 +868,11 @@ bool sensor_calibration_online_mag_check(void)
 		        (int)recent_sample_count, (double)dbias);
 
 		// First calibration: use candidate directly
-		memcpy(magBAinv, m_inv, sizeof(magBAinv));
+		{
+			unsigned key = irq_lock();
+			memcpy(magBAinv, m_inv, sizeof(magBAinv));
+			irq_unlock(key);
+		}
 		magneto_online_clear_history();
 		online_last_update_time = now;
 		online_update_count = 1;
@@ -870,7 +888,8 @@ bool sensor_calibration_online_mag_check(void)
 	cal_norm_ema = 0;
 	cal_norm_var_ema = 0;
 
-	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, magBAinv, sizeof(magBAinv));
+	/* Persist the local matrix we just published; do not re-read live magBAinv. */
+	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
 	sensor_refresh_sensor_ids();
 
 	LOG_INF("Online mag cal applied:");
