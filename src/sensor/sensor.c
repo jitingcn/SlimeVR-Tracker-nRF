@@ -29,6 +29,7 @@
 #include "util.h"
 #include "connection/connection.h"
 #include "calibration/calibration.h"
+#include "calibration/mag_common.h"
 #include "motion_state.h"
 
 #include <math.h>
@@ -760,8 +761,7 @@ int sensor_scan(void)
 			if (sensor_mag_dev.addr > 0x80) // marked as external
 			{
 				sensor_mag_dev.addr &= 0x7F;
-				// Check if address is still valid after clearing external marker
-				// 0x7F or out of valid I2C range (8-119) means invalid/failed scan marker
+				/* 0x7F+ or <8 = invalid; allow high addrs e.g. QMC6309 0x7C */
 				if (sensor_mag_dev.addr >= 0x7F || sensor_mag_dev.addr < 8) {
 					sensor_mag_dev.addr = 0x00; // reset to trigger full scan
 					sensor_mag_dev_reg = 0xFF;
@@ -788,8 +788,7 @@ int sensor_scan(void)
 			if (sensor_mag_dev.addr > 0x80) // marked as external
 			{
 				sensor_mag_dev.addr &= 0x7F;
-				// Check if address is still valid after clearing external marker
-				// 0x7F or out of valid I2C range (8-119) means invalid/failed scan marker
+				/* 0x7F+ or <8 = invalid; allow high addrs e.g. QMC6309 0x7C */
 				if (sensor_mag_dev.addr >= 0x7F || sensor_mag_dev.addr < 8) {
 					sensor_mag_dev.addr = 0x00; // reset to trigger full scan
 					sensor_mag_dev_reg = 0xFF;
@@ -930,6 +929,7 @@ int sensor_request_scan(bool force)
 	sensor_life_mark_scan_done();
 	main_suspended = false;
 	sensor_sensor_init = false;
+	main_ok = false;
 	if (force) {
 		sensor_imu_dev.addr = 0x00;
 		sensor_mag_dev.addr = 0x00;
@@ -1114,10 +1114,50 @@ uint8_t sensor_setup_WOM(void)
 		err = sensor_imu->setup_WOM();
 		sys_interface_suspend();
 		return err;
-	} else {
-		LOG_ERR("Failed to configure IMU wake up");
-		return 0;
 	}
+	LOG_ERR("Failed to configure IMU wake up");
+	/* 0xFF is not a valid nRF GPIO pull/sense pack; callers must fail closed. */
+	return 0xFF;
+}
+
+static bool sensor_mag_uses_i2c_passthrough(void)
+{
+	return (sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80);
+}
+
+static int sensor_mag_runtime_enable(void)
+{
+	float mag_initial_time = 1.0f / CONFIG_SENSOR_MAG_ODR;
+
+	if (sensor_mag_uses_i2c_passthrough()) {
+		sensor_imu->ext_passthrough(true);
+	}
+	int err = sensor_mag->init(mag_initial_time, &mag_actual_time);
+	if (err < 0) {
+		LOG_ERR("Magnetometer init failed: %d", err);
+		if (sensor_mag_uses_i2c_passthrough()) {
+			sensor_imu->ext_passthrough(false);
+		}
+		return err;
+	}
+	LOG_INF("Magnetometer rate: %.2fHz", 1.0 / (double)mag_actual_time);
+	return 0;
+}
+
+static void sensor_mag_runtime_disable(void)
+{
+	if (sensor_mag == NULL || sensor_mag == &sensor_mag_none) {
+		return;
+	}
+	if (sensor_mag_uses_i2c_passthrough()) {
+		sensor_imu->ext_passthrough(true);
+	}
+	sensor_mag->shutdown();
+	if (sensor_mag_uses_i2c_passthrough()) {
+		sensor_imu->ext_passthrough(false);
+	}
+	mag_calibrated = false;
+	last_mag_fusion_ticks = 0;
 }
 
 void sensor_set_mag_enabled(bool enabled)
@@ -1127,13 +1167,71 @@ void sensor_set_mag_enabled(bool enabled)
 		return;
 	}
 
-	// Persist to retained memory + NVS, then reboot to let init code handle it
-	LOG_INF("%s magnetometer, rebooting...", enabled ? "Enabling" : "Disabling");
+	if (magneto_progress & 0x80) {
+		LOG_WRN("Magnetometer toggle blocked: mag calibration in progress");
+		return;
+	}
+
+	if (!sensor_sensor_init || !main_ok) {
+		LOG_INF("%s magnetometer, rebooting (sensor not ready)...", enabled ? "Enabling" : "Disabling");
+		bool val = enabled;
+		sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+		skip_fusion_save = true;
+		sys_request_system_reboot(false);
+		return;
+	}
+
+	if (enabled && !mag_available) {
+		LOG_WRN("No magnetometer hardware; persisting enabled for next boot");
+		bool val = true;
+		sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+		mag_enabled = true;
+		sensor_refresh_sensor_ids();
+		return;
+	}
+
+	LOG_INF("%s magnetometer (runtime)...", enabled ? "Enabling" : "Disabling");
+	main_imu_suspend();
+	sys_interface_resume();
+
+	int err = 0;
+	if (enabled) {
+		err = sensor_mag_runtime_enable();
+	} else {
+		sensor_mag_runtime_disable();
+	}
+
+	sys_interface_suspend();
+
+	if (err < 0) {
+		LOG_ERR("Magnetometer enable failed; leaving disabled");
+		main_imu_resume();
+		return;
+	}
+
 	bool val = enabled;
 	sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
-	// Tell sensor_retained_write() to invalidate fusion instead of saving it
+	mag_enabled = enabled;
+
 	skip_fusion_save = true;
-	sys_request_system_reboot(false);
+	main_imu_restart();
+	sensor_mag_ref_reset();
+	sensor_refresh_sensor_ids();
+
+	if (connection_get_data_collection()) {
+		connection_send_raw_metadata(
+			gyro_actual_range,
+			accel_actual_range,
+			1.0f / gyro_actual_time,
+			1.0f / accel_actual_time,
+			mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
+			(uint8_t)sensor_imu_id,
+			(uint8_t)sensor_mag_id
+		);
+	}
+
+	main_imu_resume();
+	LOG_INF("Magnetometer %s", enabled ? "enabled" : "disabled");
 }
 
 bool sensor_get_mag_enabled(void)
@@ -2798,6 +2896,8 @@ void wait_for_threads(void)
 void main_imu_suspend(void)
 {
 	main_suspended = true;
+	/* Thread cannot feed once frozen or self-suspended; pause WDT in all paths. */
+	watchdog_pause(WDT_CHANNEL_SENSOR);
 	if (!main_running) { // don't suspend if already stopped (TODO: may be called from sensor thread)
 		return;          // thread self-suspends at end of sensor_loop_wait when main_suspended
 	}
@@ -2820,7 +2920,9 @@ void main_imu_resume(void)
 	if (!main_suspended) { // not suspended
 		return;
 	}
+	watchdog_resume(WDT_CHANNEL_SENSOR);
 	k_thread_resume(&sensor_thread_id);
+	main_suspended = false;
 	LOG_INF("Resumed sensor thread");
 }
 
