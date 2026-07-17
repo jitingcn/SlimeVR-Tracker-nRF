@@ -85,7 +85,6 @@
 #define TAU_SMOOTH_ALPHA_UP 0.21f        /* tauAcc increase smoothing (per sample) */
 #endif                                   /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
 
-static uint8_t imu_id;
 
 static vqf_params_t params;
 static vqf_state_t state;
@@ -154,7 +153,7 @@ static uint8_t rest_event_total; /* total events (up to log size) */
 
 void vqf_update_sensor_ids(int imu)
 {
-	imu_id = imu;
+	ARG_UNUSED(imu);
 }
 
 static void set_params()
@@ -244,22 +243,21 @@ void vqf_save(void *data)
 
 void vqf_update_gyro(float *g, float time)
 {
-	ARG_UNUSED(time);
 	float g_rad[3] = {0};
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++) {
 		g_rad[i] = g[i] * DEG_TO_RAD;
 	}
-	updateGyr(&params, &state, &coeffs, g_rad);
-}
-
-void vqf_update_gyro_ts(float *g, uint64_t timestamp_us)
-{
-	float g_rad[3] = {0};
-	for (int i = 0; i < 3; i++) {
-		g_rad[i] = g[i] * DEG_TO_RAD;
+	/* Prefer caller dt so ODR changes / jitter do not stick to coeffs->gyrTs. */
+	if (time > 0.0f && time < 10.0f) {
+		uint64_t synth_ts = state.lastGyrTsUs + (uint64_t)(time * 1e6f);
+		if (synth_ts == 0) {
+			synth_ts = 1;
+		}
+		updateGyrTs(&params, &state, &coeffs, g_rad, synth_ts);
+	} else {
+		updateGyr(&params, &state, &coeffs, g_rad);
 	}
-	updateGyrTs(&params, &state, &coeffs, g_rad, timestamp_us);
 }
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
@@ -371,7 +369,6 @@ static void vqf_track_rest_diag(void)
 
 void vqf_update_accel(float *a, float time)
 {
-	ARG_UNUSED(time);
 	float a_m_s2[3] = {0};
 	// a is in g, convert to m/s^2
 	for (int i = 0; i < 3; i++) {
@@ -383,23 +380,15 @@ void vqf_update_accel(float *a, float time)
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	vqf_pre_accel_update(a_m_s2);
 #endif
-	updateAcc(&params, &state, &coeffs, a_m_s2);
-	vqf_track_rest_diag();
-}
-
-void vqf_update_accel_ts(float *a, uint64_t timestamp_us)
-{
-	float a_m_s2[3] = {0};
-	for (int i = 0; i < 3; i++) {
-		a_m_s2[i] = a[i] * CONST_EARTH_GRAVITY;
+	if (time > 0.0f && time < 10.0f) {
+		uint64_t synth_ts = state.lastAccTsUs + (uint64_t)(time * 1e6f);
+		if (synth_ts == 0) {
+			synth_ts = 1;
+		}
+		updateAccTs(&params, &state, &coeffs, a_m_s2, synth_ts);
+	} else {
+		updateAcc(&params, &state, &coeffs, a_m_s2);
 	}
-	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0) {
-		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
-	}
-#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-	vqf_pre_accel_update(a_m_s2);
-#endif
-	updateAccTs(&params, &state, &coeffs, a_m_s2, timestamp_us);
 	vqf_track_rest_diag();
 }
 
@@ -421,11 +410,6 @@ void vqf_update_mag(float *m, float time)
 	} else {
 		updateMag(&params, &state, &coeffs, m);
 	}
-}
-
-void vqf_update_mag_ts(float *m, uint64_t timestamp_us)
-{
-	updateMagTs(&params, &state, &coeffs, m, timestamp_us);
 }
 
 void vqf_update(float *g, float *a, float *m, float time)
