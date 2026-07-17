@@ -95,10 +95,11 @@ int ist8306_update_odr(float time, float *actual_time)
 		time = INFINITY;
 	}
 
-	if (last_odr == MODE)
-		return 1;
-	else
-		last_odr = MODE;
+	uint8_t desired = MODE;
+	if (last_odr == desired) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	if (MODE == MODE_SINGLE)
 		MODE = MODE_STANDBY; // set STBY, oneshot will set SMM
@@ -106,11 +107,14 @@ int ist8306_update_odr(float time, float *actual_time)
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL1, NSF << 5);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, MODE);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_OSRCNTL, OSR);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_odr = desired;
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void ist8306_mag_oneshot(void)
@@ -136,7 +140,10 @@ bool ist8306_mag_read(float m[3])
 	uint8_t rawData[6];
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_DATAXL, &rawData[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return false;
+	}
 	ist8306_mag_process(rawData, m);
 	return true;
 }

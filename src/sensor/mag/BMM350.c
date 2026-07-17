@@ -160,18 +160,21 @@ int bmm3_update_odr(float time, float *actual_time)
 	}
 
 	uint8_t AGGR_SET = AGGR_AVG << 4 | AGGR;
-	if (last_odr == AGGR_SET)
-		return 1;
-	else
-		last_odr = AGGR_SET;
+	if (last_odr == AGGR_SET) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM350_PMU_CMD_AGGR_SET, AGGR_SET);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM350_PMU_CMD, PMU_CMD);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_odr = AGGR_SET;
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void bmm3_mag_oneshot(void)

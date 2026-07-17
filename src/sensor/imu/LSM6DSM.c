@@ -175,7 +175,7 @@ int lsm6dsm_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 		OP_MODE_G = DSM_OP_MODE_G_NP;
 		GYRO_SLEEP = DSM_OP_MODE_G_SLEEP;
 		ODR_G = last_gyro_odr; // using last ODR
-		ODR = 0;
+		ODR = -1; /* not off: skip ODR_OFF overwrite below */
 	}
 	else
 	{
@@ -188,6 +188,11 @@ int lsm6dsm_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 	{
 		gyro_time = 0; // off
 		ODR_G = DSM_ODR_OFF;
+	}
+	else if (ODR < 0)
+	{
+		/* sleep: keep ODR_G = last_gyro_odr */
+		gyro_time = INFINITY;
 	}
 	else if (gyro_time < 0.3f / 1000) // in this case it seems better to compare gyro_time
 	{
@@ -240,13 +245,11 @@ int lsm6dsm_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 		gyro_time = 1.0 / 12.5; // 13Hz -> 76.8 / 1000
 	}
 
-	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL && last_gyro_odr == ODR_G) // if both were already configured
-		return 1;
-
-	last_accel_mode = OP_MODE_XL;
-	last_gyro_mode = OP_MODE_G;
-	last_accel_odr = ODR_XL;
-	last_gyro_odr = ODR_G;
+	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL && last_gyro_odr == ODR_G) {
+		*accel_actual_time = accel_time;
+		*gyro_actual_time = gyro_time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	uint8_t ODR_FIFO = MAX(ODR_XL, ODR_G);
 
@@ -277,9 +280,15 @@ int lsm6dsm_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_CTRL3, (DEC_G << 3) | DEC_XL); // set decimation
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_CTRL5, (ODR_FIFO >> 1) | 0x06); // set FIFO ODR, FIFO Continuous mode
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_accel_mode = OP_MODE_XL;
+	last_gyro_mode = OP_MODE_G;
+	last_accel_odr = ODR_XL;
+	last_gyro_odr = ODR_G;
 	*accel_actual_time = accel_time;
 	*gyro_actual_time = gyro_time;
 

@@ -132,19 +132,22 @@ int lis3_update_odr(float time, float *actual_time)
 	}
 
 	uint8_t ctrl = OM << 5 | DO << 2 | FAST_ODR << 1;
-	if (last_odr == ctrl)
-		return 1;
-	else
-		last_odr = ctrl;
+	if (last_odr == ctrl) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG1, 0x80 | ctrl); // temp, X/Y operating mode, and ODR
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, MD); // set measurement mode
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG4, OM << 2); // set Z-axis operating mode
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_odr = ctrl;
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void lis3_mag_oneshot(void)
@@ -158,13 +161,16 @@ void lis3_mag_oneshot(void)
 bool lis3_mag_read(float m[3])
 {
 	int err = 0;
-	uint8_t status;
+	uint8_t status = MD_SINGLE_CONV; /* force first register read before exit */
 	while ((status & 0x03) == MD_SINGLE_CONV) // wait for oneshot to complete
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, &status);
 	uint8_t rawData[6];
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_OUT_X_L, &rawData[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return false;
+	}
 	lis3_mag_process(rawData, m);
 	return true;
 }

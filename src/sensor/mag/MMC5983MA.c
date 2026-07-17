@@ -114,10 +114,10 @@ int mmc_update_odr(float time, float *actual_time)
 		time = INFINITY;
 	}
 
-	if (last_odr == MODR)
-		return 1;
-	else
-		last_odr = MODR;
+	if (last_odr == MODR) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	// set magnetometer bandwidth
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5983MA_CONTROL_1, MBW);
@@ -125,11 +125,14 @@ int mmc_update_odr(float time, float *actual_time)
 	// enable continuous measurement mode (bit 3 == 1), set sample rate
 	// enable automatic Set/Reset (bit 7 == 1), set set/reset rate
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5983MA_CONTROL_2, 0x80 | (MSET << 4) | (MODR ? 0x08 : 0) | MODR);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_odr = MODR;
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void mmc_mag_oneshot(void)
@@ -156,7 +159,10 @@ bool mmc_mag_read(float m[3])
 	uint8_t rawData[7]; // x/y/z mag register data stored here
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, MMC5983MA_XOUT_0, &rawData[0], 7); // Read the 7 raw data registers into data array
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return false;
+	}
 	mmc_mag_process(rawData, m);
 	return true;
 }

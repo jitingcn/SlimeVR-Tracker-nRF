@@ -175,24 +175,31 @@ int icm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	}
 	gyro_time /= clock_scale; // scale clock
 
-	if (last_accel_odr == AODR && last_gyro_odr == GODR) // if both were already configured
-		return 1;
+	if (last_accel_odr == AODR && last_gyro_odr == GODR) {
+		*accel_actual_time = accel_time;
+		*gyro_actual_time = gyro_time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
+	uint8_t prev_accel_odr = last_accel_odr;
+	uint8_t prev_gyro_odr = last_gyro_odr;
 	int err = 0;
 	// only if the power mode has changed
-	if (last_accel_odr == 0xff || last_gyro_odr == 0xff || (last_accel_odr == 0 ? 0 : 1) != (AODR == 0 ? 0 : 1) || (last_gyro_odr == 0 ? 0 : 1) != (GODR == 0 ? 0 : 1))
+	if (prev_accel_odr == 0xff || prev_gyro_odr == 0xff || (prev_accel_odr == 0 ? 0 : 1) != (AODR == 0 ? 0 : 1) || (prev_gyro_odr == 0 ? 0 : 1) != (GODR == 0 ? 0 : 1))
 	{ // TODO: can't tell difference between gyro off and gyro standby
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_PWR_MGMT0, gMode << 2 | aMode); // set accel and gyro modes
 		k_busy_wait(250); // wait >200us (datasheet 14.36)
 	}
-	last_accel_odr = AODR;
-	last_gyro_odr = GODR;
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_ACCEL_CONFIG0, Ascale << 5 | AODR); // set accel ODR and FS
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_GYRO_CONFIG0, Gscale << 5 | GODR); // set gyro ODR and FS
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_accel_odr = AODR;
+	last_gyro_odr = GODR;
 	*accel_actual_time = accel_time;
 	*gyro_actual_time = gyro_time;
 

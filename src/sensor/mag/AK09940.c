@@ -78,20 +78,24 @@ int ak_update_odr(float time, float *actual_time)
 		time = 0; // unsure if SMM is working at the needed rate
 	}
 
-	if (last_odr == MODE)
-		return 1;
-	else
-		last_odr = MODE;
+	uint8_t desired = MODE;
+	if (last_odr == desired) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	if (MODE == MODE_SMM)
 		MODE = MODE_PDM; // set PDM, oneshot will set SMM
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL3, MT_LND2 << 5 | MODE);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_odr = desired;
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void ak_mag_oneshot(void)
@@ -118,7 +122,10 @@ bool ak_mag_read(float m[3])
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, AK09940_HXL, &rawData[0], 9);
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_ST2, &status); // release protection
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return false;
+	}
 	ak_mag_process(rawData, m);
 	return true;
 }

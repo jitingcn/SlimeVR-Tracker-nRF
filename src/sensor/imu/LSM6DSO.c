@@ -184,7 +184,7 @@ int lsm6dso_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 		OP_MODE_G = DSO_OP_MODE_G_NP;
 		GYRO_SLEEP = DSO_OP_MODE_G_SLEEP;
 		ODR_G = last_gyro_odr; // using last ODR
-		ODR = 0;
+		ODR = -1; /* not off: skip ODR_OFF overwrite below */
 	}
 	else
 	{
@@ -198,6 +198,11 @@ int lsm6dso_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 	{
 		gyro_time = 0; // off
 		ODR_G = DSO_ODR_OFF;
+	}
+	else if (ODR < 0)
+	{
+		/* sleep: keep ODR_G = last_gyro_odr */
+		gyro_time = INFINITY;
 	}
 	else if (gyro_time < 0.3f / 1000) // in this case it seems better to compare gyro_time
 	{
@@ -251,13 +256,11 @@ int lsm6dso_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 	}
 	gyro_time /= freq_scale; // scale by internal freq adjustment
 
-	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL && last_gyro_odr == ODR_G) // if both were already configured
-		return 1;
-
-	last_accel_mode = OP_MODE_XL;
-	last_gyro_mode = OP_MODE_G;
-	last_accel_odr = ODR_XL;
-	last_gyro_odr = ODR_G;
+	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL && last_gyro_odr == ODR_G) {
+		*accel_actual_time = accel_time;
+		*gyro_actual_time = gyro_time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL1, ODR_XL | accel_fs); // set accel ODR and FS
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL6, OP_MODE_XL); // set accelerator perf mode
@@ -267,9 +270,15 @@ int lsm6dso_update_odr(float accel_time, float gyro_time, float *accel_actual_ti
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL4, GYRO_SLEEP); // set gyroscope awake/sleep mode
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FIFO_CTRL3, (ODR_XL >> 4) | ODR_G); // set accel and gyro batch rate
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_accel_mode = OP_MODE_XL;
+	last_gyro_mode = OP_MODE_G;
+	last_accel_odr = ODR_XL;
+	last_gyro_odr = ODR_G;
 	*accel_actual_time = accel_time;
 	*gyro_actual_time = gyro_time;
 
@@ -464,7 +473,7 @@ const sensor_imu_t sensor_imu_lsm6dso = {
 
 	*lsm_setup_DRDY,
 	*lsm6dso_setup_WOM,
-	
+
 	*lsm6dso_ext_setup,
 	*lsm6dso_ext_passthrough
 };

@@ -82,17 +82,20 @@ int lis2_update_odr(float time, float *actual_time)
 		time = INFINITY;
 	}
 
-	if (last_odr == MODR)
-		return 1;
-	else
-		last_odr = MODR;
+	if (last_odr == MODR) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, MODR << 2 | MD); // set mag ODR and MD
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_odr = MODR;
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void lis2_mag_oneshot(void)
@@ -106,13 +109,16 @@ void lis2_mag_oneshot(void)
 bool lis2_mag_read(float m[3])
 {
 	int err = 0;
-	uint8_t status;
+	uint8_t status = MD_SINGLE; /* force first register read before exit */
 	while ((status & 0x03) == MD_SINGLE) // wait for oneshot to complete
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, &status);
 	uint8_t rawData[6];
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_OUTX_L_REG, &rawData[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return false;
+	}
 	lis2_mag_process(rawData, m);
 	return true;
 }

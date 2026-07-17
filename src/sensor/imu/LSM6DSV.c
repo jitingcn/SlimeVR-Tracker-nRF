@@ -298,13 +298,11 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	}
 	gyro_time /= freq_scale; // scale by internal freq adjustment
 
-	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL && last_gyro_odr == ODR_G) // if both were already configured
-		return 1;
-
-	last_accel_mode = OP_MODE_XL;
-	last_gyro_mode = OP_MODE_G;
-	last_accel_odr = ODR_XL;
-	last_gyro_odr = ODR_G;
+	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL && last_gyro_odr == ODR_G) {
+		*accel_actual_time = accel_time;
+		*gyro_actual_time = gyro_time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	uint8_t ctrl1_config = OP_MODE_XL << 4 | ODR_XL;
 	uint8_t ctrl2_config = OP_MODE_G << 4 | ODR_G;
@@ -325,9 +323,15 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	LOG_INF("CTRL1 readback=0x%02X, CTRL2 readback=0x%02X, FIFO_CTRL3 readback=0x%02X",
 		ctrl1_readback, ctrl2_readback, fifo_ctrl3_readback);
 
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_accel_mode = OP_MODE_XL;
+	last_gyro_mode = OP_MODE_G;
+	last_accel_odr = ODR_XL;
+	last_gyro_odr = ODR_G;
 	*accel_actual_time = accel_time;
 	*gyro_actual_time = gyro_time;
 

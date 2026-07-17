@@ -428,12 +428,17 @@ int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time
 	}
 	gyro_time /= clock_scale; // scale clock
 
-	if (last_accel_odr == ACCEL_ODR && last_gyro_odr == GYRO_ODR) // if both were already configured
-		return 1;
+	if (last_accel_odr == ACCEL_ODR && last_gyro_odr == GYRO_ODR) {
+		*accel_actual_time = accel_time;
+		*gyro_actual_time = gyro_time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
+	uint8_t prev_accel_odr = last_accel_odr;
+	uint8_t prev_gyro_odr = last_gyro_odr;
 	int err = 0;
 	// only if the power mode has changed
-	if (last_accel_odr == 0xff || last_gyro_odr == 0xff || (last_accel_odr == 0 ? 0 : 1) != (ACCEL_ODR == 0 ? 0 : 1) || (last_gyro_odr == 0 ? 0 : 1) != (GYRO_ODR == 0 ? 0 : 1))
+	if (prev_accel_odr == 0xff || prev_gyro_odr == 0xff || (prev_accel_odr == 0 ? 0 : 1) != (ACCEL_ODR == 0 ? 0 : 1) || (prev_gyro_odr == 0 ? 0 : 1) != (GYRO_ODR == 0 ? 0 : 1))
 	{ // TODO: can't tell difference between gyro off and gyro standby
 		uint8_t pwr_mgmt = GYRO_MODE << 2 | ACCEL_MODE;
 		LOG_INF("PWR_MGMT0 write = 0x%02X (GYRO_MODE=%d, ACCEL_MODE=%d)", pwr_mgmt, GYRO_MODE, ACCEL_MODE);
@@ -444,8 +449,6 @@ int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time
 		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, &pwr_mgmt_readback);
 		LOG_INF("PWR_MGMT0 readback = 0x%02X", pwr_mgmt_readback);
 	}
-	last_accel_odr = ACCEL_ODR;
-	last_gyro_odr = GYRO_ODR;
 
 	uint8_t accel_config = ACCEL_UI_FS_SEL << 4 | ACCEL_ODR;
 	uint8_t gyro_config = GYRO_UI_FS_SEL << 4 | GYRO_ODR;
@@ -459,9 +462,13 @@ int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_GYRO_CONFIG0, &gyro_config_readback);
 	LOG_INF("ACCEL_CONFIG0 readback = 0x%02X, GYRO_CONFIG0 readback = 0x%02X",
 		accel_config_readback, gyro_config_readback);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_accel_odr = ACCEL_ODR;
+	last_gyro_odr = GYRO_ODR;
 	*accel_actual_time = accel_time;
 	*gyro_actual_time = gyro_time;
 

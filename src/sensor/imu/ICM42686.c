@@ -273,16 +273,21 @@ int icm42686_update_odr(float accel_time, float gyro_time,
 
 	gyro_time /= clock_scale;
 
-	if (last_accel_odr == AODR && last_gyro_odr == GODR)
-		return 1;
+	if (last_accel_odr == AODR && last_gyro_odr == GODR) {
+		*accel_actual_time = accel_time;
+		*gyro_actual_time = gyro_time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
+	uint8_t prev_accel_odr = last_accel_odr;
+	uint8_t prev_gyro_odr = last_gyro_odr;
 	int err = 0;
 
 	// only if the power mode has changed
-	if (last_accel_odr == 0xff ||
-		last_gyro_odr == 0xff ||
-		(last_accel_odr == 0 ? 0 : 1) != (AODR == 0 ? 0 : 1) ||
-		(last_gyro_odr == 0 ? 0 : 1) != (GODR == 0 ? 0 : 1))
+	if (prev_accel_odr == 0xff ||
+		prev_gyro_odr == 0xff ||
+		(prev_accel_odr == 0 ? 0 : 1) != (AODR == 0 ? 0 : 1) ||
+		(prev_gyro_odr == 0 ? 0 : 1) != (GODR == 0 ? 0 : 1))
 	{
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU,
 								  ICM42686_PWR_MGMT0,
@@ -290,9 +295,6 @@ int icm42686_update_odr(float accel_time, float gyro_time,
 
 		k_busy_wait(250);
 	}
-
-	last_accel_odr = AODR;
-	last_gyro_odr = GODR;
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU,
 							  ICM42686_ACCEL_CONFIG0,
@@ -302,9 +304,13 @@ int icm42686_update_odr(float accel_time, float gyro_time,
 							  ICM42686_GYRO_CONFIG0,
 							  Gscale << 5 | GODR);
 
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_accel_odr = AODR;
+	last_gyro_odr = GODR;
 	*accel_actual_time = accel_time;
 	*gyro_actual_time = gyro_time;
 

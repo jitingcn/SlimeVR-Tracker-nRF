@@ -162,19 +162,22 @@ int bmm1_update_odr(float time, float *actual_time)
 	}
 
 	uint8_t OP_SET = DR << 2 | OPMODE;
-	if (last_odr == OP_SET)
-		return 1;
-	else
-		last_odr = OP_SET;
+	if (last_odr == OP_SET) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_OP_CTRL, OP_SET << 1);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_REP_XY, REP_XY);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_REP_Z, REP_Z);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_odr = OP_SET;
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void bmm1_mag_oneshot(void)
@@ -193,7 +196,10 @@ bool bmm1_mag_read(float m[3])
 	uint8_t rawData[8];
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, BMM150_DATAX_LSB, &rawData[0], 8);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return false;
+	}
 	bmm1_mag_process(rawData, m);
 	return true;
 }

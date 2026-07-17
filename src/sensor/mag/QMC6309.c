@@ -144,22 +144,26 @@ int qmc_update_odr(float time, float *actual_time)
 	}
 
 	uint8_t STAT = ODR_MASK(MODR) | MD;
-	if (last_state == STAT)
-		return 1;
-	last_state = STAT;
+	if (last_state == STAT) {
+		*actual_time = time;
+		return 0; /* already configured — success for err|= callers */
+	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, ODR_MASK(MODR) | RNG_MASK(RNG_8G) | SET_RESET_ON);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_4) | OSR_MASK(OSR_8) | MD);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
+	last_state = STAT;
 	oneshot_trigger_time = 0;
 
 	if (MD != MD_SUSPEND)
 		mag_period_ms = (int32_t)(time * 1000);
 
 	*actual_time = time;
-	return err;
+	return 0;
 }
 
 void qmc_mag_oneshot(void)
@@ -206,7 +210,10 @@ bool qmc_mag_read(float m[3])
 	uint8_t rawData[6];
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return false;
+	}
 	// Normal Mode latches output until next ODR cycle. If the sensor hub (or
 	// direct I2C loop) reads faster than mag ODR, the registers are byte-identical
 	// until a new measurement arrives. Skip VQF to avoid over-feeding.
