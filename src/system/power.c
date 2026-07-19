@@ -132,8 +132,8 @@ static void sys_disconnect_interface_pins(void)
 */
 #if PWR_EXISTS
 	LOG_INF("Power GPIO pin: %u", pwr.pin);
-	nrf_gpio_cfg_default(pwr.pin);
-	LOG_INF("Disconnected power GPIO");
+	gpio_pin_configure_dt(&pwr, GPIO_OUTPUT_INACTIVE);
+	LOG_INF("Disabled power GPIO (LDO off)");
 #endif
 #if VCC_EXISTS
 	LOG_INF("VCC GPIO pin: %u", vcc.pin);
