@@ -116,9 +116,7 @@ int sensor_offsetBias_internal(
 	float actual_gyro_odr = sensor_get_gyro_odr();
 	float actual_accel_odr = sensor_get_accel_odr();
 
-	// Calculate effective ODRs after oversampling
-	// sensor_wait_gyro receives data at effective_gyro_odr (after gyro oversampling)
-	// sensor_wait_accel receives data at effective_accel_odr (after accel oversampling)
+	/* Effective ODRs after gyro Δq-merge / accel average (fusion feed rate). */
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 	float effective_gyro_odr = actual_gyro_odr / CONFIG_SENSOR_GYRO_OVERSAMPLING;
 #else
@@ -262,11 +260,10 @@ int sensor_offsetBias_internal(
 	// Convert min_sample_time_ms to seconds for calculation
 	float min_sample_time_sec = (float)min_sample_time_ms / 1000.0f;
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-	// With oversampling enabled, the effective sample rate sent to calibration is reduced
-	// by the oversampling factor (e.g., 1600Hz / 4 = 400Hz effective)
+	/* Δq-merge reduces fusion/calibration gyro steps by N (e.g. 1600/4 → 400 Hz). */
 	int min_samples_required = (int)(effective_gyro_odr * min_sample_time_sec);
 	LOG_INF(
-		"Calibration: Gyro oversampling %dx, effective ODR: %.2fHz",
+		"Calibration: Gyro Δq-merge %dx, effective ODR: %.2fHz",
 		CONFIG_SENSOR_GYRO_OVERSAMPLING,
 		(double)effective_gyro_odr
 	);

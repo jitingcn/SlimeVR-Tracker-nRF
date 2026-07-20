@@ -321,15 +321,22 @@ config SENSOR_GYRO_ODR
         A lower rate is recommended for IMUs with poor gyrometer rate noise density. (Ex. BMI270, LSM6DS3TR-C)
 
 config SENSOR_GYRO_OVERSAMPLING
-    int "Gyroscope oversampling factor"
+    int "Gyroscope Δq-merge factor (INT_merge)"
     default 1
     range 1 16
     help
-        Number of gyroscope samples to average before fusion.
-        Set to 1 to disable oversampling.
-        For example, set SENSOR_GYRO_ODR=1600 and SENSOR_GYRO_OVERSAMPLING=4
-        to achieve effective 400Hz with noise reduction from 4x oversampling.
-        The effective gyro rate for fusion will be ODR / oversampling factor.
+        Number of high-rate gyroscope samples to merge via quaternion increments
+        (Δq product / INT_merge) before one fusion gyro update.
+        Preserves coning that plain ω averaging destroys.
+        Pipeline per sample: firmware compensation (TCal/ZRO/D_offset + sens)
+        first, then Δq built with frozen fusion residual bias, then one
+        update_gyro of the equivalent rate (fusion bias re-added so the
+        filter's internal subtract matches N×update_gyro strapdown).
+        Set to 1 to disable (one fusion update per gyro sample).
+        Example: SENSOR_GYRO_ODR=1600 and SENSOR_GYRO_OVERSAMPLING=4 →
+        1600 Hz strapdown Δq merged into one 400 Hz fusion gyro step.
+        Effective fusion gyro rate = ODR / oversampling factor.
+        Accelerometer oversampling (if enabled) stays separate and still averages.
 
 config SENSOR_ACCEL_OVERSAMPLING
     int "Accelerometer oversampling factor"

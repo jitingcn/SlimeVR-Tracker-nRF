@@ -191,11 +191,22 @@ static float mag_actual_time;
 static uint8_t sensor_fifo_raw_buffer[SENSOR_FIFO_RAW_BUFFER_SIZE];
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-// Gyroscope oversampling state for noise reduction
-// Accumulates gyro samples and averages them before fusion
-static float gyro_oversample_sum[3] = {0};
+/*
+ * INT_merge: high-rate Δq product → one fusion gyro step at ODR/N.
+ *
+ * Two bias layers (do not mix):
+ *  1) Firmware: process_gyro (TCal / static gyroBias / D_offset) + sens scale
+ *     applied per sample into `g` before merge.
+ *  2) Fusion: VQF/EqF residual bias, frozen for the N-sample window, subtracted
+ *     when building each Δq, then re-added on the fed ω_eq so update_gyro's
+ *     internal subtract recovers the debiased equivalent rate.
+ * Never re-add firmware offsets on the feed path — fusion never sees them.
+ */
+#define GYRO_DQ_EPS 1e-8f
+static float gyro_dq_acc[4];
 static int gyro_oversample_count = 0;
-static float gyro_effective_time; // Effective time step for fusion after oversampling
+static float gyro_effective_time; /* N * gyro_actual_time */
+static float gyro_merge_bias_dps[3]; /* frozen fusion bias for one window */
 #endif
 
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
@@ -1535,16 +1546,17 @@ int sensor_init(void)
 	LOG_INF("Initialized sensors");
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-	// Initialize gyro oversampling state
+	gyro_dq_acc[0] = 1.0f;
+	gyro_dq_acc[1] = 0.0f;
+	gyro_dq_acc[2] = 0.0f;
+	gyro_dq_acc[3] = 0.0f;
 	gyro_oversample_count = 0;
-	for (int i = 0; i < 3; i++) {
-		gyro_oversample_sum[i] = 0;
-	}
-	// Calculate effective time step for fusion after oversampling
+	gyro_merge_bias_dps[0] = gyro_merge_bias_dps[1] = gyro_merge_bias_dps[2] = 0.0f;
 	gyro_effective_time = gyro_actual_time * CONFIG_SENSOR_GYRO_OVERSAMPLING;
 	LOG_INF(
-		"Gyro oversampling: %dx, effective rate: %.2fHz",
+		"Gyro INT_merge: %dx Δq @ %.2fHz → fusion %.2fHz (firmware cal per sample; fusion bias frozen/window)",
 		CONFIG_SENSOR_GYRO_OVERSAMPLING,
+		1.0 / (double)gyro_actual_time,
 		1.0 / (double)gyro_effective_time
 	);
 #endif
@@ -1792,6 +1804,7 @@ typedef struct {
 /* Persistent per-frame average accel (kept when a_count == 0). */
 static float sensor_loop_avg_a[3] = {0};
 
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING <= 1
 static void feed_calibrated_gyro(float *g, float dt, int *g_count, float *debug_cal_g_sum)
 {
 	// Accumulate calibrated gyro for debug (after zero bias and sensitivity calibration)
@@ -1812,9 +1825,10 @@ static void feed_calibrated_gyro(float *g, float dt, int *g_count, float *debug_
 	sensor_fusion->update_gyro(g, dt);
 	(*g_count)++;
 }
+#endif /* CONFIG_SENSOR_GYRO_OVERSAMPLING <= 1 */
 
-#if (CONFIG_SENSOR_GYRO_OVERSAMPLING > 1) || (CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1)
-/* Shared accumulate + average for gyro/accel oversampling (CMSIS or scalar). */
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+/* Accel oversampling: average samples (noise reduction; not orientation strapdown). */
 static void oversample_accum3(float sum[3], const float sample[3])
 {
 #if CONFIG_CMSIS_DSP
@@ -1848,6 +1862,100 @@ static bool oversample_try_avg3(float sum[3], int *count, int n, float out_avg[3
 }
 #endif
 
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+static void gyro_dq_mul(const float q1[4], const float q2[4], float out[4])
+{
+	float w = q1[0] * q2[0] - q1[1] * q2[1] - q1[2] * q2[2] - q1[3] * q2[3];
+	float x = q1[0] * q2[1] + q1[1] * q2[0] + q1[2] * q2[3] - q1[3] * q2[2];
+	float y = q1[0] * q2[2] - q1[1] * q2[3] + q1[2] * q2[0] + q1[3] * q2[1];
+	float z = q1[0] * q2[3] + q1[1] * q2[2] - q1[2] * q2[1] + q1[3] * q2[0];
+	out[0] = w;
+	out[1] = x;
+	out[2] = y;
+	out[3] = z;
+}
+
+/*
+ * g_dps: already firmware-compensated (TCal/ZRO/D_offset + sens).
+ * bias_dps: frozen fusion residual only — not firmware gyroBias.
+ * Matches VQF updateGyr: Δq from (g - fusion_bias).
+ */
+static void gyro_dq_accumulate_sample(const float g_dps[3], const float fusion_bias_dps[3], float dt)
+{
+	const float deg_to_rad = (float)(M_PI / 180.0);
+	float wx = (g_dps[0] - fusion_bias_dps[0]) * deg_to_rad;
+	float wy = (g_dps[1] - fusion_bias_dps[1]) * deg_to_rad;
+	float wz = (g_dps[2] - fusion_bias_dps[2]) * deg_to_rad;
+	float wn = sqrtf(wx * wx + wy * wy + wz * wz);
+	float dq[4];
+	if (wn > GYRO_DQ_EPS) {
+		float half = wn * dt * 0.5f;
+		float s = sinf(half) / wn;
+		dq[0] = cosf(half);
+		dq[1] = s * wx;
+		dq[2] = s * wy;
+		dq[3] = s * wz;
+	} else {
+		dq[0] = 1.0f;
+		dq[1] = 0.0f;
+		dq[2] = 0.0f;
+		dq[3] = 0.0f;
+	}
+	float out[4];
+	gyro_dq_mul(gyro_dq_acc, dq, out);
+	float n2 = out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3];
+	if (n2 > GYRO_DQ_EPS) {
+		float inv = 1.0f / sqrtf(n2);
+		gyro_dq_acc[0] = out[0] * inv;
+		gyro_dq_acc[1] = out[1] * inv;
+		gyro_dq_acc[2] = out[2] * inv;
+		gyro_dq_acc[3] = out[3] * inv;
+	}
+}
+
+/*
+ * Merged Δq → ω_eq over T_eff, then re-add the *same* frozen fusion bias.
+ * update_gyro will subtract fusion bias again → strapdown sees ω_eq.
+ * Do not add firmware TCal/ZRO/D_offset here (already removed from g).
+ */
+static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float fusion_bias_dps[3])
+{
+	float qw = gyro_dq_acc[0];
+	float qx = gyro_dq_acc[1];
+	float qy = gyro_dq_acc[2];
+	float qz = gyro_dq_acc[3];
+	/* Shortest rotation (window is small; still keep sign stable). */
+	if (qw < 0.0f) {
+		qw = -qw;
+		qx = -qx;
+		qy = -qy;
+		qz = -qz;
+	}
+	if (qw > 1.0f) {
+		qw = 1.0f;
+	}
+	float angle = 2.0f * acosf(qw);
+	float s = sinf(angle * 0.5f);
+	float wr[3];
+	if (fabsf(s) > GYRO_DQ_EPS && angle > GYRO_DQ_EPS) {
+		float scale = angle / (s * T_eff);
+		wr[0] = qx * scale;
+		wr[1] = qy * scale;
+		wr[2] = qz * scale;
+	} else {
+		float scale = 2.0f / T_eff;
+		wr[0] = qx * scale;
+		wr[1] = qy * scale;
+		wr[2] = qz * scale;
+	}
+	const float rad_to_deg = 180.0f / (float)M_PI;
+	/* Reconstruct post-firmware stream: ω_eq + fusion_residual. */
+	g_feed_dps[0] = wr[0] * rad_to_deg + fusion_bias_dps[0];
+	g_feed_dps[1] = wr[1] * rad_to_deg + fusion_bias_dps[1];
+	g_feed_dps[2] = wr[2] * rad_to_deg + fusion_bias_dps[2];
+}
+#endif
+
 static void feed_gyro_sample(
 	float *raw_g,
 	int *g_count,
@@ -1873,30 +1981,12 @@ static void feed_gyro_sample(
 		(*debug_g_samples)++;
 	}
 
-#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-	/* Accumulate raw before cal; linear cal/sens so order is equivalent and cheaper. */
-	oversample_accum3(gyro_oversample_sum, raw_g);
-	float g_avg[3];
-	if (!oversample_try_avg3(gyro_oversample_sum, &gyro_oversample_count, CONFIG_SENSOR_GYRO_OVERSAMPLING, g_avg)) {
-		return;
-	}
-
-	sensor_calibration_process_gyro(g_avg);
-
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	if (retained) {
-		g_avg[0] *= retained->gyroSensScale[0];
-		g_avg[1] *= retained->gyroSensScale[1];
-		g_avg[2] *= retained->gyroSensScale[2];
-	}
-#endif
-
-	feed_calibrated_gyro(g_avg, gyro_effective_time, g_count, debug_cal_g_sum);
-#else
+	/* --- Firmware compensation (layer 1): TCal / static ZRO / D_offset --- */
 	sensor_calibration_process_gyro(raw_g);
 	float g[] = {raw_g[0], raw_g[1], raw_g[2]};
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
+	/* Firmware-ish scale; applied before fusion, same as non-OS path. */
 	if (retained) {
 		g[0] *= retained->gyroSensScale[0];
 		g[1] *= retained->gyroSensScale[1];
@@ -1904,6 +1994,44 @@ static void feed_gyro_sample(
 	}
 #endif
 
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	/* Per-sample stats on firmware-compensated g; Δq merge; one fusion step. */
+	if (sensor_debug_is_active()) {
+		for (int j = 0; j < 3; j++) {
+			debug_cal_g_sum[j] += g[j];
+		}
+	}
+#if CONFIG_SENSOR_RANGE_STATS
+	sensor_update_range_stats_gyro(g);
+#endif
+	sensor_record_rest_gyro_motion(g);
+
+	/* Freeze fusion residual bias for the whole window (layer 2). */
+	if (gyro_oversample_count == 0) {
+		if (sensor_fusion && sensor_fusion->get_gyro_bias) {
+			sensor_fusion->get_gyro_bias(gyro_merge_bias_dps);
+		} else {
+			gyro_merge_bias_dps[0] = gyro_merge_bias_dps[1] = gyro_merge_bias_dps[2] = 0.0f;
+		}
+	}
+	gyro_dq_accumulate_sample(g, gyro_merge_bias_dps, gyro_actual_time);
+	gyro_oversample_count++;
+	if (gyro_oversample_count < CONFIG_SENSOR_GYRO_OVERSAMPLING) {
+		return;
+	}
+
+	float g_feed[3];
+	gyro_dq_to_feed_gyro(g_feed, gyro_effective_time, gyro_merge_bias_dps);
+	/* g_feed is post-firmware + fusion_bias carrier; update_gyro subtracts fusion bias. */
+	sensor_fusion->update_gyro(g_feed, gyro_effective_time);
+	(*g_count)++;
+
+	gyro_dq_acc[0] = 1.0f;
+	gyro_dq_acc[1] = 0.0f;
+	gyro_dq_acc[2] = 0.0f;
+	gyro_dq_acc[3] = 0.0f;
+	gyro_oversample_count = 0;
+#else
 	feed_calibrated_gyro(g, gyro_actual_time, g_count, debug_cal_g_sum);
 #endif
 }
@@ -2397,16 +2525,14 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 		float expected_accel_samples = sensor_update_time_ms / 1000.0f / accel_actual_time;
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-		// With gyro oversampling, expected fusion timesteps is reduced by oversampling factor
+		/* Δq-merge: one fusion gyro step per N high-rate samples. */
 		float expected_gyro_timesteps_f = expected_gyro_samples / CONFIG_SENSOR_GYRO_OVERSAMPLING;
-		// Only warn if actual count is significantly off (more than ±50% or at least ±1)
-		// This handles fractional expected values better
 		if (frame->g_count) {
 			int min_expected = (int)expected_gyro_timesteps_f;           // floor
 			int max_expected = (int)(expected_gyro_timesteps_f + 0.99f); // ceiling
 			if (frame->g_count < min_expected - 1 || frame->g_count > max_expected + 1) {
 				LOG_DBG(
-					"Expected ~%.1f gyro timesteps (oversampling %dx), got %d (elapsed %lldms)",
+					"Expected ~%.1f gyro timesteps (Δq-merge %dx), got %d (elapsed %lldms)",
 					(double)expected_gyro_timesteps_f,
 					CONFIG_SENSOR_GYRO_OVERSAMPLING,
 					frame->g_count,
