@@ -42,6 +42,8 @@ static bool power_init = false;
 
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
+#include "nrf_gpio_util.h" /* after LOG_MODULE_REGISTER: helpers use LOG_INF */
+
 static bool sys_WOM(bool force);
 static bool sys_system_off(void);
 static void sys_system_reboot(void);
@@ -110,35 +112,29 @@ static const struct gpio_dt_spec vcc = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, vcc_gp
 
 #define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
 
+/* CS/VCC -> Hi-Z (GPIO_DISCONNECTED); pwr enable -> driven inactive. */
 static void sys_disconnect_interface_pins(void)
 {
-	// interface pins are disconnected according to devicetree, so only need to disconnect any cs pins
-	// int pin already configured by power off
 #if DT_SPI_DEV_HAS_CS_GPIOS(DT_NODELABEL(imu_spi))
-	uint32_t imu_cs_gpios = DT_SPI_DEV_CS_GPIOS_PIN(DT_NODELABEL(imu_spi));
-	LOG_INF("IMU CS GPIO pin: %u", imu_cs_gpios);
-	nrf_gpio_cfg_default(imu_cs_gpios);
-	LOG_INF("Disconnected IMU CS GPIO");
+	const struct gpio_dt_spec imu_cs = GPIO_DT_SPEC_GET_BY_IDX(
+		DT_BUS(DT_NODELABEL(imu_spi)), cs_gpios, DT_REG_ADDR_RAW(DT_NODELABEL(imu_spi)));
+	nrf_gpio_configure_dt_log("Disconnected IMU CS", &imu_cs, GPIO_DISCONNECTED);
 #endif
 #if DT_SPI_DEV_HAS_CS_GPIOS(DT_NODELABEL(mag_spi))
-	uint32_t mag_cs_gpios = DT_SPI_DEV_CS_GPIOS_PIN(DT_NODELABEL(mag_spi)));
-	LOG_INF("Magnetometer CS GPIO pin: %u", mag_cs_gpios);
-	nrf_gpio_cfg_default(mag_cs_gpios);
-	LOG_INF("Disconnected Magnetometer CS GPIO");
+	const struct gpio_dt_spec mag_cs = GPIO_DT_SPEC_GET_BY_IDX(
+		DT_BUS(DT_NODELABEL(mag_spi)), cs_gpios, DT_REG_ADDR_RAW(DT_NODELABEL(mag_spi)));
+	nrf_gpio_configure_dt_log("Disconnected Magnetometer CS", &mag_cs, GPIO_DISCONNECTED);
 #endif
 /*
 	TODO: for promicro, leaving ext_vcc on draws ~50uA, disconnect works, pulldown may be more reliable
 	what to do about boards that use ext_vcc? it is not expected to leave on during WOM
 */
 #if PWR_EXISTS
-	LOG_INF("Power GPIO pin: %u", pwr.pin);
-	gpio_pin_configure_dt(&pwr, GPIO_OUTPUT_INACTIVE);
-	LOG_INF("Disabled power GPIO (LDO off)");
+	nrf_gpio_configure_dt_log("Disabled power GPIO", &pwr, GPIO_OUTPUT_INACTIVE);
 #endif
 #if VCC_EXISTS
-	LOG_INF("VCC GPIO pin: %u", vcc.pin);
-	nrf_gpio_cfg_default(vcc.pin);
-	LOG_INF("Disconnected VCC GPIO");
+	/* Hi-Z (same as nrf_gpio_cfg_default); not OUTPUT_INACTIVE — see TODO above. */
+	nrf_gpio_configure_dt_log("Disconnected VCC GPIO", &vcc, GPIO_DISCONNECTED);
 #endif
 }
 
@@ -241,20 +237,8 @@ static void disconnect_sensor_pins(void)
 	if (device_is_ready(i2c_dev)) {
 		NRF_TWIM_Type *twim = (NRF_TWIM_Type *)DT_REG_ADDR(DT_NODELABEL(i2c0));
 
-		uint32_t scl_pin = twim->PSEL.SCL;
-		uint32_t sda_pin = twim->PSEL.SDA;
-
-		if (!(scl_pin & (1UL << 31))) {
-			uint32_t scl_pin_num = scl_pin & 0x1F;
-			nrf_gpio_cfg_default(scl_pin_num);
-			LOG_INF("Disconnected I2C SCL pin %u", scl_pin_num);
-		}
-
-		if (!(sda_pin & (1UL << 31))) {
-			uint32_t sda_pin_num = sda_pin & 0x1F;
-			nrf_gpio_cfg_default(sda_pin_num);
-			LOG_INF("Disconnected I2C SDA pin %u", sda_pin_num);
-		}
+		nrf_psel_cfg_default("Disconnected I2C SCL", nrf_twim_scl_pin_get(twim));
+		nrf_psel_cfg_default("Disconnected I2C SDA", nrf_twim_sda_pin_get(twim));
 	}
 #endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi3))
@@ -262,50 +246,16 @@ static void disconnect_sensor_pins(void)
 	if (device_is_ready(spi_dev)) {
 		NRF_SPIM_Type *spim = (NRF_SPIM_Type *)DT_REG_ADDR(DT_NODELABEL(spi3));
 
-		uint32_t sck_pin = spim->PSEL.SCK;
-		uint32_t mosi_pin = spim->PSEL.MOSI;
-		uint32_t miso_pin = spim->PSEL.MISO;
-
-		if (!(sck_pin & (1UL << 31))) {
-			uint32_t sck_pin_num = sck_pin & 0x1F;
-			nrf_gpio_cfg_default(sck_pin_num);
-			LOG_INF("Disconnected SPI SCK pin %u", sck_pin_num);
-		}
-
-		if (!(mosi_pin & (1UL << 31))) {
-			uint32_t mosi_pin_num = mosi_pin & 0x1F;
-			nrf_gpio_cfg_default(mosi_pin_num);
-			LOG_INF("Disconnected SPI MOSI pin %u", mosi_pin_num);
-		}
-
-		if (!(miso_pin & (1UL << 31))) {
-			uint32_t miso_pin_num = miso_pin & 0x1F;
-			nrf_gpio_cfg_default(miso_pin_num);
-			LOG_INF("Disconnected SPI MISO pin %u", miso_pin_num);
-		}
+		nrf_psel_cfg_default("Disconnected SPI SCK", nrf_spim_sck_pin_get(spim));
+		nrf_psel_cfg_default("Disconnected SPI MOSI", nrf_spim_mosi_pin_get(spim));
+		nrf_psel_cfg_default("Disconnected SPI MISO", nrf_spim_miso_pin_get(spim));
 
 #if DT_NODE_HAS_PROP(DT_NODELABEL(spi3), cs_gpios)
 		const struct gpio_dt_spec cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi3), cs_gpios, 0);
-		if (device_is_ready(cs.port)) {
-			gpio_pin_configure_dt(&cs, GPIO_DISCONNECTED);
-			LOG_INF("Disconnected SPI CS pin %u", cs.pin);
-		}
+		nrf_gpio_configure_dt_log("Disconnected SPI CS", &cs, GPIO_DISCONNECTED);
 #endif
 	}
 #endif
-
-// #if PWR_EXISTS
-// 	gpio_pin_configure_dt(&pwr, GPIO_DISCONNECTED);
-// 	LOG_INF("Disconnected power GPIO");
-// #endif
-// #if INT0_EXISTS
-// 	gpio_pin_configure_dt(&int0, GPIO_DISCONNECTED);
-// 	LOG_INF("Disconnected INT0 GPIO");
-// #endif
-// #if CLK_EXISTS
-// 	gpio_pin_configure_dt(&clk, GPIO_DISCONNECTED);
-// 	LOG_INF("Disconnected CLK GPIO");
-// #endif
 
 	LOG_INF("All sensor GPIO pins disconnected");
 #endif
@@ -413,7 +363,8 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 #endif
 	// Configure WOM interrupt
 	uint32_t int0_gpios = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
-	LOG_INF("Wake up GPIO pin: %u, config: %u", int0_gpios, pin_config);
+	LOG_INF("Wake up GPIO " NRF_ABS_PIN_LOG_FMT ", config: %u", NRF_ABS_PIN_LOG_ARGS(int0_gpios),
+		pin_config);
 	nrf_gpio_cfg_input(int0_gpios, (pin_config >> 4) & 0xF);
 	nrf_gpio_cfg_sense_set(int0_gpios, pin_config & 0xF);
 	LOG_INF("Configured IMU wake up GPIO");
@@ -454,13 +405,13 @@ static bool sys_system_off(void) // TODO: add timeout
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
 #if IMU_INT_EXISTS
-	// Configure interrupt pin as it is not used
+	/* Idle: input buffer off + pulldown (not Hi-Z cfg_default). */
 	uint32_t int0_gpios = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
-	LOG_INF("Wake up GPIO pin: %u", int0_gpios);
+	LOG_INF("Wake up GPIO " NRF_ABS_PIN_LOG_FMT, NRF_ABS_PIN_LOG_ARGS(int0_gpios));
 	nrf_gpio_cfg(int0_gpios, NRF_GPIO_PIN_DIR_INPUT, NRF_GPIO_PIN_INPUT_DISCONNECT, NRF_GPIO_PIN_PULLDOWN, NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_NOSENSE);
-	LOG_INF("Disconnected IMU wake up GPIO");
+	LOG_INF("Configured IMU wake-up GPIO idle (pulldown)");
 #endif
-	// Disconnect remaining interface pins // TODO: only an improvement during shutdown? causes higher usage in WOM
+	/* TODO: only an improvement during shutdown? causes higher usage in WOM */
 	sys_disconnect_interface_pins();
 	LOG_INF("Powering off nRF");
 #if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN

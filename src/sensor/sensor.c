@@ -347,6 +347,8 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_DBG);
 LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 #endif
 
+#include "system/nrf_gpio_util.h" /* after LOG_MODULE_REGISTER: pin log helpers */
+
 #define SENSOR_SCAN_COLD_POWER_UP_DELAY_MS 50
 
 static int sensor_scan_last_power_up_delay_ms = SENSOR_SCAN_COLD_POWER_UP_DELAY_MS;
@@ -1615,8 +1617,12 @@ int sensor_init(void)
 	if (pin_config == 0) {
 		return -1;
 	}
-	uint32_t int0_gpios = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
-	LOG_INF("FIFO THS/WM/WTM GPIO pin: %u, config: %u", int0_gpios, pin_config);
+	{
+		uint32_t int0_abs = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
+
+		LOG_INF("FIFO THS/WM/WTM GPIO " NRF_ABS_PIN_LOG_FMT ", config: %u",
+			NRF_ABS_PIN_LOG_ARGS(int0_abs), pin_config);
+	}
 	uint32_t pull_flags = ((pin_config >> 4) == NRF_GPIO_PIN_PULLDOWN ? GPIO_PULL_DOWN : 0)
 						| ((pin_config >> 4) == NRF_GPIO_PIN_PULLUP ? GPIO_PULL_UP : 0);
 	gpio_pin_configure_dt(&int0, GPIO_INPUT | pull_flags);
