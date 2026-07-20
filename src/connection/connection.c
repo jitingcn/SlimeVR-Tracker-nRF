@@ -1268,7 +1268,7 @@ void connection_thread(void)
 			if (esb_ota_is_active()) {
 				esb_ota_check_timeout();
 				esb_ota_periodic_status();
-				k_msleep(2);
+				k_usleep(1500);
 				continue;
 			}
 
