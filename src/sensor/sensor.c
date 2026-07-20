@@ -202,7 +202,9 @@ static uint8_t sensor_fifo_raw_buffer[SENSOR_FIFO_RAW_BUFFER_SIZE];
  *     internal subtract recovers the debiased equivalent rate.
  * Never re-add firmware offsets on the feed path — fusion never sees them.
  */
+/* float enough: N≤16 near-identity Δq; Cortex-M4/M33 FPU is SP-only */
 #define GYRO_DQ_EPS 1e-8f
+#define GYRO_DQ_HALF_TAYLOR 1e-4f /* |θ/2| below this → sinc/cos Taylor */
 static float gyro_dq_acc[4];
 static int gyro_oversample_count = 0;
 static float gyro_effective_time; /* N * gyro_actual_time */
@@ -1876,22 +1878,30 @@ static void gyro_dq_mul(const float q1[4], const float q2[4], float out[4])
 }
 
 /*
- * g_dps: already firmware-compensated (TCal/ZRO/D_offset + sens).
- * bias_dps: frozen fusion residual only — not firmware gyroBias.
- * Matches VQF updateGyr: Δq from (g - fusion_bias).
+ * g_dps: firmware-compensated; fusion_bias_dps: frozen fusion residual.
+ * float + small-angle Taylor + soft renormalize (same Δq form as VQF).
  */
 static void gyro_dq_accumulate_sample(const float g_dps[3], const float fusion_bias_dps[3], float dt)
 {
-	const float deg_to_rad = (float)(M_PI / 180.0);
-	float wx = (g_dps[0] - fusion_bias_dps[0]) * deg_to_rad;
-	float wy = (g_dps[1] - fusion_bias_dps[1]) * deg_to_rad;
-	float wz = (g_dps[2] - fusion_bias_dps[2]) * deg_to_rad;
-	float wn = sqrtf(wx * wx + wy * wy + wz * wz);
+	float wx = (g_dps[0] - fusion_bias_dps[0]) * DEG_TO_RAD;
+	float wy = (g_dps[1] - fusion_bias_dps[1]) * DEG_TO_RAD;
+	float wz = (g_dps[2] - fusion_bias_dps[2]) * DEG_TO_RAD;
+	float wn2 = wx * wx + wy * wy + wz * wz;
 	float dq[4];
-	if (wn > GYRO_DQ_EPS) {
-		float half = wn * dt * 0.5f;
-		float s = sinf(half) / wn;
-		dq[0] = cosf(half);
+	if (wn2 > GYRO_DQ_EPS) {
+		float wn = sqrtf(wn2);
+		float half = 0.5f * wn * dt;
+		float c;
+		float s; /* sin(half)/wn == (dt/2)*sinc(half) */
+		if (half < GYRO_DQ_HALF_TAYLOR) {
+			float h2 = half * half;
+			c = 1.0f - 0.5f * h2 * (1.0f - h2 / 12.0f);
+			s = 0.5f * dt * (1.0f - h2 / 6.0f * (1.0f - h2 / 20.0f));
+		} else {
+			c = cosf(half);
+			s = sinf(half) / wn;
+		}
+		dq[0] = c;
 		dq[1] = s * wx;
 		dq[2] = s * wy;
 		dq[3] = s * wz;
@@ -1903,20 +1913,18 @@ static void gyro_dq_accumulate_sample(const float g_dps[3], const float fusion_b
 	}
 	float out[4];
 	gyro_dq_mul(gyro_dq_acc, dq, out);
+	/* Soft renormalize: q ← q*(1.5 - 0.5|q|²). */
 	float n2 = out[0] * out[0] + out[1] * out[1] + out[2] * out[2] + out[3] * out[3];
-	if (n2 > GYRO_DQ_EPS) {
-		float inv = 1.0f / sqrtf(n2);
-		gyro_dq_acc[0] = out[0] * inv;
-		gyro_dq_acc[1] = out[1] * inv;
-		gyro_dq_acc[2] = out[2] * inv;
-		gyro_dq_acc[3] = out[3] * inv;
-	}
+	float scale = 1.5f - 0.5f * n2;
+	gyro_dq_acc[0] = out[0] * scale;
+	gyro_dq_acc[1] = out[1] * scale;
+	gyro_dq_acc[2] = out[2] * scale;
+	gyro_dq_acc[3] = out[3] * scale;
 }
 
 /*
- * Merged Δq → ω_eq over T_eff, then re-add the *same* frozen fusion bias.
- * update_gyro will subtract fusion bias again → strapdown sees ω_eq.
- * Do not add firmware TCal/ZRO/D_offset here (already removed from g).
+ * Merged Δq → ω_eq; re-add frozen fusion bias.
+ * atan2(|v|,w) > acos(w) for small windows.
  */
 static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float fusion_bias_dps[3])
 {
@@ -1924,21 +1932,24 @@ static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float f
 	float qx = gyro_dq_acc[1];
 	float qy = gyro_dq_acc[2];
 	float qz = gyro_dq_acc[3];
-	/* Shortest rotation (window is small; still keep sign stable). */
 	if (qw < 0.0f) {
 		qw = -qw;
 		qx = -qx;
 		qy = -qy;
 		qz = -qz;
 	}
-	if (qw > 1.0f) {
-		qw = 1.0f;
-	}
-	float angle = 2.0f * acosf(qw);
-	float s = sinf(angle * 0.5f);
+	float vnorm = sqrtf(qx * qx + qy * qy + qz * qz);
+	float angle = 2.0f * atan2f(vnorm, qw);
 	float wr[3];
-	if (fabsf(s) > GYRO_DQ_EPS && angle > GYRO_DQ_EPS) {
-		float scale = angle / (s * T_eff);
+	if (vnorm > GYRO_DQ_EPS && angle > GYRO_DQ_EPS) {
+		float half = 0.5f * angle;
+		float scale;
+		if (half < GYRO_DQ_HALF_TAYLOR) {
+			float h2 = half * half;
+			scale = (2.0f * (1.0f + h2 / 6.0f)) / T_eff;
+		} else {
+			scale = angle / (sinf(half) * T_eff);
+		}
 		wr[0] = qx * scale;
 		wr[1] = qy * scale;
 		wr[2] = qz * scale;
@@ -1948,11 +1959,9 @@ static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float f
 		wr[1] = qy * scale;
 		wr[2] = qz * scale;
 	}
-	const float rad_to_deg = 180.0f / (float)M_PI;
-	/* Reconstruct post-firmware stream: ω_eq + fusion_residual. */
-	g_feed_dps[0] = wr[0] * rad_to_deg + fusion_bias_dps[0];
-	g_feed_dps[1] = wr[1] * rad_to_deg + fusion_bias_dps[1];
-	g_feed_dps[2] = wr[2] * rad_to_deg + fusion_bias_dps[2];
+	g_feed_dps[0] = wr[0] * RAD_TO_DEG + fusion_bias_dps[0];
+	g_feed_dps[1] = wr[1] * RAD_TO_DEG + fusion_bias_dps[1];
+	g_feed_dps[2] = wr[2] * RAD_TO_DEG + fusion_bias_dps[2];
 }
 #endif
 
@@ -2328,9 +2337,7 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 				/* Integrate raw gyro into quaternion accumulator.
 				 * raw_g is in deg/s; convert to rad/s for integration. */
 				float g_rad[3]
-					= {raw_g[0] * (float)(M_PI / 180.0f),
-					   raw_g[1] * (float)(M_PI / 180.0f),
-					   raw_g[2] * (float)(M_PI / 180.0f)};
+					= {raw_g[0] * DEG_TO_RAD, raw_g[1] * DEG_TO_RAD, raw_g[2] * DEG_TO_RAD};
 				float gyr_norm = sqrtf(g_rad[0] * g_rad[0] + g_rad[1] * g_rad[1] + g_rad[2] * g_rad[2]);
 				if (gyr_norm > 1e-6f) {
 					float angle = gyr_norm * gyro_actual_time;
