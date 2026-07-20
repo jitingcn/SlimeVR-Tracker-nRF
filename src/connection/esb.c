@@ -1154,6 +1154,9 @@ void event_handler(struct esb_evt const *event)
 							int32_t server_offset_ticks
 								= (int32_t)(ping_rx_ticks - t4_ticks);
 
+							/* Save prior sync stamp before overwrite — EMA predict
+							 * needs elapsed since last accepted PONG, not zero. */
+							uint32_t prev_sync_local_ticks = g_last_sync_local_ticks;
 							g_last_rx_raw_ticks = ping_rx_ticks;
 							g_last_sync_local_ticks = ping_ticks_for_this_ctr;
 							g_last_sync_timestamp = k_uptime_get();
@@ -1213,8 +1216,8 @@ void event_handler(struct esb_evt const *event)
 								 * initial convergence before skew is estimated.
 								 */
 								g_sync_update_count++;
-								/* Predict: where we expect the offset to be based on skew */
-								uint32_t delta_since_sync = ping_ticks_for_this_ctr - g_last_sync_local_ticks;
+								/* Predict from last accepted sync (prev), not current stamp. */
+								uint32_t delta_since_sync = ping_ticks_for_this_ctr - prev_sync_local_ticks;
 								int32_t predicted_current = (int32_t)g_server_ticks_offset
 									+ (int32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
 								int32_t offset_innovation = server_offset_ticks - predicted_current;
