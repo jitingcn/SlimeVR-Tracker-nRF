@@ -37,7 +37,7 @@ K_THREAD_DEFINE(
 	NULL,
 	NULL,
 	NULL,
-	6,
+	BUTTON_THREAD_PRIORITY,
 	0,
 	0
 ); // TODO: stack increased because of reboot request (to 512) and sensor scan (to 1024)

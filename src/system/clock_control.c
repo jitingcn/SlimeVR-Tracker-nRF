@@ -18,6 +18,7 @@
 	THE SOFTWARE.
 */
 #include "clock_control.h"
+#include "globals.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/irq.h>
@@ -177,7 +178,7 @@ void clock_init_external_async(void)
 		NULL,
 		NULL,
 		NULL,
-		8,
+		CLOCK_INIT_THREAD_PRIORITY,
 		0,
 		K_NO_WAIT
 	);

@@ -11,7 +11,7 @@
 LOG_MODULE_REGISTER(led, LOG_LEVEL_INF);
 
 static void led_thread(void);
-K_THREAD_DEFINE(led_thread_id, 512, led_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(led_thread_id, 512, led_thread, NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, 0);
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 

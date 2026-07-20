@@ -25,6 +25,7 @@
 #include <math.h>
 #if defined(CONFIG_VQF_BENCH)
 #include <zephyr/kernel.h>
+#include "thread_priority.h"
 #endif
 
 #if defined(CONFIG_VQF_BENCH) && defined(CONFIG_CPU_CORTEX_M_HAS_DWT)
@@ -693,7 +694,6 @@ static void vqf_bench_print_stats(const char *name, uint32_t iterations, uint32_
 }
 
 #define VQF_BENCH_BATCH_SIZE 16U
-#define VQF_BENCH_THREAD_PRIO 8
 
 typedef enum {
 	VQF_BENCH_UPDATE_GYR,
@@ -764,8 +764,8 @@ void vqf_run_benchmark(uint32_t iterations)
 		iterations = 1000;
 	}
 
-	if (bench_thread_prio < VQF_BENCH_THREAD_PRIO) {
-		k_thread_priority_set(bench_thread, VQF_BENCH_THREAD_PRIO);
+	if (bench_thread_prio < VQF_BENCH_THREAD_PRIORITY) {
+		k_thread_priority_set(bench_thread, VQF_BENCH_THREAD_PRIORITY);
 		bench_prio_changed = true;
 	}
 

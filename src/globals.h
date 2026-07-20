@@ -26,6 +26,7 @@
 #include <zephyr/logging/log.h>
 
 #include "retained.h"
+#include "thread_priority.h"
 
 // Adafruit UF2 bootloader GPREGRET magic values.
 // See: Adafruit_nRF52_Bootloader/src/main.c (DFU_MAGIC_*).

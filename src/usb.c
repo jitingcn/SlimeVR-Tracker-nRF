@@ -23,7 +23,7 @@ static bool configured;
 LOG_MODULE_REGISTER(usb, LOG_LEVEL_INF);
 
 static void usb_init_thread(void);
-K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, 6, 0, 500); // Wait before enabling USB
+K_THREAD_DEFINE(usb_init_thread_id, 256, usb_init_thread, NULL, NULL, NULL, USB_INIT_THREAD_PRIORITY, 0, 500); // Wait before enabling USB
 
 #define SLIMEVR_USB_STRING_MANUFACTURER_IDX 1U
 #define SLIMEVR_USB_STRING_PRODUCT_IDX 2U

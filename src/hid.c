@@ -20,6 +20,7 @@
 	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 	THE SOFTWARE.
 */
+#include "globals.h"
 #include <zephyr/devicetree.h>
 
 #define USB_EXISTS 0
@@ -84,7 +85,7 @@ static void hid_thread_start_now(void)
 		NULL,
 		NULL,
 		NULL,
-		6,
+		HID_THREAD_PRIORITY,
 		0,
 		K_NO_WAIT
 	);

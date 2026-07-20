@@ -59,7 +59,7 @@ static void console_thread_start_now(void)
 		NULL,
 		NULL,
 		NULL,
-		6,
+		CONSOLE_THREAD_PRIORITY,
 		0,
 		K_NO_WAIT
 	);
@@ -79,7 +79,7 @@ static void console_lifecycle_work_handler(struct k_work *work)
 	}
 }
 #else
-K_THREAD_DEFINE(console_thread_id, 2048, console_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(console_thread_id, 2048, console_thread, NULL, NULL, NULL, CONSOLE_THREAD_PRIORITY, 0, 0);
 #endif
 
 #define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER)

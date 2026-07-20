@@ -101,7 +101,7 @@ static void calibration_thread(void);
 // Keep background calibration below the sensor loop so trial Magneto solves do
 // not preempt FIFO servicing. This makes online/manual calibration a little less
 // eager, but avoids sensor-loop timing regressions from background work.
-K_THREAD_DEFINE(calibration_thread_id, 4096, calibration_thread, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(calibration_thread_id, 4096, calibration_thread, NULL, NULL, NULL, CALIBRATION_THREAD_PRIORITY, K_FP_REGS, 0);
 
 void sensor_calibration_process_accel(float a[3])
 {
