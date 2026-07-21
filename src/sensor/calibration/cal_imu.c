@@ -280,8 +280,9 @@ void sensor_calibrate_imu(void)
 				retained->tempCalPoints[idx].temp = avg_temp;
 				memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
 				retained->tempCalState.valid = false; // Invalidate old curve
-				// Manual calibration always writes NVS (user-initiated, not periodic)
+				/* User-initiated: warm-mark then flush so pin-reset keeps points. */
 				update_tcal_state();
+				sys_flush_warm();
 
 			} else {
 				LOG_WRN(

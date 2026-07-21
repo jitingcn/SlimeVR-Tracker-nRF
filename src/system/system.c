@@ -196,9 +196,8 @@ static int sys_retained_init(void)
 		sys_migrate_battery_curve();
 		sys_read(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, sizeof(retained->gyroSensScale));
 		// If gyroSensScale was never set in NVS (all zeros), restore default values
-		if (retained->gyroSensScale[0] == 0.0f &&
-		    retained->gyroSensScale[1] == 0.0f &&
-		    retained->gyroSensScale[2] == 0.0f) {
+		if (retained->gyroSensScale[0] == 0.0f && retained->gyroSensScale[1] == 0.0f
+			&& retained->gyroSensScale[2] == 0.0f) {
 			retained->gyroSensScale[0] = 1.0f;
 			retained->gyroSensScale[1] = 1.0f;
 			retained->gyroSensScale[2] = 1.0f;
@@ -272,7 +271,102 @@ void reboot_counter_write(uint8_t reboot_counter)
 	retained_update();
 }
 
-// write to retained and nvs
+/* Deferred NVS slots for warm-durable IDs (coalesced until sys_flush_warm). */
+#define WARM_DIRTY_MAX 8
+struct warm_dirty_slot {
+	uint16_t id;
+	void *ptr;
+	size_t len;
+};
+static struct warm_dirty_slot warm_dirty[WARM_DIRTY_MAX];
+static uint8_t warm_dirty_count;
+
+void sys_flush_warm(void);
+
+static void warm_dirty_clear_id(uint16_t id)
+{
+	for (uint8_t i = 0; i < warm_dirty_count;) {
+		if (warm_dirty[i].id != id) {
+			i++;
+			continue;
+		}
+		warm_dirty[i] = warm_dirty[warm_dirty_count - 1];
+		warm_dirty_count--;
+	}
+}
+
+static void warm_dirty_mark(uint16_t id, void *ptr, size_t len)
+{
+	if (!ptr || len == 0) {
+		return;
+	}
+	for (uint8_t i = 0; i < warm_dirty_count; i++) {
+		if (warm_dirty[i].id == id) {
+			warm_dirty[i].ptr = ptr;
+			warm_dirty[i].len = len;
+			return;
+		}
+	}
+	if (warm_dirty_count >= WARM_DIRTY_MAX) {
+		LOG_ERR("Warm dirty table full, forcing flush before mark ID %u", id);
+		sys_flush_warm();
+		if (warm_dirty_count >= WARM_DIRTY_MAX) {
+			LOG_ERR("Warm dirty table still full after flush, dropping ID %u", id);
+			return;
+		}
+	}
+	warm_dirty[warm_dirty_count++] = (struct warm_dirty_slot){
+		.id = id,
+		.ptr = ptr,
+		.len = len,
+	};
+}
+
+bool sys_warm_is_dirty(void)
+{
+	return warm_dirty_count > 0;
+}
+
+void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t len)
+{
+	if (!retained_ptr) {
+		LOG_ERR("sys_write_warm: retained_ptr required for ID %u", id);
+		return;
+	}
+	if (data && retained_ptr != data) {
+		memcpy(retained_ptr, data, len);
+	}
+	warm_dirty_mark(id, retained_ptr, len);
+	retained_update();
+}
+
+void sys_flush_warm(void)
+{
+	if (warm_dirty_count == 0) {
+		return;
+	}
+	if (!sys_nvs_init()) {
+		LOG_ERR("sys_flush_warm: NVS init failed, keeping %u dirty IDs", warm_dirty_count);
+		return;
+	}
+
+	LOG_INF("Flushing %u warm NVS ID(s)", warm_dirty_count);
+	for (uint8_t i = 0; i < warm_dirty_count; i++) {
+		int err = nvs_write(&fs, warm_dirty[i].id, warm_dirty[i].ptr, warm_dirty[i].len);
+		if (err < 0) {
+			LOG_ERR("sys_flush_warm: NVS write ID %u failed: %d", warm_dirty[i].id, err);
+			/* Keep remaining dirty; drop only successfully written prefix next time. */
+			if (i > 0) {
+				memmove(&warm_dirty[0], &warm_dirty[i], (warm_dirty_count - i) * sizeof(warm_dirty[0]));
+			}
+			warm_dirty_count -= i;
+			return;
+		}
+	}
+	warm_dirty_count = 0;
+}
+
+// write to retained and nvs (cold / eager)
 void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 {
 	if (!sys_nvs_init()) {
@@ -289,8 +383,14 @@ void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 	int err = nvs_write(&fs, id, data, len);
 	if (err < 0) {
 		LOG_ERR("Failed to write to NVS, error: %d", err);
+		/* RAM already updated; seal CRC so soft-reset trusts retained. */
+		if (retained_ptr) {
+			retained_update();
+		}
 		return;
 	}
+	/* Eager NVS write supersedes any deferred warm copy of this ID. */
+	warm_dirty_clear_id(id);
 	if (retained_ptr) {
 		retained_update();
 	}
@@ -335,6 +435,7 @@ void sys_clear(void)
 	printk("Resetting NVS and retained\n");
 
 	sys_nvs_init();
+	warm_dirty_count = 0;
 	memset(retained, 0, sizeof(*retained));
 	nvs_clear(&fs);
 	nvs_init = false;
@@ -358,17 +459,8 @@ void sys_nvs_stats(void)
 	}
 
 	printk("Storage partition: %u bytes\n", NVS_PARTITION_SIZE);
-	printk(
-		"Allocated NVS: %u * %u = %u bytes\n",
-		fs.sector_size,
-		fs.sector_count,
-		fs.sector_size * fs.sector_count
-	);
-	printk(
-		"NVS free: %d bytes, max item: %d bytes\n",
-		nvs_calc_free_space(&fs),
-		nvs_sector_max_data_size(&fs)
-	);
+	printk("Allocated NVS: %u * %u = %u bytes\n", fs.sector_size, fs.sector_count, fs.sector_size * fs.sector_count);
+	printk("NVS free: %d bytes, max item: %d bytes\n", nvs_calc_free_space(&fs), nvs_sector_max_data_size(&fs));
 }
 
 // return 0 if clock applied, -1 if failed (because there is no clk_en or clk_out)
@@ -503,8 +595,7 @@ static void button_thread(void)
 				press_time = 0;
 				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 				set_status(SYS_STATUS_BUTTON_PRESSED, false);
-			} else if (sys_user_shutdown())
-			{
+			} else if (sys_user_shutdown()) {
 #if CONFIG_USER_EXTRA_ACTIONS
 				LOG_INF("Button hold timeout, shutdown canceled");
 #else
@@ -513,15 +604,13 @@ static void button_thread(void)
 #endif
 				press_time = 0;
 				set_status(SYS_STATUS_BUTTON_PRESSED, false); // TODO: is needed?
-			}
-			else // shutting down or rebooting
+			} else                                            // shutting down or rebooting
 			{
 				k_thread_abort(button_thread_id);
 			}
 		}
 
-		bool active = (press_time != 0) || (last_press != 0) || (last_press_duration > 0)
-			|| (num_presses > 0);
+		bool active = (press_time != 0) || (last_press != 0) || (last_press_duration > 0) || (num_presses > 0);
 
 		if (!active) {
 			(void)k_sem_take(&button_wake_sem, K_FOREVER);

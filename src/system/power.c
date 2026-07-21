@@ -339,6 +339,7 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	}
 #endif
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
 	sensor_calibration_online_mag_retained_save();
 	sensor_record_wom_sleep();
 	sensor_retained_write();
@@ -394,6 +395,7 @@ static bool sys_system_off(void) // TODO: add timeout
 		return false; /* keep queued until OTA finishes */
 	}
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	sys_flush_warm(); /* persist warm cal before session clear / power loss */
 	sensor_calibration_online_mag_cold_start();
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
@@ -431,6 +433,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 {
 	LOG_INF("System reboot requested");
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	sys_flush_warm(); /* persist warm cal before reboot (covers OTA reboot path) */
 	sensor_calibration_online_mag_cold_start();
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot

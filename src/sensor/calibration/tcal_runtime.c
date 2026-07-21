@@ -161,20 +161,28 @@ void update_tcal_state(void)
 		printk("T-Cal: No points available.\n");
 	}
 
-	// Save updated state to NVS
-	sys_write(
+	/* Warm: retained now; NVS on sys_flush_warm (WoM / reboot / system-off).
+	 * User-initiated callers should follow with sys_flush_warm().
+	 */
+	sys_write_warm(
+		MAIN_GYRO_TEMP_ID,
+		&retained->gyroTemp,
+		&retained->gyroTemp,
+		sizeof(retained->gyroTemp)
+	);
+	sys_write_warm(
 		MAIN_GYRO_TCAL_STATE_ID,
 		&retained->tempCalState,
 		&retained->tempCalState,
 		sizeof(retained->tempCalState)
 	);
-	sys_write(
+	sys_write_warm(
 		MAIN_GYRO_TCAL_POINTS_ID,
 		retained->tempCalPoints,
 		retained->tempCalPoints,
 		sizeof(retained->tempCalPoints)
 	);
-	sys_write(
+	sys_write_warm(
 		MAIN_GYRO_TCAL_COEFFS_ID,
 		retained->tempCalCoeffs,
 		retained->tempCalCoeffs,
@@ -310,10 +318,12 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp)
 		update_tcal_state();
 	} else {
 		LOG_DBG(
-			"T-Cal: Change below threshold (%.4f < %.4f), skipping NVS write",
+			"T-Cal: Change below threshold (%.4f < %.4f), skipping warm NVS mark",
 			(double)max_delta,
 			(double)TCAL_SAVE_SIGNIFICANCE_THRESHOLD
 		);
+		/* Keep CRC valid for soft-reset; do not dirty NVS for insignificant churn. */
+		retained_update();
 		sensor_tcal_cache_invalidate();
 	}
 }
@@ -376,7 +386,9 @@ static void tcal_accum_flush(void)
 		idx
 	);
 
-	sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
+	/* Last measured temp lives in retained; NVS only if point commit dirties warm set. */
+	retained->gyroTemp = avg_temp;
+	retained_update();
 
 	tcal_save_point(idx, avg_bias, avg_temp);
 	tcal_accum_last_commit_time = k_uptime_get();

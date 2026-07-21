@@ -204,11 +204,13 @@ void sensor_calibration_online_mag_retained_save(void)
 	}
 	retained->onlineMagState.update_count = (uint8_t)CLAMP(online_update_count, 0, 255);
 	retained->onlineMagState.last_buf_avg_norm = online_last_buf_avg_norm;
+	retained_update();
 }
 
 void sensor_calibration_online_mag_retained_clear(void)
 {
 	memset(&retained->onlineMagState, 0, sizeof(retained->onlineMagState));
+	retained_update();
 }
 
 void sensor_calibration_online_mag_cold_start(void)
@@ -888,8 +890,8 @@ bool sensor_calibration_online_mag_check(void)
 	cal_norm_ema = 0;
 	cal_norm_var_ema = 0;
 
-	/* Persist the local matrix we just published; do not re-read live magBAinv. */
-	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
+	/* Warm: retained now; NVS on sys_flush_warm (WoM / reboot / system-off). */
+	sys_write_warm(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
 	sensor_refresh_sensor_ids();
 
 	LOG_INF("Online mag cal applied:");

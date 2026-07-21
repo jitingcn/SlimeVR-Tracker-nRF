@@ -861,7 +861,8 @@ void sensor_tcal_remove_point(int index_to_remove)
 		retained->tempCalState.valid = false;
 
 		printk("Point at index %d removed. Recalculating MLS state...\n", index_to_remove);
-		update_tcal_state(); // Refresh and save
+		update_tcal_state();
+		sys_flush_warm(); /* console/user action: durable immediately */
 	} else {
 		printk("No data found at index %d. Nothing to remove.\n", index_to_remove);
 	}
