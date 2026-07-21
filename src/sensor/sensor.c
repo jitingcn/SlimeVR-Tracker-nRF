@@ -191,6 +191,13 @@ static float mag_actual_time;
 
 static uint8_t sensor_fifo_raw_buffer[SENSOR_FIFO_RAW_BUFFER_SIZE];
 
+/*
+ * Runtime INT_merge factor. Defaults to CONFIG_SENSOR_GYRO_OVERSAMPLING.
+ * On I2C IMU, forced to 1 and chip ODR is requested at the intended fusion
+ * rate (ODR/N) — 400 kHz I2C cannot sustain hi-res FIFO at 1600 Hz.
+ */
+static uint8_t gyro_oversample_n = CONFIG_SENSOR_GYRO_OVERSAMPLING;
+
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 /*
  * INT_merge: high-rate Δq product → one fusion gyro step at ODR/N.
@@ -225,7 +232,7 @@ static float gyro_actual_range;  // Actual gyroscope full scale range (deg/s)
 
 /* Raw gyrQuat emit plan: same N as fusion INT_merge, separate uncalibrated accum. */
 struct raw_rate_plan {
-	uint8_t n_raw; /* == CONFIG_SENSOR_GYRO_OVERSAMPLING */
+	uint8_t n_raw; /* == gyro_oversample_n */
 	uint8_t emit_count;
 	float chip_hz;
 	float send_hz; /* == fusion_hz; meta gyro_odr (host gyrTs) */
@@ -1529,8 +1536,26 @@ int sensor_init(void)
 
 	// setup sensor, set ODR
 	float accel_initial_time = 1.0f / CONFIG_SENSOR_ACCEL_ODR; // configure with accel ODR from config
-	float gyro_initial_time = 1.0f / CONFIG_SENSOR_GYRO_ODR;   // configure with gyro ODR from config
 	float mag_initial_time = 1.0f / CONFIG_SENSOR_MAG_ODR;     // configure with mag ODR from config
+	/*
+	 * Gyro request: SPI keeps CONFIG ODR + INT_merge N.
+	 * I2C: bus cannot drain hi-res FIFO at high ODR — drop merge, request
+	 * the intended fusion rate (ODR/N) so chip Hz ≈ fusion Hz.
+	 */
+	gyro_oversample_n = CONFIG_SENSOR_GYRO_OVERSAMPLING;
+	float gyro_request_hz = (float)CONFIG_SENSOR_GYRO_ODR;
+	if (sensor_interface_imu_is_i2c() && CONFIG_SENSOR_GYRO_OVERSAMPLING > 1) {
+		gyro_oversample_n = 1;
+		gyro_request_hz
+			= (float)CONFIG_SENSOR_GYRO_ODR / (float)CONFIG_SENSOR_GYRO_OVERSAMPLING;
+		LOG_INF(
+			"I2C IMU: gyro request %.0fHz (fusion target), oversampling off (config %dx @ %dHz)",
+			(double)gyro_request_hz,
+			CONFIG_SENSOR_GYRO_OVERSAMPLING,
+			CONFIG_SENSOR_GYRO_ODR
+		);
+	}
+	float gyro_initial_time = 1.0f / gyro_request_hz;
 	err = sensor_imu
 			  ->init(clock_actual_rate, accel_initial_time, gyro_initial_time, &accel_actual_time, &gyro_actual_time);
 	sensor_actual_time = MIN(accel_actual_time, gyro_actual_time);
@@ -1568,13 +1593,15 @@ int sensor_init(void)
 	gyro_dq_acc[3] = 0.0f;
 	gyro_oversample_count = 0;
 	gyro_merge_bias_dps[0] = gyro_merge_bias_dps[1] = gyro_merge_bias_dps[2] = 0.0f;
-	gyro_effective_time = gyro_actual_time * CONFIG_SENSOR_GYRO_OVERSAMPLING;
-	LOG_INF(
-		"Gyro INT_merge: %dx Δq @ %.2fHz → fusion %.2fHz (firmware cal per sample; fusion bias frozen/window)",
-		CONFIG_SENSOR_GYRO_OVERSAMPLING,
-		1.0 / (double)gyro_actual_time,
-		1.0 / (double)gyro_effective_time
-	);
+	gyro_effective_time = gyro_actual_time * (float)gyro_oversample_n;
+	if (gyro_oversample_n > 1) {
+		LOG_INF(
+			"Gyro INT_merge: %dx Δq @ %.2fHz → fusion %.2fHz (firmware cal per sample; fusion bias frozen/window)",
+			gyro_oversample_n,
+			1.0 / (double)gyro_actual_time,
+			1.0 / (double)gyro_effective_time
+		);
+	}
 #endif
 
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
@@ -1607,7 +1634,7 @@ int sensor_init(void)
 	} else {
 		// Determine effective gyro time step for fusion
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-		float fusion_gyro_time = gyro_effective_time;
+		float fusion_gyro_time = (gyro_oversample_n > 1) ? gyro_effective_time : gyro_actual_time;
 #else
 		float fusion_gyro_time = gyro_actual_time;
 #endif
@@ -1703,7 +1730,7 @@ static float raw_gyr_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 static void raw_rate_plan_refresh(void)
 {
 	float chip_hz = 1.0f / gyro_actual_time;
-	uint8_t n_raw = (uint8_t)CONFIG_SENSOR_GYRO_OVERSAMPLING;
+	uint8_t n_raw = gyro_oversample_n > 0 ? gyro_oversample_n : 1;
 
 	raw_rate_plan.n_raw = n_raw;
 	raw_rate_plan.chip_hz = chip_hz;
@@ -2061,7 +2088,7 @@ static void feed_gyro_sample(
 	}
 	gyro_dq_accumulate_sample(g, gyro_merge_bias_dps, gyro_actual_time);
 	gyro_oversample_count++;
-	if (gyro_oversample_count < CONFIG_SENSOR_GYRO_OVERSAMPLING) {
+	if (gyro_oversample_count < (int)gyro_oversample_n) {
 		return;
 	}
 
@@ -2562,8 +2589,8 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 		float expected_accel_samples = sensor_update_time_ms / 1000.0f / accel_actual_time;
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-		/* Δq-merge: one fusion gyro step per N high-rate samples. */
-		float expected_gyro_timesteps_f = expected_gyro_samples / CONFIG_SENSOR_GYRO_OVERSAMPLING;
+		/* Δq-merge: one fusion gyro step per N high-rate samples (N may be 1 on I2C). */
+		float expected_gyro_timesteps_f = expected_gyro_samples / (float)gyro_oversample_n;
 		if (frame->g_count) {
 			int min_expected = (int)expected_gyro_timesteps_f;           // floor
 			int max_expected = (int)(expected_gyro_timesteps_f + 0.99f); // ceiling
@@ -2571,7 +2598,7 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 				LOG_DBG(
 					"Expected ~%.1f gyro timesteps (Δq-merge %dx), got %d (elapsed %lldms)",
 					(double)expected_gyro_timesteps_f,
-					CONFIG_SENSOR_GYRO_OVERSAMPLING,
+					gyro_oversample_n,
 					frame->g_count,
 					elapsed_ms
 				);
@@ -3120,7 +3147,7 @@ void main_imu_restart(void)
 	{
 		// Determine effective gyro time step for fusion (must match sensor_init logic)
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-		float fusion_gyro_time = gyro_effective_time;
+		float fusion_gyro_time = (gyro_oversample_n > 1) ? gyro_effective_time : gyro_actual_time;
 #else
 		float fusion_gyro_time = gyro_actual_time;
 #endif
@@ -3198,7 +3225,7 @@ float sensor_get_mag_feed_hz(void)
 float sensor_get_fusion_rate(void)
 {
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-	if (gyro_effective_time > 0.0f) {
+	if (gyro_oversample_n > 1 && gyro_effective_time > 0.0f) {
 		return 1.0f / gyro_effective_time;
 	}
 #endif

@@ -336,6 +336,8 @@ config SENSOR_GYRO_OVERSAMPLING
         Example: SENSOR_GYRO_ODR=1600 and SENSOR_GYRO_OVERSAMPLING=4 →
         1600 Hz strapdown Δq merged into one 400 Hz fusion gyro step.
         Effective fusion gyro rate = ODR / oversampling factor.
+        On I2C IMU hosts, firmware forces N=1 and requests chip ODR at that
+        fusion rate (I2C cannot sustain hi-res FIFO at high ODR). SPI unchanged.
         Raw data-collection gyrQuat TX uses the same N: uncalibrated Δq
         every N chip samples; raw meta gyro_odr advertises that TX/fusion
         rate, with chip Hz in the trailing fields.

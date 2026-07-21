@@ -80,6 +80,11 @@ void sensor_interface_register_sensor_imu_i2c(struct i2c_dt_spec *dev)
 	sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU] = SENSOR_INTERFACE_SPEC_I2C;
 }
 
+bool sensor_interface_imu_is_i2c(void)
+{
+	return sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU] == SENSOR_INTERFACE_SPEC_I2C;
+}
+
 void sensor_interface_register_sensor_mag_spi(struct spi_dt_spec *dev)
 {
 	sensor_interface_dev_spi[SENSOR_INTERFACE_DEV_MAG] = dev;
