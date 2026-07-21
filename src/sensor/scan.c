@@ -68,7 +68,7 @@ int sensor_scan_i2c(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_a
 			// The first read on ICM-45686 can fail, so perform a dummy read on each address first
 			/* AN-000364
 			 * In I2C mode, after chip power-up, the host should perform one retry
-			 * on the very first I2C transaction if it receives a NACK 
+			 * on the very first I2C transaction if it receives a NACK
 			 */
 			uint8_t dummy;
 			i2c_reg_read_byte(dev, addr, 0x00, &dummy);
@@ -106,45 +106,15 @@ int sensor_scan_i2c(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_a
 					if (err) {
 						break;
 					}
-					/* Sticky bus / unpowered hub often returns 0x00 or 0xFF. */
-					if (id == 0x00 || id == 0xFF) {
-						continue;
-					}
-					for (int l = 0; l < id_cnt; l++) {
-						if (id != dev_id[id_ind + l]) {
-							continue;
+					for (int l = 0; l < id_cnt; l++)
+					{
+						if (id == dev_id[id_ind + l])
+						{
+							i2c_dev->addr = addr;
+							*i2c_dev_reg = reg;
+							LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)", addr, reg, id);
+							return dev_ids[fnd_id + l];
 						}
-						/*
-						 * Match scan_ext ghost filter: some stuck buses echo
-						 * the same byte on every register. Real chips differ.
-						 */
-						uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
-						uint8_t cross_val = 0;
-						int c_err = i2c_reg_read_byte(dev, addr, cross_reg, &cross_val);
-						if (!c_err && cross_val == id) {
-							LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data",
-								addr, reg, cross_reg, id);
-							break;
-						}
-						uint8_t verify_id = 0;
-						int v_err;
-						if (reg == 0x00 && addr >= 0x14 && addr <= 0x17) {
-							uint8_t buf[3] = {0};
-							v_err = i2c_burst_read(dev, addr, reg, buf, 3);
-							verify_id = buf[2];
-						} else {
-							v_err = i2c_reg_read_byte(dev, addr, reg, &verify_id);
-						}
-						if (v_err || verify_id != id) {
-							LOG_WRN("Verify failed at 0x%02X reg 0x%02X (expected 0x%02X, got 0x%02X, err %d)",
-								addr, reg, id, verify_id, v_err);
-							break;
-						}
-						i2c_dev->addr = addr;
-						*i2c_dev_reg = reg;
-						LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)",
-							addr, reg, id);
-						return dev_ids[fnd_id + l];
 					}
 				}
 				id_ind += id_cnt;
