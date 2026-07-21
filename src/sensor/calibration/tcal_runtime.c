@@ -52,7 +52,9 @@ static bool runtime_cal_rest_tracking = false;
 float runtime_cal_last_temp = NAN;
 
 static bool tcal_auto_calibration_enabled = false;
-static bool tcal_compensation_enabled = true;
+static bool tcal_compensation_enabled = true; /* until init_from_retained */
+/* Hot-path cache: avoid count/enable re-check every gyro sample. */
+static bool tcal_curve_apply_ready;
 
 tcal_temp_direction_t tcal_current_direction = TCAL_DIR_UNKNOWN;
 float tcal_direction_ref_temp = NAN;
@@ -64,6 +66,10 @@ static struct {
 	int temp_count;
 	float min_g[3];
 	float max_g[3];
+	float min_a[3];
+	float max_a[3];
+	bool accel_tracking;
+	uint8_t accel_peek_div;
 	float temp_min;
 	float temp_max;
 	bool active;
@@ -73,21 +79,64 @@ static struct {
 static int64_t tcal_accum_last_commit_time = 0;
 
 static void tcal_accum_flush(void);
-static void tcal_save_point(int idx, const float bias[3]);
+static void tcal_save_point(int idx, const float bias[3], float measured_temp);
 static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp);
 static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp);
 static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp);
 
+void sensor_tcal_refresh_apply_cache(void)
+{
+	tcal_curve_apply_ready =
+		tcal_compensation_enabled && (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT);
+}
+
+bool sensor_tcal_curve_apply_ready(void)
+{
+	return tcal_curve_apply_ready;
+}
+
+sensor_tcal_apply_mode_t sensor_tcal_get_apply_mode(void)
+{
+	if (!tcal_compensation_enabled) {
+		return SENSOR_TCAL_APPLY_DISABLED;
+	}
+	if (tcal_curve_apply_ready) {
+		return SENSOR_TCAL_APPLY_CURVE;
+	}
+	return SENSOR_TCAL_APPLY_ZRO_FALLBACK;
+}
+
+const char *sensor_tcal_get_apply_mode_name(void)
+{
+	switch (sensor_tcal_get_apply_mode()) {
+	case SENSOR_TCAL_APPLY_CURVE:
+		return "curve";
+	case SENSOR_TCAL_APPLY_ZRO_FALLBACK:
+		return "zro-fallback";
+	case SENSOR_TCAL_APPLY_DISABLED:
+	default:
+		return "disabled-zro";
+	}
+}
+
 void sensor_tcal_runtime_init_from_retained(void)
 {
 	tcal_compensation_enabled = retained->tcal_enabled;
-	LOG_INF("T-Cal compensation: %s", tcal_compensation_enabled ? "enabled" : "disabled");
+	sensor_tcal_refresh_apply_cache();
+	LOG_INF(
+		"T-Cal compensation: %s | apply=%s (points=%u, need>=%d)",
+		tcal_compensation_enabled ? "enabled" : "disabled",
+		sensor_tcal_get_apply_mode_name(),
+		retained->tempCalState.count,
+		MLS_MIN_POINTS_FOR_FIT
+	);
 }
 
 void update_tcal_state(void)
 {
 	// Invalidate lookup cache since calibration data changed
 	sensor_tcal_cache_invalidate();
+	sensor_tcal_refresh_apply_cache();
 
 	// Polynomial coefficients are no longer used; keep persisted storage zeroed
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
@@ -166,38 +215,39 @@ void tcal_accum_reset(void)
 
 /**
  * Save a calibration point with hysteresis-aware blending.
- * Saves at the bucket center temperature to prevent boundary drift.
+ *
+ * Slot = TEMP_TO_IDX(measured_temp). Store the measured average temperature
+ * (not bucket center): bucket only addresses collisions; we do not assume
+ * samples are uniform inside the bin.
  */
-static void tcal_save_point(int idx, const float bias[3])
+static void tcal_save_point(int idx, const float bias[3], float measured_temp)
 {
 	if (idx < 0 || idx >= TCAL_BUFFER_SIZE) {
 		LOG_WRN("T-Cal: Index %d out of range, skipping", idx);
 		return;
 	}
+	if (isnan(measured_temp)) {
+		LOG_WRN("T-Cal: Invalid measured temperature, skipping save");
+		return;
+	}
 
-	// Use the bucket center temperature as the point temperature
-	float bucket_temp = IDX_TO_TEMP(idx) + (0.5f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE);
-
-	// Update temperature direction tracking
+	/* Update direction from measured temps (same-slot revisits may be ~equal). */
 	if (!isnan(tcal_direction_ref_temp)) {
-		float delta = bucket_temp - tcal_direction_ref_temp;
+		float delta = measured_temp - tcal_direction_ref_temp;
 		if (delta > 0.2f) {
 			tcal_current_direction = TCAL_DIR_RISING;
 		} else if (delta < -0.2f) {
 			tcal_current_direction = TCAL_DIR_FALLING;
 		}
 	}
-	tcal_direction_ref_temp = bucket_temp;
+	tcal_direction_ref_temp = measured_temp;
 
 	float final_bias[3];
 	memcpy(final_bias, bias, sizeof(final_bias));
 
-	// Hysteresis-aware blending when overwriting existing point.
-	// Use tcal_current_direction directly — inferring direction from bucket center
-	// temperatures is unreliable since same-bucket overwrites always have equal temps.
+	/* Rising preferred; falling still blends in (weak α), never rejected. */
 	bool is_new_point = (retained->tempCalPoints[idx].temp == 0.0f);
 	if (!is_new_point) {
-		// Select EMA alpha based on approach direction, preferring rising-phase data
 		float ema_alpha;
 		switch (tcal_current_direction) {
 		case TCAL_DIR_RISING:
@@ -232,8 +282,6 @@ static void tcal_save_point(int idx, const float bias[3])
 		retained->tempCalState.count++;
 	}
 
-	// Check if the change is significant enough to warrant a flash write.
-	// New points always write; existing points only write if bias changed meaningfully.
 	float max_delta = 0.0f;
 	if (!is_new_point) {
 		for (int axis = 0; axis < 3; axis++) {
@@ -244,14 +292,14 @@ static void tcal_save_point(int idx, const float bias[3])
 		}
 	}
 
-	retained->tempCalPoints[idx].temp = bucket_temp;
+	retained->tempCalPoints[idx].temp = measured_temp;
 	memcpy(retained->tempCalPoints[idx].bias, final_bias, sizeof(float) * 3);
 	retained->tempCalState.valid = false;
 
 	LOG_INF(
 		"T-Cal: Committed point at idx %d (%.2fC): [%.5f, %.5f, %.5f] (delta: %.4f dps)",
 		idx,
-		(double)bucket_temp,
+		(double)measured_temp,
 		(double)final_bias[0],
 		(double)final_bias[1],
 		(double)final_bias[2],
@@ -259,11 +307,8 @@ static void tcal_save_point(int idx, const float bias[3])
 	);
 
 	if (is_new_point || max_delta >= TCAL_SAVE_SIGNIFICANCE_THRESHOLD) {
-		// Significant change or first write: persist to NVS and rebuild LUT
 		update_tcal_state();
 	} else {
-		// Minor update: refresh LUT cache so runtime lookup sees the new value
-		// without paying the cost of a full NVS write cycle
 		LOG_DBG(
 			"T-Cal: Change below threshold (%.4f < %.4f), skipping NVS write",
 			(double)max_delta,
@@ -283,7 +328,6 @@ static void tcal_accum_flush(void)
 		return;
 	}
 
-	// Compute averages
 	float avg_bias[3];
 	for (int axis = 0; axis < 3; axis++) {
 		avg_bias[axis] = (float)(tcal_accum.gyro_sum[axis] / tcal_accum.sample_count);
@@ -297,7 +341,25 @@ static void tcal_accum_flush(void)
 		return;
 	}
 
-	// Map average temperature to bucket index
+	/* Quasi-steady gate: reject fast thermal ramps so buckets stay near-static. */
+	float elapsed_s = (float)(k_uptime_get() - tcal_accum.start_time) / 1000.0f;
+	if (elapsed_s < 0.001f) {
+		elapsed_s = 0.001f;
+	}
+	float temp_span = tcal_accum.temp_max - tcal_accum.temp_min;
+	float dtdt = temp_span / elapsed_s;
+	if (dtdt > TCAL_WRITE_DTDT_MAX_C_PER_S) {
+		LOG_INF(
+			"T-Cal: Discarding flush — |dT/dt| %.3f C/s > %.3f (span %.2fC / %.1fs)",
+			(double)dtdt,
+			(double)TCAL_WRITE_DTDT_MAX_C_PER_S,
+			(double)temp_span,
+			(double)elapsed_s
+		);
+		tcal_accum_reset();
+		return;
+	}
+
 	int idx = TEMP_TO_IDX(avg_temp);
 	if (idx < 0 || idx >= TCAL_BUFFER_SIZE) {
 		LOG_WRN("T-Cal: Average temperature %.2fC outside calibration range, discarding", (double)avg_temp);
@@ -306,21 +368,19 @@ static void tcal_accum_flush(void)
 	}
 
 	LOG_INF(
-		"T-Cal: Flushing accumulator: %d samples, avg temp %.2fC (range %.2fC), bucket idx %d",
+		"T-Cal: Flushing accumulator: %d samples, avg temp %.2fC (span %.2fC, dT/dt %.3f), slot idx %d",
 		tcal_accum.sample_count,
 		(double)avg_temp,
-		(double)(tcal_accum.temp_max - tcal_accum.temp_min),
+		(double)temp_span,
+		(double)dtdt,
 		idx
 	);
 
-	// Update gyroTemp in retained
 	sys_write(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, &avg_temp, sizeof(avg_temp));
 
-	// Save to the bucket
-	tcal_save_point(idx, avg_bias);
+	tcal_save_point(idx, avg_bias, avg_temp);
 	tcal_accum_last_commit_time = k_uptime_get();
 
-	// Reset accumulator for next collection period
 	tcal_accum_reset();
 }
 
@@ -358,9 +418,16 @@ void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
 		tcal_accum.max_g[2] = g[2];
 		tcal_accum.temp_min = temp;
 		tcal_accum.temp_max = temp;
+		tcal_accum.accel_peek_div = 0;
+		float a0[3];
+		if (sensor_peek_accel(a0)) {
+			memcpy(tcal_accum.min_a, a0, sizeof(tcal_accum.min_a));
+			memcpy(tcal_accum.max_a, a0, sizeof(tcal_accum.max_a));
+			tcal_accum.accel_tracking = true;
+		}
 	}
 
-	// Motion detection: check gyro range
+	// Motion detection: gyro peak–peak
 	for (int j = 0; j < 3; j++) {
 		if (g[j] < tcal_accum.min_g[j]) {
 			tcal_accum.min_g[j] = g[j];
@@ -369,14 +436,47 @@ void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
 			tcal_accum.max_g[j] = g[j];
 		}
 		if (tcal_accum.max_g[j] - tcal_accum.min_g[j] > TCAL_ACCUM_GYRO_RANGE_THRESHOLD) {
-			// Motion detected — discard accumulated data
 			LOG_DBG(
-				"T-Cal: Motion in accumulator, axis %d (range: %.3f dps), resetting",
+				"T-Cal: Gyro motion in accumulator, axis %d (range: %.3f dps), resetting",
 				j,
 				(double)(tcal_accum.max_g[j] - tcal_accum.min_g[j])
 			);
 			tcal_accum_reset();
 			return;
+		}
+	}
+
+	/*
+	 * Accel peak–peak: peek every TCAL_ACCUM_ACCEL_PEEK_DIV samples only.
+	 * Accel updates ~100Hz; checking every raw gyro sample was wasted work.
+	 */
+	if (++tcal_accum.accel_peek_div >= TCAL_ACCUM_ACCEL_PEEK_DIV) {
+		tcal_accum.accel_peek_div = 0;
+		float a[3];
+		if (sensor_peek_accel(a)) {
+			if (!tcal_accum.accel_tracking) {
+				memcpy(tcal_accum.min_a, a, sizeof(tcal_accum.min_a));
+				memcpy(tcal_accum.max_a, a, sizeof(tcal_accum.max_a));
+				tcal_accum.accel_tracking = true;
+			} else {
+				for (int j = 0; j < 3; j++) {
+					if (a[j] < tcal_accum.min_a[j]) {
+						tcal_accum.min_a[j] = a[j];
+					}
+					if (a[j] > tcal_accum.max_a[j]) {
+						tcal_accum.max_a[j] = a[j];
+					}
+					if (tcal_accum.max_a[j] - tcal_accum.min_a[j] > TCAL_ACCUM_ACCEL_MOTION_THRESHOLD) {
+						LOG_DBG(
+							"T-Cal: Accel motion in accumulator, axis %d (range: %.4f G), resetting",
+							j,
+							(double)(tcal_accum.max_a[j] - tcal_accum.min_a[j])
+						);
+						tcal_accum_reset();
+						return;
+					}
+				}
+			}
 		}
 	}
 
@@ -856,6 +956,7 @@ void sensor_tcal_boot_calibration_check(void)
 int sensor_perform_boot_calibration(void)
 {
 	LOG_INF("Boot Cal: Starting boot calibration");
+	/* Session D_offset only — never write measured bias into tempCalPoints. */
 	// Note: No LED changes for automatic boot calibration - keep it transparent
 
 	// Get current temperature
@@ -947,7 +1048,12 @@ void sensor_tcal_set_enabled(bool enabled)
 	tcal_compensation_enabled = enabled;
 	bool val = enabled;
 	sys_write(TCAL_ENABLED_ID, &retained->tcal_enabled, &val, sizeof(val));
-	LOG_INF("T-Cal compensation %s (persisted)", enabled ? "enabled" : "disabled");
+	sensor_tcal_refresh_apply_cache();
+	LOG_INF(
+		"T-Cal compensation %s (persisted) | apply=%s",
+		enabled ? "enabled" : "disabled",
+		sensor_tcal_get_apply_mode_name()
+	);
 }
 
 bool sensor_tcal_get_enabled(void)
@@ -1001,6 +1107,7 @@ void sensor_boot_cal_reset(void)
 int sensor_perform_runtime_calibration(void)
 {
 	LOG_INF("Runtime Cal: Starting quick zero bias calibration (~3 seconds)");
+	/* Updates D_offset only — does not append/overwrite tempCalPoints. */
 	// Note: No LED changes for automatic runtime calibration - keep it transparent
 
 	// Get current temperature

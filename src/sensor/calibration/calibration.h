@@ -89,6 +89,19 @@ bool sensor_tcal_get_auto_calibration(void);
 void sensor_tcal_set_enabled(bool enabled);
 bool sensor_tcal_get_enabled(void);
 
+/* What process_gyro actually subtracts right now (flag vs curve readiness). */
+typedef enum {
+	SENSOR_TCAL_APPLY_DISABLED = 0,   /* flag off → static ZRO */
+	SENSOR_TCAL_APPLY_ZRO_FALLBACK,   /* flag on, points < MLS min → ZRO */
+	SENSOR_TCAL_APPLY_CURVE,          /* LUT/MLS active */
+} sensor_tcal_apply_mode_t;
+
+sensor_tcal_apply_mode_t sensor_tcal_get_apply_mode(void);
+const char *sensor_tcal_get_apply_mode_name(void);
+/* Hot-path: cached (enabled && points>=min). Updated on enable/point changes. */
+bool sensor_tcal_curve_apply_ready(void);
+void sensor_tcal_refresh_apply_cache(void);
+
 // Continuous bucket-based T-Cal sampling
 void sensor_tcal_feed_continuous_sample(const float g[3], float temp);
 void sensor_tcal_continuous_motion_detected(void);

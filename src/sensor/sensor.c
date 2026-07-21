@@ -340,14 +340,16 @@ static const sensor_imu_t *sensor_imu = &sensor_imu_none;
 static const sensor_mag_t *sensor_mag = &sensor_mag_none;
 
 #if CONFIG_SENSOR_USE_TCAL
-// Temperature used by T-Cal (°C).
-// Low-pass filtered to reduce IMU temperature sensor noise which can cause compensation jitter.
+/* Single LPF: τ=500ms without active curve, τ=100ms when LUT/MLS apply ready. */
 #ifndef SENSOR_TCAL_TEMP_FILTER_TAU_MS
-#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 500 // ms
+#define SENSOR_TCAL_TEMP_FILTER_TAU_MS 500 // ms — ZRO / collect / display
+#endif
+#ifndef SENSOR_TCAL_TEMP_CURVE_TAU_MS
+#define SENSOR_TCAL_TEMP_CURVE_TAU_MS 100 // ms — when curve compensation active
 #endif
 
-static float sensor_tcal_temp = 25.0f;     // Filtered temperature (°C)
-static float sensor_tcal_temp_raw = 25.0f; // Last raw temperature reading (°C)
+static float sensor_tcal_temp = 25.0f;
+static float sensor_tcal_temp_raw = 25.0f;
 static bool sensor_tcal_temp_filter_initialized = false;
 static int64_t sensor_tcal_temp_filter_last_ms = 0;
 #endif
@@ -2192,29 +2194,27 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 		// Keep last raw value for debugging/telemetry if needed
 		sensor_tcal_temp_raw = temp;
 
-		// Low-pass filter the temperature to reduce compensation jitter.
-		// First valid reading initializes the filter to avoid startup lag.
 		if (!sensor_tcal_temp_filter_initialized) {
 			sensor_tcal_temp = temp;
 			sensor_tcal_temp_filter_initialized = true;
 		} else {
 			int64_t dt_ms = now_ms - sensor_tcal_temp_filter_last_ms;
-			// If the last update was a long time ago (e.g. after suspend), re-sync immediately.
 			if (dt_ms < 0 || dt_ms > 10000) {
 				sensor_tcal_temp = temp;
 			} else {
-				// Avoid dt=0 freezing the filter when multiple loops occur within the same ms.
 				if (dt_ms == 0) {
 					dt_ms = 1;
 				}
 				float dt = (float)dt_ms;
-				float alpha = dt / ((float)SENSOR_TCAL_TEMP_FILTER_TAU_MS + dt);
+				unsigned int tau_ms = sensor_tcal_curve_apply_ready()
+									  ? SENSOR_TCAL_TEMP_CURVE_TAU_MS
+									  : SENSOR_TCAL_TEMP_FILTER_TAU_MS;
+				float alpha = dt / ((float)tau_ms + dt);
 				sensor_tcal_temp = sensor_tcal_temp + alpha * (temp - sensor_tcal_temp);
 			}
 		}
 		sensor_tcal_temp_filter_last_ms = now_ms;
 
-		// Report filtered temp to keep host display consistent with compensation
 		connection_update_sensor_temp(sensor_tcal_temp);
 	}
 #else
@@ -3119,11 +3119,8 @@ void main_imu_restart(void)
 }
 
 #if CONFIG_SENSOR_USE_TCAL
-// Public function to get the current IMU temperature
 float sensor_get_current_imu_temperature(void)
 {
-	// If the filter hasn't been initialized yet, fall back to the last raw reading.
-	// This avoids returning the default 25C for a short window at startup.
 	return sensor_tcal_temp_filter_initialized ? sensor_tcal_temp : sensor_tcal_temp_raw;
 }
 #endif

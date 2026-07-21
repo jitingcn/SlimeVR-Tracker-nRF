@@ -209,6 +209,21 @@ static int sys_retained_init(void)
 		sys_read(MAIN_GYRO_TCAL_COEFFS_ID, &retained->tempCalCoeffs, sizeof(retained->tempCalCoeffs));
 		// tempCalCorrectionOffset is retained for compatibility only; no longer used.
 		sys_read(MAIN_GYRO_TCAL_STATE_ID, &retained->tempCalState, sizeof(retained->tempCalState));
+		/*
+		 * TCAL_ENABLED_ID:
+		 * - Present: honor stored flag
+		 * - ENOENT: default on (apply still ZRO-fallback until enough points)
+		 * Blind sys_read would zero → look explicitly disabled.
+		 */
+		{
+			bool tcal_en = true;
+			int tcal_en_err = nvs_read(&fs, TCAL_ENABLED_ID, &tcal_en, sizeof(tcal_en));
+			if (tcal_en_err >= 0) {
+				retained->tcal_enabled = tcal_en;
+			} else {
+				retained->tcal_enabled = true;
+			}
+		}
 #endif
 		sys_read(RF_CHANNEL_ID, &retained->rf_channel, sizeof(retained->rf_channel));
 		sys_read(MAG_ENABLED_ID, &retained->mag_enabled, sizeof(retained->mag_enabled));

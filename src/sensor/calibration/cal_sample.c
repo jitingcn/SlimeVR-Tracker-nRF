@@ -59,6 +59,15 @@ int sensor_wait_accel(float a[3], k_timeout_t timeout)
 	return 0;
 }
 
+bool sensor_peek_accel(float a[3])
+{
+	if (accel_sample == 0 || a == NULL) {
+		return false;
+	}
+	memcpy(a, aBuf, sizeof(aBuf));
+	return true;
+}
+
 static float gBuf[3] = {0};
 static uint64_t gyro_sample = 0;
 static uint64_t gyro_wait_sample = 0;

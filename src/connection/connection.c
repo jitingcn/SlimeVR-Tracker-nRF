@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "sensor/sensor.h"
+#include "sensor/calibration/calibration.h"
 #include "connection.h"
 #include "util.h"
 #include "esb.h"
@@ -845,14 +846,36 @@ static bool connection_cal_drip_send(void)
 #if CONFIG_SENSOR_USE_TCAL
 	case 3: { /* T-Cal state */
 		buf[2] = RAW_CAL_SUB_TCAL;
-		buf[3] = retained->tcal_enabled ? 1 : 0;
+		/*
+		 * buf[3] flags (compat: non-zero ⇒ compensation flag on):
+		 *   bit0 = tcal_enabled
+		 *   bit1 = curve actively applied (enough points)
+		 *   bit2 = enabled but ZRO fallback (insufficient points)
+		 */
+		uint8_t tcal_flags = 0;
+		if (retained->tcal_enabled) {
+			tcal_flags |= 0x01;
+		}
+		switch (sensor_tcal_get_apply_mode()) {
+		case SENSOR_TCAL_APPLY_CURVE:
+			tcal_flags |= 0x02;
+			break;
+		case SENSOR_TCAL_APPLY_ZRO_FALLBACK:
+			tcal_flags |= 0x04;
+			break;
+		default:
+			break;
+		}
+		buf[3] = tcal_flags;
 		uint16_t npoints = connection_tcal_valid_point_count();
 		memcpy(&buf[4], &npoints, 2);
 		float temp_min = (float)CONFIG_SENSOR_POLY_TEMP_MIN;
 		float temp_max = (float)CONFIG_SENSOR_POLY_TEMP_MAX;
 		memcpy(&buf[6], &temp_min, 4);
 		memcpy(&buf[10], &temp_max, 4);
-		memcpy(&buf[14], retained->tempCalCorrectionOffset, 12);
+		/* [14]: apply mode enum; rest of former correction-offset area zeroed */
+		memset(&buf[14], 0, 12);
+		buf[14] = (uint8_t)sensor_tcal_get_apply_mode();
 		esb_write(buf, false, RAW_PACKET_SIZE);
 		if (npoints > 0) {
 			raw_cal_phase = 4;

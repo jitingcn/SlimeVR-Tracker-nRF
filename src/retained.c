@@ -91,7 +91,8 @@ bool retained_validate(void)
 		retained->bootCalState.doffset[0] = 0.0f;
 		retained->bootCalState.doffset[1] = 0.0f;
 		retained->bootCalState.doffset[2] = 0.0f;
-		retained->tcal_enabled = true; // T-Cal compensation enabled by default
+		/* Default on; apply path falls back to ZRO until enough points. */
+		retained->tcal_enabled = true;
 #endif
 		/* Initialize watchdog_state with valid magic but zero counters */
 		retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;

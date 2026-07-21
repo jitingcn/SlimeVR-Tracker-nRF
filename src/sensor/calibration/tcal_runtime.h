@@ -46,9 +46,16 @@
 #define RUNTIME_CAL_SAMPLE_TIME_MS 3000
 #define RUNTIME_CAL_FAILURE_COOLDOWN_MS 30000
 
+/* Rising preferred; falling still accepted but weakly updates the shared slot. */
 #define TCAL_HYSTERESIS_EMA_RISING 0.7f
-#define TCAL_HYSTERESIS_EMA_FALLING 0.3f
+#define TCAL_HYSTERESIS_EMA_FALLING 0.15f
 #define TCAL_HYSTERESIS_EMA_UNKNOWN 0.5f
+
+/* Continuous-bucket write gates (quasi-steady only; does not change apply path). */
+#define TCAL_ACCUM_ACCEL_MOTION_THRESHOLD BIAS_COLLECT_ACCEL_MOTION_THRESHOLD
+#define TCAL_WRITE_DTDT_MAX_C_PER_S 0.04f /* ~2.4 °C/min; faster → discard flush */
+/* Accel peak–peak check every N gyro samples (accel ~100Hz vs gyro 1.6kHz). */
+#define TCAL_ACCUM_ACCEL_PEEK_DIV 16
 
 typedef enum {
 	TCAL_DIR_UNKNOWN = 0,

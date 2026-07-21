@@ -332,168 +332,34 @@ int sensor_tcal_mls_lookup(float temp, float bias_out[3])
 	}
 
 	if (point_count == 0) {
-		// No points with sufficient weight - temperature is far outside calibrated range
-		// Use linear extrapolation from edge points (similar to LUT extrapolation logic)
-
-		// Collect all valid points with their temperatures
-		typedef struct {
-			float temp;
-			float bias[3];
-		} TempPoint;
-		TempPoint edge_points[MLS_EXTRAP_POINTS];
-		int edge_count = 0;
-
-		// Determine if we're extrapolating low or high
-		// First scan to find data range
-		float data_min_temp = 1000.0f;
-		float data_max_temp = -1000.0f;
-
+		/* Outside weighted support: clamp to nearest calibrated point (no unbounded slope). */
+		float best_dist = INFINITY;
+		int best_idx = -1;
 		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
 			if (retained->tempCalPoints[i].temp == 0.0f) {
 				continue;
 			}
-			float pt = retained->tempCalPoints[i].temp;
-			if (pt < data_min_temp) data_min_temp = pt;
-			if (pt > data_max_temp) data_max_temp = pt;
+			float d = fabsf(retained->tempCalPoints[i].temp - temp);
+			if (d < best_dist) {
+				best_dist = d;
+				best_idx = i;
+			}
 		}
-
-		if (data_min_temp > 999.0f) {
-			// No calibration data at all
+		if (best_idx < 0) {
 			LOG_ERR("T-Cal MLS: No calibration data available");
 			return -1;
 		}
-
-		bool extrapolate_low = (temp < data_min_temp);
-
-		if (extrapolate_low) {
-			// Collect lowest temperature points for low extrapolation
-			// Sort by temperature ascending, take first MLS_EXTRAP_POINTS
-			for (int k = 0; k < MLS_EXTRAP_POINTS && k < retained->tempCalState.count; k++) {
-				float lowest_temp = 1000.0f;
-				int lowest_idx = -1;
-
-				for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
-					if (retained->tempCalPoints[i].temp == 0.0f) continue;
-					float pt = retained->tempCalPoints[i].temp;
-
-					// Check if already selected
-					bool already_selected = false;
-					for (int j = 0; j < edge_count; j++) {
-						if (fabsf(edge_points[j].temp - pt) < 0.01f) {
-							already_selected = true;
-							break;
-						}
-					}
-					if (already_selected) continue;
-
-					if (pt < lowest_temp) {
-						lowest_temp = pt;
-						lowest_idx = i;
-					}
-				}
-
-				if (lowest_idx >= 0) {
-					edge_points[edge_count].temp = retained->tempCalPoints[lowest_idx].temp;
-					memcpy(edge_points[edge_count].bias, retained->tempCalPoints[lowest_idx].bias, sizeof(float) * 3);
-					edge_count++;
-				}
-			}
-		} else {
-			// Collect highest temperature points for high extrapolation
-			// Sort by temperature descending, take first MLS_EXTRAP_POINTS
-			for (int k = 0; k < MLS_EXTRAP_POINTS && k < retained->tempCalState.count; k++) {
-				float highest_temp = -1000.0f;
-				int highest_idx = -1;
-
-				for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
-					if (retained->tempCalPoints[i].temp == 0.0f) continue;
-					float pt = retained->tempCalPoints[i].temp;
-
-					// Check if already selected
-					bool already_selected = false;
-					for (int j = 0; j < edge_count; j++) {
-						if (fabsf(edge_points[j].temp - pt) < 0.01f) {
-							already_selected = true;
-							break;
-						}
-					}
-					if (already_selected) continue;
-
-					if (pt > highest_temp) {
-						highest_temp = pt;
-						highest_idx = i;
-					}
-				}
-
-				if (highest_idx >= 0) {
-					edge_points[edge_count].temp = retained->tempCalPoints[highest_idx].temp;
-					memcpy(edge_points[edge_count].bias, retained->tempCalPoints[highest_idx].bias, sizeof(float) * 3);
-					edge_count++;
-				}
-			}
-		}
-
-		if (edge_count == 0) {
-			LOG_ERR("T-Cal MLS: No edge points found for extrapolation");
-			return -1;
-		}
-
-		// Single point: constant extrapolation
-		if (edge_count == 1) {
-			memcpy(bias_out, edge_points[0].bias, sizeof(float) * 3);
-
-			int slot = sensor_tcal_cache_select_slot(temp);
-			mls_cache.slots[slot].temp = temp;
-			memcpy(mls_cache.slots[slot].bias, bias_out, sizeof(float) * 3);
-			memset(mls_cache.slots[slot].slope, 0, sizeof(mls_cache.slots[slot].slope));
-			mls_cache.slots[slot].valid = true;
-
-			LOG_DBG("T-Cal MLS: Single-point extrapolation at %.2fC", (double)temp);
-			return 0;
-		}
-
-		// Multiple points: linear least squares fit (same as LUT extrapolation)
-		float t_mean = 0.0f;
-		for (int i = 0; i < edge_count; i++) {
-			t_mean += edge_points[i].temp;
-		}
-		t_mean /= edge_count;
-
-		float sum_dt_sq = 0.0f;
-		for (int i = 0; i < edge_count; i++) {
-			float dt = edge_points[i].temp - t_mean;
-			sum_dt_sq += dt * dt;
-		}
-
-		float slope[3] = {0.0f, 0.0f, 0.0f};
-
-		for (int axis = 0; axis < 3; axis++) {
-			float b_mean = 0.0f;
-			for (int i = 0; i < edge_count; i++) {
-				b_mean += edge_points[i].bias[axis];
-			}
-			b_mean /= edge_count;
-
-			float sum_dt_db = 0.0f;
-			for (int i = 0; i < edge_count; i++) {
-				float dt = edge_points[i].temp - t_mean;
-				float db = edge_points[i].bias[axis] - b_mean;
-				sum_dt_db += dt * db;
-			}
-
-			slope[axis] = (sum_dt_sq > 0.001f) ? sum_dt_db / sum_dt_sq : 0.0f;
-			bias_out[axis] = b_mean + slope[axis] * (temp - t_mean);
-		}
-
-		// Cache the extrapolated result with slope for smooth interpolation
+		memcpy(bias_out, retained->tempCalPoints[best_idx].bias, sizeof(float) * 3);
 		int slot = sensor_tcal_cache_select_slot(temp);
 		mls_cache.slots[slot].temp = temp;
 		memcpy(mls_cache.slots[slot].bias, bias_out, sizeof(float) * 3);
-		memcpy(mls_cache.slots[slot].slope, slope, sizeof(float) * 3);
+		memset(mls_cache.slots[slot].slope, 0, sizeof(mls_cache.slots[slot].slope));
 		mls_cache.slots[slot].valid = true;
-
-		LOG_DBG("T-Cal MLS: Linear extrapolation %s range (%.2fC, %d pts)",
-			extrapolate_low ? "below" : "above", (double)temp, edge_count);
+		LOG_DBG(
+			"T-Cal MLS: Clamped to nearest point %.2fC (query %.2fC)",
+			(double)retained->tempCalPoints[best_idx].temp,
+			(double)temp
+		);
 		return 0;
 	}
 
@@ -798,110 +664,20 @@ int sensor_tcal_lut_lookup(float temp, float bias_out[3])
 		return -1;  // LUT not available
 	}
 
-	// Track if we need to extrapolate (temp outside LUT range)
-	bool extrapolate_low = (temp < MLS_LUT_TEMP_MIN);
-	bool extrapolate_high = (temp > MLS_LUT_TEMP_MAX);
-	float original_temp = temp;
-
-	// For extrapolation, use 4 points with 1°C spacing for robust slope estimation
-	// With MLS_LUT_STEP_PER_DEGREE = 2, 1°C = 2 LUT indices
-	#define EXTRAP_POINT_SPACING MLS_LUT_STEP_PER_DEGREE  // 1°C spacing
-	#define EXTRAP_NUM_POINTS 4
-
-	if (extrapolate_low) {
-		// Use first 4 points at 1°C intervals: indices 0, 2, 4, 6
-		int indices[EXTRAP_NUM_POINTS];
-		for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-			indices[i] = i * EXTRAP_POINT_SPACING;
-			if (indices[i] >= MLS_LUT_SIZE) {
-				return -1;  // Not enough range for extrapolation
-			}
-			if (!mls_lut.entries[indices[i]].computed) {
-				return -1;  // Required points not computed
-			}
+	/* Outside configured LUT range: clamp to nearest edge entry (no slope run-away). */
+	if (temp < MLS_LUT_TEMP_MIN) {
+		if (!mls_lut.entries[0].computed) {
+			return -1;
 		}
-
-		// Linear least squares fit using 4 points
-		// slope = Σ(t_i - t_mean)(b_i - b_mean) / Σ(t_i - t_mean)²
-		float temps[EXTRAP_NUM_POINTS];
-		float t_mean = 0.0f;
-		for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-			temps[i] = MLS_LUT_IDX_TO_TEMP(indices[i]);
-			t_mean += temps[i];
-		}
-		t_mean /= EXTRAP_NUM_POINTS;
-
-		// Pre-compute Σ(t_i - t_mean)² (same for all axes)
-		float sum_dt_sq = 0.0f;
-		for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-			float dt = temps[i] - t_mean;
-			sum_dt_sq += dt * dt;
-		}
-
-		for (int axis = 0; axis < 3; axis++) {
-			float b_mean = 0.0f;
-			for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-				b_mean += mls_lut.entries[indices[i]].bias[axis];
-			}
-			b_mean /= EXTRAP_NUM_POINTS;
-
-			float sum_dt_db = 0.0f;
-			for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-				float dt = temps[i] - t_mean;
-				float db = mls_lut.entries[indices[i]].bias[axis] - b_mean;
-				sum_dt_db += dt * db;
-			}
-
-			float slope = (sum_dt_sq > 0.001f) ? sum_dt_db / sum_dt_sq : 0.0f;
-			bias_out[axis] = b_mean + slope * (original_temp - t_mean);
-		}
+		memcpy(bias_out, mls_lut.entries[0].bias, sizeof(float) * 3);
 		return 0;
-
-	} else if (extrapolate_high) {
-		// Use last 4 points at 1°C intervals: indices n-1, n-3, n-5, n-7
-		int indices[EXTRAP_NUM_POINTS];
-		for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-			indices[i] = (MLS_LUT_SIZE - 1) - i * EXTRAP_POINT_SPACING;
-			if (indices[i] < 0) {
-				return -1;  // Not enough range for extrapolation
-			}
-			if (!mls_lut.entries[indices[i]].computed) {
-				return -1;  // Required points not computed
-			}
+	}
+	if (temp > MLS_LUT_TEMP_MAX) {
+		int hi = MLS_LUT_SIZE - 1;
+		if (!mls_lut.entries[hi].computed) {
+			return -1;
 		}
-
-		// Linear least squares fit using 4 points
-		float temps[EXTRAP_NUM_POINTS];
-		float t_mean = 0.0f;
-		for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-			temps[i] = MLS_LUT_IDX_TO_TEMP(indices[i]);
-			t_mean += temps[i];
-		}
-		t_mean /= EXTRAP_NUM_POINTS;
-
-		float sum_dt_sq = 0.0f;
-		for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-			float dt = temps[i] - t_mean;
-			sum_dt_sq += dt * dt;
-		}
-
-		for (int axis = 0; axis < 3; axis++) {
-			float b_mean = 0.0f;
-			for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-				b_mean += mls_lut.entries[indices[i]].bias[axis];
-			}
-			b_mean /= EXTRAP_NUM_POINTS;
-
-			float sum_dt_db = 0.0f;
-			for (int i = 0; i < EXTRAP_NUM_POINTS; i++) {
-				float dt = temps[i] - t_mean;
-				float db = mls_lut.entries[indices[i]].bias[axis] - b_mean;
-				sum_dt_db += dt * db;
-			}
-
-			float slope = (sum_dt_sq > 0.001f) ? sum_dt_db / sum_dt_sq : 0.0f;
-			bias_out[axis] = b_mean + slope * (original_temp - t_mean);
-		}
+		memcpy(bias_out, mls_lut.entries[hi].bias, sizeof(float) * 3);
 		return 0;
 	}
 

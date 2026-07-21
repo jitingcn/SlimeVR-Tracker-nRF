@@ -121,47 +121,36 @@ void sensor_calibration_process_gyro(float g[3])
 {
 	sensor_sample_gyro(g);
 #if CONFIG_SENSOR_USE_TCAL
-	float calculated_offset[3] = {0.0f, 0.0f, 0.0f};
-	float temp = sensor_get_current_imu_temperature();
+	float calculated_offset[3];
 	bool offset_calculated = false;
 
-	// Feed raw gyro data into continuous bucket accumulator for auto T-Cal
-	// This must happen before bias subtraction so we capture the true raw bias
-	// (auto-cal collection continues regardless of compensation enable state)
-	if (sensor_tcal_get_auto_calibration() && !isnan(temp)) {
+	const bool auto_cal = sensor_tcal_get_auto_calibration();
+	const bool curve_ready = sensor_tcal_curve_apply_ready();
+	float temp = NAN;
+	if (auto_cal || curve_ready) {
+		temp = sensor_get_current_imu_temperature();
+	}
+
+	/* Continuous collect only when auto-cal on. */
+	if (auto_cal) {
 		sensor_tcal_feed_continuous_sample(g, temp);
 	}
 
-	// ==========================================================================
-	// Unified T-Cal Strategy: LUT -> MLS -> Static Bias
-	// D_offset is always applied when valid
-	// Skipped when T-Cal compensation disabled (uses static bias instead)
-	// ==========================================================================
-
-	if (sensor_tcal_get_enabled() && !isnan(temp) && retained->tempCalState.count >= 1) {
-		// Strategy 1: Try LUT lookup (preferred - O(1) linear interpolation)
-		if (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
-			if (sensor_tcal_lut_lookup(temp, calculated_offset) == 0) {
-				offset_calculated = true;
-			}
-			// Strategy 2: Fallback to MLS if LUT not available
-			else if (sensor_tcal_mls_lookup(temp, calculated_offset) == 0) {
-				offset_calculated = true;
-			}
+	/* Cached enable∧points≥min — LUT/MLS; else ZRO below. */
+	if (curve_ready) {
+		if (sensor_tcal_lut_lookup(temp, calculated_offset) == 0) {
+			offset_calculated = true;
+		} else if (sensor_tcal_mls_lookup(temp, calculated_offset) == 0) {
+			offset_calculated = true;
 		}
 	}
 
-	// Strategy 2: Final fallback to static bias (when no T-Cal data or compensation disabled)
 	if (!offset_calculated) {
-		for (int i = 0; i < 3; i++) {
-			calculated_offset[i] = gyroBias[i];
-		}
-		// Note: offset_calculated remains false but we still apply D_offset below
+		calculated_offset[0] = gyroBias[0];
+		calculated_offset[1] = gyroBias[1];
+		calculated_offset[2] = gyroBias[2];
 	}
 
-	// Apply boot/runtime calibration D_offset
-	// D_offset is now applied regardless of whether T-Cal is used or not
-	// This allows runtime bias tracking even without temperature calibration
 	if (retained->bootCalState.doffset_valid) {
 #if CONFIG_CMSIS_DSP
 		arm_add_f32(calculated_offset, retained->bootCalState.doffset, calculated_offset, 3);
@@ -172,7 +161,6 @@ void sensor_calibration_process_gyro(float g[3])
 #endif
 	}
 
-	// Apply the calculated offset to gyro data
 #if CONFIG_CMSIS_DSP
 	arm_sub_f32(g, calculated_offset, g, 3);
 #else
@@ -655,6 +643,19 @@ static void calibration_thread(void)
 void sensor_tcal_status(void)
 {
 	printk("Temperature Calibration Status (MLS):\n");
+	printk(
+		"  - Compensation flag: %s\n",
+		sensor_tcal_get_enabled() ? "enabled (default on)" : "disabled"
+	);
+	printk(
+		"  - Active apply: %s",
+		sensor_tcal_get_apply_mode_name()
+	);
+	if (sensor_tcal_get_apply_mode() == SENSOR_TCAL_APPLY_ZRO_FALLBACK) {
+		printk(" (need >= %d points for curve)\n", MLS_MIN_POINTS_FOR_FIT);
+	} else {
+		printk("\n");
+	}
 	printk("  - MLS available: %s\n", retained->tempCalState.valid ? "Yes" : "No");
 	printk("  - Points collected: %u / %d\n", retained->tempCalState.count, TCAL_BUFFER_SIZE);
 
@@ -816,6 +817,7 @@ void sensor_tcal_clear(void)
 
 	// Reset continuous accumulator sampling state
 	tcal_accum_reset();
+	sensor_tcal_refresh_apply_cache();
 
 	// Manual command: invalidate fusion to force quaternion recalculation
 	sensor_fusion_invalidate();

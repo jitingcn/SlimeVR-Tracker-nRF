@@ -258,6 +258,12 @@ static void print_sensor_summary(void)
 	float current_gyro_offset[3];
 	sensor_calibration_get_last_gyro_offset(current_gyro_offset);
 	printk(
+		"T-Cal: flag=%s apply=%s points=%u\n",
+		sensor_tcal_get_enabled() ? "on" : "off",
+		sensor_tcal_get_apply_mode_name(),
+		retained->tempCalState.count
+	);
+	printk(
 		"Gyroscope bias tcal (real-time): %.5f %.5f %.5f at %.2f C\n",
 		(double)current_gyro_offset[0],
 		(double)current_gyro_offset[1],
@@ -1047,7 +1053,11 @@ static void console_cmd_tcal(size_t argc, char **argv)
 			printk("T-Cal compensation disabled (using static gyro bias)\n");
 		} else if (strcmp(subcmd, "status") == 0) {
 			sensor_tcal_status();
-			printk("T-Cal compensation: %s\n", sensor_tcal_get_enabled() ? "enabled" : "disabled");
+			printk(
+				"T-Cal compensation: %s | apply=%s\n",
+				sensor_tcal_get_enabled() ? "enabled" : "disabled",
+				sensor_tcal_get_apply_mode_name()
+			);
 			printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
 		} else if (strcmp(subcmd, "clear") == 0) {
 			cmd_reset_tcal();
