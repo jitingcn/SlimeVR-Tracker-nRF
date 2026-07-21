@@ -222,6 +222,25 @@ static float accel_effective_time; // Effective time step for fusion after overs
 static float accel_actual_range; // Actual accelerometer full scale range (g)
 static float gyro_actual_range;  // Actual gyroscope full scale range (deg/s)
 
+/* Raw gyrQuat emit plan: same N as fusion INT_merge, separate uncalibrated accum. */
+struct raw_rate_plan {
+	uint8_t n_raw; /* == CONFIG_SENSOR_GYRO_OVERSAMPLING */
+	uint8_t emit_count;
+	float chip_hz;
+	float send_hz; /* == fusion_hz; meta gyro_odr (host gyrTs) */
+	float fusion_hz;
+};
+
+static struct raw_rate_plan raw_rate_plan = {
+	.n_raw = 1,
+	.emit_count = 0,
+	.chip_hz = 0.0f,
+	.send_hz = 0.0f,
+	.fusion_hz = 0.0f,
+};
+
+static void sensor_send_raw_metadata(void);
+
 static float sensor_actual_time;
 static int16_t sensor_fifo_threshold;
 static int64_t sensor_data_time; // ticks
@@ -1236,15 +1255,7 @@ void sensor_set_mag_enabled(bool enabled)
 	sensor_refresh_sensor_ids();
 
 	if (connection_get_data_collection()) {
-		connection_send_raw_metadata(
-			gyro_actual_range,
-			accel_actual_range,
-			1.0f / gyro_actual_time,
-			1.0f / accel_actual_time,
-			mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
-			(uint8_t)sensor_imu_id,
-			(uint8_t)sensor_mag_id
-		);
+		sensor_send_raw_metadata();
 	}
 
 	main_imu_resume();
@@ -1660,21 +1671,14 @@ int sensor_init(void)
 	// last_mag_fusion_ticks reset is sufficient; no extra state to clear.
 
 	if (connection_get_data_collection()) {
-		connection_send_raw_metadata(
-			gyro_actual_range,
-			accel_actual_range,
-			1.0f / gyro_actual_time,
-			1.0f / accel_actual_time,
-			mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
-			(uint8_t)sensor_imu_id,
-			(uint8_t)sensor_mag_id
-		);
+		sensor_send_raw_metadata();
 		connection_send_raw_calibration();
 		LOG_INF(
-			"Data collection mode: metadata + calibration sent (gyro %.0fdps, accel %.0fg, gyro ODR %.0fHz)",
+			"Data collection mode: metadata + calibration sent (gyro %.0fdps, accel %.0fg, send %.0fHz, chip %.0fHz)",
 			(double)gyro_actual_range,
 			(double)accel_actual_range,
-			1.0 / (double)gyro_actual_time
+			(double)raw_rate_plan.send_hz,
+			(double)raw_rate_plan.chip_hz
 		);
 	}
 
@@ -1694,6 +1698,33 @@ static bool last_data_collection_state = false;
  * Integrates raw gyro (no bias correction) so offline VQF can re-estimate bias.
  * Reset when data collection starts. */
 static float raw_gyr_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+
+static void raw_rate_plan_refresh(void)
+{
+	float chip_hz = 1.0f / gyro_actual_time;
+	uint8_t n_raw = (uint8_t)CONFIG_SENSOR_GYRO_OVERSAMPLING;
+
+	raw_rate_plan.n_raw = n_raw;
+	raw_rate_plan.chip_hz = chip_hz;
+	raw_rate_plan.fusion_hz = chip_hz / (float)n_raw;
+	raw_rate_plan.send_hz = raw_rate_plan.fusion_hz;
+}
+
+static void sensor_send_raw_metadata(void)
+{
+	raw_rate_plan_refresh();
+	connection_send_raw_metadata(
+		gyro_actual_range,
+		accel_actual_range,
+		raw_rate_plan.send_hz,
+		1.0f / accel_actual_time,
+		mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
+		(uint8_t)sensor_imu_id,
+		(uint8_t)sensor_mag_id,
+		raw_rate_plan.chip_hz,
+		raw_rate_plan.fusion_hz
+	);
+}
 
 #if DEBUG
 static int64_t last_acquisition_time = INT64_MAX;
@@ -2114,32 +2145,22 @@ static void sensor_loop_handle_data_collection(bool *dc_active)
 	*dc_active = connection_get_data_collection();
 	if (*dc_active && !last_data_collection_state) {
 		sys_interface_resume();
-		/* Reset raw gyro quaternion accumulator */
+		/* Reset raw gyro quaternion accumulator and emit counter */
 		raw_gyr_quat[0] = 1.0f;
 		raw_gyr_quat[1] = 0.0f;
 		raw_gyr_quat[2] = 0.0f;
 		raw_gyr_quat[3] = 0.0f;
-		connection_send_raw_metadata(
-			gyro_actual_range,
-			accel_actual_range,
-			1.0f / gyro_actual_time,
-			1.0f / accel_actual_time,
-			mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
-			(uint8_t)sensor_imu_id,
-			(uint8_t)sensor_mag_id
-		);
+		raw_rate_plan.emit_count = 0;
+		sensor_send_raw_metadata();
 		connection_send_raw_calibration();
-		LOG_INF("Data collection activated: metadata + calibration sent");
-	} else if (*dc_active && connection_raw_metadata_resend_due()) {
-		connection_send_raw_metadata(
-			gyro_actual_range,
-			accel_actual_range,
-			1.0f / gyro_actual_time,
-			1.0f / accel_actual_time,
-			mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
-			(uint8_t)sensor_imu_id,
-			(uint8_t)sensor_mag_id
+		LOG_INF(
+			"Data collection activated: send %.0fHz n_raw=%u chip %.0fHz",
+			(double)raw_rate_plan.send_hz,
+			raw_rate_plan.n_raw,
+			(double)raw_rate_plan.chip_hz
 		);
+	} else if (*dc_active && connection_raw_metadata_resend_due()) {
+		sensor_send_raw_metadata();
 		connection_send_raw_calibration();
 	}
 	last_data_collection_state = *dc_active;
@@ -2334,10 +2355,8 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 		 * duplicate entries from separate accel/gyro FIFO tags.
 		 * Pair with the latest accel sample if present; otherwise zeros. */
 		if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
-			struct raw_imu_sample raw_sample;
 			if (frame->dc_active) {
-				/* Integrate raw gyro into quaternion accumulator.
-				 * raw_g is in deg/s; convert to rad/s for integration. */
+				/* Integrate every chip sample; queue only every n_raw samples. */
 				float g_rad[3]
 					= {raw_g[0] * DEG_TO_RAD, raw_g[1] * DEG_TO_RAD, raw_g[2] * DEG_TO_RAD};
 				float gyr_norm = sqrtf(g_rad[0] * g_rad[0] + g_rad[1] * g_rad[1] + g_rad[2] * g_rad[2]);
@@ -2362,12 +2381,20 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 					raw_gyr_quat[3] = q3 * inv_norm;
 				}
 
-				memcpy(raw_sample.gyr_quat, raw_gyr_quat, sizeof(raw_sample.gyr_quat));
-				memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
-				raw_sample.temp_c = frame->raw_collect_temp_c;
-				connection_queue_raw_sample(&raw_sample);
+				raw_rate_plan.emit_count++;
+				if (raw_rate_plan.emit_count >= raw_rate_plan.n_raw) {
+					struct raw_imu_sample raw_sample;
+					raw_rate_plan.emit_count = 0;
+					memcpy(raw_sample.gyr_quat, raw_gyr_quat, sizeof(raw_sample.gyr_quat));
+					memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
+					raw_sample.temp_c = frame->raw_collect_temp_c;
+					connection_queue_raw_sample(&raw_sample);
+					/* Clear only on emit so mid-window accel tags stay latched. */
+					memset(raw_collect_a, 0, sizeof(raw_collect_a));
+				}
+			} else {
+				memset(raw_collect_a, 0, sizeof(raw_collect_a));
 			}
-			memset(raw_collect_a, 0, sizeof(raw_collect_a));
 		}
 
 		// Debug: Log gyro values to see if they're all zero

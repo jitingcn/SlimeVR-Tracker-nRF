@@ -547,8 +547,19 @@ static int64_t last_runtime_time = 0;
  * Sensor thread queues raw IMU/mag samples via message queues.
  * Connection thread drains them and sends ESB packets with floats.
  *
- * ESB Raw IMU + GyrQuat packet (type 0x13, 52 bytes):
- *   [0]    type 0x13
+ * ESB raw meta (ESB_RAW_META_TYPE, RAW_PACKET_SIZE):
+ *   [2-5]   gyro_range
+ *   [6-9]   accel_range
+ *   [10-13] gyro_odr / raw TX Hz (equals fusion INT_merge rate; host gyrTs)
+ *   [14-17] accel_odr
+ *   [18-21] mag_odr
+ *   [22]    imu_id
+ *   [23]    mag_id
+ *   [24-27] chip_gyro_hz
+ *   [28-31] fusion_gyro_hz (0 = omit)
+ *
+ * ESB raw IMU + gyrQuat (ESB_RAW_IMU_QUAT_TYPE, RAW_PACKET_SIZE):
+ *   [0]    packet type
  *   [1]    tracker_id
  *   [2-3]  sequence (16-bit BE)
  *   [4-19] gyr_quat w,x,y,z (float × 4, accumulated raw integration)
@@ -581,7 +592,7 @@ static int64_t ota_suppress_start_time = 0;  /* Timestamp when suppress was enab
  * Indexed by (sequence % RAW_RING_SIZE).
  */
 #define RAW_RING_SIZE 256
-#define RAW_PACKET_SIZE 52 /* Fixed raw data packet size (type 0x13 with gyrQuat) */
+#define RAW_PACKET_SIZE 52 /* Fixed size for raw meta / gyrQuat / cal payloads */
 static uint8_t raw_ring[RAW_RING_SIZE][RAW_PACKET_SIZE];
 static bool raw_ring_valid[RAW_RING_SIZE];
 static uint16_t raw_ring_seq[RAW_RING_SIZE];
@@ -763,22 +774,27 @@ void connection_send_raw_metadata(
 	float accel_odr,
 	float mag_odr,
 	uint8_t imu,
-	uint8_t mag
+	uint8_t mag,
+	float chip_gyro_hz,
+	float fusion_gyro_hz
 )
 {
 	/* Buffer metadata for deferred sending by connection thread.
 	 * Never call esb_write() from sensor thread — avoids
-	 * cross-thread ESB TX FIFO contention with raw data flow. */
+	 * cross-thread ESB TX FIFO contention with raw data flow.
+	 * TX uses full RAW_PACKET_SIZE so chip/fusion Hz trailer stays on the wire. */
 	memset(raw_metadata_buf, 0, sizeof(raw_metadata_buf));
 	raw_metadata_buf[0] = ESB_RAW_META_TYPE;
 	raw_metadata_buf[1] = tracker_id;
 	memcpy(&raw_metadata_buf[2], &gyro_range, 4);
 	memcpy(&raw_metadata_buf[6], &accel_range, 4);
-	memcpy(&raw_metadata_buf[10], &gyro_odr, 4);
+	memcpy(&raw_metadata_buf[10], &gyro_odr, 4); /* raw TX Hz (= fusion rate) */
 	memcpy(&raw_metadata_buf[14], &accel_odr, 4);
 	memcpy(&raw_metadata_buf[18], &mag_odr, 4);
 	raw_metadata_buf[22] = imu;
 	raw_metadata_buf[23] = mag;
+	memcpy(&raw_metadata_buf[24], &chip_gyro_hz, 4);
+	memcpy(&raw_metadata_buf[28], &fusion_gyro_hz, 4);
 
 	raw_metadata_pending = true;
 	/* Reset 60s resend timer now so sensor loop won't re-trigger

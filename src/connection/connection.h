@@ -71,12 +71,13 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample);
 // Queue uncalibrated magnetometer data for body-frame raw transport
 void connection_queue_raw_mag(const float mag[3]);
 
-// Send metadata packet with ODR/range info (called once when data collection starts)
+/* Raw meta: gyro_odr = raw TX rate (fusion INT_merge Hz); chip/fusion Hz after mag_id. */
 void connection_send_raw_metadata(float gyro_range, float accel_range,
 				  float gyro_odr, float accel_odr,
-				  float mag_odr, uint8_t imu_id, uint8_t mag_id);
+				  float mag_odr, uint8_t imu_id, uint8_t mag_id,
+				  float chip_gyro_hz, float fusion_gyro_hz);
 
-// Send calibration data packets (type 0x14, called after metadata)
+/* Send calibration drip packets (after metadata). */
 void connection_send_raw_calibration(void);
 
 // Check if metadata needs periodic re-send (returns true if due)

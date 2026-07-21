@@ -1760,7 +1760,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 *
 	 * PING / ACK packets bypass this (no_ack == false) so time-sync and
 	 * connection-health probes are never delayed.
-	 * Raw data (0x10-0x14) always bypasses for minimum latency.
+	 * Raw data-collection packets always bypass for minimum latency.
 	 *
 	 * When TDMA is disabled (compile-time or runtime), use random backoff
 	 * to reduce collision
@@ -1802,7 +1802,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	}
 
 	// manually repeat raw IMU/mag packets for better reliability
-	// Skip duplication for metadata (0x12) and calibration (0x14)
+	// Skip duplication for raw meta and calibration
 	// which are sent at controlled intervals with guaranteed delivery
 	if (queue_status == 0 && is_raw && data[0] != ESB_RAW_META_TYPE && data[0] != ESB_RAW_CAL_TYPE) {
 		tx_payload.noack = true;
