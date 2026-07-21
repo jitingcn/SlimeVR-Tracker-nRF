@@ -154,137 +154,6 @@ static void print_board(void)
 	printk("Target: " CONFIG_BOARD_TARGET "\n");
 }
 
-static void print_sensor(void)
-{
-	printk("IMU: %s\n", (retained->imu_addr & 0x7F) != 0x7F ? sensor_get_sensor_imu_name() : "Not searching");
-	if (retained->imu_reg != 0xFF) {
-		printk("Interface: %s\n", (retained->imu_reg & 0x80) ? "SPI" : "I2C");
-	}
-	printk("Address: 0x%02X%02X\n", retained->imu_addr, retained->imu_reg);
-
-	printk(
-		"\nMagnetometer: %s (%s)\n",
-		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching",
-		sensor_get_mag_enabled() ? "enabled" : "disabled"
-	);
-	if (retained->mag_reg != 0xFF) {
-		const char *mag_interface;
-		if (retained->mag_addr & 0x80) {
-			// External magnetometer (via IMU I2CM or passthrough)
-			if (retained->imu_reg & 0x80) {
-				mag_interface = "EXT (SPI IMU I2CM)";
-			} else {
-				mag_interface = "I2C (passthrough)";
-			}
-		} else {
-			mag_interface = (retained->mag_reg & 0x80) ? "SPI" : "I2C";
-		}
-		printk("Interface: %s\n", mag_interface);
-	}
-	printk("Address: 0x%02X%02X\n", retained->mag_addr, retained->mag_reg);
-
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	printk("\nAccelerometer matrix:\n");
-	for (int i = 0; i < 3; i++) {
-		printk(
-			"%.5f %.5f %.5f %.5f\n",
-			(double)retained->accBAinv[0][i],
-			(double)retained->accBAinv[1][i],
-			(double)retained->accBAinv[2][i],
-			(double)retained->accBAinv[3][i]
-		);
-	}
-
-	// Print calibration quality analysis
-	printk("\nAccel calibration:\n");
-	printk(
-		"  Offset: [%.5f, %.5f, %.5f]\n",
-		(double)retained->accBAinv[0][0],
-		(double)retained->accBAinv[0][1],
-		(double)retained->accBAinv[0][2]
-	);
-	float diag_x = retained->accBAinv[1][0];
-	float diag_y = retained->accBAinv[2][1];
-	float diag_z = retained->accBAinv[3][2];
-	printk("  Scale: [%.5f, %.5f, %.5f]\n", (double)diag_x, (double)diag_y, (double)diag_z);
-
-#else
-	printk(
-		"\nAccelerometer bias: %.5f %.5f %.5f\n",
-		(double)retained->accelBias[0],
-		(double)retained->accelBias[1],
-		(double)retained->accelBias[2]
-	);
-#endif
-	printk(
-		"Gyroscope bias: %.5f %.5f %.5f\n",
-		(double)retained->gyroBias[0],
-		(double)retained->gyroBias[1],
-		(double)retained->gyroBias[2]
-	);
-#if CONFIG_SENSOR_USE_TCAL
-	// Display the real-time calculated gyro offset
-	float current_gyro_offset[3];
-	sensor_calibration_get_last_gyro_offset(current_gyro_offset);
-	printk(
-		"Gyroscope bias tcal (real-time): %.5f %.5f %.5f at %.2f C\n",
-		(double)current_gyro_offset[0],
-		(double)current_gyro_offset[1],
-		(double)current_gyro_offset[2],
-		(double)sensor_get_current_imu_temperature()
-	);
-#endif
-	//	printk("Magnetometer bridge offset: %.5f %.5f %.5f\n", (double)retained->magBias[0],
-	//(double)retained->magBias[1], (double)retained->magBias[2]);
-	printk("Magnetometer matrix:\n");
-	for (int i = 0; i < 3; i++) {
-		printk(
-			"%.5f %.5f %.5f %.5f\n",
-			(double)retained->magBAinv[0][i],
-			(double)retained->magBAinv[1][i],
-			(double)retained->magBAinv[2][i],
-			(double)retained->magBAinv[3][i]
-		);
-	}
-	{
-		bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
-		                 || retained->magBAinv[0][1] != 0.0f
-		                 || retained->magBAinv[0][2] != 0.0f);
-		if (sensor_calibration_get_online_mag_enabled()) {
-			float dir_bias = 0;
-			int online_samples = sensor_calibration_online_mag_status(&dir_bias);
-			float mag_cv = sensor_calibration_get_mag_quality();
-			printk("Mag cal: %s | norm_cv=%.3f | Online: enabled, %d samples, dir_bias=%.2f\n",
-			       mag_has_cal ? "active" : "none",
-			       (double)mag_cv,
-			       online_samples, (double)dir_bias);
-		} else {
-			printk("Mag cal: %s | Online: disabled\n", mag_has_cal ? "active" : "none");
-		}
-	}
-
-	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
-
-#if CONFIG_SENSOR_RANGE_STATS
-	// Display runtime range statistics summary
-	const sensor_range_stats_t *stats = sensor_get_range_stats();
-	if (stats->initialized) {
-		float gyro_peak = 0;
-		float accel_peak = 0;
-		for (int i = 0; i < 3; i++) {
-			float g_peak = fmaxf(fabsf(stats->gyro_min[i]), fabsf(stats->gyro_max[i]));
-			float a_peak = fmaxf(fabsf(stats->accel_min[i]), fabsf(stats->accel_max[i]));
-			if (g_peak > gyro_peak) gyro_peak = g_peak;
-			if (a_peak > accel_peak) accel_peak = a_peak;
-		}
-		printk("\nRuntime range peaks (this session):\n");
-		printk("  Gyro: %.2f deg/s\n", (double)gyro_peak);
-		printk("  Accel: %.3f g\n", (double)accel_peak);
-		printk("  Samples: %llu (use 'range' for details)\n", stats->sample_count);
-	}
-#endif // CONFIG_SENSOR_RANGE_STATS
-}
-
 static void print_sens_calibration_info(void)
 {
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -319,13 +188,216 @@ static void print_sens_calibration_info(void)
 #endif
 }
 
+static void print_sensor_identity(void)
+{
+	printk("IMU: %s\n", (retained->imu_addr & 0x7F) != 0x7F ? sensor_get_sensor_imu_name() : "Not searching");
+	if (retained->imu_reg != 0xFF) {
+		printk("Interface: %s\n", (retained->imu_reg & 0x80) ? "SPI" : "I2C");
+	}
+	printk("Address: 0x%02X%02X\n", retained->imu_addr, retained->imu_reg);
+
+	printk(
+		"\nMagnetometer: %s (%s)\n",
+		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching",
+		sensor_get_mag_enabled() ? "enabled" : "disabled"
+	);
+	if (retained->mag_reg != 0xFF) {
+		const char *mag_interface;
+		if (retained->mag_addr & 0x80) {
+			// External magnetometer (via IMU I2CM or passthrough)
+			if (retained->imu_reg & 0x80) {
+				mag_interface = "EXT (SPI IMU I2CM)";
+			} else {
+				mag_interface = "I2C (passthrough)";
+			}
+		} else {
+			mag_interface = (retained->mag_reg & 0x80) ? "SPI" : "I2C";
+		}
+		printk("Interface: %s\n", mag_interface);
+	}
+	printk("Address: 0x%02X%02X\n", retained->mag_addr, retained->mag_reg);
+}
+
+static void print_odr_summary_line(void)
+{
+	float gyro_hz = sensor_get_gyro_odr();
+	float accel_hz = sensor_get_accel_odr();
+	float mag_hz = sensor_get_mag_odr();
+	float fusion_hz = sensor_get_fusion_rate();
+
+	if (mag_hz > 0.0f) {
+		printk(
+			"\nODR: gyro %.1fHz / accel %.1fHz / mag %.1fHz | fusion %.1fHz\n",
+			(double)gyro_hz,
+			(double)accel_hz,
+			(double)mag_hz,
+			(double)fusion_hz
+		);
+	} else {
+		printk(
+			"\nODR: gyro %.1fHz / accel %.1fHz / mag n/a | fusion %.1fHz\n",
+			(double)gyro_hz,
+			(double)accel_hz,
+			(double)fusion_hz
+		);
+	}
+}
+
+static void print_sensor_summary(void)
+{
+	print_sensor_identity();
+	print_odr_summary_line();
+
+	printk(
+		"Gyroscope bias: %.5f %.5f %.5f\n",
+		(double)retained->gyroBias[0],
+		(double)retained->gyroBias[1],
+		(double)retained->gyroBias[2]
+	);
+#if CONFIG_SENSOR_USE_TCAL
+	float current_gyro_offset[3];
+	sensor_calibration_get_last_gyro_offset(current_gyro_offset);
+	printk(
+		"Gyroscope bias tcal (real-time): %.5f %.5f %.5f at %.2f C\n",
+		(double)current_gyro_offset[0],
+		(double)current_gyro_offset[1],
+		(double)current_gyro_offset[2],
+		(double)sensor_get_current_imu_temperature()
+	);
+#endif
+	print_sens_calibration_info();
+	printk("\nFusion: %s\n", sensor_get_sensor_fusion_name());
+}
+
+static void print_sensor_detail(void)
+{
+	printk("=== Sensor detail ===\n");
+	printk(
+		"IMU: %s | Mag: %s (%s)\n",
+		(retained->imu_addr & 0x7F) != 0x7F ? sensor_get_sensor_imu_name() : "Not searching",
+		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching",
+		sensor_get_mag_enabled() ? "enabled" : "disabled"
+	);
+
+	float mag_hz = sensor_get_mag_odr();
+	float mag_feed_hz = sensor_get_mag_feed_hz();
+	float loop_ms = sensor_get_loop_period_ms();
+	printk("\nRates:\n");
+	printk("  Gyro ODR:    %.2f Hz\n", (double)sensor_get_gyro_odr());
+	printk("  Accel ODR:   %.2f Hz\n", (double)sensor_get_accel_odr());
+	if (mag_hz > 0.0f) {
+		printk("  Mag ODR:     %.2f Hz\n", (double)mag_hz);
+	} else {
+		printk("  Mag ODR:     n/a\n");
+	}
+	if (mag_feed_hz > 0.0f) {
+		printk("  Mag feed:    ~%.1f Hz\n", (double)mag_feed_hz);
+	} else if (mag_hz > 0.0f && sensor_get_mag_enabled()) {
+		printk("  Mag feed:    measuring...\n");
+	}
+	printk("  Fusion rate: %.2f Hz\n", (double)sensor_get_fusion_rate());
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1 || CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	printk(
+		"  Oversample:  gyro %dx, accel %dx\n",
+		CONFIG_SENSOR_GYRO_OVERSAMPLING,
+		CONFIG_SENSOR_ACCEL_OVERSAMPLING
+	);
+#endif
+	if (loop_ms > 0.0f) {
+		printk("  Loop:        ~%.1f ms\n", (double)loop_ms);
+	} else {
+		printk("  Loop:        n/a\n");
+	}
+
+#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+	printk("\nAccelerometer matrix:\n");
+	for (int i = 0; i < 3; i++) {
+		printk(
+			"%.5f %.5f %.5f %.5f\n",
+			(double)retained->accBAinv[0][i],
+			(double)retained->accBAinv[1][i],
+			(double)retained->accBAinv[2][i],
+			(double)retained->accBAinv[3][i]
+		);
+	}
+
+	printk("\nAccel calibration:\n");
+	printk(
+		"  Offset: [%.5f, %.5f, %.5f]\n",
+		(double)retained->accBAinv[0][0],
+		(double)retained->accBAinv[0][1],
+		(double)retained->accBAinv[0][2]
+	);
+	float diag_x = retained->accBAinv[1][0];
+	float diag_y = retained->accBAinv[2][1];
+	float diag_z = retained->accBAinv[3][2];
+	printk("  Scale: [%.5f, %.5f, %.5f]\n", (double)diag_x, (double)diag_y, (double)diag_z);
+#else
+	printk(
+		"\nAccelerometer bias: %.5f %.5f %.5f\n",
+		(double)retained->accelBias[0],
+		(double)retained->accelBias[1],
+		(double)retained->accelBias[2]
+	);
+#endif
+	printk("Magnetometer matrix:\n");
+	for (int i = 0; i < 3; i++) {
+		printk(
+			"%.5f %.5f %.5f %.5f\n",
+			(double)retained->magBAinv[0][i],
+			(double)retained->magBAinv[1][i],
+			(double)retained->magBAinv[2][i],
+			(double)retained->magBAinv[3][i]
+		);
+	}
+	{
+		bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
+		                 || retained->magBAinv[0][1] != 0.0f
+		                 || retained->magBAinv[0][2] != 0.0f);
+		if (sensor_calibration_get_online_mag_enabled()) {
+			float dir_bias = 0;
+			int online_samples = sensor_calibration_online_mag_status(&dir_bias);
+			float mag_cv = sensor_calibration_get_mag_quality();
+			printk(
+				"Mag cal: %s | norm_cv=%.3f | Online: enabled, %d samples, dir_bias=%.2f\n",
+				mag_has_cal ? "active" : "none",
+				(double)mag_cv,
+				online_samples,
+				(double)dir_bias
+			);
+		} else {
+			printk("Mag cal: %s | Online: disabled\n", mag_has_cal ? "active" : "none");
+		}
+	}
+
+#if CONFIG_SENSOR_RANGE_STATS
+	const sensor_range_stats_t *stats = sensor_get_range_stats();
+	if (stats->initialized) {
+		float gyro_peak = 0;
+		float accel_peak = 0;
+		for (int i = 0; i < 3; i++) {
+			float g_peak = fmaxf(fabsf(stats->gyro_min[i]), fabsf(stats->gyro_max[i]));
+			float a_peak = fmaxf(fabsf(stats->accel_min[i]), fabsf(stats->accel_max[i]));
+			if (g_peak > gyro_peak) {
+				gyro_peak = g_peak;
+			}
+			if (a_peak > accel_peak) {
+				accel_peak = a_peak;
+			}
+		}
+		printk("\nRuntime range peaks (this session):\n");
+		printk("  Gyro: %.2f deg/s\n", (double)gyro_peak);
+		printk("  Accel: %.3f g\n", (double)accel_peak);
+		printk("  Samples: %llu (use 'range' for details)\n", stats->sample_count);
+	}
+#endif // CONFIG_SENSOR_RANGE_STATS
+}
+
 static void print_connection(void)
 {
 	bool paired = retained->paired_addr[0];
 	printk(paired ? "Tracker ID: %u\n" : "\nTracker ID: None\n", retained->paired_addr[1]);
 	printk("Device address: %012llX\n", *(uint64_t *)NRF_FICR->DEVICEADDR & 0xFFFFFFFFFFFF);
-	printk("Receiver address: %012llX\n", (*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF);
-	print_sens_calibration_info();
 	printk(
 		paired ? "Receiver address: %012llX\n" : "Receiver address: None\n",
 		(*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF
@@ -385,7 +457,7 @@ static void print_info(void)
 {
 	print_board();
 	printk("\n");
-	print_sensor();
+	print_sensor_summary();
 	printk("\n");
 	print_connection();
 	printk("\n");
@@ -555,6 +627,7 @@ static void print_help(void)
 	printk("\n=== Available Commands ===\n\n");
 	printk("Device Information:\n");
 	printk("  info                       Get device information\n");
+	printk("  sensor                     Get sensor rates and calibration detail\n");
 	printk("  uptime                     Get device uptime\n");
 	printk("  battery                    Get battery information\n");
 	printk("\n");
@@ -850,6 +923,13 @@ static void console_cmd_info(size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	print_info();
+}
+
+static void console_cmd_sensor(size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	print_sensor_detail();
 }
 
 static void console_cmd_uptime(size_t argc, char **argv)
@@ -1461,6 +1541,7 @@ static void console_cmd_test(size_t argc, char **argv)
 static const struct console_cmd console_cmds[] = {
 	{"help", console_cmd_help},
 	{"info", console_cmd_info},
+	{"sensor", console_cmd_sensor},
 	{"uptime", console_cmd_uptime},
 	{"shutdown", console_cmd_shutdown},
 	{"reboot", console_cmd_reboot},

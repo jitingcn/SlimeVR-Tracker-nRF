@@ -76,6 +76,10 @@ float sensor_get_current_imu_temperature(void);
 // Get actual sensor ODR (Output Data Rate) in Hz
 float sensor_get_accel_odr(void);
 float sensor_get_gyro_odr(void);
+float sensor_get_mag_odr(void); /* driver-reported Hz; 0.0f => n/a */
+float sensor_get_mag_feed_hz(void); /* measured fusion feed Hz; 0.0f => n/a */
+float sensor_get_fusion_rate(void); /* effective gyro feed into fusion */
+float sensor_get_loop_period_ms(void); /* EMA of loop period; 0.0f => n/a */
 
 // Debug mode functions
 void sensor_debug_start(uint32_t duration_sec);

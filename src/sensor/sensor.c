@@ -1684,6 +1684,7 @@ int sensor_init(void)
 
 static int64_t last_status_time = 0;
 static int64_t max_loop_time = 0;
+static float loop_period_ema_ms; /* ~actual publish/loop period */
 
 static bool last_data_collection_state = false;
 
@@ -1704,6 +1705,7 @@ static uint64_t total_loop_iterations = 0;
 #endif
 // Count actual mag samples fed to VQF since last status report (always tracked)
 static uint32_t mag_vqf_updates_since_status = 0;
+static float mag_feed_hz; /* last STATUS_INTERVAL window */
 
 /*
  * After a calibration change, fusion reset_mag_ref() zeros the backend magRef.
@@ -2898,6 +2900,15 @@ static void sensor_loop_wait(int64_t time_begin)
 	sensor_life_mark_idle();
 	int64_t time_delta = k_uptime_get() - time_begin;
 
+	if (time_delta > 0) {
+		float delta_ms = (float)time_delta;
+		if (loop_period_ema_ms <= 0.0f) {
+			loop_period_ema_ms = delta_ms;
+		} else {
+			loop_period_ema_ms = 0.9f * loop_period_ema_ms + 0.1f * delta_ms;
+		}
+	}
+
 	if (time_delta > sensor_update_time_ms && time_delta > max_loop_time) {
 		max_loop_time = time_delta;
 	}
@@ -2909,17 +2920,20 @@ static void sensor_loop_wait(int64_t time_begin)
 			max_loop_time = 0;
 		}
 		if (mag_available && mag_enabled) {
+			mag_feed_hz = mag_vqf_updates_since_status * 1000.0f / (float)STATUS_INTERVAL_MS;
 			// Report actual rate of mag samples fed into VQF (target: mag ODR, e.g. 50Hz)
 			if (sensor_debug_is_active()) {
 				LOG_INF(
 					"mag VQF updates: %u in last %dms (%.1fHz, target %.0fHz)",
 					mag_vqf_updates_since_status,
 					STATUS_INTERVAL_MS,
-					(double)mag_vqf_updates_since_status * 1000.0 / STATUS_INTERVAL_MS,
+					(double)mag_feed_hz,
 					1.0 / (double)mag_actual_time
 				);
 			}
 			mag_vqf_updates_since_status = 0;
+		} else {
+			mag_feed_hz = 0.0f;
 		}
 #if DEBUG
 		LOG_DBG(
@@ -3130,6 +3144,45 @@ float sensor_get_gyro_odr(void)
 		return 1.0f / gyro_actual_time;
 	}
 	return (float)CONFIG_SENSOR_GYRO_ODR; // Fallback to config value
+}
+
+float sensor_get_mag_odr(void)
+{
+	if (!mag_available) {
+		return 0.0f;
+	}
+	/* Prefer driver period; some update_odr paths leave INFINITY. */
+	if (mag_actual_time > 0.0f && mag_actual_time < 1.0f) {
+		return 1.0f / mag_actual_time;
+	}
+	/* Kconfig fallback only after mag has been brought up. */
+	if (mag_enabled) {
+		return (float)CONFIG_SENSOR_MAG_ODR;
+	}
+	return 0.0f;
+}
+
+float sensor_get_mag_feed_hz(void)
+{
+	if (!mag_available || !mag_enabled) {
+		return 0.0f;
+	}
+	return mag_feed_hz;
+}
+
+float sensor_get_fusion_rate(void)
+{
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	if (gyro_effective_time > 0.0f) {
+		return 1.0f / gyro_effective_time;
+	}
+#endif
+	return sensor_get_gyro_odr();
+}
+
+float sensor_get_loop_period_ms(void)
+{
+	return loop_period_ema_ms;
 }
 
 // Debug mode control functions
