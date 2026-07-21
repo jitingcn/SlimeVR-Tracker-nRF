@@ -112,24 +112,20 @@ int sensor_offsetBias_internal(
 	bool temp_threshold_reached = false;
 #endif
 
-	// Accel motion check counter - check every N gyro samples to avoid blocking
+	// Accel motion check counter - check every N gyro wait samples to avoid blocking.
+	// Wait rates follow sample_* hooks, not fusion feed rates:
+	//   gyro: process_gyro → sample_gyro on every raw sample (before Δq-merge)
+	//   accel: sample_accel after optional accel average (fusion accel rate when OS>1)
 	float actual_gyro_odr = sensor_get_gyro_odr();
 	float actual_accel_odr = sensor_get_accel_odr();
-
-	/* Effective ODRs after gyro Δq-merge / accel average (fusion feed rate). */
-#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-	float effective_gyro_odr = actual_gyro_odr / CONFIG_SENSOR_GYRO_OVERSAMPLING;
-#else
-	float effective_gyro_odr = actual_gyro_odr;
-#endif
-
+	float wait_gyro_odr = actual_gyro_odr;
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
-	float effective_accel_odr = actual_accel_odr / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+	float wait_accel_odr = actual_accel_odr / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
 #else
-	float effective_accel_odr = actual_accel_odr;
+	float wait_accel_odr = actual_accel_odr;
 #endif
 
-	int accel_check_interval = (int)(effective_gyro_odr / effective_accel_odr + 0.5f); // Round to nearest
+	int accel_check_interval = (int)(wait_gyro_odr / wait_accel_odr + 0.5f); // Round to nearest
 	if (accel_check_interval < 1) {
 		accel_check_interval = 1; // Ensure at least 1
 	}
@@ -137,13 +133,12 @@ int sensor_offsetBias_internal(
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1 || CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
 	LOG_INF(
-		"Calibration: ODR - Gyro: %.2fHz (eff: %.2fHz, %dx OS), Accel: %.2fHz (eff: %.2fHz, %dx OS), Check interval: "
-		"%d",
-		(double)actual_gyro_odr,
-		(double)effective_gyro_odr,
+		"Calibration: wait ODR - Gyro: %.2fHz (raw; fusion Δq-merge %dx), Accel: %.2fHz (wait: %.2fHz, %dx OS), "
+		"Check interval: %d",
+		(double)wait_gyro_odr,
 		CONFIG_SENSOR_GYRO_OVERSAMPLING,
 		(double)actual_accel_odr,
-		(double)effective_accel_odr,
+		(double)wait_accel_odr,
 		CONFIG_SENSOR_ACCEL_OVERSAMPLING,
 		accel_check_interval
 	);
@@ -168,9 +163,9 @@ int sensor_offsetBias_internal(
 			break;
 		}
 
-		// Feed watchdog periodically during long sampling (~every 1 second based on gyro ODR)
+		// Feed watchdog periodically during long sampling (~every 1 second of wait_gyro samples)
 		wdt_feed_counter++;
-		if (wdt_feed_counter >= (int)effective_gyro_odr) {
+		if (wdt_feed_counter >= (int)wait_gyro_odr) {
 			watchdog_feed(WDT_CHANNEL_CALIBRATION);
 			wdt_feed_counter = 0;
 		}
@@ -256,27 +251,23 @@ int sensor_offsetBias_internal(
 
 	LOG_INF("Samples collected: %d", i);
 
-	// Calculate minimum samples based on actual gyro ODR and min_sample_time_ms
-	// Convert min_sample_time_ms to seconds for calculation
+	// Minimum samples from wait_gyro rate (raw ODR), not fusion Δq-merge rate.
 	float min_sample_time_sec = (float)min_sample_time_ms / 1000.0f;
+	int min_samples_required = (int)(wait_gyro_odr * min_sample_time_sec);
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-	/* Δq-merge reduces fusion/calibration gyro steps by N (e.g. 1600/4 → 400 Hz). */
-	int min_samples_required = (int)(effective_gyro_odr * min_sample_time_sec);
 	LOG_INF(
-		"Calibration: Gyro Δq-merge %dx, effective ODR: %.2fHz",
-		CONFIG_SENSOR_GYRO_OVERSAMPLING,
-		(double)effective_gyro_odr
+		"Calibration: Gyro wait %.2fHz (Δq-merge %dx is fusion-only; does not thin cal samples)",
+		(double)wait_gyro_odr,
+		CONFIG_SENSOR_GYRO_OVERSAMPLING
 	);
-#else
-	int min_samples_required = (int)(actual_gyro_odr * min_sample_time_sec);
 #endif
 
 	if (i < min_samples_required) {
 		LOG_WRN(
-			"Not enough samples: %d < %d (based on actual gyro ODR: %.2fHz, min time: %dms)",
+			"Not enough samples: %d < %d (based on gyro wait ODR: %.2fHz, min time: %dms)",
 			i,
 			min_samples_required,
-			(double)actual_gyro_odr,
+			(double)wait_gyro_odr,
 			min_sample_time_ms
 		);
 		return -2;
