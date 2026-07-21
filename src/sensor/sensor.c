@@ -31,6 +31,7 @@
 #include "calibration/calibration.h"
 #include "calibration/mag_common.h"
 #include "motion_state.h"
+#include "zephyr/logging/log.h"
 
 #include <math.h>
 #include <hal/nrf_gpio.h>
@@ -3003,7 +3004,7 @@ static void sensor_loop_wait(int64_t time_begin)
 		}
 	} else // if signal was sent during processing, loop immediately to catch up
 	{
-		LOG_INF("FIFO THS/WM/WTM triggered during loop");
+		LOG_DBG("FIFO THS/WM/WTM triggered during loop");
 		k_yield();
 		main_wfi = false;
 	}
