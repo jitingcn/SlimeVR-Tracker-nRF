@@ -108,13 +108,22 @@ void sensor_calibrate_imu(void)
 	{
 		if (err == -1) {
 			LOG_INF("Motion detected");
+		} else if (err == -2) {
+			LOG_WRN("Calibration sampling failed (timeout or insufficient samples)");
 		} else if (err == -3) {
 			LOG_INF("Temperature instability detected");
+		} else {
+			LOG_WRN("Calibration failed: %d", err);
 		}
-		a_bias[0] = NAN; // invalidate calibration
-	} else {
-		LOG_INF("Gyroscope bias: %.5f %.5f %.5f", (double)g_bias[0], (double)g_bias[1], (double)g_bias[2]);
+		/* Do not run NAN-through-validate: CMSIS v_epsilon can treat NaN as
+		 * in-range and then apply cleared zero bias to NVS/fusion. */
+		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
+		LOG_INF("Restoring previous calibration");
+		LOG_INF("Gyroscope bias: %.5f %.5f %.5f", (double)gyroBias[0], (double)gyroBias[1], (double)gyroBias[2]);
+		sensor_calibration_validate(NULL, NULL, true); // verify old calibration still sane
+		return;
 	}
+	LOG_INF("Gyroscope bias: %.5f %.5f %.5f", (double)g_bias[0], (double)g_bias[1], (double)g_bias[2]);
 	if (sensor_calibration_validate(a_bias, g_bias, false)) {
 		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		LOG_INF("Restoring previous calibration");

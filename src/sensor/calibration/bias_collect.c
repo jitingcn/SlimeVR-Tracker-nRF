@@ -178,24 +178,27 @@ int sensor_offsetBias_internal(
 		}
 #endif
 
-		// Check accelerometer motion periodically (not every loop iteration)
-		// This prevents the loop from being blocked by slower accel ODR
+		// Check accelerometer motion periodically (not every loop iteration).
+		// Must not block: sensor_wait_gyro is a mailbox; waiting on accel drops
+		// ~1/accel_odr of gyro samples per check and halves collect rate
 		if (accel_check_counter >= accel_check_interval) {
-			if (sensor_wait_accel(rawData, K_MSEC(100))) {
-				return -2; // Timeout
-			}
-
-			// Check Accel Motion (Min/Max method)
-			for (int j = 0; j < 3; j++) {
-				if (rawData[j] < min_a[j]) {
-					min_a[j] = rawData[j];
-				}
-				if (rawData[j] > max_a[j]) {
-					max_a[j] = rawData[j];
-				}
-				if (max_a[j] - min_a[j] > BIAS_COLLECT_ACCEL_MOTION_THRESHOLD) {
-					LOG_INF("Accel motion detected: axis %d range %.4f", j, (double)(max_a[j] - min_a[j]));
-					return -1;
+			if (sensor_peek_accel(rawData)) {
+				// Check Accel Motion (Min/Max method)
+				for (int j = 0; j < 3; j++) {
+					if (rawData[j] < min_a[j]) {
+						min_a[j] = rawData[j];
+					}
+					if (rawData[j] > max_a[j]) {
+						max_a[j] = rawData[j];
+					}
+					if (max_a[j] - min_a[j] > BIAS_COLLECT_ACCEL_MOTION_THRESHOLD) {
+						LOG_INF(
+							"Accel motion detected: axis %d range %.4f",
+							j,
+							(double)(max_a[j] - min_a[j])
+						);
+						return -1;
+					}
 				}
 			}
 			accel_check_counter = 0;
