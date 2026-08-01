@@ -27,6 +27,7 @@ typedef enum {
 	// Recommended - important functions
 	WDT_CHANNEL_CONNECTION,     // Connection management
 	WDT_CHANNEL_POWER,          // Power management
+	WDT_CHANNEL_BUTTON,         // Button handling
 
 	// Optional - auxiliary functions
 	WDT_CHANNEL_LED,            // LED control
