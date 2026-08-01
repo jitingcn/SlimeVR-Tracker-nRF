@@ -244,21 +244,14 @@ void vqf_save(void *data)
 
 void vqf_update_gyro(float *g, float time)
 {
+	ARG_UNUSED(time);
 	float g_rad[3] = {0};
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++) {
 		g_rad[i] = g[i] * DEG_TO_RAD;
 	}
-	/* Prefer caller dt so ODR changes / jitter do not stick to coeffs->gyrTs. */
-	if (time > 0.0f && time < 10.0f) {
-		uint64_t synth_ts = state.lastGyrTsUs + (uint64_t)(time * 1e6f);
-		if (synth_ts == 0) {
-			synth_ts = 1;
-		}
-		updateGyrTs(&params, &state, &coeffs, g_rad, synth_ts);
-	} else {
-		updateGyr(&params, &state, &coeffs, g_rad);
-	}
+	/* Fixed coeffs->gyrTs path (caller-dt / lastGyrTsUs synth disabled for A/B). */
+	updateGyr(&params, &state, &coeffs, g_rad);
 }
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
@@ -370,6 +363,7 @@ static void vqf_track_rest_diag(void)
 
 void vqf_update_accel(float *a, float time)
 {
+	ARG_UNUSED(time);
 	float a_m_s2[3] = {0};
 	// a is in g, convert to m/s^2
 	for (int i = 0; i < 3; i++) {
@@ -381,15 +375,8 @@ void vqf_update_accel(float *a, float time)
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	vqf_pre_accel_update(a_m_s2);
 #endif
-	if (time > 0.0f && time < 10.0f) {
-		uint64_t synth_ts = state.lastAccTsUs + (uint64_t)(time * 1e6f);
-		if (synth_ts == 0) {
-			synth_ts = 1;
-		}
-		updateAccTs(&params, &state, &coeffs, a_m_s2, synth_ts);
-	} else {
-		updateAcc(&params, &state, &coeffs, a_m_s2);
-	}
+	/* Fixed coeffs->accTs path (caller-dt / lastAccTsUs synth disabled for A/B). */
+	updateAcc(&params, &state, &coeffs, a_m_s2);
 	vqf_track_rest_diag();
 }
 
