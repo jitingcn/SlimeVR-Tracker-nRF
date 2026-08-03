@@ -5,10 +5,18 @@
 
 // https://www.st.com/resource/en/datasheet/lis2mdl.pdf
 #define LIS2MDL_CFG_REG_A 0x60
-
+#define LIS2MDL_CFG_REG_B 0x61
+#define LIS2MDL_CFG_REG_C 0x62
+#define LIS2MDL_STATUS_REG 0x67
 #define LIS2MDL_OUTX_L_REG 0x68
-
 #define LIS2MDL_TEMP_OUT_L_REG 0x6E
+
+#define CFG_A_COMP_TEMP_EN 0x80
+#define CFG_A_SOFT_RST     0x20
+
+#define CFG_C_BDU 0x10
+
+#define STATUS_ZYXDA 0x08
 
 #define ODR_10Hz  0x00
 #define ODR_20Hz  0x01
