@@ -285,7 +285,7 @@ config DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
 
 config SENSOR_FAST_WOM_WAKE
     bool "Fast wake-on-motion sensor resume"
-    default y
+    default n
     depends on USE_IMU_WAKE_UP
     help
         Mark IMU wake-on-motion poweroff entries so the next boot can use a
