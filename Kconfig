@@ -257,7 +257,7 @@ config ACTIVE_TIMEOUT_IDLE_WAKE_DELAY
 
 config ACTIVE_TIMEOUT_REPEAT_WAKE_DELAY
     int "Repeated low-activity wake timeout (ms)"
-    default 60000
+    default 90000
     range 1000 3600000
     depends on DYNAMIC_ACTIVE_TIMEOUT
 
@@ -269,7 +269,7 @@ config ACTIVE_TIMEOUT_REPEAT_WAKE_COUNT
 
 config ACTIVE_TIMEOUT_MEANINGFUL_MOTION_MS
     int "Weighted motion score needed to restore normal timeout"
-    default 25000
+    default 15000
     range 1000 600000
     depends on DYNAMIC_ACTIVE_TIMEOUT
     help
