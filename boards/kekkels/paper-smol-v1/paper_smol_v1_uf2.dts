@@ -1,0 +1,117 @@
+/dts-v1/;
+#include <nordic/nrf52833_qdaa.dtsi>
+
+/* Paper Smol GPIO Pin List
+parentheses is pin for ANNA-B402
+--IMU--
+MISO:P0.11(14)
+MOSI:P0.12(15)
+SCLK:P1.00(16)
+CS:P0.10(23)
+INT:P1.09(13)
+CLKEN:P0.02(20) unused with LSMDSV6
+--PERIPHERALS--
+SW0:P0.26(33)
+LED0:P0.06(32)
+BATTSNS:P0.29(29)
+*/
+
+&pinctrl {
+	spi3_default: spi3_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_MISO, 0, 11)>,
+					<NRF_PSEL(SPIM_MOSI, 0, 12)>,
+					<NRF_PSEL(SPIM_SCK, 1, 0)>;
+		};
+	};
+
+	spi3_sleep: spi3_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_MISO, 0, 11)>,
+					<NRF_PSEL(SPIM_MOSI, 0, 12)>,
+					<NRF_PSEL(SPIM_SCK, 1, 0)>;
+			low-power-enable;
+		};
+	};
+};
+
+/ {
+	model = "Paper Smol Version 1 (lsm6dsv,qmc6039,1 sw, 1 led)";
+	compatible = "kekkels,paper-smol-v1";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
+	};
+
+
+    aliases {
+        sw0 = &button0;
+    };
+
+	leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		button0: button_0 {
+			gpios = <&gpio0 26 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Push button switch 0";
+		};
+	};
+
+	battery-divider {
+		compatible = "voltage-divider";
+		status = "okay";
+		io-channels = <&adc 5>;
+		output-ohms = <1714692>;
+		full-ohms = <(1714692+2000000)>;
+	};
+
+	zephyr,user {
+	    	int0-gpios = <&gpio1 9 0>;
+ 	    	led-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&reg1 {
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
+
+&adc { status = "okay"; };
+&gpiote { status = "okay"; };
+&gpio0 { status = "okay"; };
+&gpio1 { status = "okay"; };
+
+zephyr_udc0: &usbd {
+	compatible = "nordic,nrf-usbd";
+	status = "okay";
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+&nfct { status = "disabled"; };
+
+&spi3 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	max-frequency = <DT_FREQ_M(24)>;
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+
+	imu_spi: imu_spi@0 {
+		compatible = "vnd,spi-device";
+		spi-max-frequency = <DT_FREQ_M(24)>;
+		label = "imu-spi";
+		reg = <0>;
+	};
+};

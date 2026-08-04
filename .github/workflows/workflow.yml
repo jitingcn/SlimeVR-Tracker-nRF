@@ -215,7 +215,8 @@ jobs:
                   {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"},
                   {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"},
                   {boardname: "nekonya_tracker_uf2/nrf52833", filename: "nekonya_tracker_uf2"},
-                  {boardname: "estmini_uf2/nrf52840", filename: "Estmini_Tracker"}
+                  {boardname: "estmini_uf2/nrf52840", filename: "Estmini_Tracker"},
+                  {boardname: "paper_smol_v1_uf2/nrf52833", filename: "paper_smol_v1_uf2"},
                 ]
     runs-on: ubuntu-latest
     steps:
