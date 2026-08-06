@@ -66,6 +66,12 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 					continue;
 				for (int l = 0; l < id_cnt; l++)
 				{
+					// 0xFF is a "no real WHO_AM_I" sentinel (e.g. QMC5883L, an
+					// I2C-only part). On SPI a reserved-register read floats to
+					// 0xFF, so this would false-match and shadow real SPI mags
+					// later in the table (e.g. LIS2MDL at 0x4F). Skip it on SPI.
+					if (dev_id[id_ind + l] == 0xFF)
+						continue;
 					if (id == dev_id[id_ind + l])
 					{
 						*spi_dev_reg = reg;

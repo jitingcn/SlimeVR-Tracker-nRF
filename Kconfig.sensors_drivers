@@ -99,8 +99,18 @@ config SENSOR_DRV_LIS3MDL
 	default y if !SENSOR_MAG_DRIVERS_MINIMAL
 	default n
 
+config SENSOR_DRV_MMC5603NJ
+	bool "MMC5603NJ"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
 config SENSOR_DRV_MMC5983MA
 	bool "MMC5983MA"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
+config SENSOR_DRV_QMC5883L
+	bool "QMC5883L"
 	default y if !SENSOR_MAG_DRIVERS_MINIMAL
 	default n
 
