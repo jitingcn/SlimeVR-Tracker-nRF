@@ -15,6 +15,16 @@ static uint8_t last_cfg_a = 0xff;
 
 LOG_MODULE_REGISTER(LIS2MDL, LOG_LEVEL_DBG);
 
+// CFG_REG_C: BDU always set; 4WSPI + I2C_DIS only in SPI mode
+// (I2C mode must not set I2C_DIS or it cuts off the bus)
+static uint8_t lis2_cfg_c(void)
+{
+	uint8_t cfg_c = CFG_C_BDU;
+	if (sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) == SENSOR_INTERFACE_SPEC_SPI)
+		cfg_c |= CFG_C_4WSPI | CFG_C_I2C_DIS;
+	return cfg_c;
+}
+
 static int lis2_soft_reset(void)
 {
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, CFG_A_SOFT_RST);
@@ -48,7 +58,14 @@ int lis2_init(float time, float *actual_time)
 		return err;
 	}
 
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, CFG_C_BDU);
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, lis2_cfg_c());
+	if (err) {
+		LOG_ERR("Communication error");
+		return err;
+	}
+
+	// CFG_REG_B: LPF (ODR/4 bandwidth) + OFF_CANC (internal bias cancellation)
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_B, CFG_B_LPF | CFG_B_OFF_CANC);
 	if (err) {
 		LOG_ERR("Communication error");
 		return err;
@@ -135,7 +152,7 @@ int lis2_update_odr(float time, float *actual_time)
 	int err = 0;
 
 	if (MD == MD_CONTINUOUS) {
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, CFG_C_BDU);
+		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, lis2_cfg_c());
 	}
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, cfg_a);
