@@ -614,6 +614,11 @@ static int64_t raw_metadata_last_ms = 0;
 static bool raw_metadata_pending = false;
 static uint8_t raw_metadata_buf[RAW_PACKET_SIZE];
 
+/* Deferred calibration status report: calibration thread buffers here,
+ * connection thread sends (see connection_send_cal_status) */
+static bool cal_status_pending = false;
+static uint8_t cal_status_buf[16];
+
 /* Rate limit for meta/cal drip: max 1 packet per interval, interleaved with IMU data */
 #define RAW_META_CAL_DRIP_MS 200
 static int64_t raw_meta_cal_last_ms = 0;
@@ -812,6 +817,25 @@ void connection_send_raw_calibration(void)
 	raw_cal_point_idx = 0;
 	raw_cal_chunk_idx = 0;
 	raw_cal_pending = true;
+}
+
+void connection_send_cal_status(uint8_t kind, uint8_t phase, uint8_t axis, uint8_t detail, float value1, float value2)
+{
+	/* Buffer for deferred sending by the connection thread.
+	 * Never call esb_write() from the calibration thread — avoids
+	 * cross-thread ESB TX FIFO contention (same pattern as
+	 * connection_send_raw_metadata). Reports are spaced well apart
+	 * (~1s minimum), so a single pending slot is sufficient. */
+	memset(cal_status_buf, 0, sizeof(cal_status_buf));
+	cal_status_buf[0] = ESB_CAL_STATUS_TYPE;
+	cal_status_buf[1] = tracker_id;
+	cal_status_buf[2] = kind;
+	cal_status_buf[3] = phase;
+	cal_status_buf[4] = axis;
+	cal_status_buf[5] = detail;
+	memcpy(&cal_status_buf[6], &value1, sizeof(value1));
+	memcpy(&cal_status_buf[10], &value2, sizeof(value2));
+	cal_status_pending = true;
 }
 
 /**
@@ -1347,6 +1371,16 @@ void connection_thread(void)
 			/* Raw data has priority over fusion data to minimize latency */
 			if (connection_process_raw_data()) {
 				continue;
+			}
+
+			/* Deferred calibration status report (buffered by other threads).
+			 * Sent with ack for reliable delivery to the receiver. */
+			if (cal_status_pending) {
+				uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+				memcpy(esb_pkt, cal_status_buf, sizeof(cal_status_buf));
+				esb_pkt[16] = packet_sequence++;
+				cal_status_pending = false;
+				esb_write(esb_pkt, false, ESB_SENSOR_DATA_LEN);
 			}
 		} // end of radio_ready block
 

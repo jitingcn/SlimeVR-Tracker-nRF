@@ -137,6 +137,36 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give pa
 #define RAW_CAL_SUB_TCAL    0x04  // T-Cal state: enabled, count, temp range, correction offset
 #define RAW_CAL_SUB_TCAL_POINTS 0x05  // T-Cal raw points (chunked, 2 per packet)
 
+// Calibration status/progress report (tracker → receiver, standard 17-byte frame)
+// Layout: [0]=type [1]=tracker_id [2]=kind [3]=phase [4]=axis [5]=detail
+//         [6-9]=float value1 [10-13]=float value2 [14-15]=reserved [16]=sequence
+#define ESB_CAL_STATUS_TYPE 0x15
+
+// ESB_CAL_STATUS_TYPE kinds (byte[2])
+#define CAL_STATUS_KIND_SENS_AUTO 0x01 // Automated gyro sensitivity calibration
+
+// ESB_CAL_STATUS_TYPE phases (byte[3])
+#define CAL_STATUS_PHASE_STARTED   0x01 // v1 = expected angle (deg), v2 = revolutions
+#define CAL_STATUS_PHASE_BIAS      0x02 // v1 = spin-axis bias (dps)
+#define CAL_STATUS_PHASE_RECORDING 0x03 // v1 = rate at spin detection (dps)
+#define CAL_STATUS_PHASE_DONE      0x04 // detail = 1 if axis alignment was loose; v1 = measured angle (deg), v2 = applied scale
+#define CAL_STATUS_PHASE_REJECTED  0x05 // detail = reject reason
+#define CAL_STATUS_PHASE_ABORTED   0x06 // detail = abort reason, v1 = angle so far (deg)
+
+// ESB_CAL_STATUS_TYPE reject reasons (byte[5], phase REJECTED)
+#define CAL_STATUS_REJECT_SCALE_RANGE 0x01 // v1 = measured angle (deg), v2 = rejected scale
+#define CAL_STATUS_REJECT_OFF_AXIS    0x02 // v1 = off-axis ratio, v2 = computed scale
+#define CAL_STATUS_REJECT_NON_FINITE  0x03 // v1 = measured angle (deg)
+
+// ESB_CAL_STATUS_TYPE abort reasons (byte[5], phase ABORTED)
+#define CAL_STATUS_ABORT_NOT_STILL    0x01
+#define CAL_STATUS_ABORT_GYRO_TIMEOUT 0x02
+#define CAL_STATUS_ABORT_NO_SPIN      0x03
+#define CAL_STATUS_ABORT_SPIN_TIMEOUT 0x04
+#define CAL_STATUS_ABORT_ANGLE_SMALL  0x05
+#define CAL_STATUS_ABORT_NO_STORAGE   0x06
+#define CAL_STATUS_ABORT_BAD_PARAMS   0x07
+
 // ESB OTA packet types (used during firmware update over ESB)
 #define ESB_OTA_DATA_TYPE       0x20  // OTA firmware data (receiver → tracker)
 #define ESB_OTA_STATUS_TYPE     0x21  // OTA status report (tracker → receiver)

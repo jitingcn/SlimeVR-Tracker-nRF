@@ -80,6 +80,11 @@ void connection_send_raw_metadata(float gyro_range, float accel_range,
 /* Send calibration drip packets (after metadata). */
 void connection_send_raw_calibration(void);
 
+/* Calibration status/progress report (ESB_CAL_STATUS_TYPE). Buffers the report
+ * for deferred sending by the connection thread, so it is safe to call from
+ * other threads (e.g. the calibration thread). */
+void connection_send_cal_status(uint8_t kind, uint8_t phase, uint8_t axis, uint8_t detail, float value1, float value2);
+
 // Check if metadata needs periodic re-send (returns true if due)
 bool connection_raw_metadata_resend_due(void);
 
