@@ -46,6 +46,9 @@ void reboot_counter_write(uint8_t reboot_counter);
 
 void sys_write(uint16_t id, void *ptr, const void *data, size_t len);
 void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t len);
+void sys_warm_transaction_begin(void);
+void sys_warm_transaction_mark(uint16_t id, void *retained_ptr, size_t len);
+void sys_warm_transaction_end(bool retained_changed);
 void sys_flush_warm(void);
 bool sys_warm_is_dirty(void);
 void sys_read(uint16_t id, void *data, size_t len);

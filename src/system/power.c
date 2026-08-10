@@ -194,6 +194,8 @@ static void configure_system_off(void)
 		LOG_WRN("Entering new power state while sensor error is raised");
 	if (get_status(SYS_STATUS_SYSTEM_ERROR))
 		LOG_WRN("Entering new power state while system error is raised");
+	/* Freeze online-mag commits before the final warm-NVS flush. */
+	sensor_calibration_online_mag_prepare_power_down();
 	clock_pre_shutdown();
 	main_imu_suspend();
 	sensor_shutdown();

@@ -23,9 +23,11 @@
 #include "globals.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
+#include "sensor/calibration/online_mag.h"
 #include "connection.h"
 #include "util.h"
 #include "esb.h"
+#include "sensor_data_snapshot.h"
 #include "tdma.h"
 #include "build_defines.h"
 #include "hid.h"
@@ -44,60 +46,24 @@
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
-/*
- * Seqlock publish: sensor thread writes, connection thread reads.
- * Odd seq = write in progress; reader retries. No irq_lock.
- */
-static float sensor_q[4], sensor_a[3], sensor_m[3];
-static bool send_precise_quat;
-static atomic_t sensor_qa_seq;
-static atomic_t sensor_m_seq;
+static sensor_data_snapshot_t sensor_data_snapshot;
+static float sensor_last_q[4];
 static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
 static K_SEM_DEFINE(connection_wake_sem, 0, 1);
 
 static void connection_sensor_snap_q_a(float q_out[4], float a_out[3])
 {
-	unsigned s;
-	do {
-		s = (unsigned)atomic_get(&sensor_qa_seq);
-		if (s & 1U) {
-			k_yield(); /* writer mid-update; never busy-spin to WDT */
-			continue;
-		}
-		memcpy(q_out, sensor_q, sizeof(sensor_q));
-		memcpy(a_out, sensor_a, sizeof(sensor_a));
-	} while ((unsigned)atomic_get(&sensor_qa_seq) != s);
+	sensor_data_snapshot_read_qa(&sensor_data_snapshot, q_out, a_out);
 }
 
 static void connection_sensor_snap_q_m(float q_out[4], float m_out[3])
 {
-	unsigned sq;
-	unsigned sm;
-	do {
-		sq = (unsigned)atomic_get(&sensor_qa_seq);
-		sm = (unsigned)atomic_get(&sensor_m_seq);
-		if ((sq | sm) & 1U) {
-			k_yield();
-			continue;
-		}
-		memcpy(q_out, sensor_q, sizeof(sensor_q));
-		memcpy(m_out, sensor_m, sizeof(sensor_m));
-	} while ((unsigned)atomic_get(&sensor_qa_seq) != sq || (unsigned)atomic_get(&sensor_m_seq) != sm);
+	sensor_data_snapshot_read_qm(&sensor_data_snapshot, q_out, m_out);
 }
 
 static bool connection_sensor_get_precise_quat(void)
 {
-	unsigned s;
-	bool precise;
-	do {
-		s = (unsigned)atomic_get(&sensor_qa_seq);
-		if (s & 1U) {
-			k_yield();
-			continue;
-		}
-		precise = send_precise_quat;
-	} while ((unsigned)atomic_get(&sensor_qa_seq) != s);
-	return precise;
+	return sensor_data_snapshot_is_precise(&sensor_data_snapshot);
 }
 
 static uint8_t packet_sequence = 0;
@@ -374,9 +340,6 @@ void connection_update_sensor_ids(int imu, int mag)
 	sensor_ids_set = true;
 }
 
-static int64_t quat_update_time = 0;
-static int64_t last_quat_time = 0;
-
 void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 {
 	// data_time is in system ticks, nonzero means valid measurement
@@ -388,26 +351,17 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 		return;
 	}
 
-	unsigned s = (unsigned)atomic_get(&sensor_qa_seq);
-	atomic_set(&sensor_qa_seq, (atomic_val_t)(s + 1U)); /* odd = writing */
-	send_precise_quat = q_epsilon(q, sensor_q, 0.005f);
-	memcpy(sensor_q, q, sizeof(sensor_q));
-	memcpy(sensor_a, a, sizeof(sensor_a));
-	atomic_set(&sensor_qa_seq, (atomic_val_t)(s + 2U)); /* even = stable */
-	quat_update_time = k_uptime_get();
+	bool precise = q_epsilon(q, sensor_last_q, 0.005f);
+	memcpy(sensor_last_q, q, sizeof(sensor_last_q));
+	sensor_data_snapshot_publish_qa(&sensor_data_snapshot, q, a, precise);
 	connection_signal_wake();
 }
 
-static int64_t mag_update_time = 0;
 static int64_t last_mag_time = 0;
 
 void connection_update_sensor_mag(float *m)
 {
-	unsigned s = (unsigned)atomic_get(&sensor_m_seq);
-	atomic_set(&sensor_m_seq, (atomic_val_t)(s + 1U));
-	memcpy(sensor_m, m, sizeof(sensor_m));
-	atomic_set(&sensor_m_seq, (atomic_val_t)(s + 2U));
-	mag_update_time = k_uptime_get();
+	sensor_data_snapshot_publish_m(&sensor_data_snapshot, m);
 	connection_signal_wake();
 }
 
@@ -582,7 +536,7 @@ struct raw_imu_queued {
 K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4);
 
 static uint16_t raw_sequence = 0;
-static bool data_collection_active = false;
+static atomic_t data_collection_active;
 static volatile bool ota_suppressed = false; /* Reduce poll rate during parallel OTA */
 static int64_t ota_suppress_start_time = 0;  /* Timestamp when suppress was enabled */
 #define OTA_SUPPRESS_TIMEOUT_MS (10 * 60 * 1000)
@@ -618,9 +572,11 @@ static uint8_t raw_metadata_buf[RAW_PACKET_SIZE];
 #define RAW_META_CAL_DRIP_MS 200
 static int64_t raw_meta_cal_last_ms = 0;
 
-/* Latest mag for piggyback: seqlock; 0=empty, odd=writing, even>0=valid */
-static float latest_mag[3] = {0};
-static atomic_t latest_mag_seq;
+static struct k_spinlock latest_mag_lock;
+static float latest_mag[3];
+static uint32_t latest_mag_session;
+static bool latest_mag_valid;
+static atomic_t raw_collection_session;
 
 /* Calibration drip-feed state (one packet per connection cycle) */
 static bool raw_cal_pending = false;
@@ -692,14 +648,21 @@ static void connection_align_mag_BAinv_body(float out[4][3], const float in[4][3
 
 void connection_set_data_collection(bool enable)
 {
-	if (enable && !data_collection_active) {
+	bool was_active = atomic_get(&data_collection_active) != 0;
+	if (!enable) {
+		atomic_set(&data_collection_active, 0);
+	}
+	if (enable && !was_active) {
 		/* Flush any stale data in queues */
 		k_msgq_purge(&raw_imu_msgq);
 		raw_sequence = 0;
 		raw_metadata_sent = false;
 		raw_metadata_pending = false;
 		raw_meta_cal_last_ms = 0;
-		atomic_set(&latest_mag_seq, 0);
+		atomic_inc(&raw_collection_session);
+		k_spinlock_key_t mag_key = k_spin_lock(&latest_mag_lock);
+		latest_mag_valid = false;
+		k_spin_unlock(&latest_mag_lock, mag_key);
 		raw_cal_pending = false;
 		/* Reset ARQ state */
 		memset(raw_ring_valid, 0, sizeof(raw_ring_valid));
@@ -707,14 +670,20 @@ void connection_set_data_collection(bool enable)
 		raw_retx_count = 0;
 		irq_unlock(key);
 		raw_retx_total = 0;
+	} else if (!enable && was_active) {
+		k_spinlock_key_t mag_key = k_spin_lock(&latest_mag_lock);
+		latest_mag_valid = false;
+		k_spin_unlock(&latest_mag_lock, mag_key);
 	}
-	data_collection_active = enable;
+	if (enable) {
+		atomic_set(&data_collection_active, 1);
+	}
 	LOG_INF("Data collection %s", enable ? "STARTED" : "STOPPED");
 }
 
 bool connection_get_data_collection(void)
 {
-	return data_collection_active;
+	return atomic_get(&data_collection_active) != 0;
 }
 
 void connection_set_ota_suppressed(bool suppressed)
@@ -735,7 +704,7 @@ bool connection_get_ota_suppressed(void)
 
 void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 {
-	if (!data_collection_active) {
+	if (!connection_get_data_collection()) {
 		return;
 	}
 
@@ -754,17 +723,21 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 
 void connection_queue_raw_mag(const float mag[3])
 {
-	if (!data_collection_active) {
+	if (!connection_get_data_collection()) {
 		return;
 	}
+	uint32_t session = (uint32_t)atomic_get(&raw_collection_session);
 
-	/* Store latest mag for piggybacking onto IMU packets */
 	float aligned[3];
 	connection_align_mag_body(mag, aligned);
-	unsigned s = (unsigned)atomic_get(&latest_mag_seq) & ~1U;
-	atomic_set(&latest_mag_seq, (atomic_val_t)(s + 1U));
-	memcpy(latest_mag, aligned, sizeof(latest_mag));
-	atomic_set(&latest_mag_seq, (atomic_val_t)(s + 2U));
+	k_spinlock_key_t key = k_spin_lock(&latest_mag_lock);
+	if (connection_get_data_collection()
+	    && session == (uint32_t)atomic_get(&raw_collection_session)) {
+		memcpy(latest_mag, aligned, sizeof(latest_mag));
+		latest_mag_session = session;
+		latest_mag_valid = true;
+	}
+	k_spin_unlock(&latest_mag_lock, key);
 }
 
 void connection_send_raw_metadata(
@@ -839,8 +812,10 @@ static bool connection_cal_drip_send(void)
 
 	case 1: { /* Mag calibration */
 		buf[2] = RAW_CAL_SUB_MAG;
+		float mag_BAinv[4][3];
 		float mag_body_BAinv[4][3];
-		connection_align_mag_BAinv_body(mag_body_BAinv, retained->magBAinv);
+		magneto_online_snapshot_BAinv(mag_BAinv);
+		connection_align_mag_BAinv_body(mag_body_BAinv, mag_BAinv);
 		memcpy(&buf[3], mag_body_BAinv, sizeof(mag_body_BAinv));
 		esb_write(buf, false, RAW_PACKET_SIZE);
 		raw_cal_phase = 2;
@@ -948,7 +923,7 @@ static bool connection_cal_drip_send(void)
 
 bool connection_raw_metadata_resend_due(void)
 {
-	if (!data_collection_active || !raw_metadata_sent) {
+	if (!connection_get_data_collection() || !raw_metadata_sent) {
 		return false;
 	}
 	return (k_uptime_get() - raw_metadata_last_ms) >= RAW_METADATA_RESEND_MS;
@@ -956,7 +931,7 @@ bool connection_raw_metadata_resend_due(void)
 
 bool connection_process_raw_data(void)
 {
-	if (!data_collection_active) {
+	if (!connection_get_data_collection()) {
 		return false;
 	}
 
@@ -1041,17 +1016,14 @@ bool connection_process_raw_data(void)
 		float mag_snap[3];
 		bool mag_ok = false;
 		{
-			unsigned s;
-			do {
-				s = (unsigned)atomic_get(&latest_mag_seq);
-				if (s == 0U || (s & 1U)) {
-					break;
-				}
+			k_spinlock_key_t key = k_spin_lock(&latest_mag_lock);
+			if (latest_mag_valid
+			    && latest_mag_session == (uint32_t)atomic_get(&raw_collection_session)) {
 				memcpy(mag_snap, latest_mag, sizeof(mag_snap));
-			} while ((unsigned)atomic_get(&latest_mag_seq) != s);
-			if (s != 0U && !(s & 1U) && atomic_cas(&latest_mag_seq, (atomic_val_t)s, 0)) {
 				mag_ok = true;
 			}
+			latest_mag_valid = false;
+			k_spin_unlock(&latest_mag_lock, key);
 		}
 		if (mag_ok) {
 			memcpy(&buf[32], &mag_snap[0], 4);
@@ -1184,13 +1156,13 @@ static int64_t connection_next_deadline_ms(int64_t now)
 			deadline = ping_dl;
 		}
 	}
-	if (quat_update_time) {
+	if (sensor_data_snapshot_qa_pending(&sensor_data_snapshot)) {
 		int64_t q_dl = last_sensor_quat_time + quat_interval_ms;
 		if (q_dl < deadline) {
 			deadline = q_dl;
 		}
 	}
-	if (mag_update_time) {
+	if (sensor_data_snapshot_m_pending(&sensor_data_snapshot)) {
 		int64_t m_dl = last_mag_time + 100;
 		if (m_dl < deadline) {
 			deadline = m_dl;
@@ -1329,7 +1301,7 @@ void connection_thread(void)
 			if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 				/* Auto-stop data collection after prolonged connection error
 				 * to avoid indefinite battery drain and stuck state. */
-				if (data_collection_active) {
+				if (connection_get_data_collection()) {
 					static int64_t dc_conn_error_start;
 					if (dc_conn_error_start == 0) {
 						dc_conn_error_start = now;
@@ -1352,7 +1324,7 @@ void connection_thread(void)
 
 		/* During data collection, throttle fusion data
 		 * to leave radio bandwidth for raw data. */
-		if (radio_ready && data_collection_active) {
+		if (radio_ready && connection_get_data_collection()) {
 			static int64_t last_fusion_dc_time;
 			if (now - last_fusion_dc_time < 9) {
 				k_usleep(300);
@@ -1363,8 +1335,10 @@ void connection_thread(void)
 
 		/* Determine which data types are due or nearly due */
 		int quat_interval_ms = tdma_is_enabled() ? SENSOR_QUAT_INTERVAL_TDMA_MS : SENSOR_QUAT_INTERVAL_NOTDMA_MS;
-		bool quat_ready = quat_update_time && (now - last_sensor_quat_time >= quat_interval_ms);
-		bool mag_due = mag_update_time && (now - last_mag_time > 100);
+		bool quat_ready = sensor_data_snapshot_qa_pending(&sensor_data_snapshot)
+			&& (now - last_sensor_quat_time >= quat_interval_ms);
+		bool mag_due = sensor_data_snapshot_m_pending(&sensor_data_snapshot)
+			&& (now - last_mag_time > 100);
 		bool info_due = sensor_ids_set && (now - last_info_time > 100);
 		bool status_due = (now - last_status_time > 1000);
 		bool runtime_due = (now - last_runtime_time > 1000);
@@ -1373,7 +1347,8 @@ void connection_thread(void)
 		bool info_soon = sensor_ids_set && (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool runtime_soon = (now - last_runtime_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
-		bool mag_soon = mag_update_time && (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
+		bool mag_soon = sensor_data_snapshot_m_pending(&sensor_data_snapshot)
+			&& (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 		bool status_wanted = status_due || status_soon;
 		bool runtime_wanted = runtime_due || runtime_soon;
 		bool info_wanted = info_due || info_soon;
@@ -1388,7 +1363,6 @@ void connection_thread(void)
 			if (mag_wanted) {
 				/* mag includes full quat, use type 4 instead of separate quat+mag */
 				composite_try_add(&builder, 4);
-				mag_update_time = 0;
 				last_mag_time = now;
 				fallback_type = 4;
 			} else if (!connection_sensor_get_precise_quat() && info_wanted) {
@@ -1407,8 +1381,6 @@ void connection_thread(void)
 			composite_try_add_due(&builder, 0, info_wanted, &last_info_time, now);
 
 			send_composite_or_single(&builder, fallback_type);
-			quat_update_time = 0;
-			last_quat_time = now;
 			last_sensor_quat_time = now;
 			continue;
 		}
@@ -1426,7 +1398,6 @@ void connection_thread(void)
 			} else {
 				connection_write_packet_4();
 			}
-			mag_update_time = 0;
 			last_mag_time = now;
 			continue;
 		}
