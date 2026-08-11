@@ -161,7 +161,7 @@ static void set_params()
 {
 	init_params(&params);
 	params.tauAcc = 4.3f;
-	params.biasClip = 2.0f;
+	params.biasClip = 5.0f;
 	params.biasForgettingTime = 427.0f;
 	params.biasSigmaInit = 1.10f;
 	params.biasSigmaMotion = 0.048f;
