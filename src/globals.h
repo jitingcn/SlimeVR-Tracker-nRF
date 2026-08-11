@@ -63,15 +63,7 @@
  * Front side (facing out) is +Z
  */
 
-// TODO: not matching anymore
-#if defined(CONFIG_BOARD_SLIMEVRMINI_P1_UF2) || defined(CONFIG_BOARD_SLIMEVRMINI_P2_UF2)
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT -mx, mz, -my
-#endif
-#if defined(CONFIG_BOARD_SLIMEVRMINI_P4_UF2)
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
-#endif
-
-#if defined(CONFIG_BOARD_SLIMENRF_R1) || defined(CONFIG_BOARD_SLIMENRF_R2) || defined(CONFIG_BOARD_SLIMENRF_R3)
+#if defined(CONFIG_BOARD_SLIMENRF_R3)
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
 #endif
 

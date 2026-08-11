@@ -129,15 +129,7 @@ static uint8_t get_server_constant_tracker_status(int status) __attribute__((unu
 #define FW_BOARD 0
 #elif CONFIG_BOARD_NRF52840DONGLE
 #define FW_BOARD 0
-#elif CONFIG_BOARD_SLIMENRF_R1
-#define FW_BOARD 0
-#elif CONFIG_BOARD_SLIMENRF_R2
-#define FW_BOARD 0
 #elif CONFIG_BOARD_SLIMENRF_R3 || CONFIG_BOARD_SLIMENRF_R3_UF2
-#define FW_BOARD 0
-#elif CONFIG_BOARD_SLIMEVRMINI_P1_UF2
-#define FW_BOARD 0
-#elif CONFIG_BOARD_SLIMEVRMINI_P2_UF2
 #define FW_BOARD 0
 #elif CONFIG_BOARD_PROMICRO_UF2
 #define FW_BOARD 0
@@ -159,8 +151,6 @@ static uint8_t get_server_constant_tracker_status(int status) __attribute__((unu
 #elif CONFIG_SOC_NRF52840
 #define FW_MCU 0
 #elif CONFIG_SOC_NRF52833
-#define FW_MCU 0
-#elif CONFIG_SOC_NRF52820
 #define FW_MCU 0
 #elif CONFIG_SOC_NRF52811
 #define FW_MCU 0

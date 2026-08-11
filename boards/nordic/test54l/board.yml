@@ -1,9 +1,0 @@
-board:
-  name: test54l
-  full_name: Test nRF54L15
-  vendor: nordic
-  socs:
-  - name: nrf54l15
-    variants:
-    - name: xip
-      cpucluster: cpuflpr
