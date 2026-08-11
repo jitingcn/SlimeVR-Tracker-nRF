@@ -35,8 +35,10 @@ LOG_MODULE_REGISTER(clock_switch, LOG_LEVEL_INF);
 static inline nrf_clock_lfclk_t normalize_source(nrf_clock_lfclk_t source)
 {
 	/* XTAL_FULL_SWING and XTAL_LOW_SWING report as XTAL in actual source */
-	if (
-		source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING
+	if (false
+#ifdef NRF_CLOCK_LFCLK_XTAL_FULL_SWING
+		|| source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING
+#endif
 #ifdef NRF_CLOCK_LFCLK_XTAL_LOW_SWING
 		|| source == NRF_CLOCK_LFCLK_XTAL_LOW_SWING
 #endif
@@ -68,8 +70,11 @@ void clock_switch(nrf_clock_lfclk_t source)
 	 * Avoid switching to XTAL when the board does not have an external LFXO.
 	 * Note: switching to RC is always safe.
 	 */
-	if (!IS_ENABLED(CONFIG_CLOCK_USE_LFXO)
-		&& (source == NRF_CLOCK_LFCLK_XTAL || source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING)) {
+	bool xtal_source = source == NRF_CLOCK_LFCLK_XTAL;
+#ifdef NRF_CLOCK_LFCLK_XTAL_FULL_SWING
+	xtal_source = xtal_source || source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING;
+#endif
+	if (!IS_ENABLED(CONFIG_CLOCK_USE_LFXO) && xtal_source) {
 		LOG_INF("clock_switch: skipping XTAL, CONFIG_CLOCK_USE_LFXO disabled");
 		return;
 	}

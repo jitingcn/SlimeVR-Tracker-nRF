@@ -1,59 +1,14 @@
-set(pm_static_dir ${CMAKE_CURRENT_LIST_DIR}/pm_static)
 set(soc_overlay_dir ${CMAKE_CURRENT_LIST_DIR}/socs)
+set(partition_overlay_dir ${CMAKE_CURRENT_LIST_DIR}/dts/partitions)
 
 if(WITH_SOFTDEVICE)
   set_property(TARGET ${DEFAULT_IMAGE} APPEND PROPERTY _EP_CMAKE_ARGS -DWITH_SOFTDEVICE=ON)
 endif()
 
-if((DEFINED SB_CONFIG_BOARD AND SB_CONFIG_BOARD MATCHES "uf2") OR (DEFINED SB_CONFIG_BOARD_QUALIFIERS AND SB_CONFIG_BOARD_QUALIFIERS MATCHES "uf2"))
-  set(pm_static_candidates)
-
-  if(WITH_SOFTDEVICE)
-    if(DEFINED SB_CONFIG_BOARD_QUALIFIERS AND NOT SB_CONFIG_BOARD_QUALIFIERS STREQUAL "")
-      string(REPLACE "/" "_" pm_static_qualifiers ${SB_CONFIG_BOARD_QUALIFIERS})
-      list(APPEND pm_static_candidates
-        ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}_${pm_static_qualifiers}_sd.yml
-        ${pm_static_dir}/${SB_CONFIG_BOARD}_${pm_static_qualifiers}_sd.yml
-      )
-    endif()
-
-    list(APPEND pm_static_candidates
-      ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}_sd.yml
-      ${pm_static_dir}/${SB_CONFIG_BOARD}_sd.yml
-    )
-
-    list(APPEND pm_static_candidates
-      ${pm_static_dir}/${SB_CONFIG_SOC}_uf2_sd.yml
-      ${pm_static_dir}/pm_static_${SB_CONFIG_SOC}_uf2_sd.yml
-    )
-  endif()
-
-  if(DEFINED SB_CONFIG_BOARD_QUALIFIERS AND NOT SB_CONFIG_BOARD_QUALIFIERS STREQUAL "")
-    string(REPLACE "/" "_" pm_static_qualifiers ${SB_CONFIG_BOARD_QUALIFIERS})
-    list(APPEND pm_static_candidates
-      ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}_${pm_static_qualifiers}.yml
-      ${pm_static_dir}/${SB_CONFIG_BOARD}_${pm_static_qualifiers}.yml
-    )
-  endif()
-
-  list(APPEND pm_static_candidates
-    ${pm_static_dir}/pm_static_${SB_CONFIG_BOARD}.yml
-    ${pm_static_dir}/${SB_CONFIG_BOARD}.yml
-  )
-
-  list(APPEND pm_static_candidates
-    ${pm_static_dir}/${SB_CONFIG_SOC}_uf2.yml
-    ${pm_static_dir}/pm_static_${SB_CONFIG_SOC}_uf2.yml
-  )
-
-  list(REMOVE_DUPLICATES pm_static_candidates)
-
-  foreach(pm_static_candidate ${pm_static_candidates})
-    if(EXISTS ${pm_static_candidate})
-      set(PM_STATIC_YML_FILE ${pm_static_candidate} CACHE INTERNAL "")
-      break()
-    endif()
-  endforeach()
+set(uses_uf2_layout FALSE)
+if((DEFINED SB_CONFIG_BOARD AND SB_CONFIG_BOARD MATCHES "uf2") OR
+   (DEFINED SB_CONFIG_BOARD_QUALIFIERS AND SB_CONFIG_BOARD_QUALIFIERS MATCHES "uf2"))
+  set(uses_uf2_layout TRUE)
 endif()
 
 set(extra_dtc_overlay_candidates)
@@ -62,11 +17,33 @@ if(DEFINED EXTRA_DTC_OVERLAY_FILE)
   list(APPEND ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE ${EXTRA_DTC_OVERLAY_FILE})
 endif()
 
+if(SB_CONFIG_BOARD STREQUAL "xiao_ble")
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_xiao.overlay)
+elseif(SB_CONFIG_SOC_NRF52840 AND uses_uf2_layout AND WITH_SOFTDEVICE)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_uf2_sd.overlay)
+elseif(SB_CONFIG_SOC_NRF52840 AND uses_uf2_layout)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_uf2.overlay)
+elseif(SB_CONFIG_SOC_NRF52833 AND uses_uf2_layout)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52833_uf2.overlay)
+elseif(SB_CONFIG_SOC_NRF52840)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840.overlay)
+elseif(SB_CONFIG_SOC_NRF52832 OR SB_CONFIG_SOC_NRF52833)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52832.overlay)
+elseif(SB_CONFIG_SOC_NRF52805 OR SB_CONFIG_SOC_NRF52810 OR SB_CONFIG_SOC_NRF52811)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52805.overlay)
+endif()
+
 if(DEFINED SB_CONFIG_BOARD_QUALIFIERS AND NOT SB_CONFIG_BOARD_QUALIFIERS STREQUAL "")
-  string(REPLACE "/" "_" soc_board_qualifiers ${SB_CONFIG_BOARD_QUALIFIERS})
+  string(REPLACE "/" "_" soc_board_qualifiers "${SB_CONFIG_BOARD_QUALIFIERS}")
   list(APPEND extra_dtc_overlay_candidates ${soc_overlay_dir}/${soc_board_qualifiers}.overlay)
 
-  string(REGEX REPLACE "/.*$" "" soc_name ${SB_CONFIG_BOARD_QUALIFIERS})
+  string(REGEX MATCH "^[^/]+/[^/]+" soc_cpu_qualifiers "${SB_CONFIG_BOARD_QUALIFIERS}")
+  if(NOT soc_cpu_qualifiers STREQUAL "")
+    string(REPLACE "/" "_" soc_cpu_qualifiers "${soc_cpu_qualifiers}")
+    list(APPEND extra_dtc_overlay_candidates ${soc_overlay_dir}/${soc_cpu_qualifiers}.overlay)
+  endif()
+
+  string(REGEX REPLACE "/.*$" "" soc_name "${SB_CONFIG_BOARD_QUALIFIERS}")
   list(APPEND extra_dtc_overlay_candidates ${soc_overlay_dir}/${soc_name}.overlay)
 endif()
 

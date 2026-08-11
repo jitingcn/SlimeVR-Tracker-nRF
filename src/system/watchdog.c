@@ -21,6 +21,12 @@
 
 LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_INF);
 
+#if DT_NODE_EXISTS(DT_ALIAS(watchdog0))
+#define WATCHDOG_NODE DT_ALIAS(watchdog0)
+#else
+#define WATCHDOG_NODE DT_NODELABEL(wdt)
+#endif
+
 /* Adafruit bootloader DFU magic number (DFU_MAGIC_UF2_RESET) */
 #define ADAFRUIT_DFU_MAGIC ADAFRUIT_DFU_MAGIC_UF2_RESET
 
@@ -179,10 +185,10 @@ static int watchdog_early_check(void)
 	last_reset_was_wdt = watchdog_caused_reset();
 
 	/* Save GPREGRET for OTA RAM engine debug (survives system reset) */
-	saved_gpregret = NRF_POWER->GPREGRET & 0xFF;
+	saved_gpregret = nrf_power_gpregret_get(NRF_POWER, 0) & 0xFF;
 	if (saved_gpregret >= 0xD0 && saved_gpregret <= 0xDE) {
 		/* Clear it so bootloader doesn't see it on next reset */
-		NRF_POWER->GPREGRET = 0;
+		nrf_power_gpregret_set(NRF_POWER, 0, 0);
 	}
 
 	/* Clear reset reason flags early to prevent other code from seeing stale values */
@@ -250,7 +256,7 @@ int watchdog_init(void)
 	}
 
 	/* Get the hardware WDT device */
-	const struct device *wdt_dev = DEVICE_DT_GET(DT_NODELABEL(wdt));
+	const struct device *wdt_dev = DEVICE_DT_GET(WATCHDOG_NODE);
 	if (!device_is_ready(wdt_dev)) {
 		LOG_WRN("WDT device not ready, watchdog disabled");
 		/* Don't fail - allow system to boot without watchdog */
@@ -367,7 +373,18 @@ bool watchdog_caused_reset(void)
 {
 #ifdef NRF_RESET
 	uint32_t reset_reason = NRF_RESET->RESETREAS;
-	return (reset_reason & RESET_RESETREAS_DOG_Msk) != 0;
+	uint32_t watchdog_mask = 0;
+
+#ifdef RESET_RESETREAS_DOG_Msk
+	watchdog_mask |= RESET_RESETREAS_DOG_Msk;
+#endif
+#ifdef RESET_RESETREAS_DOG0_Msk
+	watchdog_mask |= RESET_RESETREAS_DOG0_Msk;
+#endif
+#ifdef RESET_RESETREAS_DOG1_Msk
+	watchdog_mask |= RESET_RESETREAS_DOG1_Msk;
+#endif
+	return (reset_reason & watchdog_mask) != 0;
 #else
 	uint32_t reset_reason = NRF_POWER->RESETREAS;
 	return (reset_reason & POWER_RESETREAS_DOG_Msk) != 0;
