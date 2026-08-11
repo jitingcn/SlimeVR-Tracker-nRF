@@ -18,6 +18,7 @@ struct esb_ota_page_buf {
 	uint32_t *last_erased;
 	uint32_t staging_base;
 	uint32_t image_size;
+	bool pre_erased;
 };
 
 bool esb_ota_flash_ready(void);
@@ -31,6 +32,9 @@ uint16_t esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_
 
 int esb_ota_flash_prepare_bootloader_settings(uint32_t staging_base, uint32_t image_size,
 					      uint8_t *scratch);
+int esb_ota_flash_mcuboot_region(uint32_t *addr, uint32_t *capacity);
+int esb_ota_flash_prepare_mcuboot_slot(void);
+int esb_ota_flash_request_mcuboot_upgrade(void);
 void esb_ota_flash_copy_and_reset(uint32_t staging_base, uint32_t target_base,
 				  uint32_t image_size);
 

@@ -1,0 +1,1 @@
+# MCUboot is a separate image and must not consume application-only board defaults.

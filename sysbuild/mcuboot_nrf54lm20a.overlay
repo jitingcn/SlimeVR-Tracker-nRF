@@ -1,0 +1,39 @@
+&usbhs_wrapper {
+	status = "disabled";
+};
+
+&pmic_i2c {
+	status = "disabled";
+};
+
+&pmic {
+	status = "disabled";
+
+	charger {
+		status = "disabled";
+	};
+
+	regulators {
+		status = "disabled";
+	};
+};
+
+&i2c22 {
+	status = "disabled";
+};
+
+&i2c30 {
+	status = "disabled";
+};
+
+&spi23 {
+	status = "disabled";
+};
+
+&pwm20 {
+	status = "disabled";
+};
+
+&wdt31 {
+	status = "disabled";
+};

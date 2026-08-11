@@ -263,9 +263,9 @@ static void esb_remote_cmd_clear(void)
 
 static void esb_remote_cmd_dfu(void)
 {
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#if (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER) && !CONFIG_BOOTLOADER_MCUBOOT
 	LOG_WRN("Executing remote command: DFU (enter bootloader)");
-#if CONFIG_BUILD_OUTPUT_UF2
+#if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 	k_msleep(100);
 #endif
@@ -277,9 +277,9 @@ static void esb_remote_cmd_dfu(void)
 
 static void esb_remote_cmd_dfu_ota(void)
 {
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#if (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER) && !CONFIG_BOOTLOADER_MCUBOOT
 	LOG_WRN("Executing remote command: DFU_OTA (enter OTA bootloader)");
-#if CONFIG_BUILD_OUTPUT_UF2
+#if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
 	k_msleep(2);
 #endif

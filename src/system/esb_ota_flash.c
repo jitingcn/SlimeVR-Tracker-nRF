@@ -14,7 +14,16 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/logging/log.h>
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && DT_NODE_EXISTS(DT_NODELABEL(slot1_partition))
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/storage/flash_map.h>
+#define OTA_MCUBOOT_HAS_SECONDARY 1
+#else
+#define OTA_MCUBOOT_HAS_SECONDARY 0
+#endif
+#if defined(CONFIG_SOC_NRF52840)
 #include <hal/nrf_nvmc.h>
+#endif
 #include <string.h>
 #include <errno.h>
 
@@ -30,9 +39,11 @@ LOG_MODULE_REGISTER(esb_ota_flash, LOG_LEVEL_INF);
 
 static const struct device *flash_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller));
 
+#if BOOTLOADER_SETTINGS_ADDR != 0
 /* Prepared bootloader settings (computed in thread context, written by RAM copier) */
 static struct bootloader_settings prepared_bl_settings;
 static bool bl_settings_prepared;
+#endif
 
 bool esb_ota_flash_ready(void)
 {
@@ -42,7 +53,7 @@ bool esb_ota_flash_ready(void)
 int esb_ota_flash_erase_page(uint32_t addr)
 {
 	LOG_DBG("OTA: Erasing flash page at 0x%05X", addr);
-	int err = flash_erase(flash_dev, addr, OTA_FLASH_PAGE_SIZE);
+	int err = flash_flatten(flash_dev, addr, OTA_FLASH_PAGE_SIZE);
 	if (err) {
 		LOG_ERR("OTA: Flash erase failed at 0x%05X (err %d)", addr, err);
 	}
@@ -67,10 +78,13 @@ int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb)
 
 	uint32_t flash_addr = *pb->flash_addr;
 
-	/* Pad to 4-byte alignment */
 	size_t write_len = *pb->offset;
-	if (write_len & 3) {
-		while (write_len & 3) {
+	size_t write_align = flash_get_write_block_size(flash_dev);
+	if (write_align == 0 || write_align > OTA_FLASH_PAGE_SIZE) {
+		return -EINVAL;
+	}
+	if (write_len % write_align) {
+		while (write_len % write_align) {
 			pb->buf[write_len++] = 0xFF;
 		}
 	}
@@ -78,7 +92,7 @@ int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb)
 	LOG_DBG("OTA: Flush page 0x%05X (%zu bytes)", flash_addr, write_len);
 
 	/* Erase and write to staging area */
-	if (flash_addr > *pb->last_erased) {
+	if (!pb->pre_erased && flash_addr > *pb->last_erased) {
 		int err = esb_ota_flash_erase_page(flash_addr);
 		if (err) {
 			return err;
@@ -97,7 +111,7 @@ int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb)
 
 	/* Pre-erase next page (best-effort). Next flush retries via last_erased. */
 	uint32_t next_page = *pb->flash_addr;
-	if (next_page < pb->staging_base + pb->image_size) {
+	if (!pb->pre_erased && next_page < pb->staging_base + pb->image_size) {
 		err = esb_ota_flash_erase_page(next_page);
 		if (err) {
 			LOG_WRN("OTA: next-page pre-erase failed at 0x%05X (err %d)", next_page, err);
@@ -107,6 +121,65 @@ int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb)
 	}
 
 	return 0;
+}
+
+int esb_ota_flash_mcuboot_region(uint32_t *addr, uint32_t *capacity)
+{
+#if OTA_MCUBOOT_HAS_SECONDARY
+	if (!boot_is_img_confirmed()) {
+		return -EBUSY;
+	}
+
+	const uint8_t area_id = FIXED_PARTITION_ID(slot1_partition);
+	const struct flash_area *area;
+	int err = flash_area_open(area_id, &area);
+	if (err) {
+		return err;
+	}
+
+	size_t image_offset = boot_get_image_start_offset(area_id);
+	ssize_t trailer_offset = boot_get_area_trailer_status_offset(area_id);
+	if (trailer_offset < 0 || area->fa_size <= image_offset ||
+	    (size_t)trailer_offset <= image_offset) {
+		flash_area_close(area);
+		return -ENOMEM;
+	}
+
+	*addr = area->fa_off + image_offset;
+	*capacity = (uint32_t)trailer_offset - image_offset;
+	flash_area_close(area);
+	return 0;
+#else
+	ARG_UNUSED(addr);
+	ARG_UNUSED(capacity);
+	return -ENOTSUP;
+#endif
+}
+
+int esb_ota_flash_prepare_mcuboot_slot(void)
+{
+#if OTA_MCUBOOT_HAS_SECONDARY
+	const struct flash_area *area;
+	int err = flash_area_open(FIXED_PARTITION_ID(slot1_partition), &area);
+	if (err) {
+		return err;
+	}
+
+	err = flash_area_flatten(area, 0, area->fa_size);
+	flash_area_close(area);
+	return err;
+#else
+	return -ENOTSUP;
+#endif
+}
+
+int esb_ota_flash_request_mcuboot_upgrade(void)
+{
+#if OTA_MCUBOOT_HAS_SECONDARY
+	return boot_request_upgrade(BOOT_UPGRADE_TEST);
+#else
+	return -ENOTSUP;
+#endif
 }
 
 /*
@@ -127,6 +200,7 @@ struct flash_copy_params {
 	uint32_t settings_words;   /* Number of 32-bit words to write */
 };
 
+#if defined(CONFIG_SOC_NRF52840)
 __attribute__((noinline))
 static void ota_flash_copy_from_ram(const struct flash_copy_params *p)
 {
@@ -213,10 +287,12 @@ static void ota_flash_copy_from_ram(const struct flash_copy_params *p)
 	__DSB();
 	for (;;) {} /* Wait for reset */
 }
+#endif
 
 void esb_ota_flash_copy_and_reset(uint32_t staging_base, uint32_t target_base,
 				  uint32_t image_size)
 {
+#if defined(CONFIG_SOC_NRF52840)
 	LOG_WRN("OTA: Copying %u bytes from staging 0x%05X to final 0x%05X — IRQs off, then reset",
 		image_size, staging_base, target_base);
 	k_msleep(500); /* Flush logs */
@@ -261,6 +337,12 @@ void esb_ota_flash_copy_and_reset(uint32_t staging_base, uint32_t target_base,
 
 	ram_copy(&params);
 	/* Never reached */
+#else
+	ARG_UNUSED(staging_base);
+	ARG_UNUSED(target_base);
+	ARG_UNUSED(image_size);
+	LOG_ERR("OTA: in-place flash copy is not supported on this SoC");
+#endif
 }
 
 uint32_t esb_ota_flash_compute_crc32(uint32_t addr, uint32_t size, uint8_t *scratch)
@@ -340,7 +422,6 @@ int esb_ota_flash_prepare_bootloader_settings(uint32_t staging_base, uint32_t im
 
 	settings.bank_0_crc = esb_ota_flash_compute_crc16_nordic(staging_base, image_size,
 								scratch);
-	LOG_INF(">>> CRC16 computed: 0x%04X", settings.bank_0_crc);
 	if (settings.bank_0_crc == 0xFFFF) {
 		LOG_ERR("OTA: CRC-16 read failed, refusing activate");
 		bl_settings_prepared = false;

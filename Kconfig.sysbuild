@@ -1,4 +1,12 @@
 config PARTITION_MANAGER
 	default n
 
+if BOOTLOADER_MCUBOOT
+
+choice MCUBOOT_MODE
+	default MCUBOOT_MODE_SINGLE_APP if SOC_NRF52832 || SOC_NRF52833
+endchoice
+
+endif
+
 source "share/sysbuild/Kconfig"

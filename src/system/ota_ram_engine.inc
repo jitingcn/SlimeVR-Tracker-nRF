@@ -41,6 +41,7 @@ struct ota_ram_engine_params {
 	/* OTA transfer state */
 	uint32_t image_size;         /* Total firmware size in bytes */
 	uint32_t image_crc32;        /* Expected CRC32 of firmware */
+	uint32_t required_image_magic;
 	uint32_t flash_target;       /* Target flash address (e.g. 0x27000 or 0x1000) */
 	uint32_t page_size;          /* Flash page size (4096) */
 	uint16_t next_expected_seq;  /* Next sequence number to expect */
@@ -328,6 +329,20 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 					/* Data payload starts at rx_buf[6], length = rx_len - 4 */
 					uint32_t data_len = rx_len - 4;
 					if (data_len > 60) data_len = 60;
+					if (bytes_received == 0 && p->required_image_magic != 0) {
+						if (data_len < sizeof(uint32_t)) {
+							idle_count++;
+							continue;
+						}
+						uint32_t image_magic = (uint32_t)rx_buf[6] |
+							((uint32_t)rx_buf[7] << 8) |
+							((uint32_t)rx_buf[8] << 16) |
+							((uint32_t)rx_buf[9] << 24);
+						if (image_magic != p->required_image_magic) {
+							idle_count++;
+							continue;
+						}
+					}
 					/* Clamp so leftover payload cannot write past image_size. */
 					if (bytes_received + data_len > p->image_size) {
 						data_len = p->image_size - bytes_received;

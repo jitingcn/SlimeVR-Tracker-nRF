@@ -1,0 +1,36 @@
+/ {
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+	};
+};
+
+&flash0 {
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 0x0000c000>;
+		};
+
+		slot0_partition: partition@c000 {
+			label = "image-0";
+			reg = <0x0000c000 0x00062000>;
+		};
+
+		storage_partition: partition@6e000 {
+			label = "storage";
+			reg = <0x0006e000 0x00006000>;
+		};
+
+		reserved_top_partition: partition@74000 {
+			label = "reserved-legacy-uf2";
+			read-only;
+			reg = <0x00074000 0x0000c000>;
+		};
+	};
+};

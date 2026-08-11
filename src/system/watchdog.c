@@ -161,12 +161,12 @@ static void enter_dfu_mode(void)
 		retained_update();
 	}
 
-#if CONFIG_BUILD_OUTPUT_UF2
+#if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 	/* Adafruit bootloader: Set GPREGRET to enter UF2 DFU mode */
 	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC;
 	k_msleep(100);
 	sys_reboot(SYS_REBOOT_COLD);
-#elif CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#elif CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BOOTLOADER_MCUBOOT
 	/* nRF5 SDK bootloader - implementation depends on specific bootloader */
 	sys_reboot(SYS_REBOOT_COLD);
 #else

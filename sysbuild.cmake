@@ -1,5 +1,6 @@
 set(soc_overlay_dir ${CMAKE_CURRENT_LIST_DIR}/socs)
 set(partition_overlay_dir ${CMAKE_CURRENT_LIST_DIR}/dts/partitions)
+set(mcuboot_overlay_dir ${CMAKE_CURRENT_LIST_DIR}/sysbuild)
 
 if(WITH_SOFTDEVICE)
   set_property(TARGET ${DEFAULT_IMAGE} APPEND PROPERTY _EP_CMAKE_ARGS -DWITH_SOFTDEVICE=ON)
@@ -17,7 +18,23 @@ if(DEFINED EXTRA_DTC_OVERLAY_FILE)
   list(APPEND ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE ${EXTRA_DTC_OVERLAY_FILE})
 endif()
 
-if(SB_CONFIG_SOC_NRF54LM20A)
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_BOARD STREQUAL "xiao_ble")
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_xiao_mcuboot.overlay)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${partition_overlay_dir}/nrf52840_xiao_mcuboot.overlay)
+elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF52840)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_mcuboot.overlay)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${partition_overlay_dir}/nrf52840_mcuboot.overlay)
+elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF52833)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf5283x_mcuboot_single.overlay)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${partition_overlay_dir}/nrf5283x_mcuboot_single.overlay)
+elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF52832)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52832_mcuboot_single.overlay)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${partition_overlay_dir}/nrf52832_mcuboot_single.overlay)
+elseif(NOT SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf54lm20a.overlay)
 elseif(SB_CONFIG_BOARD STREQUAL "xiao_ble")
   list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_xiao.overlay)
@@ -55,9 +72,41 @@ foreach(extra_dtc_overlay_candidate ${extra_dtc_overlay_candidates})
   endif()
 endforeach()
 
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${mcuboot_overlay_dir}/mcuboot_nrf54lm20a.overlay)
+endif()
+
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
+   (SB_CONFIG_SOC_NRF52833 OR SB_CONFIG_SOC_NRF52840 OR
+    SB_CONFIG_SOC_NRF54LM20A))
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${mcuboot_overlay_dir}/mcuboot_usb.overlay)
+endif()
+
+if(SB_CONFIG_BOOTLOADER_MCUBOOT)
+  set_property(TARGET mcuboot APPEND PROPERTY _EP_CMAKE_ARGS
+               -DBOARD_DEFCONFIG:FILEPATH=${mcuboot_overlay_dir}/mcuboot_board_defconfig)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${mcuboot_overlay_dir}/mcuboot.overlay)
+  list(APPEND ${DEFAULT_IMAGE}_EXTRA_CONF_FILE
+       ${CMAKE_CURRENT_LIST_DIR}/boards/mcuboot.conf)
+  list(REMOVE_DUPLICATES mcuboot_EXTRA_DTC_OVERLAY_FILE)
+  set(mcuboot_EXTRA_DTC_OVERLAY_FILE
+      ${mcuboot_EXTRA_DTC_OVERLAY_FILE}
+      CACHE INTERNAL "")
+endif()
+
 if(DEFINED ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE)
   list(REMOVE_DUPLICATES ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE)
   set(${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE
       ${${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE}
+      CACHE INTERNAL "")
+endif()
+
+if(DEFINED ${DEFAULT_IMAGE}_EXTRA_CONF_FILE)
+  list(REMOVE_DUPLICATES ${DEFAULT_IMAGE}_EXTRA_CONF_FILE)
+  set(${DEFAULT_IMAGE}_EXTRA_CONF_FILE
+      ${${DEFAULT_IMAGE}_EXTRA_CONF_FILE}
       CACHE INTERNAL "")
 endif()

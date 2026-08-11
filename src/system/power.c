@@ -17,6 +17,9 @@
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_power.h>
 #include <zephyr/pm/device.h>
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#include <zephyr/dfu/mcuboot.h>
+#endif
 #include <zephyr/device.h>
 #include <hal/nrf_spim.h>
 #include <hal/nrf_twim.h>
@@ -111,7 +114,7 @@ static const struct gpio_dt_spec vcc = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, vcc_gp
 #pragma message "VCC GPIO does not exist"
 #endif
 
-#define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
+#define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
 
 /* CS/VCC -> Hi-Z (GPIO_DISCONNECTED); pwr enable -> driven inactive. */
 static void sys_disconnect_interface_pins(void)
@@ -537,6 +540,16 @@ static void power_thread(void)
 		 */
 		if (!boot_success_checked && k_uptime_get() > 60000) {
 			boot_success_checked = true;
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+			if (!boot_is_img_confirmed()) {
+				int err = boot_write_img_confirmed();
+				if (err) {
+					LOG_ERR("Failed to confirm MCUboot image: %d", err);
+				} else {
+					LOG_INF("MCUboot test image confirmed");
+				}
+			}
+#endif
 			watchdog_mark_boot_success();
 		}
 
