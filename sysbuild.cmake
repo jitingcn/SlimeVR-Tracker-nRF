@@ -79,13 +79,23 @@ endforeach()
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
        ${mcuboot_overlay_dir}/mcuboot_nrf54lm20a.overlay)
-  list(APPEND mcuboot_EXTRA_CONF_FILE
-       ${mcuboot_overlay_dir}/mcuboot_usb_next.conf)
+  if(SB_CONFIG_BOARD STREQUAL "xiao_nrf54lm20a")
+    # XIAO nRF54LM20A: the nRF54 native USB (usbhs) is not wired to the
+    # USB-C connector; the onboard SAMD11 serves it as a USB-UART bridge on
+    # uart20, so MCUboot serial recovery runs over uart20 instead of USB
+    # CDC ACM.
+    list(APPEND mcuboot_EXTRA_CONF_FILE
+         ${mcuboot_overlay_dir}/mcuboot_nrf54lm20a_uart.conf)
+    list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+         ${mcuboot_overlay_dir}/mcuboot_nrf54lm20a_uart.overlay)
+  else()
+    list(APPEND mcuboot_EXTRA_CONF_FILE
+         ${mcuboot_overlay_dir}/mcuboot_usb_next.conf)
+  endif()
 endif()
 
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
-   (SB_CONFIG_SOC_NRF52833 OR SB_CONFIG_SOC_NRF52840 OR
-    SB_CONFIG_SOC_NRF54LM20A))
+   (SB_CONFIG_SOC_NRF52833 OR SB_CONFIG_SOC_NRF52840))
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
        ${mcuboot_overlay_dir}/mcuboot_usb.overlay)
 endif()

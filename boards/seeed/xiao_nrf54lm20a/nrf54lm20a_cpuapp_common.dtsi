@@ -5,15 +5,21 @@
 
 #include <nordic/nrf54lm20a_cpuapp.dtsi>
 
-zephyr_udc0: &usbhs { status = "okay"; };
+/*
+ * On the XIAO nRF54LM20A the USB-C data lines go to the onboard SAMD11
+ * (USB-UART bridge), not to the nRF54's native USB. The nRF54 usbhs D+/D-
+ * pads are not connected on the PCB, so keep usbhs disabled and use uart20
+ * (P1.11 TX / P1.10 RX), which is the SAMD11 bridge, for the console.
+ */
+zephyr_udc0: &usbhs { status = "disabled"; };
 
 #include "xiao_nrf54lm20a_common.dtsi"
 #include <vendor/nordic/nrf54lm20a_cpuapp_partition.dtsi>
 
 / {
 	chosen {
-		zephyr,console = &cdc_acm_uart0;
-		zephyr,shell-uart = &cdc_acm_uart0;
+		zephyr,console = &uart20;
+		zephyr,shell-uart = &uart20;
 		zephyr,flash-controller = &rram_controller;
 		zephyr,flash = &cpuapp_rram;
 		zephyr,code-partition = &slot0_partition;

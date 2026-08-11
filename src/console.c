@@ -20,9 +20,19 @@
 #define USB_EXISTS (DT_NODE_HAS_STATUS(USB, okay) && CONFIG_UART_CONSOLE)
 #endif
 
-#if (USB_EXISTS || CONFIG_RTT_CONSOLE) && CONFIG_USE_SLIMENRF_CONSOLE
+/*
+ * Interactive console over the chosen console device when it is a plain
+ * (non-USB) UART, for example a UART bridged by an onboard USB-to-serial
+ * chip. The console thread then starts at boot and uses console_getline(),
+ * same as the USB path, but without the USB lifecycle handling.
+ */
+#define UART_CONSOLE_EXISTS \
+	(!USB_EXISTS && CONFIG_UART_CONSOLE && \
+	 DT_NODE_HAS_STATUS(DT_CHOSEN(zephyr_console), okay))
 
-#if USB_EXISTS
+#if (USB_EXISTS || UART_CONSOLE_EXISTS || CONFIG_RTT_CONSOLE) && CONFIG_USE_SLIMENRF_CONSOLE
+
+#if USB_EXISTS || UART_CONSOLE_EXISTS
 #include <zephyr/console/console.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/drivers/uart.h>
@@ -1594,7 +1604,7 @@ static void console_thread(void)
 	}
 #endif
 
-#if USB_EXISTS
+#if USB_EXISTS || UART_CONSOLE_EXISTS
 	console_getline_init();
 
 	// Wait for any pending log data to be processed
@@ -1602,6 +1612,7 @@ static void console_thread(void)
 		k_usleep(1);
 	}
 
+#if USB_EXISTS
 	// Wait for USB CDC to be ready by checking DTR (Data Terminal Ready) signal
 	// This ensures the terminal is actually connected and ready to receive data
 	const struct device *uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
@@ -1620,13 +1631,14 @@ static void console_thread(void)
 
 	printk("*** " CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER " " CONFIG_SLIMEVR_USB_DEVICE_PRODUCT " ***\n");
 #endif
+#endif
 	printk(FW_STRING);
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
 
 	printk("Type 'help' to show available commands.\n");
 
 	while (1) {
-#if USB_EXISTS
+#if USB_EXISTS || UART_CONSOLE_EXISTS
 		char *line = console_getline();
 #else
 		char *line = rtt_console_getline();
