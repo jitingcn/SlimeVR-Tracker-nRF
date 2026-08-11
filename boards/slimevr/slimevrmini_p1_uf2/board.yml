@@ -3,6 +3,7 @@
 
 board:
   name: slimevrmini_p1_uf2
+  full_name: Mini Tracker P1
   vendor: slimevr
   socs:
     - name: nrf52833

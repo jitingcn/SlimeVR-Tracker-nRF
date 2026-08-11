@@ -3,7 +3,7 @@
 
 board:
   name: kawazu_uf2
+  full_name: Kawazu
   vendor: nekumori
   socs:
     - name: nrf52833
-

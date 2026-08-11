@@ -3,6 +3,7 @@
 
 board:
   name: foxsmol40_uf2
+  full_name: FoxApplication foxsmol40 Tracker
   vendor: foxapplication
   socs:
     - name: nrf52840

@@ -3,6 +3,7 @@
 
 board:
   name: aero_pro_uf2
+  full_name: AeroTrackerPro
   vendor: aero
   socs:
     - name: nrf52840

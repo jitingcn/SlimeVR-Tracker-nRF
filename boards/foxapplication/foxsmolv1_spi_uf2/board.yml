@@ -3,6 +3,7 @@
 
 board:
   name: foxsmolv1_spi_uf2
+  full_name: FoxApplication FoxSmolV1 Tracker SPI
   vendor: foxapplication
   socs:
     - name: nrf52840

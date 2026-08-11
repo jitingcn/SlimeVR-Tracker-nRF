@@ -3,6 +3,7 @@
 
 board:
   name: dawn_tracker_mini_uf2
+  full_name: Dawn Tracker Mini
   vendor: dawnoriginal
   socs:
     - name: nrf52833
