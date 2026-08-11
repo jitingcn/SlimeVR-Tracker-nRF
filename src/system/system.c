@@ -13,6 +13,9 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/nvs.h>
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#include <zephyr/retention/bootmode.h>
+#endif
 #include <hal/nrf_gpio.h>
 
 #include "system.h"
@@ -81,7 +84,7 @@ static const struct pwm_dt_spec clk_out = PWM_DT_SPEC_GET(CLKOUT_NODE);
 static const struct pwm_dt_spec clk_out = {0};
 #endif
 
-#define DFU_EXISTS ((CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER) && !CONFIG_BOOTLOADER_MCUBOOT)
+#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT)
 #define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
 #define NRF5_BOOTLOADER (CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BOOTLOADER_MCUBOOT)
 
@@ -766,6 +769,31 @@ void sys_command_shutdown(void)
 	sys_request_system_off(false);
 }
 
+void sys_enter_dfu(bool ota)
+{
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	ARG_UNUSED(ota);
+	int err = bootmode_set(BOOT_MODE_TYPE_BOOTLOADER);
+	if (err) {
+		LOG_ERR("Failed to request MCUboot recovery: %d", err);
+		return;
+	}
+	LOG_INF("MCUboot serial recovery requested");
+	sys_request_system_reboot(false);
+#elif ADAFRUIT_BOOTLOADER
+	NRF_POWER->GPREGRET = ota ? ADAFRUIT_DFU_MAGIC_OTA_RESET : ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	k_msleep(100);
+	sys_request_system_reboot(false);
+#elif NRF5_BOOTLOADER
+	ARG_UNUSED(ota);
+	gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+	k_msleep(100);
+	sys_request_system_reboot(false);
+#else
+	ARG_UNUSED(ota);
+#endif
+}
+
 void sys_reset_mode(uint8_t mode)
 {
 	switch (mode) {
@@ -788,24 +816,12 @@ void sys_reset_mode(uint8_t mode)
 	case 6: // Reset mode DFU
 #endif
 		LOG_INF("DFU requested");
-#if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
-		sys_request_system_reboot(false);
-#endif
-#if NRF5_BOOTLOADER
-		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+		sys_enter_dfu(false);
 		break;
 	case 7:
 	case 8: // Reset mode DFU OTA
 		LOG_INF("DFU OTA requested");
-#if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
-		sys_request_system_reboot(false);
-#endif
-#if NRF5_BOOTLOADER
-		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+		sys_enter_dfu(true);
 #endif
 	default:
 		break;

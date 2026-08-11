@@ -82,13 +82,8 @@ static void console_lifecycle_work_handler(struct k_work *work)
 K_THREAD_DEFINE(console_thread_id, 2048, console_thread, NULL, NULL, NULL, CONSOLE_THREAD_PRIORITY, 0, 0);
 #endif
 
-#define DFU_EXISTS ((CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER) && !CONFIG_BOOTLOADER_MCUBOOT)
+#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT)
 #define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
-#define NRF5_BOOTLOADER (CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BOOTLOADER_MCUBOOT)
-
-#if NRF5_BOOTLOADER
-static const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
-#endif
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
 #define SENSOR_MAG_EXISTS true
@@ -1379,6 +1374,7 @@ static void console_cmd_dfu(size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	char *arg = argc > 1 ? argv[1] : NULL;
+	bool ota = false;
 
 #if ADAFRUIT_BOOTLOADER
 	// Subcommands:
@@ -1387,24 +1383,24 @@ static void console_cmd_dfu(size_t argc, char **argv)
 	char *mode = arg;
 
 	if (mode && strcmp(mode, "ota") == 0) {
+		ota = true;
 		printk("Entering OTA DFU (BLE)...\n");
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
 	} else if (mode == NULL) {
 		printk("Entering UF2 DFU...\n");
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 	} else {
 		printk("Error: Unknown DFU mode '%s'. Use: dfu [ota]\n", mode);
 		return;
 	}
 
-	k_msleep(100); // Wait for GPREGRET to be written
-	sys_request_system_reboot(false);
 #else
-	ARG_UNUSED(arg);
+	if (arg != NULL) {
+		printk("Error: This bootloader does not support a DFU mode argument\n");
+		return;
+	}
 #endif
-#if NRF5_BOOTLOADER
-	gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+
+	printk("Entering DFU bootloader...\n");
+	sys_enter_dfu(ota);
 }
 #endif
 
@@ -1594,13 +1590,7 @@ static void console_thread(void)
 #if USB_EXISTS && DFU_EXISTS
 	if (button_read()) // button held on usb connect, enter DFU
 	{
-#if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
-		sys_request_system_reboot(false);
-#endif
-#if NRF5_BOOTLOADER
-		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+		sys_enter_dfu(false);
 	}
 #endif
 

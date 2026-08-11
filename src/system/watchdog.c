@@ -11,6 +11,7 @@
 
 #include "watchdog.h"
 #include "globals.h"
+#include "system/system.h"
 #include <zephyr/task_wdt/task_wdt.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/device.h>
@@ -169,6 +170,8 @@ static void enter_dfu_mode(void)
 #elif CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BOOTLOADER_MCUBOOT
 	/* nRF5 SDK bootloader - implementation depends on specific bootloader */
 	sys_reboot(SYS_REBOOT_COLD);
+#elif CONFIG_BOOTLOADER_MCUBOOT
+	sys_enter_dfu(false);
 #else
 	/* No bootloader available, perform cold reboot */
 	LOG_ERR("No bootloader available, performing cold reboot");

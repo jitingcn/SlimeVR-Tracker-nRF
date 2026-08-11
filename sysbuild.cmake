@@ -18,7 +18,11 @@ if(DEFINED EXTRA_DTC_OVERLAY_FILE)
   list(APPEND ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE ${EXTRA_DTC_OVERLAY_FILE})
 endif()
 
-if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_BOARD STREQUAL "xiao_ble")
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf54lm20a_mcuboot.overlay)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${partition_overlay_dir}/nrf54lm20a_mcuboot.overlay)
+elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_BOARD STREQUAL "xiao_ble")
   list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_xiao_mcuboot.overlay)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
        ${partition_overlay_dir}/nrf52840_xiao_mcuboot.overlay)
@@ -75,6 +79,8 @@ endforeach()
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
        ${mcuboot_overlay_dir}/mcuboot_nrf54lm20a.overlay)
+  list(APPEND mcuboot_EXTRA_CONF_FILE
+       ${mcuboot_overlay_dir}/mcuboot_usb_next.conf)
 endif()
 
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
@@ -84,13 +90,26 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
        ${mcuboot_overlay_dir}/mcuboot_usb.overlay)
 endif()
 
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
+   (SB_CONFIG_SOC_NRF52833 OR SB_CONFIG_SOC_NRF52840))
+  list(APPEND mcuboot_EXTRA_CONF_FILE
+       ${mcuboot_overlay_dir}/mcuboot_usb_legacy.conf)
+endif()
+
 if(SB_CONFIG_BOOTLOADER_MCUBOOT)
   set_property(TARGET mcuboot APPEND PROPERTY _EP_CMAKE_ARGS
                -DBOARD_DEFCONFIG:FILEPATH=${mcuboot_overlay_dir}/mcuboot_board_defconfig)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
-       ${mcuboot_overlay_dir}/mcuboot.overlay)
+       ${mcuboot_overlay_dir}/mcuboot.overlay
+       ${mcuboot_overlay_dir}/mcuboot_boot_mode.overlay)
+  list(APPEND ${DEFAULT_IMAGE}_EXTRA_DTC_OVERLAY_FILE
+       ${mcuboot_overlay_dir}/mcuboot_boot_mode.overlay)
   list(APPEND ${DEFAULT_IMAGE}_EXTRA_CONF_FILE
        ${CMAKE_CURRENT_LIST_DIR}/boards/mcuboot.conf)
+  list(REMOVE_DUPLICATES mcuboot_EXTRA_CONF_FILE)
+  set(mcuboot_EXTRA_CONF_FILE
+      ${mcuboot_EXTRA_CONF_FILE}
+      CACHE INTERNAL "")
   list(REMOVE_DUPLICATES mcuboot_EXTRA_DTC_OVERLAY_FILE)
   set(mcuboot_EXTRA_DTC_OVERLAY_FILE
       ${mcuboot_EXTRA_DTC_OVERLAY_FILE}

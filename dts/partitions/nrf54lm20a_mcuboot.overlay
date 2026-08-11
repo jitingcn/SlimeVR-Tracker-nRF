@@ -1,0 +1,35 @@
+/ {
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+	};
+};
+
+&cpuapp_rram {
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 0x00012000>;
+		};
+
+		slot0_partition: partition@12000 {
+			label = "image-0";
+			reg = <0x00012000 0x000e5000>;
+		};
+
+		slot1_partition: partition@f7000 {
+			label = "image-1";
+			reg = <0x000f7000 0x000e5000>;
+		};
+
+		storage_partition: partition@1dc000 {
+			label = "storage";
+			reg = <0x001dc000 0x00009000>;
+		};
+	};
+};

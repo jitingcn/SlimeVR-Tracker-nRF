@@ -1,5 +1,5 @@
 &usbhs_wrapper {
-	status = "disabled";
+	status = "okay";
 };
 
 &pmic_i2c {
