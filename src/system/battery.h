@@ -7,6 +7,9 @@
 #ifndef APPLICATION_BATTERY_H_
 #define APPLICATION_BATTERY_H_
 
+#include <stdbool.h>
+#include <stdint.h>
+
 /** Enable or disable measurement of the battery voltage.
  *
  * @param enable true to enable, false to disable
@@ -21,6 +24,8 @@ int battery_measure_enable(bool enable);
  * code.
  */
 int battery_sample(void);
+
+int battery_charger_state(bool *plugged, bool *charging, bool *charged);
 
 /** A point in a battery discharge curve sequence.
  *

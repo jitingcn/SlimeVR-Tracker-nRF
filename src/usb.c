@@ -84,8 +84,21 @@ USBD_DESC_PRODUCT_DEFINE(slimevr_product, CONFIG_SLIMEVR_USB_DEVICE_PRODUCT);
 IF_ENABLED(CONFIG_HWINFO, (USBD_DESC_SERIAL_NUMBER_DEFINE(slimevr_sn)));
 
 USBD_DESC_CONFIG_DEFINE(slimevr_fs_cfg_desc, "FS Configuration");
+USBD_DESC_CONFIG_DEFINE(slimevr_hs_cfg_desc, "HS Configuration");
 USBD_CONFIGURATION_DEFINE(slimevr_fs_config, 0, CONFIG_SLIMEVR_USB_DEVICE_MAX_POWER,
 			  &slimevr_fs_cfg_desc);
+USBD_CONFIGURATION_DEFINE(slimevr_hs_config, 0, CONFIG_SLIMEVR_USB_DEVICE_MAX_POWER,
+			  &slimevr_hs_cfg_desc);
+
+static int usbd_set_code_triple(enum usbd_speed speed)
+{
+	if (!IS_ENABLED(CONFIG_USBD_CDC_ACM_CLASS)) {
+		return 0;
+	}
+
+	return usbd_device_set_code_triple(&slimevr_usbd, speed,
+					   USB_BCC_MISCELLANEOUS, 0x02, 0x01);
+}
 
 static int usbd_add_string_descriptors(void)
 {
@@ -121,6 +134,28 @@ static int usbd_setup(usbd_msg_cb_t msg_cb)
 		return ret;
 	}
 
+	if (USBD_SUPPORTS_HIGH_SPEED &&
+	    usbd_caps_speed(&slimevr_usbd) == USBD_SPEED_HS) {
+		ret = usbd_add_configuration(&slimevr_usbd, USBD_SPEED_HS,
+					     &slimevr_hs_config);
+		if (ret != 0) {
+			LOG_ERR("Failed to add USB HS configuration: %d", ret);
+			return ret;
+		}
+
+		ret = usbd_register_all_classes(&slimevr_usbd, USBD_SPEED_HS, 1, NULL);
+		if (ret != 0) {
+			LOG_ERR("Failed to register USB HS classes: %d", ret);
+			return ret;
+		}
+
+		ret = usbd_set_code_triple(USBD_SPEED_HS);
+		if (ret != 0) {
+			LOG_ERR("Failed to set USB HS code triple: %d", ret);
+			return ret;
+		}
+	}
+
 	ret = usbd_add_configuration(&slimevr_usbd, USBD_SPEED_FS, &slimevr_fs_config);
 	if (ret != 0) {
 		LOG_ERR("Failed to add USB FS configuration: %d", ret);
@@ -133,13 +168,10 @@ static int usbd_setup(usbd_msg_cb_t msg_cb)
 		return ret;
 	}
 
-	if (IS_ENABLED(CONFIG_USBD_CDC_ACM_CLASS)) {
-		ret = usbd_device_set_code_triple(&slimevr_usbd, USBD_SPEED_FS,
-						  USB_BCC_MISCELLANEOUS, 0x02, 0x01);
-		if (ret != 0) {
-			LOG_ERR("Failed to set USB code triple: %d", ret);
-			return ret;
-		}
+	ret = usbd_set_code_triple(USBD_SPEED_FS);
+	if (ret != 0) {
+		LOG_ERR("Failed to set USB FS code triple: %d", ret);
+		return ret;
 	}
 
 	ret = usbd_msg_register_cb(&slimevr_usbd, msg_cb);

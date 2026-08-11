@@ -22,6 +22,7 @@
 #include <hal/nrf_twim.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <stdint.h>
+#include <errno.h>
 
 #include "power.h"
 #include "power_battery.h"
@@ -569,6 +570,11 @@ static void power_thread(void)
 		bool docked = dock_read();
 		bool charging = chg_read();
 		bool charged = stby_read();
+		bool pmic_plugged = false;
+		int charger_state_err = battery_charger_state(&pmic_plugged, &charging, &charged);
+		if (charger_state_err != 0 && charger_state_err != -ENOTSUP) {
+			LOG_WRN("Failed to read charger state: %d", charger_state_err);
+		}
 
 		int battery_mV;
 		int16_t battery_pptt = read_batt_mV(&battery_mV);
@@ -589,7 +595,7 @@ static void power_thread(void)
 		bool usb_plugged = false;
 #endif
 		int64_t now_ms = k_uptime_get();
-		bool raw_device_plugged = charging || charged || plugged || usb_plugged;
+		bool raw_device_plugged = charging || charged || plugged || usb_plugged || pmic_plugged;
 		bool plug_state_debouncing = power_battery_update_plugged_state(raw_device_plugged, now_ms);
 		bool plug_signal_settling = power_battery_plug_signal_settling(plug_state_debouncing, now_ms);
 		int32_t average_pptt = power_battery_average_pptt();
@@ -642,7 +648,7 @@ static void power_thread(void)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (charged)
 			set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (plugged || usb_plugged)
+		else if (plugged || usb_plugged || pmic_plugged)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (power_battery_is_low())
 			set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_SYSTEM);

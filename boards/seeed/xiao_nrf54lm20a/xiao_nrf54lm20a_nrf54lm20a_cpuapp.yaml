@@ -1,0 +1,28 @@
+# Copyright (c) 2025 Seeed Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+identifier: xiao_nrf54lm20a/nrf54lm20a/cpuapp
+name: XIAO nRF54LM20A SlimeNRF
+type: mcu
+vendor: seeed
+arch: arm
+toolchain:
+  - gnuarmemb
+  - zephyr
+sysbuild: true
+ram: 507
+flash: 920
+supported:
+  - adc
+  - gpio
+  - i2c
+  - pwm
+  - spi
+  - usbd
+  - watchdog
+  - xiao_gpio
+  - xiao_i2c
+  - xiao_spi
+  - xiao_serial
+  - xiao_adc
+
