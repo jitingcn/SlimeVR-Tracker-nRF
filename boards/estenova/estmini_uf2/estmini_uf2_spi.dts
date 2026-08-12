@@ -1,0 +1,23 @@
+// Copyright (c) 2024 Nordic Semiconductor ASA
+// SPDX-License-Identifier: Apache-2.0
+
+/dts-v1/;
+#include "estmini_uf2.dts"
+
+/delete-node/ &i2c0;
+&spi3 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	max-frequency = <DT_FREQ_M(24)>;
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+
+	imu_spi: imu_spi@0 {
+		compatible = "vnd,spi-device";
+		spi-max-frequency = <DT_FREQ_M(24)>;
+		label = "imu-spi";
+		reg = <0>;
+	};
+};
