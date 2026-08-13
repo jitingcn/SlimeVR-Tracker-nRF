@@ -1,4 +1,5 @@
 #include <math.h>
+#include <string.h>
 
 #include <zephyr/logging/log.h>
 #include <hal/nrf_gpio.h>
@@ -8,6 +9,7 @@
 #include "sensor/sensor_none.h"
 
 #define PACKET_SIZE 7 // first byte is pattern, only 6 actual sample bytes
+#define FIFO_SANITY_MAX_SAMPLES 32 // guard against corrupted DIFF_FIFO reads
 
 static uint8_t accel_fs = DSM_FS_XL_16G;
 static uint8_t gyro_fs = DSM_FS_G_2000DPS;
@@ -299,41 +301,91 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len)
 {
 	int err = 0;
 	uint16_t total = 0;
-	uint16_t count = UINT16_MAX;
-	uint16_t pattern = 0;
-	while (count > 0 && len >= PACKET_SIZE)
-	{
+	/* Samples per FIFO pattern cycle; tags cycle in FIFO order and
+	 * fifo_process maps them to gyro/accel as before. */
+	const uint8_t cycle_samples = (uint8_t)(fifo_pattern_length + 1);
 
-		uint8_t rawCount[4];
-		err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_STATUS1, &rawCount[0], 2);
-		count = (uint16_t)((rawCount[1] & 7) << 8 | rawCount[0]); // Turn the 16 bits into a unsigned 16-bit value
-		if (!count) // nothing to do
-			break;
-		count /= PACKET_SIZE / 2; // words to "packets" (actually PACKET_SIZE - 1)
-		uint16_t limit = len / PACKET_SIZE;
-		if (count > limit)
+	while (len >= PACKET_SIZE)
+	{
+		uint8_t status[4];
+		int64_t st0 = k_uptime_ticks();
+		err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_STATUS1, status, 4);
 		{
-			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", count - limit);
-			count = limit;
-		}
-		for (int i = 0; i < count; i++)
-		{
-			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_STATUS3, &rawCount[0], 2); // reading pattern
-			pattern = (uint16_t)((rawCount[1] & 3) << 8 | rawCount[0]);
-			if (pattern % 3 != 0) // misaligned!
-			{
-				LOG_WRN("FIFO not aligned");
-				err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_DATA_OUT_L, rawCount, (pattern % 3) * 2); // read and discard misaligned axes
-				count--;
+			uint64_t st_us = k_ticks_to_us_near64(k_uptime_ticks() - st0);
+			if (st_us > 2000) {
+				LOG_DBG("Slow I2C read: %llu us (status, 4 B)", (unsigned long long)st_us);
 			}
-			data[i * PACKET_SIZE] = pattern / 3;
-			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_DATA_OUT_L, &data[i * PACKET_SIZE + 1], PACKET_SIZE - 1);
 		}
 		if (err)
+		{
 			LOG_ERR("Communication error");
-		data += count * PACKET_SIZE;
-		len -= count * PACKET_SIZE;
-		total += count;
+			break;
+		}
+
+		uint16_t words = (uint16_t)((status[1] & 7) << 8 | status[0]); // DIFF_FIFO[10:0]
+		if (!words) // nothing to do
+			break;
+
+		uint16_t pattern = (uint16_t)((status[3] & 3) << 8 | status[2]); // FIFO_PATTERN[9:0]
+
+		/* pattern % 3 is the word offset in a sample; skip a partial
+		 * sample so the read starts on a sample boundary. */
+		uint16_t tag = pattern / 3;
+		if (pattern % 3 != 0) // misaligned!
+		{
+			LOG_WRN("FIFO not aligned");
+			uint16_t skip_words = (uint16_t)(3 - (pattern % 3));
+			uint8_t discard[8];
+			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_DATA_OUT_L, discard, skip_words * 2);
+			words = (words > skip_words) ? (uint16_t)(words - skip_words) : 0;
+			tag = (uint16_t)((tag + 1) % cycle_samples);
+		}
+
+		uint16_t samples = words / 3;
+		uint16_t limit = len / PACKET_SIZE;
+		if (samples > limit)
+		{
+			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", samples - limit);
+			samples = limit;
+		}
+		/* A corrupted DIFF_FIFO byte could report 2047 words and turn
+		 * into a ~20 ms garbage read; clamp to a sane ceiling. */
+		if (samples > FIFO_SANITY_MAX_SAMPLES) {
+			LOG_DBG("FIFO status spike: %u words -> clamped to %u samples",
+				words, FIFO_SANITY_MAX_SAMPLES);
+			samples = FIFO_SANITY_MAX_SAMPLES;
+		}
+		if (samples == 0)
+			break;
+
+		/* Raw 16-bit words, no tags; the deterministic pattern supplies
+		 * the tag per 6-byte sample (cf. Linux st_lsm6dsx pattern FIFO). */
+		uint8_t raw[24 * 6];
+		while (samples > 0)
+		{
+			uint16_t n = samples;
+			if (n > (uint16_t)(sizeof(raw) / 6))
+				n = (uint16_t)(sizeof(raw) / 6);
+			int64_t d0 = k_uptime_ticks();
+			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_DATA_OUT_L, raw, n * 6);
+			{
+				uint64_t d_us = k_ticks_to_us_near64(k_uptime_ticks() - d0);
+				if (d_us > 2000) {
+					LOG_DBG("Slow I2C read: %llu us (data, %u B)",
+						(unsigned long long)d_us, n * 6);
+				}
+			}
+			for (uint16_t i = 0; i < n; i++)
+			{
+				data[i * PACKET_SIZE] = (uint8_t)((tag + i) % cycle_samples);
+				memcpy(&data[i * PACKET_SIZE + 1], &raw[i * 6], PACKET_SIZE - 1);
+			}
+			samples -= n;
+			tag = (uint16_t)((tag + n) % cycle_samples);
+			data += n * PACKET_SIZE;
+			len -= n * PACKET_SIZE;
+			total += n;
+		}
 	}
 	return total;
 }
@@ -377,7 +429,10 @@ uint8_t lsm6dsm_setup_DRDY(uint16_t threshold)
 	buf[0] = threshold & 0xFF;
 	buf[1] = (threshold >> 8) & 0x07;
 	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_CTRL1, buf, 2);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_INT1_CTRL, 0x08); // FIFO threshold interrupt
+	/* LSM6DSM has no COUNTER_BDR (unlike LSM6DSV); use pulsed INT1_DRDY_G for
+	 * per-sample wakeup, with INT1_FTH as the burst/catch-up backup. */
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_INT1_CTRL, 0x0A); // INT1_FTH | INT1_DRDY_G
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_DRDY_PULSE_CFG, 0x80); // pulsed DRDY (75 us)
 	if (err)
 		LOG_ERR("Communication error");
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low

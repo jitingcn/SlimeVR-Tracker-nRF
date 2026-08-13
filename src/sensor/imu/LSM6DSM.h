@@ -8,6 +8,7 @@
 #define LSM6DSM_FIFO_CTRL3                 0x08
 #define LSM6DSM_FIFO_CTRL5                 0x0A
 
+#define LSM6DSM_DRDY_PULSE_CFG              0x0B
 #define LSM6DSM_INT1_CTRL                  0x0D
 
 #define LSM6DSM_CTRL1                      0x10
