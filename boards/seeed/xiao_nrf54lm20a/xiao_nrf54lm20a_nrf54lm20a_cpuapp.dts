@@ -33,14 +33,19 @@
 &spi23 {
 	compatible = "nordic,nrf-spim";
 	status = "okay";
-	max-frequency = <DT_FREQ_M(24)>;
+	/* nRF54L SPIM23 runs in the 16 MHz peripheral domain and its prescaler
+	 * only accepts even divisors (>= 2): 10/24 MHz are rejected by nrfx with
+	 * -EINVAL, so 8 MHz is the maximum usable frequency. The Zephyr driver
+	 * clamps every requested SPI frequency to this value.
+	 */
+	max-frequency = <DT_FREQ_M(8)>;
 	/* XIAO D2 is the default external tracker IMU chip select. */
 	cs-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
 
 	imu_spi: imu@0 {
 		compatible = "vnd,spi-device";
 		reg = <0>;
-		spi-max-frequency = <DT_FREQ_M(24)>;
+		spi-max-frequency = <DT_FREQ_M(8)>;
 	};
 };
 

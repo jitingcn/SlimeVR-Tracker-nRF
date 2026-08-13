@@ -71,11 +71,16 @@
 };
 
 &spi00 {
+	/* nRF54L SPIM00 prescaler accepts only even divisors: the IMU drivers'
+	 * 24 MHz request is invalid, so clamp the controller (and child) to the
+	 * safe 8 MHz used everywhere else.
+	 */
+	max-frequency = <DT_FREQ_M(8)>;
 	/delete-node/ mx25r6435f@0;
 
 	imu_spi: imu_spi@0 {
 		compatible = "vnd,spi-device";
-		spi-max-frequency = <DT_FREQ_M(24)>;
+		spi-max-frequency = <DT_FREQ_M(8)>;
 		label = "imu-spi";
 		reg = <0>;
 	};
