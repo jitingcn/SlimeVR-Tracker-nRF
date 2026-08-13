@@ -170,7 +170,12 @@ static int force_scan_request_count = 0;
 // Periodic retained save interval (ms) for crash recovery
 #define RETAINED_SAVE_INTERVAL_MS 5000
 
-static float rest_max_gyro_speed_square;
+/* Rest gyro speed uses an EMA of the calibrated gyro VECTOR (per-axis), so
+ * zero-mean high-frequency noise (or a large but constant ZRO residual) does
+ * not keep the tracker in "active" forever; only sustained rotation moves the
+ * EMA. Time constant ~120 ms at 416 Hz (alpha = 0.02/sample). */
+#define REST_GYRO_SPEED_EMA_ALPHA 0.02f
+static float rest_gyro_speed_ema[3];
 // Wall-clock tick of the most recent updateMag call, used to compute actual dt
 static int64_t last_mag_fusion_ticks = 0;
 // Time-gating for mag VQF updates: only feed update_mag once per mag ODR period.
@@ -511,14 +516,15 @@ static void sensor_reset_resting_state(void)
 	rest_state.reference_q[1] = 0.0f;
 	rest_state.reference_q[2] = 0.0f;
 	rest_state.reference_q[3] = 0.0f;
-	rest_max_gyro_speed_square = 0.0f;
+	rest_gyro_speed_ema[0] = 0.0f;
+	rest_gyro_speed_ema[1] = 0.0f;
+	rest_gyro_speed_ema[2] = 0.0f;
 }
 
 static void sensor_record_rest_gyro_motion(const float *g)
 {
-	float gyro_speed_square = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-	if (gyro_speed_square > rest_max_gyro_speed_square) {
-		rest_max_gyro_speed_square = gyro_speed_square;
+	for (int i = 0; i < 3; i++) {
+		rest_gyro_speed_ema[i] += REST_GYRO_SPEED_EMA_ALPHA * (g[i] - rest_gyro_speed_ema[i]);
 	}
 }
 
@@ -552,7 +558,11 @@ static bool sensor_update_resting_state(
 		return false;
 	}
 
-	float gyro_speed = sqrtf(rest_max_gyro_speed_square);
+	float gyro_speed = sqrtf(
+		rest_gyro_speed_ema[0] * rest_gyro_speed_ema[0]
+		+ rest_gyro_speed_ema[1] * rest_gyro_speed_ema[1]
+		+ rest_gyro_speed_ema[2] * rest_gyro_speed_ema[2]
+	);
 	float zero[3] = {0.0f, 0.0f, 0.0f};
 	float lin_accel = v_diff_mag(lin_a, zero);
 	float quat_delta = q_diff_mag(current_q, rest_state.reference_q);
@@ -2365,7 +2375,6 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 	frame->a_sum[1] = 0;
 	frame->a_sum[2] = 0;
 	frame->a_count = 0;
-	rest_max_gyro_speed_square = 0;
 	frame->processed_packets = 0;
 
 	// For debug: accumulate raw and calibrated data
