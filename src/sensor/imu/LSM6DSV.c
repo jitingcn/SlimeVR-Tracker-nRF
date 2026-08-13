@@ -351,7 +351,7 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 		return 0;
 	}
 
-	// Parse FIFO word count (10-bit field: bits 1:0 of STATUS2 and all 8 bits of STATUS1)
+	// Parse FIFO word count (9-bit field: bit 0 of STATUS2 and all 8 bits of STATUS1)
 	uint16_t count = (uint16_t)((rawStatus[1] & LSM6DSV_FIFO_DIFF_8) << 8 | rawStatus[0]);
 
 	// Early return if FIFO is empty
@@ -366,13 +366,14 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 		return 0;
 	}
 
-	// Limit read to available buffer space
+	// Limit read to available buffer space; drain what fits instead of
+	// resyncing and dropping the whole batch (a corrupted DIFF_FIFO or a
+	// long preemption would otherwise cost 2x350us of resync sleeps).
 	uint16_t limit = len / PACKET_SIZE;
 	if (count > limit)
 	{
-		LOG_WRN("FIFO buffer limit exceeded: count=%u limit=%u, resyncing FIFO", count, limit);
-		lsm_fifo_resync("software buffer limit exceeded");
-		return 0;
+		LOG_WRN("FIFO read buffer limit reached, %u packets dropped", count - limit);
+		count = limit;
 	}
 
 	// Batch read all packets in one SPI transaction

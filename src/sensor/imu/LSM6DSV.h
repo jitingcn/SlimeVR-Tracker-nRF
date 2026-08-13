@@ -27,13 +27,13 @@
 #define LSM6DSV_FIFO_STATUS2               0x1C  // FIFO word count [9:8] + status flags
 #define LSM6DSV_STATUS_REG                 0x1E
 
-// FIFO_STATUS2 bit definitions (0x1C)
-#define LSM6DSV_FIFO_OVR_LATCHED           0x80  // FIFO overrun latched status (reset when read)
-#define LSM6DSV_COUNTER_BDR_IA             0x40  // Counter batch data rate interrupt active
+// FIFO_STATUS2 bit definitions (0x1C), DS13476 Rev5 Table 77/78
+#define LSM6DSV_FIFO_WTM_IA                0x80  // FIFO watermark interrupt active
+#define LSM6DSV_FIFO_OVR_IA                0x40  // FIFO overrun interrupt active
 #define LSM6DSV_FIFO_FULL_IA               0x20  // FIFO full interrupt active
-#define LSM6DSV_FIFO_OVR_IA                0x10  // FIFO overrun interrupt active
-#define LSM6DSV_FIFO_WTM_IA                0x08  // FIFO watermark interrupt active
-#define LSM6DSV_FIFO_DIFF_8                0x03  // FIFO word count bits [9:8]
+#define LSM6DSV_COUNTER_BDR_IA             0x10  // Counter batch data rate interrupt active
+#define LSM6DSV_FIFO_OVR_LATCHED           0x08  // FIFO overrun latched status (reset when read)
+#define LSM6DSV_FIFO_DIFF_8                0x01  // FIFO word count bit [8]
 
 // FIFO data tag definitions (TAG_SENSOR [4:0] from FIFO_DATA_OUT_TAG byte >> 3)
 #define LSM6DSV_TAG_FIFO_EMPTY             0x00  // FIFO empty
