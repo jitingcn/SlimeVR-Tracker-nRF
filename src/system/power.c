@@ -21,6 +21,7 @@
 #include <zephyr/dfu/mcuboot.h>
 #endif
 #include <zephyr/device.h>
+#include <zephyr/sys/util.h>
 #include <hal/nrf_spim.h>
 #include <hal/nrf_twim.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
@@ -234,38 +235,77 @@ static void set_regulator(enum sys_regulator regulator)
 #endif
 }
 
+#if DT_HAS_COMPAT_STATUS_OKAY(nordic_nrf_twim)
+static void __maybe_unused disconnect_twim_pins(uintptr_t reg)
+{
+	NRF_TWIM_Type *twim = (NRF_TWIM_Type *)reg;
+
+	nrf_psel_cfg_default("Disconnected I2C SCL", nrf_twim_scl_pin_get(twim));
+	nrf_psel_cfg_default("Disconnected I2C SDA", nrf_twim_sda_pin_get(twim));
+}
+#endif
+
+#if DT_HAS_COMPAT_STATUS_OKAY(nordic_nrf_spim)
+static void __maybe_unused disconnect_spim_pins(uintptr_t reg)
+{
+	NRF_SPIM_Type *spim = (NRF_SPIM_Type *)reg;
+
+	nrf_psel_cfg_default("Disconnected SPI SCK", nrf_spim_sck_pin_get(spim));
+	nrf_psel_cfg_default("Disconnected SPI MOSI", nrf_spim_mosi_pin_get(spim));
+	nrf_psel_cfg_default("Disconnected SPI MISO", nrf_spim_miso_pin_get(spim));
+}
+#endif
+
+#define IS_TRACKER_SENSOR_NODE(node)                                                                   \
+	((DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_SAME_NODE(node, DT_NODELABEL(imu))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_SAME_NODE(node, DT_NODELABEL(imu_spi))) ||        \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_SAME_NODE(node, DT_NODELABEL(mag))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_SAME_NODE(node, DT_NODELABEL(mag_spi))))
+
+#define SENSOR_BUS_FOREIGN_CHILD(child) +!IS_TRACKER_SENSOR_NODE(child)
+
+/* Other okay children (flash, PMIC, display, ...) share this bus. */
+#define SENSOR_BUS_HAS_FOREIGN_CHILD(bus)                                                              \
+	(0 DT_FOREACH_CHILD_STATUS_OKAY(bus, SENSOR_BUS_FOREIGN_CHILD))
+
+#define DISCONNECT_NRF_BUS_PINS(bus)                                                                   \
+	IF_ENABLED(DT_NODE_HAS_COMPAT(bus, nordic_nrf_twim),                                           \
+		   (disconnect_twim_pins(DT_REG_ADDR(bus));))                                          \
+	IF_ENABLED(DT_NODE_HAS_COMPAT(bus, nordic_nrf_spim),                                           \
+		   (disconnect_spim_pins(DT_REG_ADDR(bus));))
+
+#define DISCONNECT_SENSOR_DEV_BUS(dev_id)                                                              \
+	do {                                                                                           \
+		if (SENSOR_BUS_HAS_FOREIGN_CHILD(DT_BUS(dev_id)) == 0) {                               \
+			DISCONNECT_NRF_BUS_PINS(DT_BUS(dev_id));                                       \
+		}                                                                                      \
+	} while (0)
+
 static void disconnect_sensor_pins(void)
 {
 #if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
 	LOG_INF("Disconnecting sensor GPIOs");
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(i2c0))
-	const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
-	if (device_is_ready(i2c_dev)) {
-		NRF_TWIM_Type *twim = (NRF_TWIM_Type *)DT_REG_ADDR(DT_NODELABEL(i2c0));
-
-		nrf_psel_cfg_default("Disconnected I2C SCL", nrf_twim_scl_pin_get(twim));
-		nrf_psel_cfg_default("Disconnected I2C SDA", nrf_twim_sda_pin_get(twim));
-	}
+#if DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(imu)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(imu));
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi3))
-	const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi3));
-	if (device_is_ready(spi_dev)) {
-		NRF_SPIM_Type *spim = (NRF_SPIM_Type *)DT_REG_ADDR(DT_NODELABEL(spi3));
-
-		nrf_psel_cfg_default("Disconnected SPI SCK", nrf_spim_sck_pin_get(spim));
-		nrf_psel_cfg_default("Disconnected SPI MOSI", nrf_spim_mosi_pin_get(spim));
-		nrf_psel_cfg_default("Disconnected SPI MISO", nrf_spim_miso_pin_get(spim));
-
-#if DT_NODE_HAS_PROP(DT_NODELABEL(spi3), cs_gpios)
-		const struct gpio_dt_spec cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi3), cs_gpios, 0);
-		nrf_gpio_configure_dt_log("Disconnected SPI CS", &cs, GPIO_DISCONNECTED);
+#if DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(imu_spi)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(imu_spi));
 #endif
-	}
+#if DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(mag)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(mag));
 #endif
-
+#if DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(mag_spi)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(mag_spi));
+#endif
 	LOG_INF("All sensor GPIO pins disconnected");
 #endif
 }
+
+#undef IS_TRACKER_SENSOR_NODE
+#undef SENSOR_BUS_FOREIGN_CHILD
+#undef SENSOR_BUS_HAS_FOREIGN_CHILD
+#undef DISCONNECT_NRF_BUS_PINS
+#undef DISCONNECT_SENSOR_DEV_BUS
 
 static void wait_for_logging(void)
 {
