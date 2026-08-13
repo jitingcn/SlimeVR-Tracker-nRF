@@ -1,0 +1,9 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+board:
+  name: estmini_uf2
+  full_name: Estmini Mini
+  vendor: nordic
+  socs:
+    - name: nrf52840
