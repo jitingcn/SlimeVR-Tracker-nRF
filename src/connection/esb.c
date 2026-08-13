@@ -32,9 +32,7 @@
 #include "zephyr/sys/time_units.h"
 
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
-#if defined(NRF54L15_XXAA)
 #include <hal/nrf_clock.h>
-#endif /* defined(NRF54L15_XXAA) */
 #include <hal/nrf_timer.h>
 #include <nrfx_timer.h>
 #include <zephyr/sys/crc.h>
@@ -760,10 +758,10 @@ int clocks_start(void)
 		}
 	} while (err);
 
-#if defined(NRF54L15_XXAA)
-	/* MLTPAN-20 */
+#if NRF_CLOCK_HAS_PLL
+	/* MLTPAN-20: CLOCK PLL must be running for radio (nRF54L and later). */
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
-#endif /* defined(NRF54L15_XXAA) */
+#endif
 
 	clock_status = true;
 	return 0;
