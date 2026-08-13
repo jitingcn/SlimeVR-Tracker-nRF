@@ -1406,6 +1406,8 @@ static uint64_t sensor_window_acq_max_us;
 static uint64_t sensor_window_proc_max_us;
 static uint64_t sensor_window_resume_max_us;
 static uint64_t sensor_window_fifo_max_us;
+static int64_t sensor_startup_discard_until_ms;
+static bool sensor_startup_discard_logged;
 
 static void sensor_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -3187,6 +3189,8 @@ void sensor_loop(void)
 		set_status(SYS_STATUS_SENSOR_ERROR, true); // TODO: only handles general init error
 	} else {
 		main_ok = true;
+		sensor_startup_discard_until_ms = k_uptime_get() + CONFIG_SENSOR_STARTUP_DISCARD_MS;
+		sensor_startup_discard_logged = false;
 	}
 	while (1) {
 		int64_t time_begin = k_uptime_get();
@@ -3206,16 +3210,25 @@ void sensor_loop(void)
 			if (acq_us > sensor_window_acq_max_us) {
 				sensor_window_acq_max_us = acq_us;
 			}
-			int64_t vqf_begin_ticks = k_uptime_ticks();
-			sensor_loop_process_fifo(&frame);
-			sensor_window_vqf_us += k_ticks_to_us_near64(k_uptime_ticks() - vqf_begin_ticks);
-			sensor_loop_process_mag(&frame);
-			sensor_loop_check_packets(&frame, time_begin);
-			sensor_loop_publish(&frame);
-			uint64_t proc_us = k_ticks_to_us_near64(k_uptime_ticks() - proc_begin_ticks);
-			sensor_window_proc_us += proc_us;
-			if (proc_us > sensor_window_proc_max_us) {
-				sensor_window_proc_max_us = proc_us;
+			if (sensor_startup_discard_until_ms > 0 && k_uptime_get() < sensor_startup_discard_until_ms) {
+				/* Skip the gyro power-on settle transient for every IMU:
+				 * drain the FIFO but feed nothing to fusion. */
+				if (!sensor_startup_discard_logged) {
+					LOG_DBG("Discarding startup IMU samples for %d ms", CONFIG_SENSOR_STARTUP_DISCARD_MS);
+					sensor_startup_discard_logged = true;
+				}
+			} else {
+				int64_t vqf_begin_ticks = k_uptime_ticks();
+				sensor_loop_process_fifo(&frame);
+				sensor_window_vqf_us += k_ticks_to_us_near64(k_uptime_ticks() - vqf_begin_ticks);
+				sensor_loop_process_mag(&frame);
+				sensor_loop_check_packets(&frame, time_begin);
+				sensor_loop_publish(&frame);
+				uint64_t proc_us = k_ticks_to_us_near64(k_uptime_ticks() - proc_begin_ticks);
+				sensor_window_proc_us += proc_us;
+				if (proc_us > sensor_window_proc_max_us) {
+					sensor_window_proc_max_us = proc_us;
+				}
 			}
 			sensor_window_packets += frame.packets;
 		}

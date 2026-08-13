@@ -377,6 +377,17 @@ config SENSOR_UPDATE_TIME_LOW_NOISE_MS
         Lower values raise the loop/packet rate (and ESB TPS) at the cost of
         more I2C/SPI reads and CPU time. 6 ms matches the historic default.
 
+config SENSOR_STARTUP_DISCARD_MS
+    int "Startup IMU samples to discard (ms)"
+    default 20
+    range 0 50
+    help
+        Discard IMU samples for this long after sensor init before feeding
+        fusion, to skip the gyro power-on settle transient for every IMU.
+        TDK examples discard the first FIFO frames and Betaflight waits for
+        gyro startup. 0 disables the window. Keep it small (<=20 ms) so the
+        first valid pose is not delayed.
+
 config SENSOR_MAG_ODR
     int "Magnetometer ODR (Hz)"
     default 200
