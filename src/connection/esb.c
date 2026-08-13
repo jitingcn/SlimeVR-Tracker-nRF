@@ -35,6 +35,7 @@
 #include <hal/nrf_clock.h>
 #include <hal/nrf_timer.h>
 #include <nrfx_timer.h>
+#include <nrfx_power.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/kernel.h>
@@ -95,6 +96,14 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, ESB_THREAD_PRIORITY, 0, 0);
 static int64_t last_tx_time = 0;
+
+/*
+ * nRF54L only: how long to keep HFCLK (and constant latency) up after the last
+ * ESB TX before stopping it. Frequent HFXO/PLL restarts are unreliable on
+ * nRF54L (anomaly 20/39), so clocks are stopped only after a longer idle
+ * period instead of after every drained TX.
+ */
+#define ESB_CLOCK_IDLE_STOP_MS 3000
 
 static uint32_t ping_success_streak = 0; // consecutive success counter
 static bool ping_pending = false;
@@ -773,6 +782,15 @@ int clocks_start(void)
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
 #endif
 
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+	/* nRF54L anomaly 20: constant latency sub-power mode must be active while
+	 * the radio is used, otherwise a TX payload can silently not be
+	 * transmitted and the radio stays stuck (ESB TX FIFO fills up). Mirrors
+	 * what MPSL / nrf_802154 / esb_glue.c do on nRF54L.
+	 */
+	(void)nrfx_power_constlat_mode_request();
+#endif
+
 	clock_status = true;
 	return 0;
 }
@@ -793,6 +811,10 @@ void clocks_stop(void)
 	clock_status = false;
 
 	onoff_release(clk_mgr);
+
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+	nrfx_power_constlat_mode_free();
+#endif
 
 	LOG_DBG("HF clock stop request");
 }
@@ -869,7 +891,12 @@ void event_handler(struct esb_evt const *event)
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
 		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+			/* nRF54L: keep HFCLK up while ESB is active; idle stop is
+			 * handled in esb_thread after ESB_CLOCK_IDLE_STOP_MS. */
+#else
 			clocks_stop();
+#endif
 		}
 		break;
 	case ESB_EVENT_TX_FAILED:
@@ -937,7 +964,12 @@ void event_handler(struct esb_evt const *event)
 		}
 
 		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+			/* nRF54L: keep HFCLK up while ESB is active; idle stop is
+			 * handled in esb_thread after ESB_CLOCK_IDLE_STOP_MS. */
+#else
 			clocks_stop();
+#endif
 		}
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
@@ -2039,6 +2071,16 @@ static void esb_thread(void)
 			esb_pair();
 			esb_initialize(true);
 		}
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+		/* Stop HFCLK only after a longer idle period without any ESB TX.
+		 * Frequent XO/PLL restarts are unreliable on nRF54L (anomaly 20). */
+		if (clock_status && esb_paired && !connection_get_data_collection() &&
+		    esb_is_idle() && last_tx_time != 0 &&
+		    (k_uptime_get() - last_tx_time) > ESB_CLOCK_IDLE_STOP_MS) {
+			clocks_stop();
+		}
+#endif
+
 		// Check for shutdown timeout if connection errors persist
 		if (ping_failures >= TX_ERROR_THRESHOLD && !test_mode_get()) {
 #if CONFIG_CONNECTION_OVER_HID
