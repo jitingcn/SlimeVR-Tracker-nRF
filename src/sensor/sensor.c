@@ -2351,7 +2351,7 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 		// TODO: causing warnings since packet processing and loop timing still expects previous update_time
 		switch (sensor_mode) {
 		case SENSOR_SENSOR_MODE_LOW_NOISE:
-			set_update_time_ms(6);
+			set_update_time_ms(CONFIG_SENSOR_UPDATE_TIME_LOW_NOISE_MS);
 			LOG_INF("Switching sensors to low noise");
 			break;
 		case SENSOR_SENSOR_MODE_LOW_POWER:
