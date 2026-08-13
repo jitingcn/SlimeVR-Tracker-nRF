@@ -681,9 +681,18 @@ int sensor_get_sensor_temperature(float *ptr)
 
 void sensor_scan_thread(void)
 {
+	/* The sensor loop only registers WDT_CHANNEL_SENSOR after sensor_init()
+	 * succeeds; discovery/init itself was previously unmonitored. Cover this
+	 * phase so a blocked sensor bus reboots instead of freezing forever. */
+	watchdog_register_thread(WDT_CHANNEL_SCAN, 0);
+
 	sys_interface_resume(); // make sure interfaces are enabled
 	(void)sensor_scan();    // IMUs discovery
 	sys_interface_suspend();
+
+	/* Handoff: sensor_loop re-registers WDT_CHANNEL_SENSOR. Remove this
+	 * one-shot channel so a later boot/rescan starts from a clean slot. */
+	watchdog_pause(WDT_CHANNEL_SCAN);
 }
 
 static int sensor_scan_imu_once(void)
