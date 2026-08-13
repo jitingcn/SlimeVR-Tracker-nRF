@@ -189,7 +189,11 @@ static float mag_actual_time;
 #define SENSOR_FIFO_RAW_BUFFER_SIZE 1024
 #endif
 
-static uint8_t sensor_fifo_raw_buffer[SENSOR_FIFO_RAW_BUFFER_SIZE];
+static uint8_t sensor_fifo_raw_buffer[SENSOR_FIFO_RAW_BUFFER_SIZE]
+#ifdef CONFIG_DCACHE_LINE_SIZE
+	__aligned(CONFIG_DCACHE_LINE_SIZE)
+#endif
+	;
 
 /*
  * Runtime INT_merge factor. Defaults to CONFIG_SENSOR_GYRO_OVERSAMPLING.
@@ -2230,7 +2234,12 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 	// - At 1000Hz ODR with 100ms low power 2 update: 1000 * 0.100 = ~100 packets
 	// - With 4x oversampling at 1600Hz: effectively same as 400Hz but with 4x raw packets
 	uint8_t *rawData = sensor_fifo_raw_buffer;
+	int64_t fifo_begin_ticks = k_uptime_ticks();
 	frame->packets = sensor_imu->fifo_read(rawData, sizeof(sensor_fifo_raw_buffer));
+	uint64_t fifo_us = k_ticks_to_us_near64(k_uptime_ticks() - fifo_begin_ticks);
+	if (fifo_us > sensor_window_fifo_max_us) {
+		sensor_window_fifo_max_us = fifo_us;
+	}
 #if IMU_INT_EXISTS
 	if (sensor_fast_first_update_pending && frame->packets > 0) {
 		sensor_fast_first_update_pending = false;
