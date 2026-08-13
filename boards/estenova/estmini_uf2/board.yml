@@ -7,5 +7,3 @@ board:
   vendor: nordic
   socs:
     - name: nrf52840
-      variants:
-      - name: 'spi'
