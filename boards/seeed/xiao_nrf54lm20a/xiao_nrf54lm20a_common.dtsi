@@ -4,6 +4,7 @@
  */
 
 #include "xiao_nrf54lm20a-pinctrl.dtsi"
+#include <zephyr/dt-bindings/gpio/nordic-nrf-gpio.h>
 #include <zephyr/dt-bindings/regulator/npm13xx.h>
 
 / {
@@ -45,8 +46,12 @@
 	power_en: power-en {
 		compatible = "regulator-fixed";
 		regulator-name = "sensor-power-enable";
-		enable-gpios = <&gpio1 12 GPIO_ACTIVE_HIGH>;
+		/* High drive on the enable pin + 3 ms startup delay, mirroring
+		 * Zephyr PRs #56640 / #57875 for the XIAO Sense LSM6DS3TR-C.
+		 */
+		enable-gpios = <&gpio1 12 (NRF_GPIO_DRIVE_S0H1 | GPIO_ACTIVE_HIGH)>;
 		regulator-boot-on;
+		startup-delay-us = <3000>;
 	};
 
 	pmic_i2c: pmic-i2c {
@@ -83,6 +88,8 @@
 					regulator-max-microvolt = <3300000>;
 					regulator-initial-mode = <NPM13XX_LDSW_MODE_LDO>;
 					regulator-boot-on;
+					/* Let the IMU 3.3 V rail settle before I2C access (cf. Zephyr PR #57875). */
+					startup-delay-us = <3000>;
 				};
 			};
 		};
