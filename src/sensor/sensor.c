@@ -605,8 +605,7 @@ static void sensor_update_range_stats_accel(float a[3]);
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 2048);
 
-K_THREAD_DEFINE(sensor_init_thread_id, 256, sensor_request_scan, true, NULL, NULL, SENSOR_REQUEST_SCAN_THREAD_PRIORITY, 0, 0);
-// crashing on nrf54l at 256
+K_THREAD_DEFINE(sensor_init_thread_id, 384, sensor_request_scan, true, NULL, NULL, SENSOR_REQUEST_SCAN_THREAD_PRIORITY, 0, 0);
 
 /* init thread handles starting scanner on the main thread, and then switches to the loop, before returning
    afterwards, other calls to start scanner will stop the loop on their thread and start the scanner on its own; it will
