@@ -102,6 +102,11 @@ void tdma_set_enabled(bool enabled);
 bool tdma_is_enabled(void);
 
 /**
+ * Current TDMA frame width in 32768 Hz server ticks (0 = no dynamic config yet).
+ */
+uint16_t tdma_frame_ticks_get(void);
+
+/**
  * Update TDMA parameters from receiver's dynamic config (PONG bytes 8-11).
  * Automatically enables TDMA when valid config is received.
  *

@@ -1143,11 +1143,27 @@ static void connection_signal_wake(void)
 	k_sem_give(&connection_wake_sem);
 }
 
+static int connection_quat_interval_ms(void)
+{
+#if CONFIG_CONNECTION_TDMA
+	if (tdma_is_enabled()) {
+		uint16_t frame_ticks = tdma_frame_ticks_get();
+		if (frame_ticks > 0) {
+			/* One sensor packet per TDMA frame; ceil the tick interval to
+			 * stay inside the per-tracker slot budget (e.g. 127 ticks ->
+			 * 4 ms -> ~250 TPS, under the ~258 TPS frame limit). */
+			return (int)(((uint32_t)frame_ticks * 1000U + 32767U) / 32768U);
+		}
+		return SENSOR_QUAT_INTERVAL_TDMA_MS;
+	}
+#endif
+	return SENSOR_QUAT_INTERVAL_NOTDMA_MS;
+}
+
 static int64_t connection_next_deadline_ms(int64_t now)
 {
 	int64_t deadline = now + 1000; /* bounded fallback */
-	int quat_interval_ms = tdma_is_enabled() ? SENSOR_QUAT_INTERVAL_TDMA_MS
-						 : SENSOR_QUAT_INTERVAL_NOTDMA_MS;
+	int quat_interval_ms = connection_quat_interval_ms();
 
 	if (esb_ready()) {
 		uint32_t ping_iv = get_ping_interval_ms();
@@ -1334,7 +1350,7 @@ void connection_thread(void)
 		}
 
 		/* Determine which data types are due or nearly due */
-		int quat_interval_ms = tdma_is_enabled() ? SENSOR_QUAT_INTERVAL_TDMA_MS : SENSOR_QUAT_INTERVAL_NOTDMA_MS;
+		int quat_interval_ms = connection_quat_interval_ms();
 		bool quat_ready = sensor_data_snapshot_qa_pending(&sensor_data_snapshot)
 			&& (now - last_sensor_quat_time >= quat_interval_ms);
 		bool mag_due = sensor_data_snapshot_m_pending(&sensor_data_snapshot)

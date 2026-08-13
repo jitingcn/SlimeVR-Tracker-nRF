@@ -225,6 +225,12 @@ void tdma_set_enabled(bool enabled)
 #endif
 }
 
+uint16_t tdma_frame_ticks_get(void)
+{
+	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
+	return TDMA_UNPACK_FRAME(pack);
+}
+
 bool tdma_is_enabled(void)
 {
 #if CONFIG_CONNECTION_TDMA
