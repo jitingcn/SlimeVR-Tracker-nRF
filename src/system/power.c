@@ -5,6 +5,7 @@
 #include "battery_tracker.h"
 #include "connection/connection.h"
 #include "system.h"
+#include "uptime.h"
 #include "led.h"
 #include "connection/esb.h"
 #include "system/esb_ota.h"
@@ -565,7 +566,7 @@ static void power_thread(void)
 	while (1)
 	{
 		/* Log OTA RAM engine GPREGRET once, after USB console is ready (~5s) */
-		if (!ota_gpregret_logged && k_uptime_get() > 5000) {
+		if (!ota_gpregret_logged && system_uptime_since_boot_ms() > 5000) {
 			ota_gpregret_logged = true;
 			uint8_t gp = watchdog_get_ota_gpregret();
 			if (gp >= 0xD0 && gp <= 0xDE) {
@@ -578,7 +579,7 @@ static void power_thread(void)
 		 * clearing the WDT reset counter, allowing multiple WDT resets to
 		 * accumulate and eventually trigger DFU mode if there's a persistent issue.
 		 */
-		if (!boot_success_checked && k_uptime_get() > 60000) {
+		if (!boot_success_checked && system_uptime_since_boot_ms() > 60000) {
 			boot_success_checked = true;
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 			if (!boot_is_img_confirmed()) {

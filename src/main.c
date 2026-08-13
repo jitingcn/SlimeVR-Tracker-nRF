@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "system/system.h"
+#include "system/uptime.h"
 // #include "timer.h"
 #include "connection/esb.h"
 #include "sensor/sensor.h"
@@ -92,10 +93,10 @@ int main(void)
 
 	if (button_read()) {
 		while (button_read()) {
-			if (k_uptime_get() > 1000) {
+			if (system_uptime_since_boot_ms() > 1000) {
 				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
 			}
-			if (k_uptime_get() > 5000) {
+			if (system_uptime_since_boot_ms() > 5000) {
 #if CONFIG_USER_EXTRA_ACTIONS
 				LOG_INF("Button long hold timeout, continuing boot");
 #else
@@ -107,11 +108,11 @@ int main(void)
 			k_msleep(1);
 		}
 #if USER_SHUTDOWN_ENABLED
-		if (k_uptime_get() < 50 && booting_from_shutdown) { // debounce
+		if (system_uptime_since_boot_ms() < 50 && booting_from_shutdown) { // debounce
 			sys_request_system_off(false);
 		}
 #endif
-		if (k_uptime_get() <= 5000) {
+		if (system_uptime_since_boot_ms() <= 5000) {
 			set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);
 		} else {
 			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);

@@ -6,7 +6,11 @@
 
 struct sensor_activity_score {
 	int32_t value_ms;
+	/* last_update_ms < 0 means "not started" */
 	int64_t last_update_ms;
+	/* Reference time of this scoring session, so the startup guard does not
+	 * depend on uptime being zero at boot. */
+	int64_t session_start_ms;
 };
 
 bool sensor_motion_is_quiet(

@@ -23,6 +23,7 @@
 #include "globals.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
+#include "system/uptime.h"
 #include "system/watchdog.h"
 #include "util.h"
 
@@ -905,7 +906,7 @@ void sensor_tcal_boot_calibration_check(void)
 	}
 
 	// Check time window using uptime
-	int64_t uptime = k_uptime_get();
+	int64_t uptime = system_uptime_since_boot_ms();
 
 	// Before window starts
 	if (uptime < BOOT_CAL_TIME_WINDOW_START_MS) {
