@@ -41,7 +41,8 @@ LOG_MODULE_REGISTER(cal_tcal_runtime, LOG_LEVEL_INF);
 #define TCAL_ACCUM_FLUSH_INTERVAL_MS 25000
 #define TCAL_ACCUM_MIN_SAMPLES 2000
 #define TCAL_ACCUM_TEMP_DRIFT_MAX 0.53f
-#define TCAL_ACCUM_GYRO_RANGE_THRESHOLD 1.5f
+#define TCAL_ACCUM_GYRO_RANGE_THRESHOLD 5.0f /* dps, windowed-mean range method */
+#define TCAL_ACCUM_GYRO_MOTION_WINDOW_MS 250 /* ms - smooth raw gyro noise before range check */
 
 #define TCAL_SAVE_SIGNIFICANCE_THRESHOLD 0.002f
 
@@ -64,6 +65,13 @@ static struct {
 	double temp_sum;
 	int sample_count;
 	int temp_count;
+	/* Gyro motion gate uses the range of short-window MEANS, not raw samples:
+	 * a large but stable zero-rate offset plus high-frequency noise (e.g.
+	 * >10 dps spread while stationary) must not abort accumulation. */
+	double gyro_win_sum[3];
+	int gyro_win_count;
+	int gyro_win_samples;
+	bool gyro_win_tracked;
 	float min_g[3];
 	float max_g[3];
 	float min_a[3];
@@ -422,12 +430,12 @@ void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
 		tcal_accum_reset();
 		tcal_accum.active = true;
 		tcal_accum.start_time = k_uptime_get();
-		tcal_accum.min_g[0] = g[0];
-		tcal_accum.min_g[1] = g[1];
-		tcal_accum.min_g[2] = g[2];
-		tcal_accum.max_g[0] = g[0];
-		tcal_accum.max_g[1] = g[1];
-		tcal_accum.max_g[2] = g[2];
+		tcal_accum.gyro_win_sum[0] = 0.0;
+		tcal_accum.gyro_win_sum[1] = 0.0;
+		tcal_accum.gyro_win_sum[2] = 0.0;
+		tcal_accum.gyro_win_count = 0;
+		tcal_accum.gyro_win_tracked = false;
+		tcal_accum.gyro_win_samples = MAX(1, (int)(sensor_get_gyro_odr() * TCAL_ACCUM_GYRO_MOTION_WINDOW_MS / 1000.0f));
 		tcal_accum.temp_min = temp;
 		tcal_accum.temp_max = temp;
 		tcal_accum.accel_peek_div = 0;
@@ -439,22 +447,39 @@ void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
 		}
 	}
 
-	// Motion detection: gyro peak–peak
+	// Motion detection: gyro windowed-mean range
 	for (int j = 0; j < 3; j++) {
-		if (g[j] < tcal_accum.min_g[j]) {
-			tcal_accum.min_g[j] = g[j];
+		tcal_accum.gyro_win_sum[j] += (double)g[j];
+	}
+	tcal_accum.gyro_win_count++;
+	if (tcal_accum.gyro_win_count >= tcal_accum.gyro_win_samples) {
+		for (int j = 0; j < 3; j++) {
+			float win_mean = (float)(tcal_accum.gyro_win_sum[j] / tcal_accum.gyro_win_count);
+			tcal_accum.gyro_win_sum[j] = 0.0;
+			if (!tcal_accum.gyro_win_tracked) {
+				tcal_accum.min_g[j] = win_mean;
+				tcal_accum.max_g[j] = win_mean;
+			} else {
+				if (win_mean < tcal_accum.min_g[j]) {
+					tcal_accum.min_g[j] = win_mean;
+				}
+				if (win_mean > tcal_accum.max_g[j]) {
+					tcal_accum.max_g[j] = win_mean;
+				}
+			}
 		}
-		if (g[j] > tcal_accum.max_g[j]) {
-			tcal_accum.max_g[j] = g[j];
-		}
-		if (tcal_accum.max_g[j] - tcal_accum.min_g[j] > TCAL_ACCUM_GYRO_RANGE_THRESHOLD) {
-			LOG_DBG(
-				"T-Cal: Gyro motion in accumulator, axis %d (range: %.3f dps), resetting",
-				j,
-				(double)(tcal_accum.max_g[j] - tcal_accum.min_g[j])
-			);
-			tcal_accum_reset();
-			return;
+		tcal_accum.gyro_win_count = 0;
+		tcal_accum.gyro_win_tracked = true;
+		for (int j = 0; j < 3; j++) {
+			if (tcal_accum.max_g[j] - tcal_accum.min_g[j] > TCAL_ACCUM_GYRO_RANGE_THRESHOLD) {
+				LOG_DBG(
+					"T-Cal: Gyro motion in accumulator, axis %d (windowed-mean range: %.3f dps), resetting",
+					j,
+					(double)(tcal_accum.max_g[j] - tcal_accum.min_g[j])
+				);
+				tcal_accum_reset();
+				return;
+			}
 		}
 	}
 
