@@ -148,6 +148,8 @@ static int packet_errors = 0;
 #define NO_PACKETS_TIMEOUT_MS 3000
 static int64_t no_packets_since_ms = 0;
 static bool no_packets_timeout_logged = false;
+/* INT fired while the loop was still draining FIFO. Next empty read is expected. */
+static bool sensor_int_during_loop = false;
 
 static int64_t last_suspend_attempt_time = 0;
 static int64_t last_data_time;
@@ -2585,18 +2587,22 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 			no_packets_since_ms = 0;
 			no_packets_timeout_logged = false;
 		} else {
-			LOG_WRN("No packets in buffer");
-			// If FIFO stays empty for long enough, raise a sensor error state.
-			if (no_packets_since_ms == 0) {
-				no_packets_since_ms = now_ms;
-			}
-			if (!no_packets_timeout_logged && (now_ms - no_packets_since_ms) >= NO_PACKETS_TIMEOUT_MS) {
-				LOG_ERR("No packets in buffer for %lldms", (long long)(now_ms - no_packets_since_ms));
-				set_status(SYS_STATUS_SENSOR_ERROR, true);
-				no_packets_timeout_logged = true;
+			if (sensor_int_during_loop) {
+				LOG_DBG("No packets in buffer after in-loop INT");
+			} else {
+				LOG_WRN("No packets in buffer");
+				// If FIFO stays empty for long enough, raise a sensor error state.
+				if (no_packets_since_ms == 0) {
+					no_packets_since_ms = now_ms;
+				}
+				if (!no_packets_timeout_logged && (now_ms - no_packets_since_ms) >= NO_PACKETS_TIMEOUT_MS) {
+					LOG_ERR("No packets in buffer for %lldms", (long long)(now_ms - no_packets_since_ms));
+					set_status(SYS_STATUS_SENSOR_ERROR, true);
+					no_packets_timeout_logged = true;
+				}
 			}
 		}
-		if (++packet_errors == 10) {
+		if (!sensor_int_during_loop && ++packet_errors == 10) {
 			LOG_ERR("Packet error threshold exceeded");
 			set_status(SYS_STATUS_SENSOR_ERROR, true);
 			if (frame->packets) {
@@ -2609,6 +2615,7 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 		no_packets_since_ms = 0;
 		no_packets_timeout_logged = false;
 	}
+	sensor_int_during_loop = false;
 
 	// Check if expected number of timesteps when using FIFO threshold
 	// When accel and gyro have different ODRs, check them separately based on their expected rates
@@ -3053,20 +3060,20 @@ static void sensor_loop_wait(int64_t time_begin)
 
 #if IMU_INT_EXISTS
 	sensor_data_time = 0; // reset data time
-	if (!main_wfi) {
-		main_wfi = true;                      // TODO: this is terrible
-		k_msleep(sensor_update_time_ms + 10); // will be resumed by interrupt // TODO: dont use hard timeout
-		if (main_wfi)                         // timeout
-		{
-			LOG_DBG("Sensor interrupt timeout");
-			main_wfi = false;
-		}
-	} else // if signal was sent during processing, loop immediately to catch up
-	{
+	int64_t wait_begin_ticks = k_uptime_ticks();
+	if (k_sem_take(&sensor_int_sem, K_NO_WAIT) == 0) {
+		/* INT arrived while the loop was still processing: loop immediately to catch up. */
 		LOG_DBG("FIFO THS/WM/WTM triggered during loop");
+		sensor_int_during_loop = true;
 		k_yield();
-		main_wfi = false;
+	} else if (k_sem_take(&sensor_int_sem, K_MSEC(sensor_update_time_ms + 10)) == 0) {
+		/* Woken by FIFO watermark interrupt; sensor_data_time set by ISR. */
+	} else {
+		/* No INT in the window - FIFO watermark edge was missed or not produced. */
+		sensor_int_timeouts++;
+		LOG_DBG("Sensor interrupt timeout (%u)", sensor_int_timeouts);
 	}
+	sensor_window_wait_us += k_ticks_to_us_near64(k_uptime_ticks() - wait_begin_ticks);
 #else
 	// TODO: old behavior
 	//		led_clock_offset += time_delta;
