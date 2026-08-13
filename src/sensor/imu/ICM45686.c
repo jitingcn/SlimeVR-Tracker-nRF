@@ -1,5 +1,6 @@
 #include <math.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <hal/nrf_gpio.h>
 
@@ -479,7 +480,15 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 {
 	int err = 0;
 	uint8_t rawCount[2];
+	/* AN-000364 2.2: read FIFO_COUNT twice and use the second value to
+	 * avoid sampling a count while a frame is still being written. */
 	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &rawCount[0], 2);
+	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &rawCount[0], 2);
+	if (err)
+	{
+		LOG_ERR("Failed to read FIFO count");
+		return 0;
+	}
 	uint16_t packets = (uint16_t)(rawCount[0] << 8 | rawCount[1]); // Turn the 16 bits into a unsigned 16-bit value
 
 	fifo_temp_valid = false;
@@ -494,18 +503,24 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 		packets = limit;
 	}
 
-	// Read exactly what FIFO_COUNT said - single read, no loops
+	/* Stream mode may still be writing the newest frame while we drain.
+	 * AN-000364 recommends reading M-1; the fixed 20-byte frame keeps the
+	 * remaining frames aligned, so icm45_fifo_process skips a torn header,
+	 * matching the ArduPilot/PX4 validate-and-skip approach. */
 	uint16_t count = packets * PACKET_SIZE;
-	err |= ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_DATA, data, count, PACKET_SIZE);
+	err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_DATA, data, count, PACKET_SIZE);
 	if (err)
+	{
 		LOG_ERR("Communication error");
-	else
-		icm45_cache_fifo_temp(data, packets);
+		return 0;
+	}
+	icm45_cache_fifo_temp(data, packets);
 
 	return packets;
 }
 
 static const uint8_t invalid[6] = {0x80, 0x00, 0x80, 0x00, 0x80, 0x00};
+static int64_t icm45_last_bad_header_ms = 0;
 
 int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
@@ -513,7 +528,12 @@ int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 	// Accept both 0x78 and 0x7A headers (0x7A has timestamp bit set)
 	if (data[index] != 0x78 && data[index] != 0x7A)
 	{
-		LOG_WRN("Invalid FIFO header: 0x%02X (expected 0x78 or 0x7A)", data[index]);
+		// Rate-limit: a corrupted FIFO_COUNT can otherwise spam one warning per packet
+		if (k_uptime_get() - icm45_last_bad_header_ms >= 1000)
+		{
+			LOG_WRN("Invalid FIFO header: 0x%02X (expected 0x78 or 0x7A)", data[index]);
+			icm45_last_bad_header_ms = k_uptime_get();
+		}
 		return 1; // Skip invalid header
 	}
 
