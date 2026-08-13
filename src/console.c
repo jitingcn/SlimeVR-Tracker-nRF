@@ -668,6 +668,7 @@ static void print_help(void)
 	printk("  pair                       Enter pairing mode\n");
 	printk("  clear                      Clear pairing data\n");
 	printk("  tdma <on|off>              Enable/disable TDMA scheduling\n");
+	printk("  radio <on|off>             Stop/restart ESB radio (diagnostic A/B for IMU noise)\n");
 	printk("\n");
 	printk("RF Channel:\n");
 	printk("  channel <1-100>            Set RF channel (saved to NVS)\n");
@@ -1379,6 +1380,31 @@ static void console_cmd_clearchannel(size_t argc, char **argv)
 	}
 }
 
+static void console_cmd_radio(size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	char *arg = argc > 1 ? argv[1] : NULL;
+
+	if (!arg) {
+		printk("Usage: radio <on|off>\n");
+		printk("Example: radio off - stop ESB radio for IMU noise A/B test\n");
+		return;
+	}
+
+	if (strcmp(arg, "off") == 0) {
+		esb_deinitialize();
+		printk("ESB radio disabled; sensor loop keeps running (diagnostic only)\n");
+	} else if (strcmp(arg, "on") == 0) {
+		if (esb_reinitialize()) {
+			printk("Error: ESB reinitialize failed\n");
+		} else {
+			printk("ESB radio reinitialized\n");
+		}
+	} else {
+		printk("Invalid radio argument: %s (use on/off)\n", arg);
+	}
+}
+
 #if DFU_EXISTS
 static void console_cmd_dfu(size_t argc, char **argv)
 {
@@ -1579,6 +1605,7 @@ static const struct console_cmd console_cmds[] = {
 	{"clear", console_cmd_clear},
 	{"channel", console_cmd_channel},
 	{"clearchannel", console_cmd_clearchannel},
+	{"radio", console_cmd_radio},
 #if DFU_EXISTS
 	{"dfu", console_cmd_dfu},
 #endif
