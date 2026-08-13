@@ -1377,20 +1377,33 @@ static void set_update_time_ms(int time_ms)
 	sensor_update_time_ms = time_ms; // TODO: terrible naming
 }
 
-bool main_wfi = false;
+/* FIFO watermark INT wakeup. A counting semaphore cannot lose a wakeup
+ * between the "check flag" and "k_msleep" window in sensor_loop_wait(),
+ * unlike the previous plain flag. */
+static K_SEM_DEFINE(sensor_int_sem, 0, 1);
+static uint32_t sensor_int_timeouts;
+
+/* Per-5s loop/pipeline diagnostics (reported at DBG). */
+static uint32_t sensor_window_iters;
+static uint32_t sensor_window_publishes;
+static float sensor_window_fused_angle_rad;
+static uint64_t sensor_window_proc_us;
+static uint64_t sensor_window_wait_us;
+static uint64_t sensor_window_packets;
+static uint64_t sensor_window_acq_us;
+static uint64_t sensor_window_vqf_us;
+static uint32_t sensor_window_ints;
+static uint64_t sensor_window_acq_max_us;
+static uint64_t sensor_window_proc_max_us;
+static uint64_t sensor_window_resume_max_us;
+static uint64_t sensor_window_fifo_max_us;
 
 static void sensor_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	// wake up sensor thread
-	if (main_wfi) {
-		// Use to time latency
-		sensor_data_time = k_uptime_ticks();
-		main_wfi = false;
-		k_wakeup(&sensor_thread_id);
-	} else {
-		// need to signal to catch up thread
-		main_wfi = true;
-	}
+	// Use to time latency
+	sensor_data_time = k_uptime_ticks();
+	sensor_window_ints++;
+	k_sem_give(&sensor_int_sem);
 }
 
 static struct gpio_callback sensor_cb_data;
@@ -2227,7 +2240,12 @@ static void sensor_loop_handle_data_collection(bool *dc_active)
 static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 {
 	// Resume devices
+	int64_t resume_begin_ticks = k_uptime_ticks();
 	sys_interface_resume();
+	uint64_t resume_us = k_ticks_to_us_near64(k_uptime_ticks() - resume_begin_ticks);
+	if (resume_us > sensor_window_resume_max_us) {
+		sensor_window_resume_max_us = resume_us;
+	}
 
 	// Trigger reconfig on sensor mode change
 	bool reconfig = last_sensor_mode != sensor_mode;
@@ -2365,8 +2383,9 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 		};
 	}
 
-	// Suspend devices
-	sys_interface_suspend();
+	/* Keep the IMU interface enabled across iterations; suspend/resume
+	 * churn is pure overhead at 400 Hz. Other power paths still suspend it
+	 * on long sleeps. */
 }
 
 static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
@@ -2924,6 +2943,12 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 	if (send_quat_data || send_lin_accel_data || force_send_by_time) {
+		float dq_dot = fabsf(q[0]*last_q[0] + q[1]*last_q[1] + q[2]*last_q[2] + q[3]*last_q[3]);
+		if (dq_dot > 1.0f) {
+			dq_dot = 1.0f;
+		}
+		sensor_window_fused_angle_rad += 2.0f * acosf(dq_dot);
+		sensor_window_publishes++;
 		memcpy(last_q, q, sizeof(q));
 		memcpy(last_lin_a, lin_a, sizeof(lin_a));
 		float device_quat[4];
@@ -3010,8 +3035,52 @@ static void sensor_loop_wait(int64_t time_begin)
 	if (k_uptime_get() - last_status_time > STATUS_INTERVAL_MS) {
 		last_status_time = k_uptime_get();
 		if (max_loop_time > 0) {
-			LOG_WRN("Last update steps took up to %lld ms", max_loop_time);
+			/* Only warn when the processing EMA shows the loop is
+			 * genuinely falling behind; single preempted iterations are
+			 * absorbed by the FIFO/catch-up. */
+			if (loop_period_ema_ms > (float)sensor_update_time_ms * 1.5f) {
+				LOG_WRN("Last update steps took up to %lld ms", max_loop_time);
+			} else {
+				LOG_DBG("Slow loop step %lld ms ignored (EMA %.2f ms)",
+					max_loop_time, (double)loop_period_ema_ms);
+			}
 			max_loop_time = 0;
+		}
+		if (sensor_int_timeouts > 0) {
+			LOG_WRN("Sensor INT timeouts: %u in last %d s", sensor_int_timeouts, STATUS_INTERVAL_MS / 1000);
+			sensor_int_timeouts = 0;
+		}
+		if (sensor_window_iters > 0) {
+			uint32_t win_s = STATUS_INTERVAL_MS / 1000;
+			LOG_DBG(
+				"sensor window: loop %.0f Hz, publish %.0f/s, fused %.1f deg/s, proc %.2f ms (acq %.2f vqf %.2f), wait %.2f ms, pkts/loop %.1f, ints/s %.0f, max acq %.2f (rs %.2f fifo %.2f) proc %.2f ms",
+				(double)sensor_window_iters / (double)win_s,
+				(double)sensor_window_publishes / (double)win_s,
+				(double)(sensor_window_fused_angle_rad * 180.0f / 3.14159265f / (float)win_s),
+				(double)sensor_window_proc_us / (double)sensor_window_iters / 1000.0,
+				(double)sensor_window_acq_us / (double)sensor_window_iters / 1000.0,
+				(double)sensor_window_vqf_us / (double)sensor_window_iters / 1000.0,
+				(double)sensor_window_wait_us / (double)sensor_window_iters / 1000.0,
+				(double)sensor_window_packets / (double)sensor_window_iters,
+				(double)sensor_window_ints / (double)win_s,
+				(double)sensor_window_acq_max_us / 1000.0,
+				(double)sensor_window_resume_max_us / 1000.0,
+				(double)sensor_window_fifo_max_us / 1000.0,
+				(double)sensor_window_proc_max_us / 1000.0
+			);
+			sensor_window_iters = 0;
+			sensor_window_publishes = 0;
+			sensor_window_fused_angle_rad = 0.0f;
+			sensor_window_proc_us = 0;
+			sensor_window_wait_us = 0;
+			sensor_window_packets = 0;
+			sensor_window_acq_us = 0;
+			sensor_window_vqf_us = 0;
+			sensor_window_ints = 0;
+			sensor_window_acq_max_us = 0;
+			sensor_window_proc_max_us = 0;
+			sensor_window_resume_max_us = 0;
+			sensor_window_fifo_max_us = 0;
 		}
 		if (mag_available && mag_enabled) {
 			mag_feed_hz = mag_vqf_updates_since_status * 1000.0f / (float)STATUS_INTERVAL_MS;
@@ -3112,18 +3181,34 @@ void sensor_loop(void)
 	}
 	while (1) {
 		int64_t time_begin = k_uptime_get();
+		sensor_window_iters++;
 		if (main_ok) {
+			int64_t proc_begin_ticks = k_uptime_ticks();
 			sensor_loop_frame_t frame = {0};
 #if DEBUG
 			frame.loop_begin = k_uptime_ticks();
 #endif
 
 			sensor_loop_handle_data_collection(&frame.dc_active);
+			int64_t acq_begin_ticks = k_uptime_ticks();
 			sensor_loop_acquire(&frame);
+			uint64_t acq_us = k_ticks_to_us_near64(k_uptime_ticks() - acq_begin_ticks);
+			sensor_window_acq_us += acq_us;
+			if (acq_us > sensor_window_acq_max_us) {
+				sensor_window_acq_max_us = acq_us;
+			}
+			int64_t vqf_begin_ticks = k_uptime_ticks();
 			sensor_loop_process_fifo(&frame);
+			sensor_window_vqf_us += k_ticks_to_us_near64(k_uptime_ticks() - vqf_begin_ticks);
 			sensor_loop_process_mag(&frame);
 			sensor_loop_check_packets(&frame, time_begin);
 			sensor_loop_publish(&frame);
+			uint64_t proc_us = k_ticks_to_us_near64(k_uptime_ticks() - proc_begin_ticks);
+			sensor_window_proc_us += proc_us;
+			if (proc_us > sensor_window_proc_max_us) {
+				sensor_window_proc_max_us = proc_us;
+			}
+			sensor_window_packets += frame.packets;
 		}
 
 		sensor_loop_wait(time_begin);
