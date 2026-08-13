@@ -735,7 +735,6 @@ int clocks_start(void)
 	int err;
 	int res;
 	struct onoff_client clk_cli;
-	int fetch_attempts = 0;
 
 	sys_notify_init_spinwait(&clk_cli.notify);
 
@@ -745,18 +744,29 @@ int clocks_start(void)
 		return err;
 	}
 
+	/*
+	 * Wait for the HF clock to actually start. A cold HFXO start can take
+	 * several milliseconds. Match the SDK's esb_clocks_start()
+	 * (sdk-nrf/subsys/esb/esb_glue.c): keep waiting until the onoff request
+	 * completes. Returning while the request is still pending would leave
+	 * clk_cli dangling on the onoff manager's client list, and the
+	 * completion ISR would later walk that stale node (bus fault).
+	 */
 	do {
-		k_usleep(100);
 		err = sys_notify_fetch_result(&clk_cli.notify, &res);
 		if (!err && res) {
 			LOG_ERR("Clock could not be started: %d", res);
 			return res;
 		}
-		if (err && ++fetch_attempts > 10) {
-			LOG_WRN_ONCE("Unable to fetch Clock request result: %d", err);
-			return err;
+		if (err == -EAGAIN) {
+			k_yield();
 		}
-	} while (err);
+	} while (err == -EAGAIN);
+
+	if (err) {
+		LOG_ERR("Unexpected return code from sys_notify_fetch_result: %d", err);
+		return err;
+	}
 
 #if NRF_CLOCK_HAS_PLL
 	/* MLTPAN-20: CLOCK PLL must be running for radio (nRF54L and later). */
