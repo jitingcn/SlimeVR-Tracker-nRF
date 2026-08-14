@@ -44,7 +44,14 @@ enum sensor_interface_spec
 
 typedef struct sensor_ext_ssi {
 	int (*ext_write)(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes);
+	/* Single I2CM transaction: write num_write bytes (a register address), then
+	 * read num_read register-data bytes. num_read counts register data only;
+	 * any device-internal dummy bytes are an IMU-driver concern, not part of
+	 * this budget. */
 	int (*ext_write_read)(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read);
+	/* Max register-data bytes readable in one I2CM transaction. Requests longer
+	 * than this are segmented by the interface layer (sub-register advanced by
+	 * the number of data bytes already read). */
 	uint8_t ext_burst;
 } sensor_ext_ssi_t;
 
