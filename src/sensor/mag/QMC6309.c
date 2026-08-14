@@ -65,6 +65,8 @@ static const float sensitivity = 1 / 4000.0f; // ~0.25 mgauss/LSB @ 8G range -> 
 static uint8_t last_state = 0xff;
 static bool lastOvfl = false;
 static int64_t oneshot_trigger_time = 0;
+static bool oneshot_pending;
+static bool oneshot_failed;
 // In Normal Mode, data registers are latched and hold stable values between
 // measurement cycles. Byte-level comparison detects when sensor hub (or direct
 // I2C at loop rate > mag ODR) reads the same sample twice, without requiring
@@ -81,6 +83,8 @@ int qmc_init(float time, float *actual_time)
 	last_state = 0xff; // init state
 	lastOvfl = false;
 	oneshot_trigger_time = 0;
+	oneshot_pending = false;
+	oneshot_failed = false;
 	last_rawData_valid = false;
 	last_mag_time_ms = 0;
 	int err = qmc_update_odr(time, actual_time);
@@ -89,6 +93,11 @@ int qmc_init(float time, float *actual_time)
 
 void qmc_shutdown(void)
 {
+	last_state = 0xff;
+	oneshot_trigger_time = 0;
+	oneshot_pending = false;
+	oneshot_failed = false;
+	last_rawData_valid = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_MASK);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_CLEAR);
 	if (err)
@@ -132,7 +141,7 @@ int qmc_update_odr(float time, float *actual_time)
 		MODR = ODR_50Hz;
 		time = 1.f / 50;
 	}
-	else if (ODR > 5)
+	else if (ODR > 1)
 	{
 		MODR = ODR_10Hz;
 		time = 1.f / 10;
@@ -150,14 +159,19 @@ int qmc_update_odr(float time, float *actual_time)
 	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, ODR_MASK(MODR) | RNG_MASK(RNG_8G) | SET_RESET_ON);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_4) | OSR_MASK(OSR_8) | MD);
+	if (!err)
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_4) | OSR_MASK(OSR_8) | MD);
 	if (err) {
 		LOG_ERR("Communication error");
+		last_state = 0xff;
 		return err;
 	}
 
 	last_state = STAT;
 	oneshot_trigger_time = 0;
+	oneshot_pending = false;
+	oneshot_failed = false;
+	last_rawData_valid = false;
 
 	if (MD != MD_SUSPEND)
 		mag_period_ms = (int32_t)(time * 1000);
@@ -169,6 +183,9 @@ int qmc_update_odr(float time, float *actual_time)
 void qmc_mag_oneshot(void)
 {
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_4) | OSR_MASK(OSR_8) | MD_SINGLE);
+	last_state = 0xff;
+	oneshot_failed = err != 0;
+	oneshot_pending = true;
 	oneshot_trigger_time = k_uptime_get();
 	if (err)
 		LOG_ERR("Communication error");
@@ -176,39 +193,55 @@ void qmc_mag_oneshot(void)
 
 bool qmc_mag_read(float m[3])
 {
-	int err = 0;
-	if (oneshot_trigger_time)
+	bool was_oneshot = oneshot_pending;
+	if (oneshot_pending)
 	{
+		if (oneshot_failed) {
+			oneshot_pending = false;
+			oneshot_failed = false;
+			return false;
+		}
+
 		// Oneshot mode: wait for DRDY with timeout
 		uint8_t status = 0;
 		int64_t timeout = oneshot_trigger_time + 10; // 10ms timeout
 		while ((status & STAT_DATA_RDY_MASK) == 0)
 		{
-			err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
-			if (k_uptime_get() > timeout)
+			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
+			if (err) {
+				LOG_ERR("Communication error");
+				oneshot_pending = false;
+				return false;
+			}
+			if (k_uptime_get() >= timeout)
 			{
 				LOG_WRN("Data ready status timeout!");
-				break;
+				oneshot_pending = false;
+				return false;
 			}
 		}
 		oneshot_trigger_time = 0;
-		if (err)
-		{
+		oneshot_pending = false;
+		if (status & STAT_OVERFLOW_MASK) {
+			if (!lastOvfl)
+				LOG_INF("Magnetometer overflow");
+			lastOvfl = true;
+			return false;
+		}
+		lastOvfl = false;
+	}
+	if (!was_oneshot && sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) != SENSOR_INTERFACE_SPEC_EXT) {
+		uint8_t status = 0;
+		int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
+		if (err) {
 			LOG_ERR("Communication error");
 			return false;
 		}
-		if ((status & STAT_OVERFLOW_MASK) && !lastOvfl)
-		{
-			LOG_INF("Magnetometer overflow");
-			lastOvfl = 1;
-		}
-		else
-		{
-			lastOvfl = 0;
-		}
+		if (!(status & STAT_DATA_RDY_MASK) || (status & STAT_OVERFLOW_MASK))
+			return false;
 	}
 	uint8_t rawData[6];
-	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
+	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
 	if (err)
 	{
 		LOG_ERR("Communication error");
@@ -245,7 +278,8 @@ void qmc_mag_process(uint8_t *raw_m, float m[3])
 {
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
-		m[i] = ((int16_t*)raw_m)[i];
+		uint16_t raw = ((uint16_t)raw_m[i * 2 + 1] << 8) | raw_m[i * 2];
+		m[i] = (int16_t)raw;
 		m[i] *= sensitivity; // Gauss
 	}
 }

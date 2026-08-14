@@ -3,7 +3,7 @@
 
 #include "sensor/sensor.h"
 
-#define IST8308_CNTL4   0x33
+#define IST8308_CNTL4   0x34
 
 #define DR_500 0b00
 #define DR_200 0b1

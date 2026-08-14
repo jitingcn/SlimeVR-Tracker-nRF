@@ -10,21 +10,31 @@ static const float sensitivity = 0.075; // uT/LSB
 
 static uint8_t last_odr = 0xff;
 static int64_t oneshot_trigger_time = 0;
+static bool oneshot_pending;
+static bool oneshot_failed;
 
 LOG_MODULE_REGISTER(IST8308, LOG_LEVEL_DBG);
 
 int ist8308_init(float time, float *actual_time)
 {
 	last_odr = 0xff; // reset last odr
+	oneshot_pending = false;
+	oneshot_failed = false;
 //	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_ACTR, 0x00); // exit suspend
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8308_CNTL4, DR_200); // set DR
-	err |= ist8308_update_odr(time, actual_time);
+	if (err) {
+		LOG_ERR("Communication error");
+		return (err < 0 ? err : 0);
+	}
+	err = ist8308_update_odr(time, actual_time);
 	return (err < 0 ? err : 0);
 }
 
 void ist8308_shutdown(void)
 {
 	last_odr = 0xff; // reset last odr
+	oneshot_pending = false;
+	oneshot_failed = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL3, 0x01); // soft reset
 //	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_ACTR, 0x02); // suspend
 	if (err)
@@ -100,53 +110,81 @@ int ist8308_update_odr(float time, float *actual_time)
 	uint8_t desired = MODE;
 	if (last_odr == desired) {
 		*actual_time = time;
-		return 0; /* already configured — success for err|= callers */
+		return 0; /* already configured */
 	}
 
 	if (MODE == MODE_SINGLE)
 		MODE = MODE_STANDBY; // set STBY, oneshot will set SMM
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL1, NSF << 5);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, MODE);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_OSRCNTL, OSR);
-	if (err) {
-		LOG_ERR("Communication error");
-		return err;
-	}
+	if (err)
+		goto error;
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, MODE);
+	if (err)
+		goto error;
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_OSRCNTL, OSR);
+	if (err)
+		goto error;
 
 	last_odr = desired;
+	oneshot_pending = false;
+	oneshot_failed = false;
 	*actual_time = time;
 	return 0;
+error:
+	last_odr = 0xff;
+	LOG_ERR("Communication error");
+	return err;
 }
 
 void ist8308_mag_oneshot(void)
 {
+	last_odr = 0xff;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, MODE_SINGLE); // set single measurement mode
 	oneshot_trigger_time = k_uptime_get();
+	oneshot_pending = true;
+	oneshot_failed = err != 0;
 	if (err)
 		LOG_ERR("Communication error");
 }
 
 bool ist8308_mag_read(float m[3])
 {
-	int err = 0;
-	uint8_t status = oneshot_trigger_time ? 0x00 : 0x01;
-	int64_t timeout = oneshot_trigger_time + 5; // 5ms timeout
-	if (k_uptime_get() >= timeout) // already passed timeout
-		oneshot_trigger_time = 0;
-	while ((~status & 0x01) && k_uptime_get() < timeout) // wait for oneshot to complete or timeout
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, &status);
-	if (oneshot_trigger_time ? k_uptime_get() >= timeout : false)
-		LOG_ERR("Read timeout");
-	oneshot_trigger_time = 0;
-	uint8_t rawData[6];
-	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_DATAXL, &rawData[0], 6);
-	if (err)
-	{
-		LOG_ERR("Communication error");
+	if (oneshot_pending && oneshot_failed) {
+		oneshot_pending = false;
+		oneshot_failed = false;
 		return false;
 	}
-	ist8308_mag_process(rawData, m);
+
+	uint8_t frame[7];
+	if (oneshot_pending) {
+		int64_t timeout = oneshot_trigger_time + 5;
+		while (true) {
+			int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, frame, sizeof(frame));
+			if (err) {
+				LOG_ERR("Communication error");
+				oneshot_pending = false;
+				return false;
+			}
+			if (frame[0] & 0x01)
+				break;
+			if (k_uptime_get() >= timeout) {
+				LOG_ERR("Read timeout");
+				oneshot_pending = false;
+				return false;
+			}
+		}
+		oneshot_pending = false;
+	} else {
+		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, frame, sizeof(frame));
+		if (err) {
+			LOG_ERR("Communication error");
+			return false;
+		}
+		if (!(frame[0] & 0x01))
+			return false;
+	}
+	ist8308_mag_process(&frame[1], m);
 	return true;
 }
 
@@ -171,5 +209,5 @@ const sensor_mag_t sensor_mag_ist8308 = {
 	*mag_none_temp_read,
 
 	*ist8308_mag_process,
-	6, 6
+	7, 7
 };
