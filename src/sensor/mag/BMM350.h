@@ -4,37 +4,53 @@
 #include "sensor/sensor.h"
 
 // https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmm350-ds00.pdf
+#define BMM350_CHIP_ID_REG 0x00
 #define BMM350_PMU_CMD_AGGR_SET 0x04
-#define BMM350_PMU_CMD          0x06
+#define BMM350_PMU_CMD_AXIS_EN 0x05
+#define BMM350_PMU_CMD 0x06
 #define BMM350_PMU_CMD_STATUS_0 0x07
-
+#define BMM350_INT_CTRL 0x2E
+#define BMM350_INT_STATUS 0x30
 #define BMM350_MAG_X_XLSB 0x31
-
 #define BMM350_TEMP_XLSB 0x3A
-
 #define BMM350_OTP_CMD_REG 0x50
+#define BMM350_OTP_DATA_MSB_REG 0x52
+#define BMM350_OTP_DATA_LSB_REG 0x53
+#define BMM350_OTP_STATUS_REG 0x55
 #define BMM350_CMD 0x7E
 
-#define AGGR_ODR_400Hz    0x02
-#define AGGR_ODR_200Hz    0x03
-#define AGGR_ODR_100Hz    0x04
-#define AGGR_ODR_50Hz     0x05
-#define AGGR_ODR_25Hz     0x06
-#define AGGR_ODR_12_5Hz   0x07
-#define AGGR_ODR_6_25Hz   0x08
-#define AGGR_ODR_3_125Hz  0x09
+#define BMM350_CHIP_ID 0x33
+#define BMM350_CMD_SOFTRESET 0xB6
+#define BMM350_OTP_CMD_DIR_READ 0x20
+#define BMM350_OTP_CMD_PWR_OFF 0x80
+#define BMM350_OTP_STATUS_ERROR 0xE0
+#define BMM350_OTP_STATUS_CMD_DONE 0x01
+#define BMM350_DRDY_DATA_REG_EN 0x80
+#define BMM350_DRDY_DATA_REG 0x04
+#define BMM350_AXIS_EN_XYZ 0x07
+
+#define AGGR_ODR_400Hz 0x02
+#define AGGR_ODR_200Hz 0x03
+#define AGGR_ODR_100Hz 0x04
+#define AGGR_ODR_50Hz 0x05
+#define AGGR_ODR_25Hz 0x06
+#define AGGR_ODR_12_5Hz 0x07
+#define AGGR_ODR_6_25Hz 0x08
+#define AGGR_ODR_3_125Hz 0x09
 #define AGGR_ODR_1_5625Hz 0x0A
 
 #define AGGR_NO_AVG 0x00
-#define AGGR_AVG_2  0x01
-#define AGGR_AVG_4  0x02
-#define AGGR_AVG_8  0x03
+#define AGGR_AVG_2 0x01
+#define AGGR_AVG_4 0x02
+#define AGGR_AVG_8 0x03
 
-#define PMU_CMD_SUS     0x00
-#define PMU_CMD_NM      0x01
+#define PMU_CMD_SUS 0x00
+#define PMU_CMD_NM 0x01
 #define PMU_CMD_UPD_OAE 0x02
-#define PMU_CMD_FM      0x03
+#define PMU_CMD_FM 0x03
 #define PMU_CMD_FM_FAST 0x04
+#define PMU_CMD_FGR 0x05
+#define PMU_CMD_BR 0x07
 
 int bmm3_init(float time, float *actual_time);
 void bmm3_shutdown(void);
