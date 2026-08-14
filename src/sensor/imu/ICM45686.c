@@ -812,6 +812,9 @@ retry_write:
 	// finds fresh data ready without the full oneshot cycle.
 	if (was_continuous && !err)
 	{
+		// The write transaction just completed; make sure the I2CM engine is
+		// idle before re-arming GO so the restored read is not aborted.
+		icm45_i2cm_wait_done();
 		uint8_t rd_profile[2] = {saved_sub, saved_addr};
 		icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2);
 		icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_COMMAND_0,
