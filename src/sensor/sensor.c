@@ -178,15 +178,31 @@ static int force_scan_request_count = 0;
  * EMA. Time constant ~120 ms at 416 Hz (alpha = 0.02/sample). */
 #define REST_GYRO_SPEED_EMA_ALPHA 0.02f
 static float rest_gyro_speed_ema[3];
-// Wall-clock tick of the most recent updateMag call, used to compute actual dt
-static int64_t last_mag_fusion_ticks = 0;
-// Time-gating for mag VQF updates: only feed update_mag once per mag ODR period.
-// (Loop runs at ~gyro-FIFO rate >> mag ODR; bitwise equality is unreliable because
-// some mag sensors return slightly different register values on repeated reads.)
+/* Magnetometer reads share one deadline regardless of the selected bus backend. */
+static int64_t mag_read_period_ticks = 1;
+static int64_t next_mag_read_ticks;
+/* Wall-clock tick of the most recent successful fusion feed. */
+static int64_t last_mag_fusion_ticks;
 
 static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
+
+static void sensor_mag_timing_reset(void)
+{
+	next_mag_read_ticks = 0;
+	last_mag_fusion_ticks = 0;
+}
+
+static void sensor_mag_timing_configure(void)
+{
+	mag_read_period_ticks = 1;
+	if (isfinite(mag_actual_time) && mag_actual_time > 0.0f) {
+		uint64_t period_us = (uint64_t)ceil((double)mag_actual_time * 1000000.0);
+		mag_read_period_ticks = MAX((int64_t)k_us_to_ticks_ceil64(MAX(period_us, 1)), 1);
+	}
+	sensor_mag_timing_reset();
+}
 
 #if CONFIG_SENSOR_USE_LOW_POWER_2
 #define SENSOR_FIFO_RAW_BUFFER_SIZE 2048
@@ -1176,6 +1192,7 @@ void sensor_shutdown(void) // Communicate all imus to shut down
 	 * be unavailable, so a probe fails and raises SENSOR_ERROR. Shutdown only talks
 	 * to drivers that are already bound.
 	 */
+	sensor_mag_timing_reset();
 	if (!sensor_sensor_init || sensor_imu == NULL || sensor_imu == &sensor_imu_none) {
 		LOG_INF("sensor_shutdown: sensors not initialized, skip");
 		return;
@@ -1210,6 +1227,7 @@ static bool sensor_mag_uses_i2c_passthrough(void)
 
 static int sensor_mag_runtime_enable(void)
 {
+	sensor_mag_timing_reset();
 	float mag_initial_time = 1.0f / CONFIG_SENSOR_MAG_ODR;
 
 	if (sensor_mag_uses_i2c_passthrough()) {
@@ -1223,12 +1241,14 @@ static int sensor_mag_runtime_enable(void)
 		}
 		return err;
 	}
+	sensor_mag_timing_configure();
 	LOG_INF("Magnetometer rate: %.2fHz", 1.0 / (double)mag_actual_time);
 	return 0;
 }
 
 static void sensor_mag_runtime_disable(void)
 {
+	sensor_mag_timing_reset();
 	if (sensor_mag == NULL || sensor_mag == &sensor_mag_none) {
 		return;
 	}
@@ -1240,7 +1260,6 @@ static void sensor_mag_runtime_disable(void)
 		sensor_imu->ext_passthrough(false);
 	}
 	mag_calibrated = false;
-	last_mag_fusion_ticks = 0;
 }
 
 void sensor_set_mag_enabled(bool enabled)
@@ -1557,6 +1576,7 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 int sensor_init(void)
 {
 	int err;
+	sensor_mag_timing_reset();
 	sensor_update_frame_transform_cache();
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
 	if (mag_available && mag_enabled) // shutdown magnetometer first only when enabled
@@ -1636,6 +1656,7 @@ int sensor_init(void)
 		if (err < 0) {
 			return err;
 		}
+		sensor_mag_timing_configure();
 		// 0-1ms to setup mmc
 	}
 	LOG_INF("Initialized sensors");
@@ -1748,9 +1769,7 @@ int sensor_init(void)
 	LOG_INF("Using %s", fusion_names[fusion_id]);
 	LOG_INF("Initialized fusion");
 	sensor_fusion_init = true;
-	last_mag_fusion_ticks = 0; // reset so first mag update uses nominal mag_actual_time as dt
-	sensor_reset_resting_state();
-	// last_mag_fusion_ticks reset is sufficient; no extra state to clear.
+	sensor_mag_timing_reset();
 
 	if (connection_get_data_collection()) {
 		sensor_send_raw_metadata();
@@ -2367,9 +2386,18 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 	frame->raw_m[2] = 0;
 	frame->new_mag_data = false;
 	if (mag_available && mag_enabled) {
-		frame->new_mag_data = sensor_mag->mag_read(frame->raw_m); // returns false if no new sample (DRDY not set)
+		int64_t now_ticks = k_uptime_ticks();
+		if (next_mag_read_ticks == 0 || now_ticks >= next_mag_read_ticks) {
+			frame->new_mag_data = sensor_mag->mag_read(frame->raw_m);
+			if (frame->new_mag_data) {
+				if (next_mag_read_ticks != 0 && now_ticks - next_mag_read_ticks < mag_read_period_ticks) {
+					next_mag_read_ticks += mag_read_period_ticks;
+				} else {
+					next_mag_read_ticks = now_ticks + mag_read_period_ticks;
+				}
+			}
+		}
 	}
-
 	if (frame->new_mag_data && connection_get_data_collection()) {
 		connection_queue_raw_mag(frame->raw_m);
 	}
@@ -2571,24 +2599,17 @@ static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 		float mz = frame->raw_m[2];
 		float m[] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
 
-		// Time-gate mag VQF updates to the actual mag ODR.
-		// QMC6309 handles duplicate detection internally (Normal Mode latch),
-		// so new_mag_data=true already means a genuinely fresh sample for that driver.
-		// For other drivers that always return true, the time-gate below acts as a
-		// safety net.
 		if (mag_calibrated) {
 			int64_t now_ticks = k_uptime_ticks();
-			// Prefer mag_actual_time; some drivers can still return INFINITY from update_odr.
-			float mag_dt
-				= (mag_actual_time > 0.0f && mag_actual_time < 1.0f) ? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
+			float mag_dt = mag_actual_time;
 			if (last_mag_fusion_ticks > 0) {
 				int64_t diff_ticks = now_ticks - last_mag_fusion_ticks;
 				if (diff_ticks > 0) {
 					mag_dt = (float)k_ticks_to_us_floor64(diff_ticks) * 1e-6f;
 				}
 			}
-			last_mag_fusion_ticks = now_ticks;
 			sensor_fusion->update_mag(m, mag_dt);
+			last_mag_fusion_ticks = now_ticks;
 			mag_vqf_updates_since_status++;
 			sensor_mag_ref_accumulate(m, frame->a_sum, frame->a_count);
 		}
@@ -3289,6 +3310,7 @@ void main_imu_wakeup(void)
 
 void main_imu_restart(void)
 {
+	sensor_mag_timing_reset();
 	if (main_ok) // only restart fusion if initialized
 	{
 		// Determine effective gyro time step for fusion (must match sensor_init logic)
@@ -3312,9 +3334,6 @@ void main_imu_restart(void)
 		if (had_mag_ref && saved_ref_norm > 0) {
 			sensor_fusion_set_mag_ref(saved_ref_norm, saved_ref_dip);
 		}
-		// Reset mag timing so the first post-restart update uses the nominal fallback
-		// instead of a potentially stale diff (which could be > 10s → updateMag fallback path).
-		last_mag_fusion_ticks = 0;
 		sensor_reset_resting_state();
 	}
 }
