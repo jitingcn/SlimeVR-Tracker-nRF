@@ -368,6 +368,10 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len)
 				n = (uint16_t)(sizeof(raw) / 6);
 			int64_t d0 = k_uptime_ticks();
 			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_DATA_OUT_L, raw, n * 6);
+			if (err) {
+				LOG_ERR("Communication error");
+				return total;
+			}
 			{
 				uint64_t d_us = k_ticks_to_us_near64(k_uptime_ticks() - d0);
 				if (d_us > 2000) {

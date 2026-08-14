@@ -175,7 +175,9 @@ void lsm_shutdown(void)
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
 	k_msleep(2); // Wait for reset to complete before the next init path continues
 	if (err)
+	{
 		LOG_ERR("Communication error");
+	}
 }
 
 void lsm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
@@ -458,7 +460,11 @@ void lsm_accel_read(float a[3])
 	uint8_t rawAccel[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_L_A, &rawAccel[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		memset(a, 0, 3 * sizeof(*a));
+		return;
+	}
 
 	// LSM6DSV16B (0x71): Z, Y, X order in registers (reading from OUTX_L_A gets Z, Y, X)
 	// LSM6DSV (0x70): X, Y, Z order in registers
@@ -487,7 +493,11 @@ void lsm_gyro_read(float g[3])
 	uint8_t rawGyro[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_L_G, &rawGyro[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		memset(g, 0, 3 * sizeof(*g));
+		return;
+	}
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
 		g[i] = (int16_t)((((uint16_t)rawGyro[1 + (i * 2)]) << 8) | rawGyro[i * 2]);
@@ -500,7 +510,10 @@ float lsm_temp_read(void)
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUT_TEMP_L, &rawTemp[0], 2);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return NAN;
+	}
 	// TSen Temperature sensitivity 256 LSB/°C
 	// The output of the temperature sensor is 0 LSB (typ.) at 25°C
 	float temp = (int16_t)((((uint16_t)rawTemp[1]) << 8) | rawTemp[0]);
