@@ -92,6 +92,8 @@ void clock_switch(nrf_clock_lfclk_t source)
 
 	LOG_INF("clock_switch: %d -> %d", current_source, normalized_requested);
 
+	/* Keep the stop-to-start transition atomic while the system timer is stopped. */
+	unsigned int key = irq_lock();
 	if (running) {
 		nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
 
@@ -107,6 +109,7 @@ void clock_switch(nrf_clock_lfclk_t source)
 	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
 	nrf_clock_lf_src_set(NRF_CLOCK, source);
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
+	irq_unlock(key);
 
 	if (source == NRF_CLOCK_LFCLK_RC) {
 		// RC starts very quickly, just wait for the event without sleeping
