@@ -38,9 +38,6 @@ LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_INF);
 #define WATCHDOG_NODE DT_NODELABEL(wdt)
 #endif
 
-/* Adafruit bootloader DFU magic number (DFU_MAGIC_UF2_RESET) */
-#define ADAFRUIT_DFU_MAGIC ADAFRUIT_DFU_MAGIC_UF2_RESET
-
 /* Channel handles from task_wdt_add() */
 static int channel_ids[WDT_CHANNEL_COUNT];
 
@@ -184,8 +181,7 @@ static void enter_dfu_mode(void)
 	}
 
 #if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
-	/* Adafruit bootloader: Set GPREGRET to enter UF2 DFU mode */
-	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC;
+	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 	k_msleep(100);
 	sys_reboot(SYS_REBOOT_COLD);
 #elif CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BOOTLOADER_MCUBOOT

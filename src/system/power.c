@@ -33,10 +33,6 @@
 #include "power_battery.h"
 #include "clock_control.h"
 
-#define DFU_DBL_RESET_MEM 0x20007F7C
-#define DFU_DBL_RESET_APP 0x4ee5677e
-
-static uint32_t *dbl_reset_mem __attribute__((unused)) = ((uint32_t *)DFU_DBL_RESET_MEM); // retained
 
 enum sys_regulator {
 	SYS_REGULATOR_DCDC,
@@ -66,8 +62,7 @@ static int sys_power_state_request(enum sys_power_request id);
 static enum sys_power_request sys_power_state_peek(void);
 static void sys_power_state_clear(void);
 
-static void disable_DFU_thread(void);
-K_THREAD_DEFINE(disable_DFU_thread_id, 128, disable_DFU_thread, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // disable DFU if the system is running correctly
+K_THREAD_DEFINE(disable_DFU_thread_id, 128, sys_skip_dfu, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // skip DFU if the system is running correctly
 
 static void power_thread(void);
 K_THREAD_DEFINE(power_thread_id, 1024, power_thread, NULL, NULL, NULL, POWER_THREAD_PRIORITY, 0, 0);
@@ -421,7 +416,7 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 //	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
+	sys_skip_dfu();
 #endif
 	sys_poweroff();
 	return true;
@@ -470,7 +465,7 @@ static bool sys_system_off(void) // TODO: add timeout
 	// retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
+	sys_skip_dfu();
 #endif
 	sys_poweroff();
 	return true;
@@ -493,7 +488,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 //	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
+	sys_skip_dfu();
 #endif
 	sys_reboot(SYS_REBOOT_COLD);
 }
@@ -541,12 +536,6 @@ bool vbus_read(void)
 #endif
 }
 
-static void disable_DFU_thread(void)
-{
-#if ADAFRUIT_BOOTLOADER
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
-#endif
-}
 
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
 // TODO: should be separated to be more clear in its function?

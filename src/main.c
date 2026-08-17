@@ -44,10 +44,6 @@ static const struct gpio_dt_spec gnd = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, gnd_gp
 #warning "IMU gnd pins not defined: do not stack IMU on PROMICRO"
 #endif // CONFIG_BOARD_PROMICRO_UF2
 #endif
-#define DFU_DBL_RESET_MEM 0x20007F7C
-#define DFU_DBL_RESET_APP 0x4ee5677e
-
-static uint32_t *dbl_reset_mem __attribute__((unused)) = ((uint32_t *)DFU_DBL_RESET_MEM); // retained
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -138,7 +134,7 @@ int main(void)
 		LOG_INF("Reset count: %u", reboot_counter);
 #if ADAFRUIT_BOOTLOADER                                                                                                \
 	&& !(IGNORE_RESET && BUTTON_EXISTS)       // Using Adafruit bootloader, skip DFU if reset button is in use
-		(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
+	sys_skip_dfu(); // Skip DFU
 #endif
 		k_msleep(1000); // Wait before clearing counter and continuing
 	}

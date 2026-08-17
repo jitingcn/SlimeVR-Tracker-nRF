@@ -794,6 +794,15 @@ void sys_enter_dfu(bool ota)
 #endif
 }
 
+void sys_skip_dfu(void)
+{
+#if ADAFRUIT_BOOTLOADER
+	if (NRF_POWER->GPREGRET == 0) {
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_SKIP; // Skip DFU
+	}
+#endif
+}
+
 void sys_reset_mode(uint8_t mode)
 {
 	switch (mode) {
