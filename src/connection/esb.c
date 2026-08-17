@@ -64,8 +64,29 @@ static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0,
 
 static uint8_t paired_addr[8] = {0};
 
+/* ---------------------------------------------------------------------------
+ * ESB connection state machine.
+ *
+ * Explicit state replaces the implicit esb_paired/ping_failures matrix so
+ * pairing, connection, and error recovery transitions are visible in one
+ * place. Radio/data readiness is unchanged: esb_ready() == PAIRED.
+ *
+ *   PAIRING    - pairing burst to discovery address (entered on boot if
+ *                unpaired, or via esb_reset_pair/remote clear)
+ *   PAIRED     - paired address active, normal operation
+ *   RECOVERING - ping loss detected; ping counter keeps accumulating
+ *                failures for the shutdown watchdog, while the flag
+ *                gates repeated recovery bursts from esb_thread
+ * ------------------------------------------------------------------------- */
+typedef enum {
+	ESB_ST_PAIRING,
+	ESB_ST_PAIRED,
+	ESB_ST_RECOVERING,
+} esb_conn_state_t;
+
+static esb_conn_state_t esb_conn_state = ESB_ST_PAIRING;
+
 static bool esb_initialized = false;
-static bool esb_paired = false;
 
 #define TX_ERROR_THRESHOLD 300
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
@@ -890,7 +911,7 @@ void event_handler(struct esb_evt const *event)
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
-		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
+		if (esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() && esb_is_idle()) {
 #if defined(CONFIG_SOC_SERIES_NRF54L)
 			/* nRF54L: keep HFCLK up while ESB is active; idle stop is
 			 * handled in esb_thread after ESB_CLOCK_IDLE_STOP_MS. */
@@ -956,6 +977,7 @@ void event_handler(struct esb_evt const *event)
 		if (ping_failures == TX_ERROR_THRESHOLD) // consecutive ping failures
 		{
 			connection_error_start_time = k_uptime_get(); // Mark when connection errors started
+			esb_conn_state = ESB_ST_RECOVERING;
 			LOG_WRN(
 				"Ping failure threshold reached (%d failures), starting "
 				"timeout timer",
@@ -963,7 +985,7 @@ void event_handler(struct esb_evt const *event)
 			);
 		}
 
-		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
+		if (esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() && esb_is_idle()) {
 #if defined(CONFIG_SOC_SERIES_NRF54L)
 			/* nRF54L: keep HFCLK up while ESB is active; idle stop is
 			 * handled in esb_thread after ESB_CLOCK_IDLE_STOP_MS. */
@@ -1033,6 +1055,7 @@ void event_handler(struct esb_evt const *event)
 						ping_pending = false;
 						ping_failed = false;
 						ping_failures = 0;
+						esb_conn_state = ESB_ST_PAIRED;
 						if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
 							set_status(SYS_STATUS_CONNECTION_ERROR, false);
 							connection_error_start_time = 0;
@@ -1051,6 +1074,7 @@ void event_handler(struct esb_evt const *event)
 					ping_pending = false;
 					ping_failed = false;
 					ping_failures = 0;
+					esb_conn_state = ESB_ST_PAIRED;
 					if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
 						ping_success_streak++;
 						if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
@@ -1617,6 +1641,7 @@ void esb_pair(void)
 	if (!paired_addr[0]) // zero, no receiver paired
 	{
 		LOG_INF("Pairing");
+		esb_conn_state = ESB_ST_PAIRING;
 		esb_set_addr_discovery();
 		esb_initialize(true);
 		//		timer_init(); // TODO: shouldn't be here!!!
@@ -1694,15 +1719,15 @@ void esb_pair(void)
 	set_tracker_id(paired_addr[1]);
 
 	esb_set_addr_paired();
-	esb_paired = true;
+	esb_conn_state = ESB_ST_PAIRED;
 	clocks_stop();
 }
 
 void esb_reset_pair(void)
 {
-	if (paired_addr[0] || esb_paired) {
+	if (paired_addr[0] || esb_conn_state != ESB_ST_PAIRING) {
 		esb_deinitialize(); // make sure esb is off
-		esb_paired = false;
+		esb_conn_state = ESB_ST_PAIRING;
 		memset(paired_addr, 0, sizeof(paired_addr));
 		LOG_INF("Pairing requested");
 	}
@@ -1733,7 +1758,7 @@ void esb_process_ota_rx_queue(void)
 
 void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 {
-	if (!esb_initialized || !esb_paired) {
+	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
 		return;
 	}
 	if (!clock_status) {
@@ -1984,7 +2009,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 
 bool esb_ready(void)
 {
-	return esb_initialized && esb_paired;
+	return esb_initialized && esb_conn_state != ESB_ST_PAIRING;
 }
 
 uint8_t esb_get_ping_ack_flag(void)
@@ -2061,11 +2086,11 @@ static void esb_thread(void)
 
 	while (1) {
 #if CONFIG_CONNECTION_OVER_HID
-		if (!esb_paired && get_status(SYS_STATUS_USB_CONNECTED) == false
+		if (esb_conn_state == ESB_ST_PAIRING && get_status(SYS_STATUS_USB_CONNECTED) == false
 			&& k_uptime_get() - 750 > start_time) // only automatically enter pairing while not
 												  // potentially communicating by usb
 #else
-		if (!esb_paired)
+		if (esb_conn_state == ESB_ST_PAIRING)
 #endif
 		{
 			esb_pair();
@@ -2074,7 +2099,7 @@ static void esb_thread(void)
 #if defined(CONFIG_SOC_SERIES_NRF54L)
 		/* Stop HFCLK only after a longer idle period without any ESB TX.
 		 * Frequent XO/PLL restarts are unreliable on nRF54L (anomaly 20). */
-		if (clock_status && esb_paired && !connection_get_data_collection() &&
+		if (clock_status && esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() &&
 		    esb_is_idle() && last_tx_time != 0 &&
 		    (k_uptime_get() - last_tx_time) > ESB_CLOCK_IDLE_STOP_MS) {
 			clocks_stop();
@@ -2130,6 +2155,7 @@ static void esb_thread(void)
 			LOG_WRN("PING timeout, failures=%u", ping_failures);
 			if (ping_failures == TX_ERROR_THRESHOLD) {
 				connection_error_start_time = now_idle;
+				esb_conn_state = ESB_ST_RECOVERING;
 				LOG_WRN(
 					"Ping failure threshold reached (%d failures), starting "
 					"timeout timer",
