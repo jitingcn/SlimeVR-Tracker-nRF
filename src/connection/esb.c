@@ -88,6 +88,15 @@ static esb_conn_state_t esb_conn_state = ESB_ST_PAIRING;
 
 static bool esb_initialized = false;
 
+/* Preferred ESB channels: even channels outside WiFi/BT-heavy spectrum
+ * (upstream SlimeVR selection). */
+static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS[] = {
+	0, 2, 52, 72, 74, 76, 78, 82, 84, 86, 88, 50, 24, 48,
+	70, 68, 46, 44, 20, 54, 56, 28, 30,
+	6, 8, 10, 12, 14, 16, 18, 32, 34,
+	36, 38, 40, 42, 58, 60, 62, 64, 66,
+};
+#define ESB_ALLOWED_CHANNELS_COUNT ARRAY_SIZE(ESB_ALLOWED_CHANNELS)
 #define TX_ERROR_THRESHOLD 300
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
