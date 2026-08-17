@@ -323,8 +323,8 @@ static void esb_remote_cmd_set_channel(void)
 	// Validate channel value (0-100)
 	if (received_channel_value <= 100) {
 		LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
-		// Save to retained memory
-		retained->rf_channel = (uint8_t)received_channel_value;
+		// Save to retained memory (encoded)
+		retained->rf_channel = esb_rf_channel_encode((uint8_t)received_channel_value);
 		retained_update();
 		// Save to NVS
 		sys_write(
@@ -333,11 +333,11 @@ static void esb_remote_cmd_set_channel(void)
 			&retained->rf_channel,
 			sizeof(retained->rf_channel)
 		);
-		LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
+		LOG_INF("RF channel saved to NVS: %u", received_channel_value);
 		if (esb_reinitialize()) {
 			LOG_ERR("ESB reinitialize failed after channel change");
 		} else {
-			LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
+			LOG_INF("ESB reinitialized with channel %u", received_channel_value);
 		}
 	} else {
 		LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
@@ -347,8 +347,8 @@ static void esb_remote_cmd_set_channel(void)
 static void esb_remote_cmd_clear_channel(void)
 {
 	LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
-	// Clear saved channel (set to 0xFF = use default)
-	retained->rf_channel = 0xFF;
+	// Clear saved channel (set to default marker)
+	retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
 	retained_update();
 	sys_write(
 		RF_CHANNEL_ID,
@@ -1508,17 +1508,16 @@ int esb_initialize(bool tx)
 	err = esb_init(&config);
 
 	if (!err) {
-		// Read and apply RF channel from retained/NVS
-		// 0xFF and 0 both indicate "use default"
-		if (retained->rf_channel != 0xFF && retained->rf_channel != 0 && retained->rf_channel <= 100) {
-			LOG_INF("Restoring RF channel from NVS: %u", retained->rf_channel);
-			esb_set_rf_channel(retained->rf_channel);
+		// Read and apply RF channel from retained/NVS (stored value is encoded).
+		uint8_t ch = esb_rf_channel_decode(retained->rf_channel);
+		if (ch != ESB_RF_CHANNEL_DEFAULT) {
+			LOG_INF("Restoring RF channel from NVS: %u", ch);
+			esb_set_rf_channel(ch);
 		} else {
 			LOG_INF("Using default RF channel: %u", RADIO_RF_CHANNEL);
 			esb_set_rf_channel(RADIO_RF_CHANNEL);
-			// Initialize with 0xFF to indicate default is being used
-			if (retained->rf_channel != 0xFF) {
-				retained->rf_channel = 0xFF;
+			if (retained->rf_channel != ESB_RF_CHANNEL_DEFAULT) {
+				retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
 				retained_update();
 			}
 		}

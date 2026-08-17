@@ -414,9 +414,10 @@ static void print_connection(void)
 		(*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF
 	);
 
-	// Display RF channel info
-	if (retained->rf_channel != 0xFF && retained->rf_channel <= 100) {
-		printk("RF Channel: %u (custom)\n", retained->rf_channel);
+	// Display RF channel info (stored value is encoded)
+	uint8_t rf_ch = esb_rf_channel_decode(retained->rf_channel);
+	if (rf_ch != ESB_RF_CHANNEL_DEFAULT) {
+		printk("RF Channel: %u (custom)\n", rf_ch);
 	} else {
 		printk("RF Channel: %u (default)\n", CONFIG_RADIO_RF_CHANNEL);
 	}
@@ -670,8 +671,7 @@ static void print_help(void)
 	printk("  tdma <on|off>              Enable/disable TDMA scheduling\n");
 	printk("  radio <on|off>             Stop/restart ESB radio (diagnostic A/B for IMU noise)\n");
 	printk("\n");
-	printk("RF Channel:\n");
-	printk("  channel <1-100>            Set RF channel (saved to NVS)\n");
+	printk("  channel <0-100>            Set RF channel (saved to NVS)\n");
 	printk("    Example: channel 25       Set RF channel to 25\n");
 	printk("  clearchannel               Clear RF channel (use default)\n");
 	printk("\n");
@@ -1333,18 +1333,18 @@ static void console_cmd_channel(size_t argc, char **argv)
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	if (!arg) {
-		printk("Usage: channel <1-100>\n");
+		printk("Usage: channel <0-100>\n");
 		printk("Example: channel 25 - Set RF channel to 25\n");
 	} else {
 		char *endptr;
 		long channel = strtol(arg, &endptr, 10);
 
-		if (*endptr != '\0' || channel < 1 || channel > 100) {
-			printk("Invalid channel. Must be a number between 1 and 100.\n");
+		if (*endptr != '\0' || channel < 0 || channel > 100) {
+			printk("Invalid channel. Must be a number between 0 and 100.\n");
 		} else {
 			printk("Setting RF channel to %d\n", (int)channel);
-			// Save to retained memory
-			retained->rf_channel = (uint8_t)channel;
+			// Save to retained memory (encoded)
+			retained->rf_channel = esb_rf_channel_encode((uint8_t)channel);
 			retained_update();
 			// Save to NVS
 			sys_write(
@@ -1353,11 +1353,11 @@ static void console_cmd_channel(size_t argc, char **argv)
 				&retained->rf_channel,
 				sizeof(retained->rf_channel)
 			);
-			printk("RF channel saved to NVS: %u\n", retained->rf_channel);
+			printk("RF channel saved to NVS: %d\n", (int)channel);
 			if (esb_reinitialize()) {
 				printk("Error: ESB reinitialize failed\n");
 			} else {
-				printk("ESB reinitialized with channel %u\n", retained->rf_channel);
+				printk("ESB reinitialized with channel %d\n", (int)channel);
 			}
 		}
 	}
@@ -1368,8 +1368,8 @@ static void console_cmd_clearchannel(size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	printk("Clearing RF channel setting (restore default)\n");
-	// Clear saved channel (set to 0xFF = use default)
-	retained->rf_channel = 0xFF;
+	// Clear saved channel (set to default marker)
+	retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
 	retained_update();
 	sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
 	printk("RF channel cleared, will use default on next boot\n");
