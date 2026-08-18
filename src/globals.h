@@ -32,6 +32,7 @@
 // See: Adafruit_nRF52_Bootloader/src/main.c (DFU_MAGIC_*).
 #define ADAFRUIT_DFU_MAGIC_UF2_RESET 0x57
 #define ADAFRUIT_DFU_MAGIC_OTA_RESET 0xA8
+#define ADAFRUIT_DFU_MAGIC_SKIP 0x6D
 #define SENSOR_WOM_FAST_WAKE_GPREGRET 0x5A
 
 #define USER_SHUTDOWN_ENABLED CONFIG_USER_SHUTDOWN // Allow user to use reset or sw0 to shutdown
@@ -63,20 +64,16 @@
  * Front side (facing out) is +Z
  */
 
-// TODO: not matching anymore
-#if defined(CONFIG_BOARD_SLIMEVRMINI_P1_UF2) || defined(CONFIG_BOARD_SLIMEVRMINI_P2_UF2)
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT -mx, mz, -my
-#endif
-#if defined(CONFIG_BOARD_SLIMEVRMINI_P4_UF2)
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
-#endif
-
-#if defined(CONFIG_BOARD_SLIMENRF_R1) || defined(CONFIG_BOARD_SLIMENRF_R2) || defined(CONFIG_BOARD_SLIMENRF_R3)
+#if defined(CONFIG_BOARD_SLIMENRF_R3)
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
 #endif
 
 #if defined(CONFIG_BOARD_FOXSMOL40_UF2)
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz
+#endif
+
+#if defined(CONFIG_BOARD_AERO_PRO_UF2)
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT -mx, my, mz
 #endif
 
 #ifdef CONFIG_SENSOR_ROTATION_0

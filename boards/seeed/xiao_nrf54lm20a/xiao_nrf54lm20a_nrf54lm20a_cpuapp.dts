@@ -1,0 +1,51 @@
+/*
+ * Copyright (c) 2025 Seeed Technology Co., Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include "nrf54lm20a_cpuapp_common.dtsi"
+#include "seeed_xiao_connector.dtsi"
+
+/ {
+	model = "Seeed XIAO nRF54LM20A SlimeNRF";
+	compatible = "seeed,xiao-nrf54lm20a-cpuapp";
+
+	zephyr,user {
+		/* External tracker IMU interrupt on XIAO D3. */
+		int0-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&i2c22 {
+	imu: imu@0 {
+		compatible = "i2c-device";
+		reg = <0>;
+	};
+
+	mag: mag@0 {
+		compatible = "i2c-device";
+		reg = <0>;
+	};
+};
+
+&spi23 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+	/* nRF54L SPIM23 runs in the 16 MHz peripheral domain and its prescaler
+	 * only accepts even divisors (>= 2): 10/24 MHz are rejected by nrfx with
+	 * -EINVAL, so 8 MHz is the maximum usable frequency. The Zephyr driver
+	 * clamps every requested SPI frequency to this value.
+	 */
+	max-frequency = <DT_FREQ_M(8)>;
+	/* XIAO D2 is the default external tracker IMU chip select. */
+	cs-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
+
+	imu_spi: imu@0 {
+		compatible = "vnd,spi-device";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(8)>;
+	};
+};
+

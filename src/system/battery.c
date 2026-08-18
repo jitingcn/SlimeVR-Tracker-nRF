@@ -15,6 +15,7 @@
 #include <zephyr/drivers/adc.h>
 #include <zephyr/dt-bindings/adc/nrf-saadc.h>
 #include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/sensor/npm13xx_charger.h>
 #include <zephyr/logging/log.h>
 
 #include "battery.h"
@@ -23,6 +24,12 @@ LOG_MODULE_REGISTER(BATTERY, CONFIG_ADC_LOG_LEVEL);
 
 #define VBATT DT_PATH(battery_divider)
 #define ZEPHYR_USER DT_PATH(zephyr_user)
+#define PMIC_CHARGER DT_NODELABEL(pmic_charger)
+#define USE_PMIC_CHARGER DT_NODE_HAS_STATUS(PMIC_CHARGER, okay)
+
+#if USE_PMIC_CHARGER
+static const struct device *const charger = DEVICE_DT_GET(PMIC_CHARGER);
+#else
 
 struct io_channel_config {
 	uint8_t channel;
@@ -69,7 +76,9 @@ static struct divider_data divider_data = {
 	.adc = DEVICE_DT_GET(DT_IO_CHANNELS_CTLR(ZEPHYR_USER)),
 #endif
 };
+#endif
 
+#if !USE_PMIC_CHARGER
 static int divider_setup(void) {
 	const struct divider_config* cfg = &divider_config;
 	const struct io_channel_config* iocp = &cfg->io_channel;
@@ -155,20 +164,35 @@ static int divider_setup(void) {
 
 	return rc;
 }
+#endif
 
 static bool battery_ok;
 
 static int battery_setup() {
+#if USE_PMIC_CHARGER
+	battery_ok = device_is_ready(charger);
+	if (!battery_ok) {
+		LOG_ERR("nPM1300 charger is not ready");
+		return -ENODEV;
+	}
+	LOG_INF("Battery setup: nPM1300 charger ready");
+	return 0;
+#else
 	int rc = divider_setup();
 
 	battery_ok = (rc == 0);
 	LOG_INF("Battery setup: %d %d", rc, battery_ok);
 	return rc;
+#endif
 }
 
 SYS_INIT(battery_setup, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 int battery_measure_enable(bool enable) {
+#if USE_PMIC_CHARGER
+	ARG_UNUSED(enable);
+	return battery_ok ? 0 : -ENODEV;
+#else
 	int rc = -ENOENT;
 
 	if (battery_ok) {
@@ -180,9 +204,24 @@ int battery_measure_enable(bool enable) {
 		}
 	}
 	return rc;
+#endif
 }
 
 int battery_sample(void) {
+#if USE_PMIC_CHARGER
+	if (!battery_ok) {
+		return -ENODEV;
+	}
+
+	int rc = sensor_sample_fetch(charger);
+	if (rc != 0) {
+		return rc;
+	}
+
+	struct sensor_value voltage;
+	rc = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage);
+	return rc == 0 ? sensor_value_to_milli(&voltage) : rc;
+#else
 	int rc = -ENOENT;
 
 	if (battery_ok) {
@@ -213,6 +252,37 @@ int battery_sample(void) {
 	}
 
 	return rc;
+#endif
+}
+
+int battery_charger_state(bool *plugged, bool *charging, bool *charged)
+{
+#if USE_PMIC_CHARGER
+	if (!battery_ok) {
+		return -ENODEV;
+	}
+
+	struct sensor_value value;
+	int rc = sensor_attr_get(charger, SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS,
+		SENSOR_ATTR_NPM13XX_CHARGER_VBUS_PRESENT, &value);
+	if (rc != 0) {
+		return rc;
+	}
+	*plugged = value.val1 != 0;
+
+	rc = sensor_channel_get(charger, SENSOR_CHAN_NPM13XX_CHARGER_STATUS, &value);
+	if (rc != 0) {
+		return rc;
+	}
+	*charged = (value.val1 & BIT(1)) != 0;
+	*charging = (value.val1 & (BIT(2) | BIT(3) | BIT(4))) != 0;
+	return 0;
+#else
+	ARG_UNUSED(plugged);
+	ARG_UNUSED(charging);
+	ARG_UNUSED(charged);
+	return -ENOTSUP;
+#endif
 }
 
 unsigned int

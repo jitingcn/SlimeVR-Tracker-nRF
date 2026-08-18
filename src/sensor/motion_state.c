@@ -55,6 +55,7 @@ bool sensor_activity_score_update(
 {
 	if (state->last_update_ms < 0) {
 		state->last_update_ms = now_ms;
+		state->session_start_ms = now_ms;
 		return false;
 	}
 	int32_t elapsed_ms = (int32_t)(now_ms - state->last_update_ms);
@@ -63,7 +64,7 @@ bool sensor_activity_score_update(
 		return state->value_ms >= (int32_t)meaningful_score_ms;
 	if (elapsed_ms > 250)
 		elapsed_ms = 250;
-	if ((uint64_t)now_ms <= startup_guard_ms) {
+	if ((uint64_t)(now_ms - state->session_start_ms) <= startup_guard_ms) {
 		state->value_ms = 0;
 		return false;
 	}

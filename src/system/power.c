@@ -5,6 +5,7 @@
 #include "battery_tracker.h"
 #include "connection/connection.h"
 #include "system.h"
+#include "uptime.h"
 #include "led.h"
 #include "connection/esb.h"
 #include "system/esb_ota.h"
@@ -17,20 +18,21 @@
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_power.h>
 #include <zephyr/pm/device.h>
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#include <zephyr/dfu/mcuboot.h>
+#endif
 #include <zephyr/device.h>
+#include <zephyr/sys/util.h>
 #include <hal/nrf_spim.h>
 #include <hal/nrf_twim.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <stdint.h>
+#include <errno.h>
 
 #include "power.h"
 #include "power_battery.h"
 #include "clock_control.h"
 
-#define DFU_DBL_RESET_MEM 0x20007F7C
-#define DFU_DBL_RESET_APP 0x4ee5677e
-
-static uint32_t *dbl_reset_mem __attribute__((unused)) = ((uint32_t *)DFU_DBL_RESET_MEM); // retained
 
 enum sys_regulator {
 	SYS_REGULATOR_DCDC,
@@ -60,8 +62,7 @@ static int sys_power_state_request(enum sys_power_request id);
 static enum sys_power_request sys_power_state_peek(void);
 static void sys_power_state_clear(void);
 
-static void disable_DFU_thread(void);
-K_THREAD_DEFINE(disable_DFU_thread_id, 128, disable_DFU_thread, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // disable DFU if the system is running correctly
+K_THREAD_DEFINE(disable_DFU_thread_id, 128, sys_skip_dfu, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // skip DFU if the system is running correctly
 
 static void power_thread(void);
 K_THREAD_DEFINE(power_thread_id, 1024, power_thread, NULL, NULL, NULL, POWER_THREAD_PRIORITY, 0, 0);
@@ -110,7 +111,7 @@ static const struct gpio_dt_spec vcc = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, vcc_gp
 #pragma message "VCC GPIO does not exist"
 #endif
 
-#define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
+#define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
 
 /* CS/VCC -> Hi-Z (GPIO_DISCONNECTED); pwr enable -> driven inactive. */
 static void sys_disconnect_interface_pins(void)
@@ -194,6 +195,8 @@ static void configure_system_off(void)
 		LOG_WRN("Entering new power state while sensor error is raised");
 	if (get_status(SYS_STATUS_SYSTEM_ERROR))
 		LOG_WRN("Entering new power state while system error is raised");
+	/* Freeze online-mag commits before the final warm-NVS flush. */
+	sensor_calibration_online_mag_prepare_power_down();
 	clock_pre_shutdown();
 	main_imu_suspend();
 	sensor_shutdown();
@@ -228,38 +231,77 @@ static void set_regulator(enum sys_regulator regulator)
 #endif
 }
 
+#if DT_HAS_COMPAT_STATUS_OKAY(nordic_nrf_twim)
+static void __maybe_unused disconnect_twim_pins(uintptr_t reg)
+{
+	NRF_TWIM_Type *twim = (NRF_TWIM_Type *)reg;
+
+	nrf_psel_cfg_default("Disconnected I2C SCL", nrf_twim_scl_pin_get(twim));
+	nrf_psel_cfg_default("Disconnected I2C SDA", nrf_twim_sda_pin_get(twim));
+}
+#endif
+
+#if DT_HAS_COMPAT_STATUS_OKAY(nordic_nrf_spim)
+static void __maybe_unused disconnect_spim_pins(uintptr_t reg)
+{
+	NRF_SPIM_Type *spim = (NRF_SPIM_Type *)reg;
+
+	nrf_psel_cfg_default("Disconnected SPI SCK", nrf_spim_sck_pin_get(spim));
+	nrf_psel_cfg_default("Disconnected SPI MOSI", nrf_spim_mosi_pin_get(spim));
+	nrf_psel_cfg_default("Disconnected SPI MISO", nrf_spim_miso_pin_get(spim));
+}
+#endif
+
+#define IS_TRACKER_SENSOR_NODE(node)                                                                   \
+	((DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_SAME_NODE(node, DT_NODELABEL(imu))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_SAME_NODE(node, DT_NODELABEL(imu_spi))) ||        \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_SAME_NODE(node, DT_NODELABEL(mag))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_SAME_NODE(node, DT_NODELABEL(mag_spi))))
+
+#define SENSOR_BUS_FOREIGN_CHILD(child) +!IS_TRACKER_SENSOR_NODE(child)
+
+/* Other okay children (flash, PMIC, display, ...) share this bus. */
+#define SENSOR_BUS_HAS_FOREIGN_CHILD(bus)                                                              \
+	(0 DT_FOREACH_CHILD_STATUS_OKAY(bus, SENSOR_BUS_FOREIGN_CHILD))
+
+#define DISCONNECT_NRF_BUS_PINS(bus)                                                                   \
+	IF_ENABLED(DT_NODE_HAS_COMPAT(bus, nordic_nrf_twim),                                           \
+		   (disconnect_twim_pins(DT_REG_ADDR(bus));))                                          \
+	IF_ENABLED(DT_NODE_HAS_COMPAT(bus, nordic_nrf_spim),                                           \
+		   (disconnect_spim_pins(DT_REG_ADDR(bus));))
+
+#define DISCONNECT_SENSOR_DEV_BUS(dev_id)                                                              \
+	do {                                                                                           \
+		if (SENSOR_BUS_HAS_FOREIGN_CHILD(DT_BUS(dev_id)) == 0) {                               \
+			DISCONNECT_NRF_BUS_PINS(DT_BUS(dev_id));                                       \
+		}                                                                                      \
+	} while (0)
+
 static void disconnect_sensor_pins(void)
 {
 #if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
 	LOG_INF("Disconnecting sensor GPIOs");
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(i2c0))
-	const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
-	if (device_is_ready(i2c_dev)) {
-		NRF_TWIM_Type *twim = (NRF_TWIM_Type *)DT_REG_ADDR(DT_NODELABEL(i2c0));
-
-		nrf_psel_cfg_default("Disconnected I2C SCL", nrf_twim_scl_pin_get(twim));
-		nrf_psel_cfg_default("Disconnected I2C SDA", nrf_twim_sda_pin_get(twim));
-	}
+#if DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(imu)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(imu));
 #endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(spi3))
-	const struct device *spi_dev = DEVICE_DT_GET(DT_NODELABEL(spi3));
-	if (device_is_ready(spi_dev)) {
-		NRF_SPIM_Type *spim = (NRF_SPIM_Type *)DT_REG_ADDR(DT_NODELABEL(spi3));
-
-		nrf_psel_cfg_default("Disconnected SPI SCK", nrf_spim_sck_pin_get(spim));
-		nrf_psel_cfg_default("Disconnected SPI MOSI", nrf_spim_mosi_pin_get(spim));
-		nrf_psel_cfg_default("Disconnected SPI MISO", nrf_spim_miso_pin_get(spim));
-
-#if DT_NODE_HAS_PROP(DT_NODELABEL(spi3), cs_gpios)
-		const struct gpio_dt_spec cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi3), cs_gpios, 0);
-		nrf_gpio_configure_dt_log("Disconnected SPI CS", &cs, GPIO_DISCONNECTED);
+#if DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(imu_spi)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(imu_spi));
 #endif
-	}
+#if DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(mag)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(mag));
 #endif
-
+#if DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_NODE_HAS_STATUS_OKAY(DT_BUS(DT_NODELABEL(mag_spi)))
+	DISCONNECT_SENSOR_DEV_BUS(DT_NODELABEL(mag_spi));
+#endif
 	LOG_INF("All sensor GPIO pins disconnected");
 #endif
 }
+
+#undef IS_TRACKER_SENSOR_NODE
+#undef SENSOR_BUS_FOREIGN_CHILD
+#undef SENSOR_BUS_HAS_FOREIGN_CHILD
+#undef DISCONNECT_NRF_BUS_PINS
+#undef DISCONNECT_SENSOR_DEV_BUS
 
 static void wait_for_logging(void)
 {
@@ -374,7 +416,7 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 //	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
+	sys_skip_dfu();
 #endif
 	sys_poweroff();
 	return true;
@@ -423,7 +465,7 @@ static bool sys_system_off(void) // TODO: add timeout
 	// retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
+	sys_skip_dfu();
 #endif
 	sys_poweroff();
 	return true;
@@ -446,7 +488,7 @@ static void sys_system_reboot(void) // TODO: add timeout
 //	retained_update();
 	wait_for_logging();
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
+	sys_skip_dfu();
 #endif
 	sys_reboot(SYS_REBOOT_COLD);
 }
@@ -494,12 +536,6 @@ bool vbus_read(void)
 #endif
 }
 
-static void disable_DFU_thread(void)
-{
-#if ADAFRUIT_BOOTLOADER
-	(*dbl_reset_mem) = DFU_DBL_RESET_APP; // Skip DFU
-#endif
-}
 
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
 // TODO: should be separated to be more clear in its function?
@@ -519,7 +555,7 @@ static void power_thread(void)
 	while (1)
 	{
 		/* Log OTA RAM engine GPREGRET once, after USB console is ready (~5s) */
-		if (!ota_gpregret_logged && k_uptime_get() > 5000) {
+		if (!ota_gpregret_logged && system_uptime_since_boot_ms() > 5000) {
 			ota_gpregret_logged = true;
 			uint8_t gp = watchdog_get_ota_gpregret();
 			if (gp >= 0xD0 && gp <= 0xDE) {
@@ -532,8 +568,18 @@ static void power_thread(void)
 		 * clearing the WDT reset counter, allowing multiple WDT resets to
 		 * accumulate and eventually trigger DFU mode if there's a persistent issue.
 		 */
-		if (!boot_success_checked && k_uptime_get() > 60000) {
+		if (!boot_success_checked && system_uptime_since_boot_ms() > 60000) {
 			boot_success_checked = true;
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+			if (!boot_is_img_confirmed()) {
+				int err = boot_write_img_confirmed();
+				if (err) {
+					LOG_ERR("Failed to confirm MCUboot image: %d", err);
+				} else {
+					LOG_INF("MCUboot test image confirmed");
+				}
+			}
+#endif
 			watchdog_mark_boot_success();
 		}
 
@@ -567,6 +613,11 @@ static void power_thread(void)
 		bool docked = dock_read();
 		bool charging = chg_read();
 		bool charged = stby_read();
+		bool pmic_plugged = false;
+		int charger_state_err = battery_charger_state(&pmic_plugged, &charging, &charged);
+		if (charger_state_err != 0 && charger_state_err != -ENOTSUP) {
+			LOG_WRN("Failed to read charger state: %d", charger_state_err);
+		}
 
 		int battery_mV;
 		int16_t battery_pptt = read_batt_mV(&battery_mV);
@@ -587,7 +638,7 @@ static void power_thread(void)
 		bool usb_plugged = false;
 #endif
 		int64_t now_ms = k_uptime_get();
-		bool raw_device_plugged = charging || charged || plugged || usb_plugged;
+		bool raw_device_plugged = charging || charged || plugged || usb_plugged || pmic_plugged;
 		bool plug_state_debouncing = power_battery_update_plugged_state(raw_device_plugged, now_ms);
 		bool plug_signal_settling = power_battery_plug_signal_settling(plug_state_debouncing, now_ms);
 		int32_t average_pptt = power_battery_average_pptt();
@@ -640,7 +691,7 @@ static void power_thread(void)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (charged)
 			set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (plugged || usb_plugged)
+		else if (plugged || usb_plugged || pmic_plugged)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (power_battery_is_low())
 			set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_SYSTEM);

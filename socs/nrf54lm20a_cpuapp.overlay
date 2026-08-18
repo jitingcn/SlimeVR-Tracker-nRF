@@ -1,0 +1,22 @@
+/ {
+	cpuapp_sram@2007ebfc {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x2007ebfc DT_SIZE_K(4)>;
+		zephyr,memory-region = "RETAINED_MEM";
+		status = "okay";
+
+		retainedmem0: retainedmem {
+			compatible = "zephyr,retained-ram";
+			status = "okay";
+		};
+	};
+
+	aliases {
+		retainedmemdevice = &retainedmem0;
+	};
+};
+
+&cpuapp_sram {
+	/* Preserve the top 4 KiB of the 511 KiB CPUAPP SRAM for retained state. */
+	reg = <0x20000000 0x7ebfc>;
+};

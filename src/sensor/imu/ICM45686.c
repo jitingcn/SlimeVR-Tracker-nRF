@@ -1,5 +1,6 @@
 #include <math.h>
 
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <hal/nrf_gpio.h>
 
@@ -14,11 +15,13 @@ static const float gyro_sensitivity = 2000.0f / 32768.0f; // Always 2000dps
 static const float accel_sensitivity_32 = 32.0f / ((uint32_t)2<<30); // 32G forced
 static const float gyro_sensitivity_32 = 4000.0f / ((uint32_t)2<<30); // 4000dps forced
 
-static const uint16_t times[] = {6400, 3200, 1600, 800, 400, 200, 100, 50, 25, 2, 0};
+static const float odr_hz[] = {6400.0f, 3200.0f, 1600.0f, 800.0f, 400.0f, 200.0f, 100.0f, 50.0f, 25.0f, 12.5f};
 static const uint8_t odrs[] = {ACCEL_ODR_6_4kHz, ACCEL_ODR_3_2kHz, ACCEL_ODR_1_6kHz, ACCEL_ODR_800Hz, ACCEL_ODR_400Hz, ACCEL_ODR_200Hz, ACCEL_ODR_100Hz, ACCEL_ODR_50Hz, ACCEL_ODR_25Hz, ACCEL_ODR_12_5Hz};
 
 static uint8_t last_accel_odr = 0xff;
 static uint8_t last_gyro_odr = 0xff;
+static uint8_t last_accel_mode = 0xff;
+static uint8_t last_gyro_mode = 0xff;
 static const float clock_reference = 32000;
 static float clock_scale = 1; // ODR is scaled by clock_rate/clock_reference
 
@@ -267,6 +270,7 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG0, 0x00);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG1, 0x00);
 
+	clock_scale = 1.0f;
 	if (clock_rate > 0)
 	{
 		clock_scale = clock_rate / clock_reference;
@@ -297,6 +301,8 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
+	last_accel_mode = 0xff;
+	last_gyro_mode = 0xff;
 	err |= icm45_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
 
 	// Configure SRC_CTRL: 0=off, 1=AAF only, 2=AAF+Interpolator
@@ -327,6 +333,8 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 			// Recalculate ODR without clock scaling
 			last_accel_odr = 0xff;
 			last_gyro_odr = 0xff;
+			last_accel_mode = 0xff;
+			last_gyro_mode = 0xff;
 			err |= icm45_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
 		}
 		else
@@ -336,7 +344,9 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 	}
 
 	if (err)
+	{
 		LOG_ERR("Communication error");
+	}
 	return (err < 0 ? err : 0);
 }
 
@@ -345,6 +355,8 @@ void icm45_shutdown(void)
 	icm45_ext_stop_continuous();
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff; // reset last odr
+	last_accel_mode = 0xff;
+	last_gyro_mode = 0xff;
 	fifo_temp = 25.0f;
 	fifo_temp_valid = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
@@ -358,11 +370,15 @@ void icm45_shutdown(void)
 //	ireg_buf[2] = 0xBB & ~0x10; // set internal pull down resistors for AP pins (pin 11)
 //	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3); // write buffer
 	if (err)
+	{
 		LOG_ERR("Communication error");
+	}
 }
 
 void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
 {
+	ARG_UNUSED(accel_range);
+	ARG_UNUSED(gyro_range);
 	// ICM45686 only supports 32G and 4000dps in high-res mode
 	*accel_actual_range = 32; // always 32g in hires
 	*gyro_actual_range = 4000; // always 4000dps in hires
@@ -370,7 +386,7 @@ void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_ra
 
 int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
-	int ODR;
+	float requested_odr;
 	// ICM45686 only supports 32G and 4000dps in high-res mode
 	uint8_t ACCEL_UI_FS_SEL = ACCEL_UI_FS_SEL_32G;
 	uint8_t GYRO_UI_FS_SEL = GYRO_UI_FS_SEL_4000DPS;
@@ -388,16 +404,16 @@ int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time
 	else
 	{
 		ACCEL_MODE = ACCEL_MODE_LN;
-		ODR = 1 / accel_time;
-		ODR /= clock_scale; // scale clock
-		for (int i = 1; i < ARRAY_SIZE(times); i++)
+		requested_odr = (1.0f / accel_time) / clock_scale;
+		size_t selected = 0;
+		for (size_t i = 1; i < ARRAY_SIZE(odr_hz); i++)
 		{
-			if (ODR <= (i > 9 ? times[i] / 25.0 : times[i]))
-				continue;
-			ACCEL_ODR = odrs[i - 1];
-			accel_time = i > 10 ? times[i - 1] / 25.0 : 1.0 / times[i - 1];
-			break;
+			if (requested_odr > odr_hz[i])
+				break;
+			selected = i;
 		}
+		ACCEL_ODR = odrs[selected];
+		accel_time = 1.0f / odr_hz[selected];
 	}
 	accel_time /= clock_scale; // scale clock
 
@@ -415,31 +431,30 @@ int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time
 	else
 	{
 		GYRO_MODE = GYRO_MODE_LN;
-		ODR = 1 / gyro_time;
-		ODR /= clock_scale; // scale clock
-		for (int i = 1; i < ARRAY_SIZE(times); i++)
+		requested_odr = (1.0f / gyro_time) / clock_scale;
+		size_t selected = 0;
+		for (size_t i = 1; i < ARRAY_SIZE(odr_hz); i++)
 		{
-			if (ODR <= (i > 9 ? times[i] / 25.0 : times[i]))
-				continue;
-			GYRO_ODR = odrs[i - 1];
-			gyro_time = i > 10 ? times[i - 1] / 25.0 : 1.0 / times[i - 1];
-			break;
+			if (requested_odr > odr_hz[i])
+				break;
+			selected = i;
 		}
+		GYRO_ODR = odrs[selected];
+		gyro_time = 1.0f / odr_hz[selected];
 	}
 	gyro_time /= clock_scale; // scale clock
 
-	if (last_accel_odr == ACCEL_ODR && last_gyro_odr == GYRO_ODR) {
+	if (last_accel_odr == ACCEL_ODR && last_gyro_odr == GYRO_ODR &&
+		last_accel_mode == ACCEL_MODE && last_gyro_mode == GYRO_MODE) {
 		*accel_actual_time = accel_time;
 		*gyro_actual_time = gyro_time;
 		return 0; /* already configured — success for err|= callers */
 	}
 
-	uint8_t prev_accel_odr = last_accel_odr;
-	uint8_t prev_gyro_odr = last_gyro_odr;
 	int err = 0;
 	// only if the power mode has changed
-	if (prev_accel_odr == 0xff || prev_gyro_odr == 0xff || (prev_accel_odr == 0 ? 0 : 1) != (ACCEL_ODR == 0 ? 0 : 1) || (prev_gyro_odr == 0 ? 0 : 1) != (GYRO_ODR == 0 ? 0 : 1))
-	{ // TODO: can't tell difference between gyro off and gyro standby
+	if (last_accel_mode != ACCEL_MODE || last_gyro_mode != GYRO_MODE)
+	{
 		uint8_t pwr_mgmt = GYRO_MODE << 2 | ACCEL_MODE;
 		LOG_INF("PWR_MGMT0 write = 0x%02X (GYRO_MODE=%d, ACCEL_MODE=%d)", pwr_mgmt, GYRO_MODE, ACCEL_MODE);
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, pwr_mgmt); // set accel and gyro modes
@@ -463,12 +478,18 @@ int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time
 	LOG_INF("ACCEL_CONFIG0 readback = 0x%02X, GYRO_CONFIG0 readback = 0x%02X",
 		accel_config_readback, gyro_config_readback);
 	if (err) {
+		last_accel_odr = 0xff;
+		last_gyro_odr = 0xff;
+		last_accel_mode = 0xff;
+		last_gyro_mode = 0xff;
 		LOG_ERR("Communication error");
 		return err;
 	}
 
 	last_accel_odr = ACCEL_ODR;
 	last_gyro_odr = GYRO_ODR;
+	last_accel_mode = ACCEL_MODE;
+	last_gyro_mode = GYRO_MODE;
 	*accel_actual_time = accel_time;
 	*gyro_actual_time = gyro_time;
 
@@ -479,7 +500,15 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 {
 	int err = 0;
 	uint8_t rawCount[2];
+	/* AN-000364 2.2: read FIFO_COUNT twice and use the second value to
+	 * avoid sampling a count while a frame is still being written. */
 	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &rawCount[0], 2);
+	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &rawCount[0], 2);
+	if (err)
+	{
+		LOG_ERR("Failed to read FIFO count");
+		return 0;
+	}
 	uint16_t packets = (uint16_t)(rawCount[0] << 8 | rawCount[1]); // Turn the 16 bits into a unsigned 16-bit value
 
 	fifo_temp_valid = false;
@@ -494,18 +523,24 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 		packets = limit;
 	}
 
-	// Read exactly what FIFO_COUNT said - single read, no loops
+	/* Stream mode may still be writing the newest frame while we drain.
+	 * AN-000364 recommends reading M-1; the fixed 20-byte frame keeps the
+	 * remaining frames aligned, so icm45_fifo_process skips a torn header,
+	 * matching the ArduPilot/PX4 validate-and-skip approach. */
 	uint16_t count = packets * PACKET_SIZE;
-	err |= ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_DATA, data, count, PACKET_SIZE);
+	err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_DATA, data, count, PACKET_SIZE);
 	if (err)
+	{
 		LOG_ERR("Communication error");
-	else
-		icm45_cache_fifo_temp(data, packets);
+		return 0;
+	}
+	icm45_cache_fifo_temp(data, packets);
 
 	return packets;
 }
 
 static const uint8_t invalid[6] = {0x80, 0x00, 0x80, 0x00, 0x80, 0x00};
+static int64_t icm45_last_bad_header_ms = 0;
 
 int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
@@ -513,7 +548,12 @@ int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 	// Accept both 0x78 and 0x7A headers (0x7A has timestamp bit set)
 	if (data[index] != 0x78 && data[index] != 0x7A)
 	{
-		LOG_WRN("Invalid FIFO header: 0x%02X (expected 0x78 or 0x7A)", data[index]);
+		// Rate-limit: a corrupted FIFO_COUNT can otherwise spam one warning per packet
+		if (k_uptime_get() - icm45_last_bad_header_ms >= 1000)
+		{
+			LOG_WRN("Invalid FIFO header: 0x%02X (expected 0x78 or 0x7A)", data[index]);
+			icm45_last_bad_header_ms = k_uptime_get();
+		}
 		return 1; // Skip invalid header
 	}
 
@@ -569,7 +609,11 @@ void icm45_accel_read(float a[3])
 	uint8_t rawAccel[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_ACCEL_DATA_X1_UI, &rawAccel[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		memset(a, 0, 3 * sizeof(*a));
+		return;
+	}
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
 		a[i] = (int16_t)((((uint16_t)rawAccel[i * 2]) << 8) | rawAccel[1 + (i * 2)]);
@@ -582,7 +626,11 @@ void icm45_gyro_read(float g[3])
 	uint8_t rawGyro[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_GYRO_DATA_X1_UI, &rawGyro[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		memset(g, 0, 3 * sizeof(*g));
+		return;
+	}
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
 		g[i] = (int16_t)((((uint16_t)rawGyro[i * 2]) << 8) | rawGyro[1 + (i * 2)]);
@@ -598,7 +646,10 @@ float icm45_temp_read(void)
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_TEMP_DATA1_UI, &rawTemp[0], 2);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return NAN;
+	}
 	// Temperature in Degrees Centigrade = (TEMP_DATA / 128) + 25
 	float temp = (int16_t)((((uint16_t)rawTemp[0]) << 8) | rawTemp[1]);
 	temp /= 128;
@@ -631,6 +682,8 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG0, 0x00); // disable default interrupt (RESET_DONE)
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_ACCEL_CONFIG0, ACCEL_UI_FS_SEL_8G << 4 | ACCEL_ODR_200Hz); // set accel ODR and FS
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, ACCEL_MODE_LP); // set accel and gyro modes
+	last_accel_mode = 0xff;
+	last_gyro_mode = 0xff;
 	ireg_buf[0] = ICM45686_IPREG_SYS2; // address is a word, icm is big endian
 	ireg_buf[1] = ICM45686_IPREG_SYS2_REG_129;
 	ireg_buf[2] = 0x00; // set ACCEL_LP_AVG_SEL to 1x
@@ -759,6 +812,9 @@ retry_write:
 	// finds fresh data ready without the full oneshot cycle.
 	if (was_continuous && !err)
 	{
+		// The write transaction just completed; make sure the I2CM engine is
+		// idle before re-arming GO so the restored read is not aborted.
+		icm45_i2cm_wait_done();
 		uint8_t rd_profile[2] = {saved_sub, saved_addr};
 		icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2);
 		icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_COMMAND_0,
@@ -934,6 +990,8 @@ int icm45_ext_setup(void)
 	if (gyro_mode == GYRO_MODE_OFF) {
 		pwr = (pwr & ~(0x03 << 2)) | (GYRO_MODE_STANDBY << 2);
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_PWR_MGMT0, pwr);
+		last_accel_mode = 0xff;
+		last_gyro_mode = 0xff;
 		k_msleep(1); // Wait for gyro oscillator to stabilize
 	}
 

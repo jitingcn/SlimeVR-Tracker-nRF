@@ -33,6 +33,7 @@ typedef enum {
 	WDT_CHANNEL_LED,            // LED control
 	WDT_CHANNEL_STATUS,         // Status display
 	WDT_CHANNEL_CALIBRATION,    // Calibration processing
+	WDT_CHANNEL_SCAN,           // Sensor discovery/init before loop starts
 
 	WDT_CHANNEL_COUNT
 } wdt_channel_id_t;

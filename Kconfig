@@ -368,6 +368,26 @@ config SENSOR_GYRO_FS
         Requested gyrometer full scale. Actual scale will be raised to the nearest supported scale.
         A lower scale may improve noise performance, but is more likely to saturate.
 
+config SENSOR_UPDATE_TIME_LOW_NOISE_MS
+    int "Sensor loop update interval in low-noise mode (ms)"
+    default 6
+    range 1 100
+    help
+        Target FIFO watermark interval for the sensor loop in low-noise mode.
+        Lower values raise the loop/packet rate (and ESB TPS) at the cost of
+        more I2C/SPI reads and CPU time. 6 ms matches the historic default.
+
+config SENSOR_STARTUP_DISCARD_MS
+    int "Startup IMU samples to discard (ms)"
+    default 20
+    range 0 50
+    help
+        Discard IMU samples for this long after sensor init before feeding
+        fusion, to skip the gyro power-on settle transient for every IMU.
+        TDK examples discard the first FIFO frames and Betaflight waits for
+        gyro startup. 0 disables the window. Keep it small (<=20 ms) so the
+        first valid pose is not delayed.
+
 config SENSOR_MAG_ODR
     int "Magnetometer ODR (Hz)"
     default 200
@@ -569,6 +589,29 @@ config CLOCK_USE_LFXO
         Disable this option if your board does not have an external
         LFXO crystal. Using LFXO without a crystal will cause the
         system to hang or IMU detection to fail.
+
+choice CLOCK_USE_LFXO_MODE
+    prompt "External LF clock source mode"
+    depends on CLOCK_USE_LFXO
+    default CLOCK_USE_LFXO_MODE_XTAL
+    help
+        Some boards drive the LFCLK pin with an external 32.768 kHz
+        signal (low-swing or full-swing) instead of a crystal.
+        Select the matching mode here; XTAL is the standard crystal
+        configuration.
+
+config CLOCK_USE_LFXO_MODE_XTAL
+    bool "Crystal oscillator (XTAL)"
+
+config CLOCK_USE_LFXO_MODE_LOW_SWING
+    bool "External low-swing signal"
+    depends on SOC_SERIES_NRF52
+
+config CLOCK_USE_LFXO_MODE_FULL_SWING
+    bool "External full-swing signal"
+    depends on SOC_SERIES_NRF52
+
+endchoice
 
 config CONNECTION_TDMA
     bool "Enable TDMA transmit scheduling"

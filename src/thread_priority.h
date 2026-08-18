@@ -16,7 +16,9 @@
 #define SENSOR_LOOP_THREAD_PRIORITY 7
 #define LED_THREAD_PRIORITY 6
 #define DISABLE_DFU_THREAD_PRIORITY 6
-#define POWER_THREAD_PRIORITY 6
+/* Below the sensor loop (7): the battery poll bitbangs the nPM1300 over
+ * gpio-i2c (busy-wait), which would otherwise stall the sensor loop. */
+#define POWER_THREAD_PRIORITY 9
 #define STATUS_THREAD_PRIORITY 6
 #define BUTTON_THREAD_PRIORITY 6
 #define VQF_BENCH_THREAD_PRIORITY 8

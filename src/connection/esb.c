@@ -32,11 +32,10 @@
 #include "zephyr/sys/time_units.h"
 
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
-#if defined(NRF54L15_XXAA)
 #include <hal/nrf_clock.h>
-#endif /* defined(NRF54L15_XXAA) */
 #include <hal/nrf_timer.h>
 #include <nrfx_timer.h>
+#include <nrfx_power.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/kernel.h>
@@ -65,9 +64,39 @@ static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0,
 
 static uint8_t paired_addr[8] = {0};
 
-static bool esb_initialized = false;
-static bool esb_paired = false;
+/* ---------------------------------------------------------------------------
+ * ESB connection state machine.
+ *
+ * Explicit state replaces the implicit esb_paired/ping_failures matrix so
+ * pairing, connection, and error recovery transitions are visible in one
+ * place. Radio/data readiness is unchanged: esb_ready() == PAIRED.
+ *
+ *   PAIRING    - pairing burst to discovery address (entered on boot if
+ *                unpaired, or via esb_reset_pair/remote clear)
+ *   PAIRED     - paired address active, normal operation
+ *   RECOVERING - ping loss detected; ping counter keeps accumulating
+ *                failures for the shutdown watchdog, while the flag
+ *                gates repeated recovery bursts from esb_thread
+ * ------------------------------------------------------------------------- */
+typedef enum {
+	ESB_ST_PAIRING,
+	ESB_ST_PAIRED,
+	ESB_ST_RECOVERING,
+} esb_conn_state_t;
 
+static esb_conn_state_t esb_conn_state = ESB_ST_PAIRING;
+
+static bool esb_initialized = false;
+
+/* Preferred ESB channels: even channels outside WiFi/BT-heavy spectrum
+ * (upstream SlimeVR selection). */
+static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS[] = {
+	0, 2, 52, 72, 74, 76, 78, 82, 84, 86, 88, 50, 24, 48,
+	70, 68, 46, 44, 20, 54, 56, 28, 30,
+	6, 8, 10, 12, 14, 16, 18, 32, 34,
+	36, 38, 40, 42, 58, 60, 62, 64, 66,
+};
+#define ESB_ALLOWED_CHANNELS_COUNT ARRAY_SIZE(ESB_ALLOWED_CHANNELS)
 #define TX_ERROR_THRESHOLD 300
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
@@ -97,6 +126,14 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, ESB_THREAD_PRIORITY, 0, 0);
 static int64_t last_tx_time = 0;
+
+/*
+ * nRF54L only: how long to keep HFCLK (and constant latency) up after the last
+ * ESB TX before stopping it. Frequent HFXO/PLL restarts are unreliable on
+ * nRF54L (anomaly 20/39), so clocks are stopped only after a longer idle
+ * period instead of after every drained TX.
+ */
+#define ESB_CLOCK_IDLE_STOP_MS 3000
 
 static uint32_t ping_success_streak = 0; // consecutive success counter
 static bool ping_pending = false;
@@ -263,13 +300,9 @@ static void esb_remote_cmd_clear(void)
 
 static void esb_remote_cmd_dfu(void)
 {
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT
 	LOG_WRN("Executing remote command: DFU (enter bootloader)");
-#if CONFIG_BUILD_OUTPUT_UF2
-	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
-	k_msleep(100);
-#endif
-	sys_request_system_reboot(false);
+	sys_enter_dfu(false);
 #else
 	LOG_WRN("Remote command: DFU not supported (no bootloader)");
 #endif
@@ -277,13 +310,9 @@ static void esb_remote_cmd_dfu(void)
 
 static void esb_remote_cmd_dfu_ota(void)
 {
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT
 	LOG_WRN("Executing remote command: DFU_OTA (enter OTA bootloader)");
-#if CONFIG_BUILD_OUTPUT_UF2
-	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
-	k_msleep(2);
-#endif
-	sys_request_system_reboot(false);
+	sys_enter_dfu(true);
 #else
 	LOG_WRN("Remote command: DFU_OTA not supported (no bootloader)");
 #endif
@@ -294,8 +323,8 @@ static void esb_remote_cmd_set_channel(void)
 	// Validate channel value (0-100)
 	if (received_channel_value <= 100) {
 		LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
-		// Save to retained memory
-		retained->rf_channel = (uint8_t)received_channel_value;
+		// Save to retained memory (encoded)
+		retained->rf_channel = esb_rf_channel_encode((uint8_t)received_channel_value);
 		retained_update();
 		// Save to NVS
 		sys_write(
@@ -304,11 +333,11 @@ static void esb_remote_cmd_set_channel(void)
 			&retained->rf_channel,
 			sizeof(retained->rf_channel)
 		);
-		LOG_INF("RF channel saved to NVS: %u", retained->rf_channel);
+		LOG_INF("RF channel saved to NVS: %u", received_channel_value);
 		if (esb_reinitialize()) {
 			LOG_ERR("ESB reinitialize failed after channel change");
 		} else {
-			LOG_INF("ESB reinitialized with channel %u", retained->rf_channel);
+			LOG_INF("ESB reinitialized with channel %u", received_channel_value);
 		}
 	} else {
 		LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
@@ -318,8 +347,8 @@ static void esb_remote_cmd_set_channel(void)
 static void esb_remote_cmd_clear_channel(void)
 {
 	LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
-	// Clear saved channel (set to 0xFF = use default)
-	retained->rf_channel = 0xFF;
+	// Clear saved channel (set to default marker)
+	retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
 	retained_update();
 	sys_write(
 		RF_CHANNEL_ID,
@@ -745,7 +774,6 @@ int clocks_start(void)
 	int err;
 	int res;
 	struct onoff_client clk_cli;
-	int fetch_attempts = 0;
 
 	sys_notify_init_spinwait(&clk_cli.notify);
 
@@ -755,23 +783,43 @@ int clocks_start(void)
 		return err;
 	}
 
+	/*
+	 * Wait for the HF clock to actually start. A cold HFXO start can take
+	 * several milliseconds. Match the SDK's esb_clocks_start()
+	 * (sdk-nrf/subsys/esb/esb_glue.c): keep waiting until the onoff request
+	 * completes. Returning while the request is still pending would leave
+	 * clk_cli dangling on the onoff manager's client list, and the
+	 * completion ISR would later walk that stale node (bus fault).
+	 */
 	do {
-		k_usleep(100);
 		err = sys_notify_fetch_result(&clk_cli.notify, &res);
 		if (!err && res) {
 			LOG_ERR("Clock could not be started: %d", res);
 			return res;
 		}
-		if (err && ++fetch_attempts > 10) {
-			LOG_WRN_ONCE("Unable to fetch Clock request result: %d", err);
-			return err;
+		if (err == -EAGAIN) {
+			k_yield();
 		}
-	} while (err);
+	} while (err == -EAGAIN);
 
-#if defined(NRF54L15_XXAA)
-	/* MLTPAN-20 */
+	if (err) {
+		LOG_ERR("Unexpected return code from sys_notify_fetch_result: %d", err);
+		return err;
+	}
+
+#if NRF_CLOCK_HAS_PLL
+	/* MLTPAN-20: CLOCK PLL must be running for radio (nRF54L and later). */
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_PLLSTART);
-#endif /* defined(NRF54L15_XXAA) */
+#endif
+
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+	/* nRF54L anomaly 20: constant latency sub-power mode must be active while
+	 * the radio is used, otherwise a TX payload can silently not be
+	 * transmitted and the radio stays stuck (ESB TX FIFO fills up). Mirrors
+	 * what MPSL / nrf_802154 / esb_glue.c do on nRF54L.
+	 */
+	(void)nrfx_power_constlat_mode_request();
+#endif
 
 	clock_status = true;
 	return 0;
@@ -793,6 +841,10 @@ void clocks_stop(void)
 	clock_status = false;
 
 	onoff_release(clk_mgr);
+
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+	nrfx_power_constlat_mode_free();
+#endif
 
 	LOG_DBG("HF clock stop request");
 }
@@ -868,8 +920,13 @@ void event_handler(struct esb_evt const *event)
 		tx_success_count++;
 		// Reset ENOMEM error counter on successful transmission
 		consecutive_enomem_errors = 0;
-		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
+		if (esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() && esb_is_idle()) {
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+			/* nRF54L: keep HFCLK up while ESB is active; idle stop is
+			 * handled in esb_thread after ESB_CLOCK_IDLE_STOP_MS. */
+#else
 			clocks_stop();
+#endif
 		}
 		break;
 	case ESB_EVENT_TX_FAILED:
@@ -929,6 +986,7 @@ void event_handler(struct esb_evt const *event)
 		if (ping_failures == TX_ERROR_THRESHOLD) // consecutive ping failures
 		{
 			connection_error_start_time = k_uptime_get(); // Mark when connection errors started
+			esb_conn_state = ESB_ST_RECOVERING;
 			LOG_WRN(
 				"Ping failure threshold reached (%d failures), starting "
 				"timeout timer",
@@ -936,8 +994,13 @@ void event_handler(struct esb_evt const *event)
 			);
 		}
 
-		if (esb_paired && !connection_get_data_collection() && esb_is_idle()) {
+		if (esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() && esb_is_idle()) {
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+			/* nRF54L: keep HFCLK up while ESB is active; idle stop is
+			 * handled in esb_thread after ESB_CLOCK_IDLE_STOP_MS. */
+#else
 			clocks_stop();
+#endif
 		}
 		break;
 	case ESB_EVENT_RX_RECEIVED: {
@@ -1001,6 +1064,7 @@ void event_handler(struct esb_evt const *event)
 						ping_pending = false;
 						ping_failed = false;
 						ping_failures = 0;
+						esb_conn_state = ESB_ST_PAIRED;
 						if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
 							set_status(SYS_STATUS_CONNECTION_ERROR, false);
 							connection_error_start_time = 0;
@@ -1019,6 +1083,7 @@ void event_handler(struct esb_evt const *event)
 					ping_pending = false;
 					ping_failed = false;
 					ping_failures = 0;
+					esb_conn_state = ESB_ST_PAIRED;
 					if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
 						ping_success_streak++;
 						if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
@@ -1443,17 +1508,16 @@ int esb_initialize(bool tx)
 	err = esb_init(&config);
 
 	if (!err) {
-		// Read and apply RF channel from retained/NVS
-		// 0xFF and 0 both indicate "use default"
-		if (retained->rf_channel != 0xFF && retained->rf_channel != 0 && retained->rf_channel <= 100) {
-			LOG_INF("Restoring RF channel from NVS: %u", retained->rf_channel);
-			esb_set_rf_channel(retained->rf_channel);
+		// Read and apply RF channel from retained/NVS (stored value is encoded).
+		uint8_t ch = esb_rf_channel_decode(retained->rf_channel);
+		if (ch != ESB_RF_CHANNEL_DEFAULT) {
+			LOG_INF("Restoring RF channel from NVS: %u", ch);
+			esb_set_rf_channel(ch);
 		} else {
 			LOG_INF("Using default RF channel: %u", RADIO_RF_CHANNEL);
 			esb_set_rf_channel(RADIO_RF_CHANNEL);
-			// Initialize with 0xFF to indicate default is being used
-			if (retained->rf_channel != 0xFF) {
-				retained->rf_channel = 0xFF;
+			if (retained->rf_channel != ESB_RF_CHANNEL_DEFAULT) {
+				retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
 				retained_update();
 			}
 		}
@@ -1585,6 +1649,7 @@ void esb_pair(void)
 	if (!paired_addr[0]) // zero, no receiver paired
 	{
 		LOG_INF("Pairing");
+		esb_conn_state = ESB_ST_PAIRING;
 		esb_set_addr_discovery();
 		esb_initialize(true);
 		//		timer_init(); // TODO: shouldn't be here!!!
@@ -1662,15 +1727,15 @@ void esb_pair(void)
 	set_tracker_id(paired_addr[1]);
 
 	esb_set_addr_paired();
-	esb_paired = true;
+	esb_conn_state = ESB_ST_PAIRED;
 	clocks_stop();
 }
 
 void esb_reset_pair(void)
 {
-	if (paired_addr[0] || esb_paired) {
+	if (paired_addr[0] || esb_conn_state != ESB_ST_PAIRING) {
 		esb_deinitialize(); // make sure esb is off
-		esb_paired = false;
+		esb_conn_state = ESB_ST_PAIRING;
 		memset(paired_addr, 0, sizeof(paired_addr));
 		LOG_INF("Pairing requested");
 	}
@@ -1701,7 +1766,7 @@ void esb_process_ota_rx_queue(void)
 
 void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 {
-	if (!esb_initialized || !esb_paired) {
+	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
 		return;
 	}
 	if (!clock_status) {
@@ -1952,7 +2017,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 
 bool esb_ready(void)
 {
-	return esb_initialized && esb_paired;
+	return esb_initialized && esb_conn_state != ESB_ST_PAIRING;
 }
 
 uint8_t esb_get_ping_ack_flag(void)
@@ -2029,16 +2094,26 @@ static void esb_thread(void)
 
 	while (1) {
 #if CONFIG_CONNECTION_OVER_HID
-		if (!esb_paired && get_status(SYS_STATUS_USB_CONNECTED) == false
+		if (esb_conn_state == ESB_ST_PAIRING && get_status(SYS_STATUS_USB_CONNECTED) == false
 			&& k_uptime_get() - 750 > start_time) // only automatically enter pairing while not
 												  // potentially communicating by usb
 #else
-		if (!esb_paired)
+		if (esb_conn_state == ESB_ST_PAIRING)
 #endif
 		{
 			esb_pair();
 			esb_initialize(true);
 		}
+#if defined(CONFIG_SOC_SERIES_NRF54L)
+		/* Stop HFCLK only after a longer idle period without any ESB TX.
+		 * Frequent XO/PLL restarts are unreliable on nRF54L (anomaly 20). */
+		if (clock_status && esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() &&
+		    esb_is_idle() && last_tx_time != 0 &&
+		    (k_uptime_get() - last_tx_time) > ESB_CLOCK_IDLE_STOP_MS) {
+			clocks_stop();
+		}
+#endif
+
 		// Check for shutdown timeout if connection errors persist
 		if (ping_failures >= TX_ERROR_THRESHOLD && !test_mode_get()) {
 #if CONFIG_CONNECTION_OVER_HID
@@ -2088,6 +2163,7 @@ static void esb_thread(void)
 			LOG_WRN("PING timeout, failures=%u", ping_failures);
 			if (ping_failures == TX_ERROR_THRESHOLD) {
 				connection_error_start_time = now_idle;
+				esb_conn_state = ESB_ST_RECOVERING;
 				LOG_WRN(
 					"Ping failure threshold reached (%d failures), starting "
 					"timeout timer",

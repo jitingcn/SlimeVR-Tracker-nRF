@@ -46,6 +46,9 @@ void reboot_counter_write(uint8_t reboot_counter);
 
 void sys_write(uint16_t id, void *ptr, const void *data, size_t len);
 void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t len);
+void sys_warm_transaction_begin(void);
+void sys_warm_transaction_mark(uint16_t id, void *retained_ptr, size_t len);
+void sys_warm_transaction_end(bool retained_changed);
 void sys_flush_warm(void);
 bool sys_warm_is_dirty(void);
 void sys_read(uint16_t id, void *data, size_t len);
@@ -62,6 +65,8 @@ bool stby_read(void);
 
 int sys_user_shutdown(void);
 void sys_command_shutdown(void);
+void sys_enter_dfu(bool ota);
+void sys_skip_dfu(void);
 void sys_reset_mode(uint8_t mode);
 
 #endif

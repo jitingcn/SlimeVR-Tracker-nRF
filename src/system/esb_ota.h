@@ -92,6 +92,7 @@
 #define OTA_BEGIN_PACKET_SIZE   64
 #define OTA_BOARD_TARGET_MAX    48
 #define OTA_PROTOCOL_VERSION    1
+#define OTA_MCUBOOT_IMAGE_MAGIC 0x96F3B83D
 
 /*
  * ── OTA Status Packet Format (Tracker → Receiver, 13 bytes) ────────
@@ -118,13 +119,18 @@
  *                bits 31-25: year-2020, 24-21: month, 20-16: day,
  *                15-11: hour, 10-5: minute, 4-0: second/2
  * Byte  9-12:  firmware_size (uint32 LE, current running firmware)
- * Byte 13:     bootloader_type (0=none, 1=adafruit_uf2, 2=nrf5_opendfu)
+ * Byte 13:     bootloader_type (OTA_BOOTLOADER_*)
  * Byte 14:     ota_protocol_version
  * Byte 15-62:  board_target (null-terminated string, max 48 bytes)
  * Byte 63-64:  flash_base_address (uint16 BE, page-aligned: actual_addr >> 12)
  * Byte 65:     CRC-8 CCITT
  */
 #define OTA_FW_INFO_PACKET_SIZE 66
+
+#define OTA_BOOTLOADER_NONE          0
+#define OTA_BOOTLOADER_ADAFRUIT_UF2  1
+#define OTA_BOOTLOADER_NRF5_OPENDFU  2
+#define OTA_BOOTLOADER_MCUBOOT       3
 
 /*
  * ── OTA Timing Constants ────────────────────────────────────────────
@@ -249,7 +255,7 @@ int esb_ota_handle_verify(void);
 /** Handle activate request; returns 0 on success */
 int esb_ota_handle_activate(void);
 
-/** Handle abort request (reboots to UF2 bootloader) */
+/** Handle abort request and reboot through the active recovery path. */
 void esb_ota_handle_abort(void);
 
 /** Check for OTA timeout; call periodically from connection thread */

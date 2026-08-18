@@ -1,0 +1,78 @@
+/*
+ * Temporary test variant for Seeed XIAO nRF54LM20A driving an external SPI
+ * IMU on non-default connector pins.
+ *
+ * Wiring (XIAO pin -> external IMU module):
+ *   GND  -> GND
+ *   3V3  -> 3V3
+ *   P1.06 (D10) -> SCL  (SPI SCK)
+ *   P1.05 (D9)  -> SDA  (SPI MOSI / SDI)
+ *   P1.04 (D8)  -> CS
+ *   P1.09 (D7)  -> SDO  (SPI MISO)
+ *   P1.08 (D6)  -> INT
+ *
+ * The default board SPI pinout (SCK P1.04 / MOSI P1.06 / MISO P1.05, CS D2)
+ * is replaced, the default I2C IMU/magnetometer nodes are disabled so the
+ * sensor scan runs SPI-only, and uart21 is kept off because its P1.08/P1.09
+ * pads are reused for INT/MISO.
+ */
+
+/* Replace the default SPI clock/data pinctrl with the test wiring. */
+&spi23_default {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 1, 6)>,
+			<NRF_PSEL(SPIM_MOSI, 1, 5)>,
+			<NRF_PSEL(SPIM_MISO, 1, 9)>;
+	};
+};
+
+&spi23_sleep {
+	group1 {
+		psels = <NRF_PSEL(SPIM_SCK, 1, 6)>,
+			<NRF_PSEL(SPIM_MOSI, 1, 5)>,
+			<NRF_PSEL(SPIM_MISO, 1, 9)>;
+		low-power-enable;
+	};
+};
+
+&spi23 {
+	/* IMU chip select on P1.04 (D8). */
+	cs-gpios = <&xiao_d 8 GPIO_ACTIVE_LOW>;
+	/*
+	 * nRF54L SPIM23 sits in the 16 MHz peripheral domain and its prescaler
+	 * only accepts even divisors (>= 2). 10 MHz and 24 MHz are therefore
+	 * invalid and nrfx rejects them with -EINVAL; 8 MHz is the maximum
+	 * usable frequency. The Zephyr driver clamps every requested SPI
+	 * frequency (scan and driver init) to this value.
+	 */
+	max-frequency = <DT_FREQ_M(8)>;
+};
+
+&imu_spi {
+	spi-max-frequency = <DT_FREQ_M(8)>;
+};
+
+/* External IMU interrupt on P1.08 (D6). */
+/ {
+	zephyr,user {
+		int0-gpios = <&xiao_d 6 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* Disable the default I2C bus and its IMU/magnetometer nodes. */
+&i2c22 {
+	status = "disabled";
+};
+
+&imu {
+	status = "disabled";
+};
+
+&mag {
+	status = "disabled";
+};
+
+/* P1.08 (TX) / P1.09 (RX) are reused by INT/MISO above. */
+&uart21 {
+	status = "disabled";
+};

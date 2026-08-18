@@ -3,6 +3,7 @@
 
 board:
   name: styria_mini_uf2
+  full_name: Styria Mini
   vendor: styria
   socs:
     - name: nrf52840

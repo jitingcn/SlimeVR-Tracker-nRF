@@ -43,7 +43,11 @@
 #endif
 
 #ifndef BIAS_COLLECT_GYRO_MOTION_THRESHOLD
-#define BIAS_COLLECT_GYRO_MOTION_THRESHOLD 1.5f // dps (range method)
+#define BIAS_COLLECT_GYRO_MOTION_THRESHOLD 10.0f // dps (windowed-mean range method)
+#endif
+
+#ifndef BIAS_COLLECT_GYRO_MOTION_WINDOW_MS
+#define BIAS_COLLECT_GYRO_MOTION_WINDOW_MS 250 // ms - smooth raw gyro noise before range check
 #endif
 
 #ifndef BIAS_COLLECT_ACCEL_MOTION_THRESHOLD

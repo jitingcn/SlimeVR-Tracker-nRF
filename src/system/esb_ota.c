@@ -24,7 +24,9 @@
  * ESB OTA Firmware Update – Tracker Side
  *
  * Receives firmware data over ESB, writes to internal flash, validates,
- * and activates via bootloader settings page update.
+ * and activates it through the configured boot path. MCUboot dual-slot
+ * builds stage into slot1; MCUboot single-slot and legacy builds update the
+ * application region in place.
  *
  * Flash layout (nRF52840 with Adafruit bootloader):
  *   0x00000 - 0x00FFF  MBR (4 KB)
@@ -64,12 +66,17 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 
 /* ── Flash configuration ─────────────────────────────────────────── */
 
-#ifndef CONFIG_FLASH_LOAD_OFFSET
+#if !defined(CONFIG_BOOTLOADER_MCUBOOT) && !defined(CONFIG_FLASH_LOAD_OFFSET)
 #error "CONFIG_FLASH_LOAD_OFFSET must be defined by board defconfig"
 #endif
 
-/* MBR occupies 0x0-0x1000 and must not be overwritten via OTA */
+/* MCUboot update BINs include the image header and therefore start at slot0.
+ * Legacy raw images start after the MBR. */
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#define OTA_FLASH_BASE      DT_REG_ADDR(DT_NODELABEL(slot0_partition))
+#else
 #define OTA_FLASH_BASE      MAX(CONFIG_FLASH_LOAD_OFFSET, 0x1000)
+#endif
 
 /*
  * Flash partition layout and OTA engine selection.
@@ -77,19 +84,40 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
  * nRF52833: uses RAM engine for in-place writes (no staging needed)
  * Other SoCs: OTA disabled at runtime
  */
-#if CONFIG_SOC_NRF52840
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && DT_NODE_EXISTS(DT_NODELABEL(slot1_partition))
+#define OTA_FLASH_END        0
+#define OTA_USE_RAM_ENGINE   0
+#define OTA_USE_MCUBOOT      1
+#define BOOTLOADER_SETTINGS_ADDR 0
+#define OTA_SUPPORTED        1
+#elif defined(CONFIG_BOOTLOADER_MCUBOOT)
+#if CONFIG_SOC_NRF52833
+#define OTA_FLASH_END        DT_REG_ADDR(DT_NODELABEL(storage_partition))
+#define OTA_USE_RAM_ENGINE   1
+#define OTA_SUPPORTED        1
+#else
+#define OTA_FLASH_END        0
+#define OTA_USE_RAM_ENGINE   0
+#define OTA_SUPPORTED        0
+#endif
+#define OTA_USE_MCUBOOT      0
+#define BOOTLOADER_SETTINGS_ADDR 0
+#elif CONFIG_SOC_NRF52840
 #define OTA_FLASH_END        0xEE000 /* End of app partition (before NVS) */
 #define OTA_USE_RAM_ENGINE   0
+#define OTA_USE_MCUBOOT      0
 #define BOOTLOADER_SETTINGS_ADDR BOOTLOADER_SETTINGS_ADDR_52840
 #define OTA_SUPPORTED        1
 #elif CONFIG_SOC_NRF52833
 #define OTA_FLASH_END        0x74000
 #define OTA_USE_RAM_ENGINE   1  /* Use RAM engine for in-place writes */
+#define OTA_USE_MCUBOOT      0
 #define BOOTLOADER_SETTINGS_ADDR BOOTLOADER_SETTINGS_ADDR_52833
 #define OTA_SUPPORTED        1
 #else
 #define OTA_FLASH_END        (OTA_FLASH_BASE + 256 * 1024)
 #define OTA_USE_RAM_ENGINE   0
+#define OTA_USE_MCUBOOT      0
 #define BOOTLOADER_SETTINGS_ADDR 0
 #define OTA_SUPPORTED        0
 #endif
@@ -190,7 +218,7 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 
 	/* nRF5 OpenDFU bootloader sets ACL write-protection on the app region,
 	 * preventing in-place flash copy.  Reject OTA early. */
-#if CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BUILD_OUTPUT_UF2
+#if CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 	LOG_ERR("OTA: blocked — nRF5 OpenDFU bootloader ACL write-protects "
 		"app region. Use DFU/SWD to update this device.");
 	ota.state = OTA_STATE_ERROR;
@@ -228,7 +256,9 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	uint32_t image_crc32 = sys_get_le32(&data[6]);
 	uint16_t total_packets = sys_get_be16(&data[10]);
 	uint8_t protocol_ver = data[12];
-	const char *board_target = (const char *)&data[13];
+	char board_target[OTA_BOARD_TARGET_MAX];
+	memcpy(board_target, &data[13], OTA_BOARD_TARGET_MAX - 1);
+	board_target[OTA_BOARD_TARGET_MAX - 1] = '\0';
 	uint32_t flash_base = (uint32_t)sys_get_be16(&data[61]) << 12; /* Page-aligned */
 
 	LOG_INF("OTA BEGIN: size=%u, crc32=0x%08X, packets=%u, proto=%u, board=%s, base=0x%X",
@@ -244,16 +274,32 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	}
 
 	/* Validate image size.
-	 * Use theoretical max (flash end - MBR) as the early check.
+	 * Use theoretical max (flash end - write base) as the early check.
 	 * The precise bounds check (flash_base + image_size > OTA_FLASH_END) and
 	 * the staging overlap check (nRF52840) below catch the real limits. */
-	if (image_size == 0 || image_size > (OTA_FLASH_END - 0x1000)) {
-		LOG_ERR("OTA BEGIN: invalid image size %u (max %u)", image_size, OTA_FLASH_END - 0x1000);
+#if !OTA_USE_MCUBOOT
+	if (image_size == 0 || image_size > (OTA_FLASH_END - OTA_FLASH_BASE)) {
+		LOG_ERR("OTA BEGIN: invalid image size %u (max %u)", image_size,
+			OTA_FLASH_END - OTA_FLASH_BASE);
 		ota.state = OTA_STATE_ERROR;
 		ota.error_code = OTA_STATUS_SIZE_ERROR;
 		ota_send_status();
 		return -EINVAL;
 	}
+#else
+	uint32_t mcuboot_staging_base = 0;
+	uint32_t mcuboot_capacity = 0;
+	int region_err = esb_ota_flash_mcuboot_region(&mcuboot_staging_base,
+						      &mcuboot_capacity);
+	if (region_err || image_size == 0 || image_size > mcuboot_capacity) {
+		LOG_ERR("OTA BEGIN: invalid MCUboot image size %u (capacity %u, err %d)",
+			image_size, mcuboot_capacity, region_err);
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_SIZE_ERROR;
+		ota_send_status();
+		return region_err ? region_err : -EINVAL;
+	}
+#endif
 
 	/* Validate board target */
 	const char *my_board = BOARD_TARGET_STRING;
@@ -268,6 +314,15 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	/* Validate flash base address (if provided, 0 = don't check).
 	 * Allow lower or equal base (e.g., SoftDevice → no-SoftDevice transition).
 	 * Block higher base: target firmware expects SoftDevice that isn't present. */
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	if (flash_base != 0) {
+		LOG_ERR("OTA BEGIN: MCUboot update image must use flash base 0");
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_SIZE_ERROR;
+		ota_send_status();
+		return -EINVAL;
+	}
+#else
 	if (flash_base != 0 && flash_base < 0x1000) {
 		LOG_ERR("OTA BEGIN: flash base 0x%X below MBR (minimum 0x1000)", flash_base);
 		ota.state = OTA_STATE_ERROR;
@@ -275,6 +330,7 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 		ota_send_status();
 		return -EINVAL;
 	}
+#endif
 	if (flash_base != 0 && flash_base > OTA_FLASH_BASE) {
 		LOG_ERR("OTA BEGIN: flash base 0x%X > running base 0x%X — "
 			"target firmware requires SoftDevice not present",
@@ -293,14 +349,14 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 		return -EINVAL;
 	}
 
-		/* Validate flash device */
-		if (!esb_ota_flash_ready()) {
-			LOG_ERR("OTA BEGIN: flash device not ready");
-			ota.state = OTA_STATE_ERROR;
-			ota.error_code = OTA_STATUS_FLASH_ERROR;
-			ota_send_status();
-			return -EIO;
-		}
+	/* Validate flash device */
+	if (!esb_ota_flash_ready()) {
+		LOG_ERR("OTA BEGIN: flash device not ready");
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_FLASH_ERROR;
+		ota_send_status();
+		return -EIO;
+	}
 
 	/* Initialize OTA state */
 	memset(&ota, 0, sizeof(ota));
@@ -311,10 +367,11 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	ota.bytes_written = 0;
 	ota.last_page_erased = 0;
 	ota.page_buf_offset = 0;
-	ota.target_flash_base = (flash_base != 0) ? flash_base : OTA_FLASH_BASE;
+	ota.target_flash_base = OTA_USE_MCUBOOT ? 0 :
+		((flash_base != 0) ? flash_base : OTA_FLASH_BASE);
 	strncpy(ota.expected_board, board_target, OTA_BOARD_TARGET_MAX - 1);
 
-	if (ota.target_flash_base != OTA_FLASH_BASE) {
+	if (!OTA_USE_MCUBOOT && ota.target_flash_base != OTA_FLASH_BASE) {
 		LOG_WRN("OTA: Cross-base update: running at 0x%X, target at 0x%X",
 			OTA_FLASH_BASE, ota.target_flash_base);
 	}
@@ -346,6 +403,23 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	return 0;
 
 #else /* !OTA_USE_RAM_ENGINE */
+
+#if OTA_USE_MCUBOOT
+	ota.staging_base = mcuboot_staging_base;
+	ota.page_buf_flash_addr = ota.staging_base;
+
+	int erase_err = esb_ota_flash_prepare_mcuboot_slot();
+	if (erase_err) {
+		LOG_ERR("OTA BEGIN: failed to prepare MCUboot secondary slot (err %d)", erase_err);
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_FLASH_ERROR;
+		ota_send_status();
+		return erase_err;
+	}
+
+	LOG_INF("OTA: MCUboot secondary slot image at 0x%05X (capacity %u bytes)",
+		ota.staging_base, mcuboot_capacity);
+#else
 	/*
 	 * Staging area: write OTA data to upper flash first, then copy to final
 	 * location with IRQs disabled. Page-align the staging base.
@@ -374,6 +448,7 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 
 	LOG_INF("OTA: Staging area at 0x%05X (image %u bytes, %u pages)",
 		ota.staging_base, image_size, image_pages);
+#endif
 
 	/* Suspend sensor thread and hardware to free CPU, SPI/I2C bus,
 	 * and GPIO interrupts during OTA. OTA always ends with reboot. */
@@ -413,6 +488,26 @@ int esb_ota_handle_data(const uint8_t *data, size_t len)
 	uint16_t seq = sys_get_be16(&data[2]);
 	size_t payload_len = len - OTA_DATA_HEADER_SIZE;
 	const uint8_t *payload = &data[OTA_DATA_HEADER_SIZE];
+	if (ota.bytes_written == 0 && payload_len >= sizeof(uint32_t)) {
+		bool mcuboot_image = sys_get_le32(payload) == OTA_MCUBOOT_IMAGE_MAGIC;
+	#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+		if (!mcuboot_image) {
+			LOG_ERR("OTA DATA: MCUboot update image header is missing");
+			ota.state = OTA_STATE_ERROR;
+			ota.error_code = OTA_STATUS_VERIFY_FAIL;
+			ota_send_status();
+			return -EINVAL;
+		}
+#else
+		if (mcuboot_image) {
+			LOG_ERR("OTA DATA: MCUboot image is incompatible with this bootloader");
+			ota.state = OTA_STATE_ERROR;
+			ota.error_code = OTA_STATUS_VERIFY_FAIL;
+			ota_send_status();
+			return -EINVAL;
+		}
+#endif
+	}
 
 	/* Check sequence number (wraparound-safe using signed diff) */
 	if (seq != ota.next_expected_seq) {
@@ -520,17 +615,14 @@ int esb_ota_handle_verify(void)
 	ota.state = OTA_STATE_VERIFYING; /* Stay in VERIFYING — get_status checks error_code */
 	ota.error_code = OTA_STATUS_VERIFY_OK;
 	ota.last_data_time = k_uptime_get(); /* Reset timeout — waiting for ACTIVATE */
-	LOG_INF(">>> verify: about to send status");
 	k_msleep(100);
 	ota_send_status();
-	LOG_INF(">>> verify: status sent, returning");
 	k_msleep(100);
 	return 0;
 }
 
 int esb_ota_handle_activate(void)
 {
-	LOG_INF(">>> OTA ACTIVATE called (state=%d error_code=0x%02X)", ota.state, ota.error_code);
 	k_msleep(100);
 	if (ota.error_code != OTA_STATUS_VERIFY_OK) {
 		LOG_ERR("OTA ACTIVATE: firmware not verified");
@@ -541,14 +633,15 @@ int esb_ota_handle_activate(void)
 	ota.state = OTA_STATE_ACTIVATING;
 	ota_send_status();
 
-	LOG_INF(">>> about to update bootloader settings");
 	k_msleep(50);
 
-	/* Compute bootloader settings (will be written by RAM copier in protected context) */
+#if OTA_USE_MCUBOOT
+	int err = esb_ota_flash_request_mcuboot_upgrade();
+#else
 	int err = esb_ota_flash_prepare_bootloader_settings(ota.staging_base, ota.image_size,
 							    ota.page_buf);
+#endif
 
-	LOG_INF(">>> bootloader settings prepared: %d", err);
 	k_msleep(50);
 
 	if (err) {
@@ -566,7 +659,10 @@ int esb_ota_handle_activate(void)
 	/* Brief delay to allow final status to be transmitted */
 	k_msleep(500);
 
-	LOG_INF("OTA: About to call esb_ota_flash_copy_and_reset");
+	LOG_INF("OTA: About to activate staged image");
+#if OTA_USE_MCUBOOT
+	sys_request_system_reboot(false);
+#else
 	LOG_INF("OTA: staging=0x%05X final=0x%05X size=%u",
 		ota.staging_base, ota.target_flash_base, ota.image_size);
 	k_msleep(200);
@@ -576,6 +672,7 @@ int esb_ota_handle_activate(void)
 
 	/* If first page wasn't deferred, just reboot */
 	sys_request_system_reboot(false);
+#endif
 
 	/* Should not reach here */
 	return 0;
@@ -590,22 +687,18 @@ void esb_ota_handle_abort(void)
 	LOG_WRN("OTA: Aborted (was in state %d, %u/%u bytes written)",
 		ota.state, ota.bytes_written, ota.image_size);
 
-	/*
-	 * After abort, the flash may contain partial firmware data.
-	 * The bootloader settings page has NOT been updated, so the bootloader
-	 * will still try to run the old firmware. However, since we've been
-	 * overwriting flash in-place, the old firmware is corrupted.
-	 *
-	 * Best action: reboot into UF2 bootloader for recovery.
-	 */
 	ota.state = OTA_STATE_IDLE;
 	memset(&ota, 0, sizeof(ota));
 	ota_send_status();
 
-	LOG_WRN("OTA: Rebooting to UF2 bootloader for recovery...");
+#if OTA_USE_MCUBOOT
+	LOG_WRN("OTA: Discarding the partial secondary image and rebooting...");
+#else
+	LOG_WRN("OTA: Rebooting to the bootloader recovery path...");
+#endif
 	k_msleep(200);
 
-#if CONFIG_BUILD_OUTPUT_UF2
+#if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 #endif
 	sys_request_system_reboot(false);
@@ -623,9 +716,8 @@ void esb_ota_check_timeout(void)
 		ota.error_code = OTA_STATUS_TIMEOUT;
 		ota_send_status();
 
-		/* Reboot to UF2 bootloader */
 		k_msleep(200);
-#if CONFIG_BUILD_OUTPUT_UF2
+#if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 #endif
 		sys_request_system_reboot(false);
@@ -725,12 +817,14 @@ static void ota_send_fw_info(void)
 	sys_put_le32((uint32_t)_flash_used, &pkt[9]);
 
 	/* Bootloader type */
-#if CONFIG_BUILD_OUTPUT_UF2
-	pkt[13] = 1; /* Adafruit UF2 */
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	pkt[13] = OTA_BOOTLOADER_MCUBOOT;
+#elif CONFIG_BUILD_OUTPUT_UF2
+	pkt[13] = OTA_BOOTLOADER_ADAFRUIT_UF2;
 #elif CONFIG_BOARD_HAS_NRF5_BOOTLOADER
-	pkt[13] = 2; /* nRF5 bootloader */
+	pkt[13] = OTA_BOOTLOADER_NRF5_OPENDFU;
 #else
-	pkt[13] = 0; /* None */
+	pkt[13] = OTA_BOOTLOADER_NONE;
 #endif
 
 	pkt[14] = OTA_PROTOCOL_VERSION;
@@ -739,8 +833,8 @@ static void ota_send_fw_info(void)
 	const char *board = BOARD_TARGET_STRING;
 	strncpy((char *)&pkt[15], board, OTA_BOARD_TARGET_MAX - 1);
 
-	/* Flash base address (page-aligned, >> 12) */
-	sys_put_be16((uint16_t)(OTA_FLASH_BASE >> 12), &pkt[63]);
+	sys_put_be16((uint16_t)((IS_ENABLED(CONFIG_BOOTLOADER_MCUBOOT) ? 0 :
+		OTA_FLASH_BASE) >> 12), &pkt[63]);
 
 	pkt[65] = esb_ota_crc8(pkt, 65);
 
@@ -757,6 +851,7 @@ static struct esb_ota_page_buf ota_page_buf_view(void)
 		.last_erased = &ota.last_page_erased,
 		.staging_base = ota.staging_base,
 		.image_size = ota.image_size,
+		.pre_erased = OTA_USE_MCUBOOT,
 	};
 }
 
@@ -803,6 +898,8 @@ static void ota_launch_ram_engine(void)
 	/* OTA state */
 	params.image_size        = ota.image_size;
 	params.image_crc32       = ota.image_crc32;
+	params.required_image_magic = IS_ENABLED(CONFIG_BOOTLOADER_MCUBOOT) ?
+		OTA_MCUBOOT_IMAGE_MAGIC : 0;
 	params.flash_target      = ota.target_flash_base;
 	params.page_size         = OTA_FLASH_PAGE_SIZE;
 	params.next_expected_seq = 0;

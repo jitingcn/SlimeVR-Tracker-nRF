@@ -1,0 +1,36 @@
+/*
+ * Copyright (c) 2025 Seeed Technology Co., Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include "nrf54lm20a_cpuapp_common.dtsi"
+#include "seeed_xiao_connector.dtsi"
+
+/ {
+	model = "Seeed XIAO nRF54LM20A Sense SlimeNRF";
+	compatible = "seeed,xiao-nrf54lm20a-sense-cpuapp";
+
+	zephyr,user {
+		int0-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&i2c30 {
+	status = "okay";
+
+	/* Use SlimeNRF's own register driver, not Zephyr's LSM6DSL driver. */
+	imu: imu@6a {
+		compatible = "i2c-device";
+		reg = <0x6a>;
+	};
+};
+
+&i2c22 {
+	mag: mag@0 {
+		compatible = "i2c-device";
+		reg = <0>;
+	};
+};
+

@@ -27,7 +27,6 @@
 
 #include <math.h>
 #include <string.h>
-#include <zephyr/irq.h>
 #include <zephyr/sys/atomic.h>
 
 #include "sensor/magneto/magneto1_4.h"
@@ -58,7 +57,7 @@ typedef struct {
 	quadrant_sample_t samples[QUADRANT_BUF_SIZE];
 	uint8_t head;   // next write position
 	uint8_t count;  // valid samples (0..QUADRANT_BUF_SIZE)
-	int64_t last_seq; // global accepted-sample sequence of the newest sample in this octant
+	uint32_t last_seq; // global accepted-sample sequence of the newest sample in this octant
 } quadrant_buf_t;
 
 // Incremental calibration blending (EMA on BAinv elements)
@@ -72,14 +71,41 @@ typedef struct {
 #define ONLINE_BLEND_SIMILARITY_HIGH 0.97f  // above this similarity, use min alpha
 
 static quadrant_buf_t quad_buf[ONLINE_QUADRANT_COUNT];
-/* Cal-thread snapshot (~3KB static: too big for stack). Seqlock vs sensor writes. */
+/* Cal-thread snapshot (~3KB static: too big for stack). */
 static quadrant_buf_t quad_buf_snap[ONLINE_QUADRANT_COUNT];
 static K_MUTEX_DEFINE(quad_buf_snap_lock);
-static atomic_t quad_buf_seq;
-static int64_t online_total_sample_count;
-static int64_t online_last_checked_sample_count;
-static int64_t online_last_check_time;
-static int64_t online_last_sample_time; // rate limiting
+static K_MUTEX_DEFINE(quad_buf_lock);
+/*
+ * The sensor thread is the only writer, but readers can run concurrently on an
+ * SMP target. A mutex protects the ordinary C objects from data races without
+ * keeping interrupts disabled for the ~3 KB snapshot copy. Clearing history
+ * only bumps quad_buf_gen; the sensor thread applies that reset on its next
+ * sample and mirrors the value into quad_buf_gen_served. Until then, readers
+ * treat the whole buffer as empty.
+ */
+static atomic_t quad_buf_gen;        /* bumped by any thread to discard history */
+static atomic_t quad_buf_gen_served; /* stored by the sensor thread only */
+static struct k_spinlock online_publish_lock;
+/*
+ * Every scalar below is shared across the sensor (7), calibration (8), console
+ * (6), ESB (5) and power (6) threads, so each one is a single 32-bit word held in
+ * an atomic_t rather than an int64_t: this is a 32-bit Cortex-M, where a 64-bit
+ * load or store is two instructions and can tear across a preemption.
+ *
+ * Sample counters are free-running uint32 and are compared with wrap-safe
+ * unsigned subtraction. Timestamps are uptime milliseconds truncated to uint32
+ * and compared with ONLINE_ELAPSED / ONLINE_TIME_GE, which use a signed 32-bit
+ * difference and therefore stay correct across the ~49.7 day wrap.
+ */
+static atomic_t online_total_sample_count;        /* uint32; only the sensor thread stores */
+static atomic_t online_last_checked_sample_count; /* uint32 */
+static atomic_t online_last_check_time;           /* uint32 ms, 0 = never */
+static atomic_t online_last_sample_time;          /* uint32 ms, 0 = never (rate limiting) */
+
+/* Wrap-safe uptime-millisecond helpers. Both operands must be uint32 ms. */
+#define ONLINE_ELAPSED(now, since) ((uint32_t)((uint32_t)(now) - (uint32_t)(since)))
+#define ONLINE_TIME_GE(a, b) ((int32_t)((uint32_t)(a) - (uint32_t)(b)) >= 0)
+
 // Drop octants that have not been refreshed for too long.
 // This is kept separate from the check cadence: stale-history rejection should
 // not depend on how often the background thread decides to run Magneto.
@@ -96,49 +122,57 @@ static float online_last_accel_dir[3]; // accel direction for cross-validation
 // samples at the maximum online sampling rate.
 #define ONLINE_MIN_CHECK_INTERVAL_MS (ONLINE_BUFFER_SAMPLE_CAPACITY * ONLINE_MIN_INTERVAL_MS)
 
-// Runtime calibrated norm tracking (exponential moving average)
-// Used to assess current calibration quality and decide if online update is needed
-static float cal_norm_ema;        // EMA of calibrated mag norm
-static float cal_norm_var_ema;    // EMA of squared deviation from mean
-static uint32_t cal_norm_count;   // number of norm samples processed
+typedef struct {
+	float cal_norm_ema;
+	float cal_norm_var_ema;
+	uint32_t cal_norm_count;
+	int update_count;
+	float last_buf_avg_norm;
+} online_runtime_state_t;
+
+static online_runtime_state_t online_runtime_state;
+static struct k_spinlock online_runtime_state_lock;
+
 #define CAL_NORM_EMA_ALPHA 0.01f  // smoothing factor (~100 sample window)
 // Don't update calibration if current norm CV is below this threshold
 #define CAL_NORM_GOOD_CV 0.05f    // 5% = good enough calibration
 
 // Minimum time between online calibration updates (prevents frequent VQF mag ref resets)
 #define ONLINE_MIN_UPDATE_INTERVAL_S 6  // 6 seconds cooldown
-static int64_t online_last_update_time;
-static bool sensor_calibration_online_mag_enabled_from_retained(void);
+static atomic_t online_last_update_time; /* uint32 ms, 0 = never */
 
 // Suppress online sample collection for N ms after buffer resets (wake-up,
 // reboot, environment change, calibration update).  This lets sensor data
 // stabilise before collecting, avoiding transient/mixed-environment samples
 // that produce poor calibration fits.
 #define ONLINE_COLLECTION_SUPPRESS_MS 1500
-static int64_t online_collection_suppress_until;
+static atomic_t online_collection_suppress_until; /* uint32 ms, 0 = not suppressed */
 
 // Minimum sustained VQF magnetic disturbance duration before allowing an online
 // calibration update.  Short disturbance bursts are usually transient interference;
 // updating calibration during those resets VQF's heading reference for no benefit.
 #define ONLINE_VQF_DIST_MIN_DURATION_MS 3000
-static int64_t online_mag_dist_start_time;
+static atomic_t online_mag_dist_start_time; /* uint32 ms, 0 = no disturbance */
+static atomic_t online_commits_suspended;
+static atomic_t online_enabled;
 
 // Require at least N successful calibration updates before trusting the
 // norm CV gate. Prevents a single early fit from being declared "good enough"
 // when the buffer is still filling and directional coverage is incomplete.
 #define ONLINE_MIN_UPDATES 3
-static int online_update_count;
-
-// Norm-change detection: when the average raw field strength in the buffer
-// changes by >40% between updates, the magnetic environment has changed.
-// We clear buffers to avoid mixed-data fits and let the next cycle fit
-// on consistent data from the new environment.
-static float online_last_buf_avg_norm = 0.0f;
 
 
-static void magneto_online_clear_history(void);
+typedef struct {
+	uint32_t total; /* accepted-sample counter at the instant of the copy */
+	unsigned gen;   /* generation the snapshot belongs to (only if valid) */
+	bool valid;     /* false: snapshot was zeroed, nothing usable in it */
+} quad_buf_snapshot_t;
+
+static void magneto_online_clear_history_at_locked(uint32_t now_ms);
+static void magneto_online_clear_progress(uint32_t now_ms);
 static double magneto_online_collect_recent(double ata_out[100], double *norm_sum_out,
-					   float dir_sum_out[3], float *raw_range_out);
+					   float dir_sum_out[3], float *raw_range_out,
+					   quad_buf_snapshot_t *snap_out);
 static int magneto_online_recent_sample_count(void);
 static float magneto_online_recent_dir_bias(void);
 static float magneto_directional_bias(const float ds[3], double count);
@@ -146,31 +180,70 @@ static void magneto_accumulate_direction(float ds[3], const float v[3]);
 static float magneto_BAinv_similarity(float existing[4][3], float candidate[4][3]);
 static bool magneto_blend_BAinv(float out[4][3], float existing[4][3], float candidate[4][3]);
 
+static online_runtime_state_t magneto_online_runtime_state_snapshot(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&online_runtime_state_lock);
+	online_runtime_state_t state = online_runtime_state;
+	k_spin_unlock(&online_runtime_state_lock, key);
+	return state;
+}
+
+static void magneto_online_calibration_state_snapshot(float BAinv_out[4][3],
+						       online_runtime_state_t *runtime_out,
+						       unsigned *generation_out)
+{
+	k_spinlock_key_t publish_key = k_spin_lock(&online_publish_lock);
+	memcpy(BAinv_out, magBAinv, sizeof(magBAinv));
+	*generation_out = (unsigned)atomic_get(&quad_buf_gen);
+	k_spinlock_key_t state_key = k_spin_lock(&online_runtime_state_lock);
+	*runtime_out = online_runtime_state;
+	k_spin_unlock(&online_runtime_state_lock, state_key);
+	k_spin_unlock(&online_publish_lock, publish_key);
+}
+
+static float magneto_online_mag_quality_from_state(const online_runtime_state_t *state)
+{
+	if (state->cal_norm_count < 100 || state->cal_norm_ema < 1e-6f) {
+		return 1.0f;
+	}
+	return sqrtf(state->cal_norm_var_ema) / state->cal_norm_ema;
+}
+
+static void magneto_online_norm_state_reset(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&online_runtime_state_lock);
+	online_runtime_state.cal_norm_count = 0;
+	online_runtime_state.cal_norm_ema = 0.0f;
+	online_runtime_state.cal_norm_var_ema = 0.0f;
+	k_spin_unlock(&online_runtime_state_lock, key);
+}
+
 int cal_online_mag_update_count(void)
 {
-	return online_update_count;
+	return magneto_online_runtime_state_snapshot().update_count;
 }
 
 uint32_t cal_online_mag_norm_count(void)
 {
-	return cal_norm_count;
+	return magneto_online_runtime_state_snapshot().cal_norm_count;
 }
 
 void magneto_online_runtime_load_retained(void)
 {
-	magneto_online_reset();
-	online_update_count = retained->onlineMagState.update_count;
-	online_last_buf_avg_norm = retained->onlineMagState.last_buf_avg_norm;
-}
-
-static bool sensor_calibration_online_mag_enabled_from_retained(void)
-{
-	return retained->mag_online_calibration_mode != MAG_ONLINE_CALIBRATION_DISABLED;
+	k_spinlock_key_t publish_key = k_spin_lock(&online_publish_lock);
+	magneto_online_clear_history_at_locked(k_uptime_get_32());
+	atomic_set(&online_last_update_time, 0);
+	k_spinlock_key_t key = k_spin_lock(&online_runtime_state_lock);
+	memset(&online_runtime_state, 0, sizeof(online_runtime_state));
+	online_runtime_state.update_count = retained->onlineMagState.update_count;
+	online_runtime_state.last_buf_avg_norm = retained->onlineMagState.last_buf_avg_norm;
+	k_spin_unlock(&online_runtime_state_lock, key);
+	k_spin_unlock(&online_publish_lock, publish_key);
 }
 
 bool sensor_calibration_get_online_mag_enabled(void)
 {
-	return sensor_calibration_online_mag_enabled_from_retained();
+	return atomic_get(&online_enabled) != 0;
 }
 
 void sensor_calibration_set_online_mag_enabled(bool enabled)
@@ -183,7 +256,7 @@ void sensor_calibration_set_online_mag_enabled(bool enabled)
 		return;
 	}
 
-	magneto_online_runtime_reset();
+	magneto_online_runtime_configure(enabled);
 	if (!enabled) {
 		sensor_calibration_online_mag_retained_clear();
 	}
@@ -198,19 +271,22 @@ void sensor_calibration_set_online_mag_enabled(bool enabled)
 
 void sensor_calibration_online_mag_retained_save(void)
 {
+	sys_warm_transaction_begin();
+	online_runtime_state_t state = magneto_online_runtime_state_snapshot();
 	if (!sensor_calibration_get_online_mag_enabled()) {
-		sensor_calibration_online_mag_retained_clear();
-		return;
+		memset(&retained->onlineMagState, 0, sizeof(retained->onlineMagState));
+	} else {
+		retained->onlineMagState.update_count = (uint8_t)CLAMP(state.update_count, 0, 255);
+		retained->onlineMagState.last_buf_avg_norm = state.last_buf_avg_norm;
 	}
-	retained->onlineMagState.update_count = (uint8_t)CLAMP(online_update_count, 0, 255);
-	retained->onlineMagState.last_buf_avg_norm = online_last_buf_avg_norm;
-	retained_update();
+	sys_warm_transaction_end(true);
 }
 
 void sensor_calibration_online_mag_retained_clear(void)
 {
+	sys_warm_transaction_begin();
 	memset(&retained->onlineMagState, 0, sizeof(retained->onlineMagState));
-	retained_update();
+	sys_warm_transaction_end(true);
 }
 
 void sensor_calibration_online_mag_cold_start(void)
@@ -222,65 +298,174 @@ void sensor_calibration_online_mag_cold_start(void)
 
 void magneto_online_reset(void)
 {
-	magneto_online_clear_history();
-	online_last_sample_time = 0;
-	online_last_update_time = 0;
+	k_spinlock_key_t key = k_spin_lock(&online_publish_lock);
+	magneto_online_clear_history_at_locked(k_uptime_get_32());
+	/* online_last_sample_time belongs to the sensor thread; the buffer clear it
+	 * services resets it (magneto_online_service_clear). */
+	atomic_set(&online_last_update_time, 0);
+	k_spin_unlock(&online_publish_lock, key);
 }
 
 void magneto_online_runtime_reset(void)
 {
-	magneto_online_reset();
-	online_update_count = 0;
-	online_last_buf_avg_norm = 0.0f;
-	cal_norm_count = 0;
-	cal_norm_ema = 0.0f;
-	cal_norm_var_ema = 0.0f;
+	k_spinlock_key_t publish_key = k_spin_lock(&online_publish_lock);
+	magneto_online_clear_history_at_locked(k_uptime_get_32());
+	atomic_set(&online_last_update_time, 0);
+	k_spinlock_key_t state_key = k_spin_lock(&online_runtime_state_lock);
+	memset(&online_runtime_state, 0, sizeof(online_runtime_state));
+	k_spin_unlock(&online_runtime_state_lock, state_key);
+	k_spin_unlock(&online_publish_lock, publish_key);
 }
 
-static void magneto_online_clear_history(void)
+void magneto_online_runtime_configure(bool enabled)
 {
-	unsigned s = (unsigned)atomic_get(&quad_buf_seq) & ~1U;
-	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 1U));
-	memset(quad_buf, 0, sizeof(quad_buf));
-	online_total_sample_count = 0;
-	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 2U));
-	online_last_checked_sample_count = 0;
-	online_last_check_time = 0;
-	memset(online_last_dir, 0, sizeof(online_last_dir));
-	memset(online_last_accel_dir, 0, sizeof(online_last_accel_dir));
-	magneto_center_reset(&online_center_estimator);
+	k_spinlock_key_t publish_key = k_spin_lock(&online_publish_lock);
+	atomic_set(&online_enabled, enabled ? 1 : 0);
+	magneto_online_clear_history_at_locked(k_uptime_get_32());
+	atomic_set(&online_last_update_time, 0);
+	k_spinlock_key_t state_key = k_spin_lock(&online_runtime_state_lock);
+	memset(&online_runtime_state, 0, sizeof(online_runtime_state));
+	k_spin_unlock(&online_runtime_state_lock, state_key);
+	k_spin_unlock(&online_publish_lock, publish_key);
+}
+
+static void magneto_online_clear_history_at_locked(uint32_t now_ms)
+{
+	/*
+	 * Discard every buffered sample without touching quad_buf: the sensor
+	 * thread owns that memory and services the reset on its next sample
+	 * (magneto_online_service_clear). Readers observe an empty buffer
+	 * immediately, before the reset physically happens.
+	 * online_last_dir / online_last_accel_dir / online_center_estimator are
+	 * sensor-thread state too, so they are reset there for the same reason.
+	 *
+	 * The generation bump comes first and doubles as the cancellation point for
+	 * an online fit that is already in flight: such a fit re-validates the
+	 * generation of the samples it was built from before it publishes magBAinv
+	 * (magneto_online_commit_BAinv), so whoever bumps first wins.
+	 */
+	atomic_inc(&quad_buf_gen);
+	atomic_set(&online_last_checked_sample_count, 0);
+	atomic_set(&online_last_check_time, 0);
 	// Suppress collection for a few seconds so transient/stale samples from
 	// wake-up, reboot, or environment transitions are not mixed into the
 	// fresh buffer.
-	online_collection_suppress_until = k_uptime_get() + ONLINE_COLLECTION_SUPPRESS_MS;
+	atomic_set(&online_collection_suppress_until,
+	           (atomic_val_t)(now_ms + ONLINE_COLLECTION_SUPPRESS_MS));
 }
 
-static bool magneto_online_quadrant_is_recent_at(const quadrant_buf_t *qbuf, int64_t total_count)
+static void magneto_online_clear_progress(uint32_t now_ms)
+{
+	k_spinlock_key_t publish_key = k_spin_lock(&online_publish_lock);
+	magneto_online_clear_history_at_locked(now_ms);
+	k_spinlock_key_t state_key = k_spin_lock(&online_runtime_state_lock);
+	online_runtime_state.update_count = 0;
+	online_runtime_state.last_buf_avg_norm = 0.0f;
+	k_spin_unlock(&online_runtime_state_lock, state_key);
+	k_spin_unlock(&online_publish_lock, publish_key);
+}
+
+void magneto_online_snapshot_BAinv(float out[4][3])
+{
+	k_spinlock_key_t key = k_spin_lock(&online_publish_lock);
+	memcpy(out, magBAinv, sizeof(magBAinv));
+	k_spin_unlock(&online_publish_lock, key);
+}
+
+void magneto_online_replace_BAinv_and_reset(const float replacement[4][3])
+{
+	k_spinlock_key_t publish_key = k_spin_lock(&online_publish_lock);
+	memcpy(magBAinv, replacement, sizeof(magBAinv));
+	magneto_online_clear_history_at_locked(k_uptime_get_32());
+	atomic_set(&online_last_update_time, 0);
+	k_spinlock_key_t state_key = k_spin_lock(&online_runtime_state_lock);
+	memset(&online_runtime_state, 0, sizeof(online_runtime_state));
+	k_spin_unlock(&online_runtime_state_lock, state_key);
+	k_spin_unlock(&online_publish_lock, publish_key);
+}
+
+void sensor_calibration_online_mag_prepare_power_down(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&online_publish_lock);
+	atomic_set(&online_commits_suspended, 1);
+	atomic_inc(&quad_buf_gen);
+	k_spin_unlock(&online_publish_lock, key);
+}
+
+/* Sensor thread only: apply a pending clear to the buffer this thread owns. */
+static void magneto_online_service_clear(void)
+{
+	unsigned gen = (unsigned)atomic_get(&quad_buf_gen);
+	if (gen == (unsigned)atomic_get(&quad_buf_gen_served)) {
+		return;
+	}
+
+	k_mutex_lock(&quad_buf_lock, K_FOREVER);
+	gen = (unsigned)atomic_get(&quad_buf_gen);
+	memset(quad_buf, 0, sizeof(quad_buf));
+	atomic_set(&online_total_sample_count, 0);
+	atomic_set(&quad_buf_gen_served, (atomic_val_t)gen);
+	k_mutex_unlock(&quad_buf_lock);
+
+	atomic_set(&online_last_sample_time, 0); /* let the next sample through at once */
+	magneto_center_reset(&online_center_estimator);
+	memset(online_last_dir, 0, sizeof(online_last_dir));
+	memset(online_last_accel_dir, 0, sizeof(online_last_accel_dir));
+}
+
+static bool magneto_online_quadrant_is_recent_at(const quadrant_buf_t *qbuf, uint32_t total_count)
 {
 	if (qbuf->count == 0) {
 		return false;
 	}
-	return (total_count - qbuf->last_seq) <= ONLINE_STALE_QUADRANT_MAX_AGE;
+	/* Unsigned difference: correct across the uint32 counter wrap. */
+	return (uint32_t)(total_count - qbuf->last_seq) <= ONLINE_STALE_QUADRANT_MAX_AGE;
 }
 
+/*
+ * Thread-context snapshot of quad_buf. The mutex may briefly delay the sensor
+ * thread while the ~3 KB copy completes, with Zephyr priority inheritance
+ * preventing unbounded priority inversion. Unlike a seqlock over ordinary C
+ * objects, this remains data-race-free when reader and writer run on different
+ * CPUs.
+ *
+ * quad_buf_gen is re-read after the copy because a clear request does not take
+ * quad_buf_lock or touch quad_buf. If the generation changed during the copy,
+ * the user has already discarded that history and the snapshot is invalid.
+ *
+ * On success .gen carries the generation the samples belong to. A caller that
+ * derives a calibration from the snapshot passes it back to
+ * magneto_online_commit_BAinv() as a cancellation token.
+ */
 /* Caller must hold quad_buf_snap_lock. */
-static int64_t magneto_online_quad_buf_snapshot_locked(void)
+static quad_buf_snapshot_t magneto_online_quad_buf_snapshot_locked(void)
 {
-	unsigned s;
-	int64_t total;
-	do {
-		s = (unsigned)atomic_get(&quad_buf_seq);
-		if (s & 1U) {
-			k_yield();
-			continue;
-		}
+	unsigned gen = (unsigned)atomic_get(&quad_buf_gen);
+	if (gen != (unsigned)atomic_get(&quad_buf_gen_served)) {
+		memset(quad_buf_snap, 0, sizeof(quad_buf_snap));
+		return (quad_buf_snapshot_t){.total = 0, .gen = 0, .valid = false};
+	}
+
+	k_mutex_lock(&quad_buf_lock, K_FOREVER);
+	gen = (unsigned)atomic_get(&quad_buf_gen);
+	unsigned served = (unsigned)atomic_get(&quad_buf_gen_served);
+	uint32_t total = (uint32_t)atomic_get(&online_total_sample_count);
+	bool valid = gen == served;
+	if (valid) {
 		memcpy(quad_buf_snap, quad_buf, sizeof(quad_buf));
-		total = online_total_sample_count;
-	} while ((unsigned)atomic_get(&quad_buf_seq) != s);
-	return total;
+		valid = (unsigned)atomic_get(&quad_buf_gen) == gen;
+	}
+	k_mutex_unlock(&quad_buf_lock);
+
+	if (valid) {
+		return (quad_buf_snapshot_t){.total = total, .gen = gen, .valid = true};
+	}
+
+	memset(quad_buf_snap, 0, sizeof(quad_buf_snap));
+	return (quad_buf_snapshot_t){.total = 0, .gen = 0, .valid = false};
 }
 
-static double magneto_online_recent_center_from_snap(int64_t total_count, mag_center_estimator_t *center)
+static double magneto_online_recent_center_from_snap(uint32_t total_count, mag_center_estimator_t *center)
 {
 	magneto_center_reset(center);
 
@@ -302,15 +487,19 @@ static double magneto_online_recent_center_from_snap(int64_t total_count, mag_ce
 
 // Collect all valid samples from all 8 quadrant ring buffers.
 // Recomputes ATA, norm_sum, centered dir_sum, and raw min/max range from raw samples.
+// *snap_out receives the snapshot descriptor, whose .gen the caller must pass to
+// magneto_online_commit_BAinv() when it publishes a fit built from these samples.
 static double magneto_online_collect_recent(double ata_out[100], double *norm_sum_out,
-                                            float dir_sum_out[3], float *raw_range_out)
+                                            float dir_sum_out[3], float *raw_range_out,
+                                            quad_buf_snapshot_t *snap_out)
 {
 	memset(ata_out, 0, sizeof(double) * 100);
 	*norm_sum_out = 0;
 	memset(dir_sum_out, 0, sizeof(float) * 3);
 
 	k_mutex_lock(&quad_buf_snap_lock, K_FOREVER);
-	int64_t total = magneto_online_quad_buf_snapshot_locked();
+	quad_buf_snapshot_t snap = magneto_online_quad_buf_snapshot_locked();
+	uint32_t total = snap.total;
 
 	mag_center_estimator_t recent_center;
 	double recent_sample_count = magneto_online_recent_center_from_snap(total, &recent_center);
@@ -333,13 +522,14 @@ static double magneto_online_collect_recent(double ata_out[100], double *norm_su
 		}
 	}
 	k_mutex_unlock(&quad_buf_snap_lock);
+	*snap_out = snap;
 	return recent_sample_count;
 }
 
 static int magneto_online_recent_sample_count(void)
 {
 	k_mutex_lock(&quad_buf_snap_lock, K_FOREVER);
-	int64_t total = magneto_online_quad_buf_snapshot_locked();
+	uint32_t total = magneto_online_quad_buf_snapshot_locked().total;
 	int count = 0;
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
 		if (!magneto_online_quadrant_is_recent_at(&quad_buf_snap[q], total)) {
@@ -357,7 +547,7 @@ static float magneto_online_recent_dir_bias(void)
 	mag_center_estimator_t recent_center;
 
 	k_mutex_lock(&quad_buf_snap_lock, K_FOREVER);
-	int64_t total = magneto_online_quad_buf_snapshot_locked();
+	uint32_t total = magneto_online_quad_buf_snapshot_locked().total;
 	double recent_sample_count = magneto_online_recent_center_from_snap(total, &recent_center);
 
 	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
@@ -520,26 +710,30 @@ void sensor_calibration_online_mag_sample(const float m[3])
 		return;
 	}
 
+	/* This thread owns quad_buf, so it performs any clear requested elsewhere. */
+	magneto_online_service_clear();
+
 	// Don't accumulate during manual calibration
 	if (magneto_progress & 0x80) {
 		return;
 	}
 
-	int64_t now = k_uptime_get();
+	uint32_t now = k_uptime_get_32();
 
 	// Track fusion mag-disturbance duration (before any sample gates) so the
 	// background check function knows how long disturbance has persisted.
 	if (sensor_fusion_get_mag_dist_detected()) {
-		if (online_mag_dist_start_time == 0) {
-			online_mag_dist_start_time = now;
+		if ((uint32_t)atomic_get(&online_mag_dist_start_time) == 0) {
+			atomic_set(&online_mag_dist_start_time, (atomic_val_t)now);
 		}
 	} else {
-		online_mag_dist_start_time = 0;
+		atomic_set(&online_mag_dist_start_time, 0);
 	}
 
 	// Suppress collection after buffer resets (wake-up, reboot, environment
 	// change, calibration update) to let sensor data stabilise.
-	if (now < online_collection_suppress_until) {
+	uint32_t suppress_until = (uint32_t)atomic_get(&online_collection_suppress_until);
+	if (suppress_until != 0 && !ONLINE_TIME_GE(now, suppress_until)) {
 		return;
 	}
 
@@ -556,13 +750,15 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	// stays frozen at a low value → gate never opens → no recalibration possible.
 	{
 		float zero[3] = {0};
-		bool has_cal = (v_diff_mag(magBAinv[0], zero) != 0);
+		float current_cal[4][3];
+		magneto_online_snapshot_BAinv(current_cal);
+		bool has_cal = (v_diff_mag(current_cal[0], zero) != 0);
 		float current_cv = sensor_calibration_get_mag_quality();
 		if (has_cal && current_cv < 0.06f && sensor_fusion_get_mag_dist_detected()) {
 			// Sustained disturbance override: if disturbance has persisted for
 			// more than 5 seconds, allow samples through.
-			bool sustained = (online_mag_dist_start_time > 0 &&
-			                  (now - online_mag_dist_start_time) > 5000);
+			uint32_t dist_start = (uint32_t)atomic_get(&online_mag_dist_start_time);
+			bool sustained = (dist_start != 0 && ONLINE_ELAPSED(now, dist_start) > 5000U);
 			if (!sustained) {
 				return;
 			}
@@ -570,7 +766,8 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	}
 
 	// Rate limit: minimum interval between samples
-	if (now - online_last_sample_time < ONLINE_MIN_INTERVAL_MS) {
+	uint32_t last_sample = (uint32_t)atomic_get(&online_last_sample_time);
+	if (last_sample != 0 && ONLINE_ELAPSED(now, last_sample) < ONLINE_MIN_INTERVAL_MS) {
 		return;
 	}
 
@@ -603,7 +800,7 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	float accel_inv = 1.0f / accel_norm;
 	float cur_accel_dir[3] = {aBuf[0] * accel_inv, aBuf[1] * accel_inv, aBuf[2] * accel_inv};
 
-	if (online_total_sample_count > 0) {
+	if ((uint32_t)atomic_get(&online_total_sample_count) > 0) {
 		float mag_dot = cur_dir[0] * online_last_dir[0]
 		              + cur_dir[1] * online_last_dir[1]
 		              + cur_dir[2] * online_last_dir[2];
@@ -620,7 +817,7 @@ void sensor_calibration_online_mag_sample(const float m[3])
 		}
 	}
 
-	online_last_sample_time = now;
+	atomic_set(&online_last_sample_time, (atomic_val_t)now);
 	online_last_dir[0] = cur_dir[0];
 	online_last_dir[1] = cur_dir[1];
 	online_last_dir[2] = cur_dir[2];
@@ -642,11 +839,16 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	if (route_mag[1] < 0) octant |= 2;
 	if (route_mag[2] < 0) octant |= 4;
 
+	k_mutex_lock(&quad_buf_lock, K_FOREVER);
+	if ((unsigned)atomic_get(&quad_buf_gen)
+	    != (unsigned)atomic_get(&quad_buf_gen_served)) {
+		k_mutex_unlock(&quad_buf_lock);
+		return;
+	}
 	quadrant_buf_t *qbuf = &quad_buf[octant];
-	unsigned s = (unsigned)atomic_get(&quad_buf_seq) & ~1U;
-	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 1U));
-	online_total_sample_count++;
-	qbuf->last_seq = online_total_sample_count;
+	uint32_t total = (uint32_t)atomic_get(&online_total_sample_count) + 1U;
+	atomic_set(&online_total_sample_count, (atomic_val_t)total);
+	qbuf->last_seq = total;
 	qbuf->samples[qbuf->head].x = m[0];
 	qbuf->samples[qbuf->head].y = m[1];
 	qbuf->samples[qbuf->head].z = m[2];
@@ -654,35 +856,77 @@ void sensor_calibration_online_mag_sample(const float m[3])
 	if (qbuf->count < QUADRANT_BUF_SIZE) {
 		qbuf->count++;
 	}
-	atomic_set(&quad_buf_seq, (atomic_val_t)(s + 2U));
+	k_mutex_unlock(&quad_buf_lock);
+}
+
+/* The storage mutex makes retained publication and dirty registration atomic to flush. */
+static bool magneto_online_commit_BAinv(const float m_inv[4][3], unsigned snap_gen,
+                                        uint32_t now_ms, int update_count,
+						float buf_avg_norm)
+{
+	sys_warm_transaction_begin();
+	k_spinlock_key_t key = k_spin_lock(&online_publish_lock);
+	if (atomic_get(&online_commits_suspended) != 0
+	    || atomic_get(&online_enabled) == 0
+	    || (unsigned)atomic_get(&quad_buf_gen) != snap_gen) {
+		k_spin_unlock(&online_publish_lock, key);
+		sys_warm_transaction_end(false);
+		return false;
+	}
+	memcpy(magBAinv, m_inv, sizeof(magBAinv));
+	memcpy(&retained->magBAinv, m_inv, sizeof(magBAinv));
+	magneto_online_clear_history_at_locked(now_ms);
+	atomic_set(&online_last_update_time, (atomic_val_t)now_ms);
+	k_spinlock_key_t state_key = k_spin_lock(&online_runtime_state_lock);
+	online_runtime_state.update_count = update_count;
+	online_runtime_state.last_buf_avg_norm = buf_avg_norm;
+	k_spin_unlock(&online_runtime_state_lock, state_key);
+	k_spin_unlock(&online_publish_lock, key);
+	sys_warm_transaction_mark(MAIN_MAG_BIAS_ID, &retained->magBAinv, sizeof(magBAinv));
+	sys_warm_transaction_end(true);
+	return true;
 }
 
 bool sensor_calibration_online_mag_check(void)
 {
-	if (!sensor_calibration_get_online_mag_enabled()) {
+	if (!sensor_calibration_get_online_mag_enabled()
+	    || atomic_get(&online_commits_suspended) != 0) {
 		return false;
 	}
+	float existing_cal[4][3];
+	online_runtime_state_t runtime_state;
+	unsigned state_generation;
+	magneto_online_calibration_state_snapshot(existing_cal, &runtime_state, &state_generation);
+	int online_update_count = runtime_state.update_count;
+	float online_last_buf_avg_norm = runtime_state.last_buf_avg_norm;
 
 	int recent_sample_count_now = magneto_online_recent_sample_count();
-	int64_t now = k_uptime_get();
+	uint32_t now = k_uptime_get_32();
 
 	if (recent_sample_count_now < MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
-	if (online_total_sample_count == online_last_checked_sample_count) {
+	/*
+	 * Change detector only: the counter is a single atomic word, so this read is
+	 * well-defined even though the sensor thread advances it concurrently. It is
+	 * never used to index the snapshot — that value comes from the snapshot
+	 * descriptor, taken atomically with the buffer copy.
+	 */
+	uint32_t total_now = (uint32_t)atomic_get(&online_total_sample_count);
+	if (total_now == (uint32_t)atomic_get(&online_last_checked_sample_count)) {
 		return false;
 	}
-	if (online_last_check_time > 0 &&
-	    (now - online_last_check_time) < ONLINE_MIN_CHECK_INTERVAL_MS) {
+	uint32_t last_check = (uint32_t)atomic_get(&online_last_check_time);
+	if (last_check != 0 && ONLINE_ELAPSED(now, last_check) < ONLINE_MIN_CHECK_INTERVAL_MS) {
 		return false;
 	}
 
-	online_last_checked_sample_count = online_total_sample_count;
-	online_last_check_time = now;
+	atomic_set(&online_last_checked_sample_count, (atomic_val_t)total_now);
+	atomic_set(&online_last_check_time, (atomic_val_t)now);
 
 	float zero[3] = {0};
-	bool has_existing = (v_diff_mag(magBAinv[0], zero) != 0);
-	float current_cv = has_existing ? sensor_calibration_get_mag_quality() : 1.0f;
+	bool has_existing = (v_diff_mag(existing_cal[0], zero) != 0);
+	float current_cv = has_existing ? magneto_online_mag_quality_from_state(&runtime_state) : 1.0f;
 
 	// When fusion has a reliable calibration (CV < 4%) and is NOT experiencing
 	// sustained magnetic disturbance, skip the calibration check entirely.
@@ -691,11 +935,11 @@ bool sensor_calibration_online_mag_check(void)
 	// detecting disturbance for >3 seconds, indicating the current calibration
 	// is genuinely insufficient.
 	if (has_existing && current_cv < 0.04f) {
-		if (online_mag_dist_start_time == 0) {
+		uint32_t dist_start = (uint32_t)atomic_get(&online_mag_dist_start_time);
+		if (dist_start == 0) {
 			return false; // fusion not disturbed — current cal is fine
 		}
-		int64_t dist_duration_ms = now - online_mag_dist_start_time;
-		if (dist_duration_ms < ONLINE_VQF_DIST_MIN_DURATION_MS) {
+		if (ONLINE_ELAPSED(now, dist_start) < ONLINE_VQF_DIST_MIN_DURATION_MS) {
 			return false; // transient disturbance — wait
 		}
 	}
@@ -716,8 +960,9 @@ bool sensor_calibration_online_mag_check(void)
 	// does NOT mean the calibration is still good — the environment may have
 	// changed.  If the code reached here past the CV < 4% disturbance gate
 	// above, the disturbance is sustained and recalibration should proceed.
-	bool mag_sustained_dist = (online_mag_dist_start_time > 0 &&
-	                           (now - online_mag_dist_start_time) > ONLINE_VQF_DIST_MIN_DURATION_MS);
+	uint32_t dist_start_now = (uint32_t)atomic_get(&online_mag_dist_start_time);
+	bool mag_sustained_dist = (dist_start_now != 0 &&
+	                           ONLINE_ELAPSED(now, dist_start_now) > ONLINE_VQF_DIST_MIN_DURATION_MS);
 	if (has_existing && current_cv < CAL_NORM_GOOD_CV && online_update_count >= ONLINE_MIN_UPDATES
 	    && !mag_sustained_dist) {
 		// Tier 2: Excellent fit + sufficient history — lock it in.
@@ -748,9 +993,12 @@ bool sensor_calibration_online_mag_check(void)
 	double recent_norm_sum;
 	float recent_dir_sum[3];
 	float recent_raw_range;
+	quad_buf_snapshot_t snap;
 	double recent_sample_count = magneto_online_collect_recent(ata_recent, &recent_norm_sum,
-	                                                           recent_dir_sum, &recent_raw_range);
-	if (recent_sample_count < MAG_CAL_MIN_SAMPLES) {
+	                                                           recent_dir_sum, &recent_raw_range,
+	                                                           &snap);
+	if (!snap.valid || snap.gen != state_generation
+	    || recent_sample_count < MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
 	if (recent_raw_range < MAG_CAL_MIN_RAW_AXIS_RANGE) {
@@ -773,9 +1021,7 @@ bool sensor_calibration_online_mag_check(void)
 			LOG_WRN("Online mag cal: env change detected (buf norm %.3f -> %.3f, ratio %.2f), "
 			        "resetting buffers",
 			        (double)online_last_buf_avg_norm, (double)buf_avg_norm, (double)norm_ratio);
-			magneto_online_clear_history();
-			online_update_count = 0;
-			online_last_buf_avg_norm = 0.0f;
+			magneto_online_clear_progress(now);
 			return false;
 		}
 	}
@@ -796,11 +1042,15 @@ bool sensor_calibration_online_mag_check(void)
 		return false;
 	}
 
+	float committed[4][3];
+	int next_update_count;
+
 	if (has_existing) {
 		// Enforce minimum cooldown between updates to avoid frequent VQF mag ref resets.
 		// Each update resets VQF's heading reference, causing ~6s of re-establishment.
-		if (online_last_update_time > 0 &&
-		    (now - online_last_update_time) < (ONLINE_MIN_UPDATE_INTERVAL_S * 1000LL)) {
+		uint32_t last_update = (uint32_t)atomic_get(&online_last_update_time);
+		if (last_update != 0 &&
+		    ONLINE_ELAPSED(now, last_update) < (ONLINE_MIN_UPDATE_INTERVAL_S * 1000U)) {
 			return false;
 		}
 
@@ -808,12 +1058,12 @@ bool sensor_calibration_online_mag_check(void)
 		// Blending weight is similarity-adaptive: more similar → conservative,
 		// more divergent → faster adaptation (possible environment change).
 		float blended[4][3];
-		if (!magneto_blend_BAinv(blended, magBAinv, m_inv)) {
+		if (!magneto_blend_BAinv(blended, existing_cal, m_inv)) {
 			LOG_WRN("Online mag cal: blend validation failed, skipping update");
 			return false;
 		}
 
-		float similarity = magneto_BAinv_similarity(magBAinv, m_inv);
+		float similarity = magneto_BAinv_similarity(existing_cal, m_inv);
 
 		// Reject candidate if similarity is below threshold — the data
 		// is too inconsistent for a meaningful fit.  This guards against
@@ -848,50 +1098,36 @@ bool sensor_calibration_online_mag_check(void)
 		        online_update_count + 1,
 		        (int)recent_sample_count, (double)dbias, (double)current_cv,
 		        (double)similarity);
-		{
-			unsigned key = irq_lock();
-			memcpy(magBAinv, blended, sizeof(magBAinv));
-			irq_unlock(key);
-		}
-		memcpy(m_inv, blended, sizeof(m_inv)); // for logging below
-
-		// Start the next cycle from a clean buffer. Keeping pre-update samples
-		// around can immediately re-mix old field conditions into the next fit.
-		magneto_online_clear_history();
-		online_last_update_time = now;
-		online_update_count++;
-		online_last_buf_avg_norm = buf_avg_norm;
-
-		// Reset fusion mag reference so it re-establishes with the refined calibration
-		sensor_fusion_reset_mag_ref();
-		sensor_mag_ref_reset();
+		memcpy(committed, blended, sizeof(committed));
+		next_update_count = online_update_count + 1;
 	} else {
 		LOG_INF("Online mag cal: first calibration (%d recent samples, dir_bias=%.3f)",
 		        (int)recent_sample_count, (double)dbias);
 
 		// First calibration: use candidate directly
-		{
-			unsigned key = irq_lock();
-			memcpy(magBAinv, m_inv, sizeof(magBAinv));
-			irq_unlock(key);
-		}
-		magneto_online_clear_history();
-		online_last_update_time = now;
-		online_update_count = 1;
-		online_last_buf_avg_norm = buf_avg_norm;
-
-		// Reset fusion mag reference so it re-establishes with the new calibration
-		sensor_fusion_reset_mag_ref();
-		sensor_mag_ref_reset();
+		memcpy(committed, m_inv, sizeof(committed));
+		next_update_count = 1;
 	}
 
-	// Reset norm tracking after calibration change
-	cal_norm_count = 0;
-	cal_norm_ema = 0;
-	cal_norm_var_ema = 0;
+	/*
+	 * Publish only if the samples this fit came from are still the current
+	 * generation. Anything that cleared or replaced the calibration while the fit
+	 * was running wins, and this fit is discarded instead of undoing it.
+	 */
+	if (!magneto_online_commit_BAinv(committed, snap.gen, now, next_update_count,
+	                                 buf_avg_norm)) {
+		LOG_INF("Online mag cal: discarded, calibration was cleared during the fit");
+		return false;
+	}
 
-	/* Warm: retained now; NVS on sys_flush_warm (WoM / reboot / system-off). */
-	sys_write_warm(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
+	memcpy(m_inv, committed, sizeof(m_inv)); // persisted and logged below
+
+	// Reset fusion mag reference so it re-establishes with the new calibration
+	sensor_fusion_reset_mag_ref();
+	sensor_mag_ref_reset();
+
+	// Reset norm tracking after calibration change
+	magneto_online_norm_state_reset();
 	sensor_refresh_sensor_ids();
 
 	LOG_INF("Online mag cal applied:");
@@ -928,25 +1164,24 @@ void sensor_calibration_track_mag_norm(float cal_norm)
 	if (cal_norm < 1e-6f) {
 		return;
 	}
-	if (cal_norm_count == 0) {
-		cal_norm_ema = cal_norm;
-		cal_norm_var_ema = 0;
+	k_spinlock_key_t key = k_spin_lock(&online_runtime_state_lock);
+	if (online_runtime_state.cal_norm_count == 0) {
+		online_runtime_state.cal_norm_ema = cal_norm;
+		online_runtime_state.cal_norm_var_ema = 0;
 	} else {
-		float diff = cal_norm - cal_norm_ema;
-		cal_norm_ema += CAL_NORM_EMA_ALPHA * diff;
-		cal_norm_var_ema += CAL_NORM_EMA_ALPHA * (diff * diff - cal_norm_var_ema);
+		float diff = cal_norm - online_runtime_state.cal_norm_ema;
+		online_runtime_state.cal_norm_ema += CAL_NORM_EMA_ALPHA * diff;
+		online_runtime_state.cal_norm_var_ema += CAL_NORM_EMA_ALPHA
+			* (diff * diff - online_runtime_state.cal_norm_var_ema);
 	}
-	cal_norm_count++;
+	online_runtime_state.cal_norm_count++;
+	k_spin_unlock(&online_runtime_state_lock, key);
 }
 
 // Get current calibration quality: returns norm CV (std/mean).
 // Lower is better. Returns 1.0 if insufficient data.
 float sensor_calibration_get_mag_quality(void)
 {
-	if (cal_norm_count < 100 || cal_norm_ema < 1e-6f) {
-		return 1.0f;
-	}
-	float std = sqrtf(cal_norm_var_ema);
-	return std / cal_norm_ema;
+	online_runtime_state_t state = magneto_online_runtime_state_snapshot();
+	return magneto_online_mag_quality_from_state(&state);
 }
-

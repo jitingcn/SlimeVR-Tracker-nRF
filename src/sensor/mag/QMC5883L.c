@@ -53,6 +53,8 @@ static const float sensitivity = 1.0f / 3000.0f; // 3000 LSB/G at ±8G range
 static uint8_t last_odr = 0xff;
 static bool lastOvfl = false;
 static int64_t oneshot_trigger_time = 0;
+static bool oneshot_pending;
+static bool oneshot_failed;
 static uint8_t last_rawData[6];
 static bool last_rawData_valid = false;
 static int64_t last_mag_time_ms;
@@ -65,23 +67,33 @@ int qmc5883l_init(float time, float *actual_time)
 	last_odr = 0xff;
 	lastOvfl = false;
 	oneshot_trigger_time = 0;
+	oneshot_pending = false;
+	oneshot_failed = false;
 	last_rawData_valid = false;
 	last_mag_time_ms = 0;
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_SET_RST, 0x01);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_2, QMC5883L_ROL_PNT | QMC5883L_INT_ENB);
-	if (err)
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_2, QMC5883L_ROL_PNT | QMC5883L_INT_ENB);
+	if (err) {
 		LOG_ERR("Communication error");
+		return err;
+	}
 
-	err |= qmc5883l_update_odr(time, actual_time);
-	return (err < 0 ? err : 0);
+	return qmc5883l_update_odr(time, actual_time);
 }
 
 void qmc5883l_shutdown(void)
 {
+	last_odr = 0xff;
+	oneshot_trigger_time = 0;
+	oneshot_pending = false;
+	oneshot_failed = false;
+	last_rawData_valid = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, QMC5883L_MODE_STANDBY);
 	if (err)
 		LOG_ERR("Communication error");
@@ -143,11 +155,15 @@ int qmc5883l_update_odr(float time, float *actual_time)
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, STAT);
 	if (err) {
 		LOG_ERR("Communication error");
+		last_odr = 0xff;
 		return err;
 	}
 
 	last_odr = STAT;
 	oneshot_trigger_time = 0;
+	oneshot_pending = false;
+	oneshot_failed = false;
+	last_rawData_valid = false;
 
 	if (MODE != QMC5883L_MODE_STANDBY)
 		mag_period_ms = (int32_t)(time * 1000);
@@ -159,6 +175,9 @@ int qmc5883l_update_odr(float time, float *actual_time)
 void qmc5883l_mag_oneshot(void)
 {
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, (QMC5883L_OSR_512 << 6) | (QMC5883L_RNG_8G << 4) | (QMC5883L_ODR_200Hz << 2) | QMC5883L_MODE_CONTINUOUS);
+	last_odr = 0xff;
+	oneshot_failed = err != 0;
+	oneshot_pending = true;
 	oneshot_trigger_time = k_uptime_get();
 	if (err)
 		LOG_ERR("Communication error");
@@ -166,40 +185,59 @@ void qmc5883l_mag_oneshot(void)
 
 bool qmc5883l_mag_read(float m[3])
 {
-	int err = 0;
-	if (oneshot_trigger_time)
+	bool was_oneshot = oneshot_pending;
+	if (oneshot_pending)
 	{
+		if (oneshot_failed) {
+			oneshot_pending = false;
+			oneshot_failed = false;
+			return false;
+		}
+
 		uint8_t status = 0;
 		int64_t timeout = oneshot_trigger_time + 10;
 		while ((status & QMC5883L_STATUS_DRDY) == 0)
 		{
-			err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_STATUS, &status);
-			if (k_uptime_get() > timeout)
+			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_STATUS, &status);
+			if (err) {
+				LOG_ERR("Communication error");
+				oneshot_pending = false;
+				return false;
+			}
+			if (k_uptime_get() >= timeout)
 			{
 				LOG_WRN("Data ready status timeout!");
-				break;
+				oneshot_pending = false;
+				return false;
 			}
 		}
 		oneshot_trigger_time = 0;
-		if (err)
-		{
+		oneshot_pending = false;
+		if (status & QMC5883L_STATUS_OVL) {
+			if (!lastOvfl)
+				LOG_INF("Magnetometer overflow");
+			lastOvfl = true;
+			return false;
+		}
+		lastOvfl = false;
+
+	}
+	if (!was_oneshot && sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) != SENSOR_INTERFACE_SPEC_EXT) {
+		uint8_t status = 0;
+		int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_STATUS, &status);
+		if (err) {
 			LOG_ERR("Communication error");
 			return false;
 		}
-		if ((status & QMC5883L_STATUS_OVL) && !lastOvfl)
-		{
-			LOG_INF("Magnetometer overflow");
-			lastOvfl = true;
-		}
-		else
-		{
-			lastOvfl = false;
-		}
+		if (!(status & QMC5883L_STATUS_DRDY) || (status & QMC5883L_STATUS_OVL))
+			return false;
 	}
 	uint8_t rawData[6];
-	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, rawData, 6);
-	if (err)
+	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, rawData, 6);
+	if (err) {
 		LOG_ERR("Communication error");
+		return false;
+	}
 
 	int64_t now = k_uptime_get();
 	if (last_rawData_valid && memcmp(rawData, last_rawData, 6) == 0)
@@ -224,7 +262,8 @@ void qmc5883l_mag_process(uint8_t *raw_m, float m[3])
 {
 	for (int i = 0; i < 3; i++)
 	{
-		m[i] = ((int16_t *)raw_m)[i];
+		uint16_t raw = ((uint16_t)raw_m[i * 2 + 1] << 8) | raw_m[i * 2];
+		m[i] = (int16_t)raw;
 		m[i] *= sensitivity;
 	}
 }

@@ -100,6 +100,8 @@ bool retained_validate(void)
 		retained->watchdog_state.total_wdt_resets = 0;
 		retained->watchdog_state.last_failed_channel = 0;
 		retained->watchdog_state.last_reset_uptime = 0;
+		/* Stored channel encoding: 0xFF = default (see esb.h helpers). */
+		retained->rf_channel = 0xFF;
 	}
 
 	/* Reset to accrue runtime from this session. */

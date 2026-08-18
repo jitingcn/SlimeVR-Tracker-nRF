@@ -13,6 +13,9 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/fs/nvs.h>
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#include <zephyr/retention/bootmode.h>
+#endif
 #include <hal/nrf_gpio.h>
 
 #include "system.h"
@@ -20,6 +23,7 @@
 #include "build_defines.h"
 
 static struct nvs_fs fs;
+static K_MUTEX_DEFINE(sys_storage_lock);
 
 #define NVS_PARTITION storage_partition
 #define NVS_PARTITION_DEVICE FIXED_PARTITION_DEVICE(NVS_PARTITION)
@@ -80,9 +84,9 @@ static const struct pwm_dt_spec clk_out = PWM_DT_SPEC_GET(CLKOUT_NODE);
 static const struct pwm_dt_spec clk_out = {0};
 #endif
 
-#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER)
-#define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
-#define NRF5_BOOTLOADER CONFIG_BOARD_HAS_NRF5_BOOTLOADER
+#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT)
+#define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
+#define NRF5_BOOTLOADER (CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BOOTLOADER_MCUBOOT)
 
 #if NRF5_BOOTLOADER
 static const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
@@ -251,18 +255,22 @@ SYS_INIT(sys_retained_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 // read from retained
 uint8_t reboot_counter_read(void)
 {
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	if (!ram_retention_valid) // system cannot trust retained state, read from nvs
 	{
 		sys_nvs_init();
 		nvs_read(&fs, RBT_CNT_ID, &retained->reboot_counter, sizeof(retained->reboot_counter));
 		retained_update();
 	}
-	return retained->reboot_counter;
+	uint8_t reboot_counter = retained->reboot_counter;
+	k_mutex_unlock(&sys_storage_lock);
+	return reboot_counter;
 }
 
 // write to retained
 void reboot_counter_write(uint8_t reboot_counter)
 {
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	retained->reboot_counter = reboot_counter;
 	if (!ram_retention_valid) // system cannot trust retained state, write to nvs
 	{
@@ -270,6 +278,7 @@ void reboot_counter_write(uint8_t reboot_counter)
 		nvs_write(&fs, RBT_CNT_ID, &retained->reboot_counter, sizeof(retained->reboot_counter));
 	}
 	retained_update();
+	k_mutex_unlock(&sys_storage_lock);
 }
 
 /* Deferred NVS slots for warm-durable IDs (coalesced until sys_flush_warm). */
@@ -282,9 +291,9 @@ struct warm_dirty_slot {
 static struct warm_dirty_slot warm_dirty[WARM_DIRTY_MAX];
 static uint8_t warm_dirty_count;
 
-void sys_flush_warm(void);
+static void sys_flush_warm_locked(void);
 
-static void warm_dirty_clear_id(uint16_t id)
+static void warm_dirty_clear_id_locked(uint16_t id)
 {
 	for (uint8_t i = 0; i < warm_dirty_count;) {
 		if (warm_dirty[i].id != id) {
@@ -296,7 +305,7 @@ static void warm_dirty_clear_id(uint16_t id)
 	}
 }
 
-static void warm_dirty_mark(uint16_t id, void *ptr, size_t len)
+static void warm_dirty_mark_locked(uint16_t id, void *ptr, size_t len)
 {
 	if (!ptr || len == 0) {
 		return;
@@ -310,7 +319,7 @@ static void warm_dirty_mark(uint16_t id, void *ptr, size_t len)
 	}
 	if (warm_dirty_count >= WARM_DIRTY_MAX) {
 		LOG_ERR("Warm dirty table full, forcing flush before mark ID %u", id);
-		sys_flush_warm();
+		sys_flush_warm_locked();
 		if (warm_dirty_count >= WARM_DIRTY_MAX) {
 			LOG_ERR("Warm dirty table still full after flush, dropping ID %u", id);
 			return;
@@ -325,7 +334,28 @@ static void warm_dirty_mark(uint16_t id, void *ptr, size_t len)
 
 bool sys_warm_is_dirty(void)
 {
-	return warm_dirty_count > 0;
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
+	bool dirty = warm_dirty_count > 0;
+	k_mutex_unlock(&sys_storage_lock);
+	return dirty;
+}
+
+void sys_warm_transaction_begin(void)
+{
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
+}
+
+void sys_warm_transaction_mark(uint16_t id, void *retained_ptr, size_t len)
+{
+	warm_dirty_mark_locked(id, retained_ptr, len);
+}
+
+void sys_warm_transaction_end(bool retained_changed)
+{
+	if (retained_changed) {
+		retained_update();
+	}
+	k_mutex_unlock(&sys_storage_lock);
 }
 
 void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t len)
@@ -334,14 +364,15 @@ void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t le
 		LOG_ERR("sys_write_warm: retained_ptr required for ID %u", id);
 		return;
 	}
+	sys_warm_transaction_begin();
 	if (data && retained_ptr != data) {
 		memcpy(retained_ptr, data, len);
 	}
-	warm_dirty_mark(id, retained_ptr, len);
-	retained_update();
+	sys_warm_transaction_mark(id, retained_ptr, len);
+	sys_warm_transaction_end(true);
 }
 
-void sys_flush_warm(void)
+static void sys_flush_warm_locked(void)
 {
 	if (warm_dirty_count == 0) {
 		return;
@@ -367,15 +398,24 @@ void sys_flush_warm(void)
 	warm_dirty_count = 0;
 }
 
+void sys_flush_warm(void)
+{
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
+	sys_flush_warm_locked();
+	k_mutex_unlock(&sys_storage_lock);
+}
+
 // write to retained and nvs (cold / eager)
 void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 {
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	if (!sys_nvs_init()) {
 		LOG_ERR("sys_write: NVS init failed, cannot write ID %d", id);
 		if (retained_ptr) {
 			memcpy(retained_ptr, data, len);
 			retained_update();
 		}
+		k_mutex_unlock(&sys_storage_lock);
 		return;
 	}
 	if (retained_ptr) {
@@ -388,21 +428,25 @@ void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 		if (retained_ptr) {
 			retained_update();
 		}
+		k_mutex_unlock(&sys_storage_lock);
 		return;
 	}
 	/* Eager NVS write supersedes any deferred warm copy of this ID. */
-	warm_dirty_clear_id(id);
+	warm_dirty_clear_id_locked(id);
 	if (retained_ptr) {
 		retained_update();
 	}
+	k_mutex_unlock(&sys_storage_lock);
 }
 
 void sys_read(uint16_t id, void *data, size_t len)
 {
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	memset(data, 0, len);
 
 	if (!sys_nvs_init()) {
 		LOG_ERR("sys_read: NVS init failed, cannot read ID %d", id);
+		k_mutex_unlock(&sys_storage_lock);
 		return;
 	}
 	int err = nvs_read(&fs, id, data, len);
@@ -414,11 +458,13 @@ void sys_read(uint16_t id, void *data, size_t len)
 			LOG_ERR("Failed to read from NVS, error: %d", err);
 			LOG_WRN("Read data set to zero");
 		}
+		k_mutex_unlock(&sys_storage_lock);
 		return;
 	}
 	if ((size_t)err < len) {
 		LOG_WRN("Short NVS read for ID %d: got %d bytes, expected %zu", id, err, len);
 	}
+	k_mutex_unlock(&sys_storage_lock);
 }
 
 void sys_clear(void)
@@ -435,6 +481,7 @@ void sys_clear(void)
 	}
 	printk("Resetting NVS and retained\n");
 
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	sys_nvs_init();
 	warm_dirty_count = 0;
 	memset(retained, 0, sizeof(*retained));
@@ -448,20 +495,24 @@ void sys_clear(void)
 	retained->gyroSensScale[2] = 1.0f;
 	retained->build_timestamp = BUILD_TIMESTAMP;
 	retained_update();
+	k_mutex_unlock(&sys_storage_lock);
 
 	LOG_INF("NVS and retained reset");
 }
 
 void sys_nvs_stats(void)
 {
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	if (!sys_nvs_init()) {
 		printk("NVS init failed\n");
+		k_mutex_unlock(&sys_storage_lock);
 		return;
 	}
 
 	printk("Storage partition: %u bytes\n", NVS_PARTITION_SIZE);
 	printk("Allocated NVS: %u * %u = %u bytes\n", fs.sector_size, fs.sector_count, fs.sector_size * fs.sector_count);
 	printk("NVS free: %d bytes, max item: %d bytes\n", nvs_calc_free_space(&fs), nvs_sector_max_data_size(&fs));
+	k_mutex_unlock(&sys_storage_lock);
 }
 
 // return 0 if clock applied, -1 if failed (because there is no clk_en or clk_out)
@@ -718,6 +769,40 @@ void sys_command_shutdown(void)
 	sys_request_system_off(false);
 }
 
+void sys_enter_dfu(bool ota)
+{
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	ARG_UNUSED(ota);
+	int err = bootmode_set(BOOT_MODE_TYPE_BOOTLOADER);
+	if (err) {
+		LOG_ERR("Failed to request MCUboot recovery: %d", err);
+		return;
+	}
+	LOG_INF("MCUboot serial recovery requested");
+	sys_request_system_reboot(false);
+#elif ADAFRUIT_BOOTLOADER
+	NRF_POWER->GPREGRET = ota ? ADAFRUIT_DFU_MAGIC_OTA_RESET : ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	k_msleep(100);
+	sys_request_system_reboot(false);
+#elif NRF5_BOOTLOADER
+	ARG_UNUSED(ota);
+	gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
+	k_msleep(100);
+	sys_request_system_reboot(false);
+#else
+	ARG_UNUSED(ota);
+#endif
+}
+
+void sys_skip_dfu(void)
+{
+#if ADAFRUIT_BOOTLOADER
+	if (NRF_POWER->GPREGRET == 0) {
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_SKIP; // Skip DFU
+	}
+#endif
+}
+
 void sys_reset_mode(uint8_t mode)
 {
 	switch (mode) {
@@ -740,24 +825,12 @@ void sys_reset_mode(uint8_t mode)
 	case 6: // Reset mode DFU
 #endif
 		LOG_INF("DFU requested");
-#if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
-		sys_request_system_reboot(false);
-#endif
-#if NRF5_BOOTLOADER
-		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+		sys_enter_dfu(false);
 		break;
 	case 7:
 	case 8: // Reset mode DFU OTA
 		LOG_INF("DFU OTA requested");
-#if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
-		sys_request_system_reboot(false);
-#endif
-#if NRF5_BOOTLOADER
-		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+		sys_enter_dfu(true);
 #endif
 	default:
 		break;

@@ -1,0 +1,68 @@
+/*
+ * Copyright (c) 2025 Seeed Technology Co., Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <nordic/nrf54lm20a_cpuapp.dtsi>
+
+/*
+ * On the XIAO nRF54LM20A the USB-C data lines go to the onboard SAMD11
+ * (USB-UART bridge), not to the nRF54's native USB. The nRF54 usbhs D+/D-
+ * pads are not connected on the PCB, so keep usbhs disabled and use uart20
+ * (P1.11 TX / P1.10 RX), which is the SAMD11 bridge, for the console.
+ */
+zephyr_udc0: &usbhs { status = "disabled"; };
+
+#include "xiao_nrf54lm20a_common.dtsi"
+#include <vendor/nordic/nrf54lm20a_cpuapp_partition.dtsi>
+
+/ {
+	chosen {
+		zephyr,console = &uart20;
+		zephyr,shell-uart = &uart20;
+		zephyr,flash-controller = &rram_controller;
+		zephyr,flash = &cpuapp_rram;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,sram = &cpuapp_sram;
+	};
+};
+
+&cpuapp_sram { status = "okay"; };
+&hfpll { clock-frequency = <DT_FREQ_M(128)>; };
+
+&lfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <17000>;
+	status = "okay";
+};
+
+&hfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <15000>;
+	status = "okay";
+};
+
+&vregmain {
+	status = "okay";
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
+
+&vregusb {
+	status = "okay";
+};
+
+&grtc {
+	owned-channels = <0 1 2 3 4 5 6 7 8 9 10 11>;
+	child-owned-channels = <3 4 7 8 9 10 11>;
+	status = "okay";
+};
+
+&gpio0 { status = "okay"; };
+&gpio1 { status = "okay"; };
+&gpio2 { status = "okay"; };
+&gpiote20 { status = "okay"; };
+&gpiote30 { status = "okay"; };
+&clock { status = "okay"; };
+&radio { status = "okay"; };
+&temp { status = "okay"; };
+&adc { status = "okay"; };

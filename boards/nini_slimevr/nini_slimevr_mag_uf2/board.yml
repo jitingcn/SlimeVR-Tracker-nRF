@@ -3,7 +3,7 @@
 
 board:
   name: nini_slimevr_mag_uf2
+  full_name: NiNi_Unicorn & MINGYUE Smol SlimeVR MAG
   vendor: nini_slimevr
   socs:
     - name: nrf52833
-

@@ -78,17 +78,21 @@ int sensor_offsetBias_internal(
 	float rawData[3];
 	float min_a[3], max_a[3];
 	float min_g[3], max_g[3];
+	/* Gyro motion uses the range of short-window MEANS, not raw samples.
+	 * Raw peak-peak range aborts on sensors with large zero-rate offset
+	 * plus high-frequency noise (e.g. >10 dps spread while perfectly
+	 * stationary); a 250 ms window mean averages that noise out while a
+	 * real sustained rotation still shifts the mean. */
+	double gyro_win_sum[3] = {0.0, 0.0, 0.0};
+	int gyro_win_count = 0;
+	bool gyro_win_tracked = false;
+	int gyro_motion_window = 1;
 
 	// Initialize min/max with initial samples
 	if (sensor_wait_accel(min_a, K_MSEC(1000))) {
 		return -2; // Timeout
 	}
 	memcpy(max_a, min_a, sizeof(max_a));
-
-	if (sensor_wait_gyro(min_g, K_MSEC(1000))) {
-		return -2; // Timeout
-	}
-	memcpy(max_g, min_g, sizeof(max_g));
 
 	double gyro_sum[3] = {0};
 
@@ -119,6 +123,7 @@ int sensor_offsetBias_internal(
 	float actual_gyro_odr = sensor_get_gyro_odr();
 	float actual_accel_odr = sensor_get_accel_odr();
 	float wait_gyro_odr = actual_gyro_odr;
+	gyro_motion_window = MAX(1, (int)(wait_gyro_odr * BIAS_COLLECT_GYRO_MOTION_WINDOW_MS / 1000.0f));
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
 	float wait_accel_odr = actual_accel_odr / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
 #else
@@ -210,17 +215,38 @@ int sensor_offsetBias_internal(
 			return -2; // Timeout
 		}
 
-		// Check Gyro Motion
+		// Check Gyro Motion (windowed-mean range method)
 		for (int j = 0; j < 3; j++) {
-			if (rawData[j] < min_g[j]) {
-				min_g[j] = rawData[j];
+			gyro_win_sum[j] += (double)rawData[j];
+		}
+		gyro_win_count++;
+		if (gyro_win_count >= gyro_motion_window) {
+			for (int j = 0; j < 3; j++) {
+				float win_mean = (float)(gyro_win_sum[j] / gyro_win_count);
+				gyro_win_sum[j] = 0.0;
+				if (!gyro_win_tracked) {
+					min_g[j] = win_mean;
+					max_g[j] = win_mean;
+				} else {
+					if (win_mean < min_g[j]) {
+						min_g[j] = win_mean;
+					}
+					if (win_mean > max_g[j]) {
+						max_g[j] = win_mean;
+					}
+				}
 			}
-			if (rawData[j] > max_g[j]) {
-				max_g[j] = rawData[j];
-			}
-			if (max_g[j] - min_g[j] > BIAS_COLLECT_GYRO_MOTION_THRESHOLD) {
-				LOG_INF("Gyro motion detected: axis %d range %.4f", j, (double)(max_g[j] - min_g[j]));
-				return -1;
+			gyro_win_count = 0;
+			gyro_win_tracked = true;
+			for (int j = 0; j < 3; j++) {
+				if (max_g[j] - min_g[j] > BIAS_COLLECT_GYRO_MOTION_THRESHOLD) {
+					LOG_INF(
+						"Gyro motion detected: axis %d windowed-mean range %.4f",
+						j,
+						(double)(max_g[j] - min_g[j])
+					);
+					return -1;
+				}
 			}
 		}
 

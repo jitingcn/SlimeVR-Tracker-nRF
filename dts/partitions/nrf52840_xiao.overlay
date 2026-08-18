@@ -1,0 +1,42 @@
+/ {
+	chosen {
+		zephyr,code-partition = &slot0_partition;
+	};
+};
+
+&flash0 {
+	/delete-node/ partitions;
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		reserved_partition: partition@0 {
+			label = "reserved";
+			read-only;
+			reg = <0x00000000 0x00027000>;
+		};
+
+		slot0_partition: partition@27000 {
+			label = "application";
+			reg = <0x00027000 0x000bf000>;
+		};
+
+		storage_partition: partition@e6000 {
+			label = "storage";
+			reg = <0x000e6000 0x00006000>;
+		};
+
+		settings_storage_partition: partition@ec000 {
+			label = "settings-reserved";
+			reg = <0x000ec000 0x00008000>;
+		};
+
+		boot_partition: partition@f4000 {
+			label = "UF2";
+			read-only;
+			reg = <0x000f4000 0x0000c000>;
+		};
+	};
+};

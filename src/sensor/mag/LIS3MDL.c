@@ -6,24 +6,39 @@
 
 static const float sensitivity = 1.0 / 3421; // Always 8G (FS = ±8 gauss: 3421 LSB/Gauss)
 
-static uint8_t last_odr = 0xff;
+static uint16_t last_state = 0xffff;
+static bool oneshot_pending;
+static bool oneshot_failed;
+static int64_t oneshot_deadline;
 
 LOG_MODULE_REGISTER(LIS3MDL, LOG_LEVEL_DBG);
 
 int lis3_init(float time, float *actual_time)
 {
+	last_state = 0xffff;
+	oneshot_pending = false;
+	oneshot_failed = false;
+
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG1, 0x80); // enable temp sensor
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG2, FS_8G << 5);
 	if (err)
-		LOG_ERR("Communication error");
-	last_odr = 0xff; // reset last odr
-	err |= lis3_update_odr(time, actual_time);
+		goto error;
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG2, FS_8G << 5);
+	if (err)
+		goto error;
+	err = lis3_update_odr(time, actual_time);
+	return (err < 0 ? err : 0);
+
+error:
+	last_state = 0xffff;
+	LOG_ERR("Communication error");
 	return (err < 0 ? err : 0);
 }
 
 void lis3_shutdown(void)
 {
-	last_odr = 0xff; // reset last odr
+	last_state = 0xffff;
+	oneshot_pending = false;
+	oneshot_failed = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG2, 0x04);
 	if (err)
 		LOG_ERR("Communication error");
@@ -31,35 +46,30 @@ void lis3_shutdown(void)
 
 int lis3_update_odr(float time, float *actual_time)
 {
-	int ODR;
-	uint8_t OM;
-	uint8_t DO;
-	uint8_t FAST_ODR;
+	int ODR = 0;
+	uint8_t OM = OM_UHP;
+	uint8_t DO = DO_0_625Hz;
+	uint8_t FAST_ODR = 0;
 	uint8_t MD;
+	bool single = time == INFINITY;
 
 	if (time <= 0) // off
 	{
 		MD = MD_POWER_DOWN;
-		ODR = 0;
 	}
 	else if (time == INFINITY) // oneshot/single
 	{
-//		MD = MD_SINGLE_CONV;
-//		ODR = 0;
-		MD = MD_POWER_DOWN; // Single measurement only up to 80Hz, so it is useless
-		ODR = 0;
+		MD = MD_POWER_DOWN;
 	}
 	else
 	{
-		OM = OM_UHP;
-		DO = 0;
 		MD = MD_CONTINUOUS_CONV;
 		ODR = 1 / time;
 	}
 
 	if (MD == MD_POWER_DOWN)
 	{
-		time = 0; // off
+		time = single ? INFINITY : 0;
 	}
 	else if (ODR > 560) // TODO: this sucks
 	{
@@ -132,62 +142,102 @@ int lis3_update_odr(float time, float *actual_time)
 	}
 
 	uint8_t ctrl = OM << 5 | DO << 2 | FAST_ODR << 1;
-	if (last_odr == ctrl) {
+	uint16_t state = ((uint16_t)MD << 8) | ctrl;
+	if (last_state == state) {
 		*actual_time = time;
-		return 0; /* already configured — success for err|= callers */
+		return 0; /* already configured */
 	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG1, 0x80 | ctrl); // temp, X/Y operating mode, and ODR
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, MD); // set measurement mode
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG4, OM << 2); // set Z-axis operating mode
-	if (err) {
-		LOG_ERR("Communication error");
-		return err;
-	}
+	if (err)
+		goto error;
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, MD); // set measurement mode
+	if (err)
+		goto error;
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG4, OM << 2); // set Z-axis operating mode
+	if (err)
+		goto error;
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG5, LIS3MDL_CTRL_REG5_BDU);
+	if (err)
+		goto error;
 
-	last_odr = ctrl;
+	last_state = state;
+	oneshot_pending = false;
+	oneshot_failed = false;
 	*actual_time = time;
 	return 0;
+error:
+	last_state = 0xffff;
+	LOG_ERR("Communication error");
+	return err;
 }
 
 void lis3_mag_oneshot(void)
 {
 	// write MD_SINGLE again to trigger a measurement (not clear in datasheet?)
+	last_state = 0xffff;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, MD_SINGLE_CONV);
+	oneshot_failed = err != 0;
+	oneshot_pending = true;
+	oneshot_deadline = k_uptime_get() + 20;
 	if (err)
 		LOG_ERR("Communication error");
 }
 
 bool lis3_mag_read(float m[3])
 {
-	int err = 0;
-	uint8_t status = MD_SINGLE_CONV; /* force first register read before exit */
-	while ((status & 0x03) == MD_SINGLE_CONV) // wait for oneshot to complete
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, &status);
-	uint8_t rawData[6];
-	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_OUT_X_L, &rawData[0], 6);
-	if (err)
-	{
+	if (oneshot_pending) {
+		if (oneshot_failed) {
+			oneshot_pending = false;
+			oneshot_failed = false;
+			return false;
+		}
+
+		uint8_t mode = MD_SINGLE_CONV;
+		while ((mode & 0x03) == MD_SINGLE_CONV) {
+			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, &mode);
+			if (err) {
+				LOG_ERR("Communication error");
+				oneshot_pending = false;
+				return false;
+			}
+			if (k_uptime_get() >= oneshot_deadline) {
+				LOG_ERR("Read timeout");
+				oneshot_pending = false;
+				return false;
+			}
+		}
+		oneshot_pending = false;
+	} else if (last_state == 0xffff || (last_state >> 8) != MD_CONTINUOUS_CONV) {
+		return false;
+	}
+
+	uint8_t frame[7];
+	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_STATUS_REG, frame, sizeof(frame));
+	if (err) {
 		LOG_ERR("Communication error");
 		return false;
 	}
-	lis3_mag_process(rawData, m);
+	if (!(frame[0] & LIS3MDL_STATUS_ZYXDA))
+		return false;
+	lis3_mag_process(&frame[1], m);
 	return true;
 }
 
 float lis3_temp_read(float bias[3])
 {
+	(void)bias;
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_TEMP_OUT_L, &rawTemp[0], 2);
+	if (err) {
+		LOG_ERR("Communication error");
+		return NAN;
+	}
 	// The output value is expressed as a signed 16-bit byte in two’s complement.
 	// The four most significant bits contain a copy of the sign bit.
 	// The nominal sensitivity is 8 LSB/°C
 	float temp = (int16_t)((((uint16_t)rawTemp[1]) << 8) | rawTemp[0]);
-	temp /= 8;
-	// No value offset?
-	if (err)
-		LOG_ERR("Communication error");
-	return temp;
+	return 25.0f + temp / 8.0f;
 }
 
 void lis3_mag_process(uint8_t *raw_m, float m[3])
@@ -210,5 +260,5 @@ const sensor_mag_t sensor_mag_lis3mdl = {
 	*lis3_temp_read,
 
 	*lis3_mag_process,
-	6, 6
+	7, 7
 };

@@ -145,21 +145,21 @@ int lis2_update_odr(float time, float *actual_time)
 
 	if (last_cfg_a == cfg_a) {
 		*actual_time = time;
-		return 0; /* already configured — success for err|= callers */
+		return 0; /* already configured */
 	}
 
 	bool was_idle = (last_cfg_a == 0xff) || ((last_cfg_a & 0x03) == MD_IDLE);
-	int err = 0;
+	int err;
 
 	if (MD == MD_CONTINUOUS) {
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, lis2_cfg_c());
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, lis2_cfg_c());
+		if (err)
+			goto error;
 	}
 
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, cfg_a);
-	if (err) {
-		LOG_ERR("Communication error");
-		return err;
-	}
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, cfg_a);
+	if (err)
+		goto error;
 
 	/* First sample after continuous enable needs turn-on delay. */
 	if (MD == MD_CONTINUOUS && was_idle)
@@ -168,6 +168,10 @@ int lis2_update_odr(float time, float *actual_time)
 	last_cfg_a = cfg_a;
 	*actual_time = time;
 	return 0;
+error:
+	last_cfg_a = 0xff;
+	LOG_ERR("Communication error");
+	return err;
 }
 
 void lis2_mag_oneshot(void)
@@ -177,38 +181,32 @@ void lis2_mag_oneshot(void)
 
 bool lis2_mag_read(float m[3])
 {
-	uint8_t status = 0;
-	int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_STATUS_REG, &status);
+	uint8_t frame[7];
+	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_STATUS_REG, frame, sizeof(frame));
 	if (err) {
 		LOG_ERR("Communication error");
 		return false;
 	}
-	if (!(status & STATUS_ZYXDA))
+	if (!(frame[0] & STATUS_ZYXDA))
 		return false;
-
-	uint8_t rawData[6];
-	err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_OUTX_L_REG, &rawData[0], 6);
-	if (err) {
-		LOG_ERR("Communication error");
-		return false;
-	}
-	lis2_mag_process(rawData, m);
+	lis2_mag_process(&frame[1], m);
 	return true;
 }
 
 float lis2_temp_read(float bias[3])
 {
+	(void)bias;
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_TEMP_OUT_L_REG, &rawTemp[0], 2);
+	if (err) {
+		LOG_ERR("Communication error");
+		return NAN;
+	}
 	// The output value is expressed as a signed 16-bit byte in two’s complement.
 	// The four most significant bits contain a copy of the sign bit.
 	// The nominal sensitivity is 8 LSB/°C
 	float temp = (int16_t)((((uint16_t)rawTemp[1]) << 8) | rawTemp[0]);
-	temp /= 8;
-	// No value offset?
-	if (err)
-		LOG_ERR("Communication error");
-	return temp;
+	return 25.0f + temp / 8.0f;
 }
 
 void lis2_mag_process(uint8_t *raw_m, float m[3])
@@ -231,5 +229,5 @@ const sensor_mag_t sensor_mag_lis2mdl = {
 	*lis2_temp_read,
 
 	*lis2_mag_process,
-	6, 6
+	7, 7
 };

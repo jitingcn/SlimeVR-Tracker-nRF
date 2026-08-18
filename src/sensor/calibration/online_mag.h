@@ -32,10 +32,14 @@ bool sensor_calibration_online_mag_check(void);
 /* Runtime state helpers used by calibration.c glue (read / mag request). */
 void magneto_online_reset(void);
 void magneto_online_runtime_reset(void);
+void magneto_online_runtime_configure(bool enabled);
 void magneto_online_runtime_load_retained(void);
 float magneto_online_min_dir_change_threshold(void);
 int cal_online_mag_update_count(void);
 uint32_t cal_online_mag_norm_count(void);
+
+void magneto_online_snapshot_BAinv(float out[4][3]);
+void magneto_online_replace_BAinv_and_reset(const float replacement[4][3]);
 
 /*
  * Public online-mag APIs remain declared in calibration.h and are defined in

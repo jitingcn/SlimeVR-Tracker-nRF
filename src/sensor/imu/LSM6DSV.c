@@ -175,7 +175,9 @@ void lsm_shutdown(void)
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
 	k_msleep(2); // Wait for reset to complete before the next init path continues
 	if (err)
+	{
 		LOG_ERR("Communication error");
+	}
 }
 
 void lsm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
@@ -351,7 +353,7 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 		return 0;
 	}
 
-	// Parse FIFO word count (10-bit field: bits 1:0 of STATUS2 and all 8 bits of STATUS1)
+	// Parse FIFO word count (9-bit field: bit 0 of STATUS2 and all 8 bits of STATUS1)
 	uint16_t count = (uint16_t)((rawStatus[1] & LSM6DSV_FIFO_DIFF_8) << 8 | rawStatus[0]);
 
 	// Early return if FIFO is empty
@@ -366,13 +368,14 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t len)
 		return 0;
 	}
 
-	// Limit read to available buffer space
+	// Limit read to available buffer space; drain what fits instead of
+	// resyncing and dropping the whole batch (a corrupted DIFF_FIFO or a
+	// long preemption would otherwise cost 2x350us of resync sleeps).
 	uint16_t limit = len / PACKET_SIZE;
 	if (count > limit)
 	{
-		LOG_WRN("FIFO buffer limit exceeded: count=%u limit=%u, resyncing FIFO", count, limit);
-		lsm_fifo_resync("software buffer limit exceeded");
-		return 0;
+		LOG_WRN("FIFO read buffer limit reached, %u packets dropped", count - limit);
+		count = limit;
 	}
 
 	// Batch read all packets in one SPI transaction
@@ -457,7 +460,11 @@ void lsm_accel_read(float a[3])
 	uint8_t rawAccel[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_L_A, &rawAccel[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		memset(a, 0, 3 * sizeof(*a));
+		return;
+	}
 
 	// LSM6DSV16B (0x71): Z, Y, X order in registers (reading from OUTX_L_A gets Z, Y, X)
 	// LSM6DSV (0x70): X, Y, Z order in registers
@@ -486,7 +493,11 @@ void lsm_gyro_read(float g[3])
 	uint8_t rawGyro[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUTX_L_G, &rawGyro[0], 6);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		memset(g, 0, 3 * sizeof(*g));
+		return;
+	}
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
 		g[i] = (int16_t)((((uint16_t)rawGyro[1 + (i * 2)]) << 8) | rawGyro[i * 2]);
@@ -499,7 +510,10 @@ float lsm_temp_read(void)
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_OUT_TEMP_L, &rawTemp[0], 2);
 	if (err)
+	{
 		LOG_ERR("Communication error");
+		return NAN;
+	}
 	// TSen Temperature sensitivity 256 LSB/°C
 	// The output of the temperature sensor is 0 LSB (typ.) at 25°C
 	float temp = (int16_t)((((uint16_t)rawTemp[1]) << 8) | rawTemp[0]);

@@ -31,18 +31,15 @@ LOG_MODULE_REGISTER(clock_switch, LOG_LEVEL_INF);
 
 #define LFCLK_WAIT_STEP_US 300
 
-/* Helper to normalize XTAL variants for comparison */
+/* Helper to normalize XTAL variants for comparison.
+ * XTAL_FULL_SWING and XTAL_LOW_SWING report as XTAL in the actual source. */
 static inline nrf_clock_lfclk_t normalize_source(nrf_clock_lfclk_t source)
 {
-	/* XTAL_FULL_SWING and XTAL_LOW_SWING report as XTAL in actual source */
-	if (
-		source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING
-#ifdef NRF_CLOCK_LFCLK_XTAL_LOW_SWING
-		|| source == NRF_CLOCK_LFCLK_XTAL_LOW_SWING
-#endif
-	) {
+#if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
+	if (source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING || source == NRF_CLOCK_LFCLK_XTAL_LOW_SWING) {
 		return NRF_CLOCK_LFCLK_XTAL;
 	}
+#endif
 	return source;
 }
 
@@ -68,8 +65,12 @@ void clock_switch(nrf_clock_lfclk_t source)
 	 * Avoid switching to XTAL when the board does not have an external LFXO.
 	 * Note: switching to RC is always safe.
 	 */
-	if (!IS_ENABLED(CONFIG_CLOCK_USE_LFXO)
-		&& (source == NRF_CLOCK_LFCLK_XTAL || source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING)) {
+	bool xtal_source = source == NRF_CLOCK_LFCLK_XTAL;
+#ifdef NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES
+	xtal_source = xtal_source || source == NRF_CLOCK_LFCLK_XTAL_FULL_SWING
+		|| source == NRF_CLOCK_LFCLK_XTAL_LOW_SWING;
+#endif
+	if (!IS_ENABLED(CONFIG_CLOCK_USE_LFXO) && xtal_source) {
 		LOG_INF("clock_switch: skipping XTAL, CONFIG_CLOCK_USE_LFXO disabled");
 		return;
 	}
@@ -87,6 +88,8 @@ void clock_switch(nrf_clock_lfclk_t source)
 
 	LOG_INF("clock_switch: %d -> %d", current_source, normalized_requested);
 
+	/* Keep the stop-to-start transition atomic while the system timer is stopped. */
+	unsigned int key = irq_lock();
 	if (running) {
 		nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
 
@@ -102,6 +105,7 @@ void clock_switch(nrf_clock_lfclk_t source)
 	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
 	nrf_clock_lf_src_set(NRF_CLOCK, source);
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
+	irq_unlock(key);
 
 	if (source == NRF_CLOCK_LFCLK_RC) {
 		// RC starts very quickly, just wait for the event without sleeping
@@ -143,11 +147,18 @@ void clock_init_external(void)
 {
 #if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
 	if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO)) {
-		clock_switch(NRF_CLOCK_LFCLK_XTAL_FULL_SWING);
+		if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO_MODE_FULL_SWING)) {
+			clock_switch(NRF_CLOCK_LFCLK_XTAL_FULL_SWING);
+		} else if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO_MODE_LOW_SWING)) {
+			clock_switch(NRF_CLOCK_LFCLK_XTAL_LOW_SWING);
+		} else {
+			clock_switch(NRF_CLOCK_LFCLK_XTAL);
+		}
 	} else if (IS_ENABLED(CONFIG_CLOCK_USE_LF_SYNTH)) {
 		/* Use LF synthesizer (derived from HFXO) for TDMA timing precision
 		 * when LFXO is not available on the board */
-#ifdef NRF_CLOCK_LFCLK_SYNTH
+#if defined(CLOCK_LFCLKSRC_SRC_Synth) || defined(CLOCK_LFCLK_SRC_SRC_LFSYNT) || \
+	defined(CLOCK_LFCLKSRC_SRC_LFSYNT)
 		clock_switch(NRF_CLOCK_LFCLK_SYNTH);
 #else
 		LOG_WRN("clock_init_external: LF_SYNTH requested but not supported");

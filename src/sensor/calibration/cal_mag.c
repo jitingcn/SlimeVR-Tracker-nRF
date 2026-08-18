@@ -28,7 +28,6 @@
 
 #include <math.h>
 #include <string.h>
-#include <zephyr/irq.h>
 
 #if CONFIG_CMSIS_DSP
 #include <arm_math.h>
@@ -66,9 +65,6 @@ static mag_center_estimator_t manual_center_estimator;
 static float manual_last_dir[3];
 static float manual_last_accel_dir[3];
 
-/* Biases / matrices owned by calibration.c */
-extern float magBAinv[4][3];
-
 static void magneto_update_dir_range(const float v[3]);
 static float magneto_min_dir_range(void);
 static void sensor_sample_mag_magneto_sample(const float m[3]);
@@ -76,7 +72,9 @@ static void sensor_sample_mag_magneto_sample(const float m[3]);
 int sensor_calibrate_mag(void)
 {
 	float zero[3] = {0};
-	if (v_diff_mag(magBAinv[0], zero) != 0) {
+	float live_snapshot[4][3];
+	magneto_online_snapshot_BAinv(live_snapshot);
+	if (v_diff_mag(live_snapshot[0], zero) != 0) {
 		magneto_reset();
 		if (get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
@@ -138,13 +136,14 @@ int sensor_calibrate_mag(void)
 		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		LOG_INF("Restoring previous calibration");
 		LOG_INF("Magnetometer matrix:");
+		magneto_online_snapshot_BAinv(live_snapshot);
 		for (int i = 0; i < 3; i++) {
 			LOG_INF(
 				"%.5f %.5f %.5f %.5f",
-				(double)magBAinv[0][i],
-				(double)magBAinv[1][i],
-				(double)magBAinv[2][i],
-				(double)magBAinv[3][i]
+				(double)live_snapshot[0][i],
+				(double)live_snapshot[1][i],
+				(double)live_snapshot[2][i],
+				(double)live_snapshot[3][i]
 			);
 		}
 		sensor_calibration_validate_mag(NULL, true); // additionally verify old calibration
@@ -154,15 +153,12 @@ int sensor_calibrate_mag(void)
 		return -1;
 	} else {
 		LOG_INF("Applying calibration");
-		unsigned key = irq_lock();
-		memcpy(magBAinv, m_inv, sizeof(magBAinv));
-		irq_unlock(key);
-		magneto_online_runtime_reset(); // Restart online calibration from a clean baseline
+		magneto_online_replace_BAinv_and_reset(m_inv);
 		sensor_fusion_reset_mag_ref();
 		sensor_mag_ref_reset(); // Recompute magRef from new calibration
 								// fusion invalidation not necessary
 	}
-	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(magBAinv));
+	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(retained->magBAinv));
 
 	LOG_INF("Finished calibration");
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
