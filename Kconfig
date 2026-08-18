@@ -590,6 +590,29 @@ config CLOCK_USE_LFXO
         LFXO crystal. Using LFXO without a crystal will cause the
         system to hang or IMU detection to fail.
 
+choice CLOCK_USE_LFXO_MODE
+    prompt "External LF clock source mode"
+    depends on CLOCK_USE_LFXO
+    default CLOCK_USE_LFXO_MODE_XTAL
+    help
+        Some boards drive the LFCLK pin with an external 32.768 kHz
+        signal (low-swing or full-swing) instead of a crystal.
+        Select the matching mode here; XTAL is the standard crystal
+        configuration.
+
+config CLOCK_USE_LFXO_MODE_XTAL
+    bool "Crystal oscillator (XTAL)"
+
+config CLOCK_USE_LFXO_MODE_LOW_SWING
+    bool "External low-swing signal"
+    depends on SOC_SERIES_NRF52
+
+config CLOCK_USE_LFXO_MODE_FULL_SWING
+    bool "External full-swing signal"
+    depends on SOC_SERIES_NRF52
+
+endchoice
+
 config CONNECTION_TDMA
     bool "Enable TDMA transmit scheduling"
     default n if !CLOCK_USE_LFXO
