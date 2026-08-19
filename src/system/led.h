@@ -57,6 +57,7 @@ enum sys_led_pattern {
 	SYS_LED_PATTERN_ERROR_B, // 500ms on 500ms off, 3 times, every 5000ms			// Error
 	SYS_LED_PATTERN_ERROR_C, // 500ms on 500ms off, 4 times, every 5000ms			// Error
 	SYS_LED_PATTERN_ERROR_D, // 500ms on 500ms off (same as SYS_LED_PATTERN_LONG)	// Error
+	SYS_LED_PATTERN_DFU,       // Fast yellow pulse								// DFU/OTA update mode
 };
 
 enum sys_led_color {

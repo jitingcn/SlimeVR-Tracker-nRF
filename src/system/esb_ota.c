@@ -54,6 +54,7 @@
 #include "connection/connection.h"
 #include "system/power.h"
 #include "system/watchdog.h"
+#include "system/led.h"
 #include "sensor/sensor.h"
 
 #include <zephyr/kernel.h>
@@ -770,11 +771,27 @@ void esb_ota_process_rx_packet(const uint8_t *data, size_t len)
 	}
 }
 
-/* ── Internal Helpers ────────────────────────────────────────────── */
+/* Keep the connection-priority LED synchronized with OTA session state.
+ * State reports are emitted for every transition and periodic status, so the
+ * edge guard avoids restarting the pulse on repeated reports. */
+static void ota_update_led(void)
+{
+	static bool led_active;
+	bool active = ota.state != OTA_STATE_IDLE && ota.state != OTA_STATE_ERROR;
+
+	if (active == led_active) {
+		return;
+	}
+	led_active = active;
+	set_led(active ? SYS_LED_PATTERN_DFU : SYS_LED_PATTERN_OFF,
+		SYS_LED_PRIORITY_CONNECTION);
+}
 
 static void ota_send_status(void)
 {
 	uint8_t pkt[OTA_STATUS_PACKET_SIZE];
+
+	ota_update_led();
 
 	pkt[0] = ESB_OTA_STATUS_TYPE;
 	pkt[1] = connection_get_id();
