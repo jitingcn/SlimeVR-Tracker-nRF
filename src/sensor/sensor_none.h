@@ -25,7 +25,13 @@
 
 #include "sensor.h"
 
-int imu_none_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int imu_none_init(
+	float clock_rate,
+	float accel_time,
+	float gyro_time,
+	float *accel_actual_time,
+	float *gyro_actual_time
+);
 void imu_none_shutdown(void);
 
 int imu_none_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
@@ -38,8 +44,7 @@ float imu_none_temp_read(void);
 
 uint8_t imu_none_setup_WOM(void);
 
-int imu_none_ext_setup(void);
-int imu_none_ext_passthrough(bool passthrough);
+int imu_none_ext_setup(enum sensor_ext_mode mode);
 
 extern const sensor_imu_t sensor_imu_none;
 

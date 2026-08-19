@@ -15,7 +15,8 @@ static float gyro_sensitivity = 2000.0f / 32768.0f; // default 2000dps
 static uint8_t accel_fs = RANGE_16G;
 static uint8_t gyro_fs = RANGE_2000;
 
-static const float accel_odr_hz[] = {1600.0f, 800.0f, 400.0f, 200.0f, 100.0f, 50.0f, 25.0f, 12.5f, 6.25f, 3.125f, 1.5625f, 0.78125f};
+static const float accel_odr_hz[]
+	= {1600.0f, 800.0f, 400.0f, 200.0f, 100.0f, 50.0f, 25.0f, 12.5f, 6.25f, 3.125f, 1.5625f, 0.78125f};
 static const uint8_t accel_odrs[]
 	= {ODR_1k6, ODR_800, ODR_400, ODR_200, ODR_100, ODR_50, ODR_25, ODR_12p5, ODR_6p25, ODR_3p1, ODR_1p5, ODR_0p78};
 static const float gyro_odr_hz[] = {3200.0f, 1600.0f, 800.0f, 400.0f, 200.0f, 100.0f, 50.0f, 25.0f};
@@ -573,5 +574,4 @@ const sensor_imu_t sensor_imu_bmi270
 	   *bmi_setup_DRDY,
 	   *bmi_setup_WOM,
 
-	   *imu_none_ext_setup,
-	   *imu_none_ext_passthrough};
+	   *imu_none_ext_setup};

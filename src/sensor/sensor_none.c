@@ -26,7 +26,13 @@
 
 LOG_MODULE_REGISTER(sensor_none, LOG_LEVEL_INF);
 
-int imu_none_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
+int imu_none_init(
+	float clock_rate,
+	float accel_time,
+	float gyro_time,
+	float *accel_actual_time,
+	float *gyro_actual_time
+)
 {
 	LOG_DBG("imu_none_init, sensor has no IMU or IMU cannot be initialized");
 	return -1;
@@ -92,15 +98,10 @@ uint8_t imu_none_setup_WOM(void)
 	return 0;
 }
 
-int imu_none_ext_setup(void)
+int imu_none_ext_setup(enum sensor_ext_mode mode)
 {
+	ARG_UNUSED(mode);
 	LOG_DBG("imu_none_ext_setup, sensor has no IMU or IMU has no ext support");
-	return -1;
-}
-
-int imu_none_ext_passthrough(bool passthrough)
-{
-	LOG_DBG("imu_none_ext_passthrough, sensor has no IMU or IMU has no ext passthrough");
 	return -1;
 }
 
@@ -121,7 +122,6 @@ const sensor_imu_t sensor_imu_none = {
 	*imu_none_setup_WOM,
 
 	*imu_none_ext_setup,
-	*imu_none_ext_passthrough
 };
 
 int mag_none_init(float time, float *actual_time)
@@ -166,16 +166,16 @@ void mag_none_mag_process(uint8_t *raw_m, float m[3])
 	return;
 }
 
-const sensor_mag_t sensor_mag_none = {
-	*mag_none_init,
-	*mag_none_shutdown,
+const sensor_mag_t sensor_mag_none
+	= {*mag_none_init,
+	   *mag_none_shutdown,
 
-	*mag_none_update_odr,
+	   *mag_none_update_odr,
 
-	*mag_none_mag_oneshot,
-	*mag_none_mag_read,
-	*mag_none_temp_read,
+	   *mag_none_mag_oneshot,
+	   *mag_none_mag_read,
+	   *mag_none_temp_read,
 
-	*mag_none_mag_process,
-	UINT8_MAX, UINT8_MAX
-};
+	   *mag_none_mag_process,
+	   UINT8_MAX,
+	   UINT8_MAX};

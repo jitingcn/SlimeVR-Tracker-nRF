@@ -216,7 +216,7 @@ static uint8_t sensor_fifo_raw_buffer[SENSOR_FIFO_RAW_BUFFER_SIZE]
 #ifdef CONFIG_DCACHE_LINE_SIZE
 	__aligned(CONFIG_DCACHE_LINE_SIZE)
 #endif
-	;
+		;
 
 /*
  * Runtime INT_merge factor. Defaults to CONFIG_SENSOR_GYRO_OVERSAMPLING.
@@ -242,7 +242,7 @@ static uint8_t gyro_oversample_n = CONFIG_SENSOR_GYRO_OVERSAMPLING;
 #define GYRO_DQ_HALF_TAYLOR 1e-4f /* |θ/2| below this → sinc/cos Taylor */
 static float gyro_dq_acc[4];
 static int gyro_oversample_count = 0;
-static float gyro_effective_time; /* N * gyro_actual_time */
+static float gyro_effective_time;    /* N * gyro_actual_time */
 static float gyro_merge_bias_dps[3]; /* frozen fusion bias for one window */
 #endif
 
@@ -577,8 +577,7 @@ static bool sensor_update_resting_state(
 	}
 
 	float gyro_speed = sqrtf(
-		rest_gyro_speed_ema[0] * rest_gyro_speed_ema[0]
-		+ rest_gyro_speed_ema[1] * rest_gyro_speed_ema[1]
+		rest_gyro_speed_ema[0] * rest_gyro_speed_ema[0] + rest_gyro_speed_ema[1] * rest_gyro_speed_ema[1]
 		+ rest_gyro_speed_ema[2] * rest_gyro_speed_ema[2]
 	);
 	float zero[3] = {0.0f, 0.0f, 0.0f};
@@ -637,7 +636,17 @@ static void sensor_update_range_stats_accel(float a[3]);
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 2048);
 
-K_THREAD_DEFINE(sensor_init_thread_id, 384, sensor_request_scan, true, NULL, NULL, SENSOR_REQUEST_SCAN_THREAD_PRIORITY, 0, 0);
+K_THREAD_DEFINE(
+	sensor_init_thread_id,
+	384,
+	sensor_request_scan,
+	true,
+	NULL,
+	NULL,
+	SENSOR_REQUEST_SCAN_THREAD_PRIORITY,
+	0,
+	0
+);
 
 /* init thread handles starting scanner on the main thread, and then switches to the loop, before returning
    afterwards, other calls to start scanner will stop the loop on their thread and start the scanner on its own; it will
@@ -854,7 +863,7 @@ int sensor_scan(void)
 	if (mag_id < 0 && !(sensor_imu_dev_reg & 0x80)) // I2C IMU
 	{
 		// IMU may support passthrough mode if the magnetometer is connected through the IMU
-		int err = sensor_imu->ext_passthrough(true); // no need to disable, the imu will be reset later
+		int err = sensor_imu->ext_setup(SENSOR_EXT_MODE_I2C_PASSTHROUGH); // reset later ends scan mode
 		if (!err) {
 			LOG_INF("Scanning bus for magnetometer through IMU passthrough");
 			if (sensor_mag_dev.addr > 0x80) // marked as external
@@ -881,7 +890,7 @@ int sensor_scan(void)
 	if (mag_id < 0 && (sensor_imu_dev_reg & 0x80)) // SPI IMU
 	{
 		// IMU may support I2CM if the magnetometer is connected through the IMU
-		int err = sensor_imu->ext_setup();
+		int err = sensor_imu->ext_setup(SENSOR_EXT_MODE_I2CM_PROXY);
 		if (!err) {
 			LOG_INF("Scanning bus for magnetometer through IMU I2CM");
 			if (sensor_mag_dev.addr > 0x80) // marked as external
@@ -1231,13 +1240,16 @@ static int sensor_mag_runtime_enable(void)
 	float mag_initial_time = 1.0f / CONFIG_SENSOR_MAG_ODR;
 
 	if (sensor_mag_uses_i2c_passthrough()) {
-		sensor_imu->ext_passthrough(true);
+		int mode_err = sensor_imu->ext_setup(SENSOR_EXT_MODE_I2C_PASSTHROUGH);
+		if (mode_err) {
+			return mode_err;
+		}
 	}
 	int err = sensor_mag->init(mag_initial_time, &mag_actual_time);
 	if (err < 0) {
 		LOG_ERR("Magnetometer init failed: %d", err);
 		if (sensor_mag_uses_i2c_passthrough()) {
-			sensor_imu->ext_passthrough(false);
+			sensor_imu->ext_setup(SENSOR_EXT_MODE_OFF);
 		}
 		return err;
 	}
@@ -1253,11 +1265,11 @@ static void sensor_mag_runtime_disable(void)
 		return;
 	}
 	if (sensor_mag_uses_i2c_passthrough()) {
-		sensor_imu->ext_passthrough(true);
+		sensor_imu->ext_setup(SENSOR_EXT_MODE_I2C_PASSTHROUGH);
 	}
 	sensor_mag->shutdown();
 	if (sensor_mag_uses_i2c_passthrough()) {
-		sensor_imu->ext_passthrough(false);
+		sensor_imu->ext_setup(SENSOR_EXT_MODE_OFF);
 	}
 	mag_calibrated = false;
 }
@@ -1581,8 +1593,8 @@ int sensor_init(void)
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
 	if (mag_available && mag_enabled) // shutdown magnetometer first only when enabled
 	{
-		if ((sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80)) { // I2C IMU with passthrough mag
-			sensor_imu->ext_passthrough(true);
+		if (sensor_mag_uses_i2c_passthrough()) {
+			sensor_imu->ext_setup(SENSOR_EXT_MODE_I2C_PASSTHROUGH);
 		}
 		sensor_mag->shutdown(); // TODO: is this needed?
 	}
@@ -1620,8 +1632,7 @@ int sensor_init(void)
 	float gyro_request_hz = (float)CONFIG_SENSOR_GYRO_ODR;
 	if (sensor_interface_imu_is_i2c() && CONFIG_SENSOR_GYRO_OVERSAMPLING > 1) {
 		gyro_oversample_n = 1;
-		gyro_request_hz
-			= (float)CONFIG_SENSOR_GYRO_ODR / (float)CONFIG_SENSOR_GYRO_OVERSAMPLING;
+		gyro_request_hz = (float)CONFIG_SENSOR_GYRO_ODR / (float)CONFIG_SENSOR_GYRO_OVERSAMPLING;
 		LOG_INF(
 			"I2C IMU: gyro request %.0fHz (fusion target), oversampling off (config %dx @ %dHz)",
 			(double)gyro_request_hz,
@@ -1643,10 +1654,9 @@ int sensor_init(void)
 	}
 	// 55-66ms to wait, get chip ids, and setup icm (50ms spent waiting for accel and gyro to start)
 	if (mag_available && mag_enabled) {
-		// Only enable passthrough for I2C IMU with external magnetometer
-		// SPI IMU with external magnetometer uses I2CM (EXT interface), not passthrough
-		if ((sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80)) {
-			sensor_imu->ext_passthrough(true); // reenable passthrough for I2C IMU
+		// Proxy mode is restored by the IMU init; passthrough must be explicit.
+		if (sensor_mag_uses_i2c_passthrough()) {
+			sensor_imu->ext_setup(SENSOR_EXT_MODE_I2C_PASSTHROUGH);
 		}
 		err = sensor_mag->init(mag_initial_time, &mag_actual_time); // configure with ~200Hz ODR
 #if SENSOR_MAG_SPI_EXISTS
@@ -1750,8 +1760,7 @@ int sensor_init(void)
 	{
 		uint32_t int0_abs = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, int0_gpios);
 
-		LOG_INF("FIFO THS/WM/WTM GPIO " NRF_ABS_PIN_LOG_FMT ", config: %u",
-			NRF_ABS_PIN_LOG_ARGS(int0_abs), pin_config);
+		LOG_INF("FIFO THS/WM/WTM GPIO " NRF_ABS_PIN_LOG_FMT ", config: %u", NRF_ABS_PIN_LOG_ARGS(int0_abs), pin_config);
 	}
 	uint32_t pull_flags = ((pin_config >> 4) == NRF_GPIO_PIN_PULLDOWN ? GPIO_PULL_DOWN : 0)
 						| ((pin_config >> 4) == NRF_GPIO_PIN_PULLUP ? GPIO_PULL_UP : 0);
@@ -2338,9 +2347,8 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 					dt_ms = 1;
 				}
 				float dt = (float)dt_ms;
-				unsigned int tau_ms = sensor_tcal_curve_apply_ready()
-									  ? SENSOR_TCAL_TEMP_CURVE_TAU_MS
-									  : SENSOR_TCAL_TEMP_FILTER_TAU_MS;
+				unsigned int tau_ms
+					= sensor_tcal_curve_apply_ready() ? SENSOR_TCAL_TEMP_CURVE_TAU_MS : SENSOR_TCAL_TEMP_FILTER_TAU_MS;
 				float alpha = dt / ((float)tau_ms + dt);
 				sensor_tcal_temp = sensor_tcal_temp + alpha * (temp - sensor_tcal_temp);
 			}
@@ -2477,8 +2485,7 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 		if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
 			if (frame->dc_active) {
 				/* Integrate every chip sample; queue only every n_raw samples. */
-				float g_rad[3]
-					= {raw_g[0] * DEG_TO_RAD, raw_g[1] * DEG_TO_RAD, raw_g[2] * DEG_TO_RAD};
+				float g_rad[3] = {raw_g[0] * DEG_TO_RAD, raw_g[1] * DEG_TO_RAD, raw_g[2] * DEG_TO_RAD};
 				float gyr_norm = sqrtf(g_rad[0] * g_rad[0] + g_rad[1] * g_rad[1] + g_rad[2] * g_rad[2]);
 				if (gyr_norm > 1e-6f) {
 					float angle = gyr_norm * gyro_actual_time;
@@ -2975,7 +2982,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 	if (send_quat_data || send_lin_accel_data || force_send_by_time) {
-		float dq_dot = fabsf(q[0]*last_q[0] + q[1]*last_q[1] + q[2]*last_q[2] + q[3]*last_q[3]);
+		float dq_dot = fabsf(q[0] * last_q[0] + q[1] * last_q[1] + q[2] * last_q[2] + q[3] * last_q[3]);
 		if (dq_dot > 1.0f) {
 			dq_dot = 1.0f;
 		}
@@ -3073,8 +3080,7 @@ static void sensor_loop_wait(int64_t time_begin)
 			if (loop_period_ema_ms > (float)sensor_update_time_ms * 1.5f) {
 				LOG_WRN("Last update steps took up to %lld ms", max_loop_time);
 			} else {
-				LOG_DBG("Slow loop step %lld ms ignored (EMA %.2f ms)",
-					max_loop_time, (double)loop_period_ema_ms);
+				LOG_DBG("Slow loop step %lld ms ignored (EMA %.2f ms)", max_loop_time, (double)loop_period_ema_ms);
 			}
 			max_loop_time = 0;
 		}
@@ -3085,7 +3091,8 @@ static void sensor_loop_wait(int64_t time_begin)
 		if (sensor_window_iters > 0) {
 			uint32_t win_s = STATUS_INTERVAL_MS / 1000;
 			LOG_DBG(
-				"sensor window: loop %.0f Hz, publish %.0f/s, fused %.1f deg/s, proc %.2f ms (acq %.2f vqf %.2f), wait %.2f ms, pkts/loop %.1f, ints/s %.0f, max acq %.2f (rs %.2f fifo %.2f) proc %.2f ms",
+				"sensor window: loop %.0f Hz, publish %.0f/s, fused %.1f deg/s, proc %.2f ms (acq %.2f vqf %.2f), wait "
+				"%.2f ms, pkts/loop %.1f, ints/s %.0f, max acq %.2f (rs %.2f fifo %.2f) proc %.2f ms",
 				(double)sensor_window_iters / (double)win_s,
 				(double)sensor_window_publishes / (double)win_s,
 				(double)(sensor_window_fused_angle_rad * 180.0f / 3.14159265f / (float)win_s),

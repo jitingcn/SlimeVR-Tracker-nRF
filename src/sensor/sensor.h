@@ -25,9 +25,9 @@
 
 #include "interface.h"
 
-const char* sensor_get_sensor_imu_name(void);
-const char* sensor_get_sensor_mag_name(void);
-const char* sensor_get_sensor_fusion_name(void);
+const char *sensor_get_sensor_imu_name(void);
+const char *sensor_get_sensor_mag_name(void);
+const char *sensor_get_sensor_fusion_name(void);
 bool sensor_is_initialized(void);
 
 int sensor_get_sensor_temperature(float *);
@@ -76,9 +76,9 @@ float sensor_get_current_imu_temperature(void);
 // Get actual sensor ODR (Output Data Rate) in Hz
 float sensor_get_accel_odr(void);
 float sensor_get_gyro_odr(void);
-float sensor_get_mag_odr(void); /* driver-reported Hz; 0.0f => n/a */
-float sensor_get_mag_feed_hz(void); /* measured fusion feed Hz; 0.0f => n/a */
-float sensor_get_fusion_rate(void); /* effective gyro feed into fusion */
+float sensor_get_mag_odr(void);        /* driver-reported Hz; 0.0f => n/a */
+float sensor_get_mag_feed_hz(void);    /* measured fusion feed Hz; 0.0f => n/a */
+float sensor_get_fusion_rate(void);    /* effective gyro feed into fusion */
 float sensor_get_loop_period_ms(void); /* EMA of loop period; 0.0f => n/a */
 
 // Debug mode functions
@@ -89,16 +89,16 @@ bool sensor_debug_is_active(void);
 #if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking - records min/max values during runtime (not persisted)
 typedef struct {
-	float gyro_max[3];   // Maximum gyro values per axis (deg/s)
-	float gyro_min[3];   // Minimum gyro values per axis (deg/s)
-	float accel_max[3];  // Maximum accel values per axis (g)
-	float accel_min[3];  // Minimum accel values per axis (g)
-	uint64_t sample_count;  // Total samples processed
-	bool initialized;    // Whether tracking has been initialized
+	float gyro_max[3];     // Maximum gyro values per axis (deg/s)
+	float gyro_min[3];     // Minimum gyro values per axis (deg/s)
+	float accel_max[3];    // Maximum accel values per axis (g)
+	float accel_min[3];    // Minimum accel values per axis (g)
+	uint64_t sample_count; // Total samples processed
+	bool initialized;      // Whether tracking has been initialized
 } sensor_range_stats_t;
 
 // Get the current range statistics
-const sensor_range_stats_t* sensor_get_range_stats(void);
+const sensor_range_stats_t *sensor_get_range_stats(void);
 // Reset range statistics
 void sensor_reset_range_stats(void);
 // Print range statistics to console
@@ -106,23 +106,23 @@ void sensor_print_range_stats(void);
 #endif // CONFIG_SENSOR_RANGE_STATS
 
 typedef struct sensor_fusion {
-	void (*init)(float, float, float);  // gyro_time, accel_time, mag_time
-	void (*load)(const void*);
-	void (*save)(void*);
+	void (*init)(float, float, float); // gyro_time, accel_time, mag_time
+	void (*load)(const void *);
+	void (*save)(void *);
 
-	void (*update_gyro)(float*, float);  // deg/s
-	void (*update_accel)(float*, float);  // g
-	void (*update_mag)(float*, float);  // any unit (usually gauss)
-	void (*update)(float*, float*, float*, float);
+	void (*update_gyro)(float *, float);  // deg/s
+	void (*update_accel)(float *, float); // g
+	void (*update_mag)(float *, float);   // any unit (usually gauss)
+	void (*update)(float *, float *, float *, float);
 
-	void (*get_gyro_bias)(float*);
-	void (*set_gyro_bias)(float*);
+	void (*get_gyro_bias)(float *);
+	void (*set_gyro_bias)(float *);
 
-	void (*update_gyro_sanity)(float*, float*);
+	void (*update_gyro_sanity)(float *, float *);
 	int (*get_gyro_sanity)(void);
 
-	void (*get_lin_a)(float*);
-	void (*get_quat)(float*);
+	void (*get_lin_a)(float *);
+	void (*get_quat)(float *);
 
 	/* Rest / mag-quality policy (both VQF and EqF implement these). */
 	bool (*get_rest_detected)(void);
@@ -133,39 +133,54 @@ typedef struct sensor_fusion {
 	void (*get_mag_ref)(float *norm, float *dip);
 } sensor_fusion_t;
 
+/* How the MCU reaches an auxiliary sensor through the selected IMU.
+ * External-sensor FIFO delivery is a separate, currently unsupported contract. */
+enum sensor_ext_mode {
+	SENSOR_EXT_MODE_OFF,
+	SENSOR_EXT_MODE_I2C_PASSTHROUGH,
+	SENSOR_EXT_MODE_I2CM_PROXY,
+};
+
 typedef struct sensor_imu {
-	int (*init)(float, float, float, float*, float*); // first float is clock_rate, nonzero means use CLKIN, return update time, return 0 if success, -1 if general error
+	int (*init)(float, float, float, float *, float *); // first float is clock_rate, nonzero means use CLKIN, return
+														// update time, return 0 if success, -1 if general error
 	void (*shutdown)(void);
 
-	void (*update_fs)(float, float, float*, float*); // return actual range
-	int (*update_odr)(float, float, float*, float*); // return actual update time, return 0 if success, 1 if odr is same, -1 if general error
+	void (*update_fs)(float, float, float *, float *); // return actual range
+	int (*update_odr)(float, float, float *, float *); // return actual update time, return 0 if success, 1 if odr is
+													   // same, -1 if general error
 
-	uint16_t (*fifo_read)(uint8_t*, uint16_t);
-	int (*fifo_process)(uint16_t, uint8_t*, float[3], float[3]); // g, deg/s
-	void (*accel_read)(float[3]); // g
-	void (*gyro_read)(float[3]); // deg/s
-	float (*temp_read)(void); // deg C
+	uint16_t (*fifo_read)(uint8_t *, uint16_t);
+	int (*fifo_process)(uint16_t, uint8_t *, float[3], float[3]); // g, deg/s
+	void (*accel_read)(float[3]);                                 // g
+	void (*gyro_read)(float[3]);                                  // deg/s
+	float (*temp_read)(void);                                     // deg C
 
 	uint8_t (*setup_DRDY)(uint16_t);
 	uint8_t (*setup_WOM)(void);
 
-	int (*ext_setup)(void); // register write/writeread with interface, return 0 if success, -1 if error or not available
-	int (*ext_passthrough)(bool); // enable/disable passthrough mode, return 0 if success, -1 if error or not available
+	int (*ext_setup)(enum sensor_ext_mode mode); // select auxiliary route; 0 on success, negative on error/unsupported
 } sensor_imu_t;
 
 typedef struct sensor_mag {
-	int (*init)(float, float*); // return update time, return 0 if success, 1 if general error
+	int (*init)(float, float *); // return update time, return 0 if success, 1 if general error
 	void (*shutdown)(void);
 
-	int (*update_odr)(float, float*); // return actual update time, return 0 if success, 1 if odr is same, -1 if general error
+	int (*update_odr)(
+		float,
+		float *
+	); // return actual update time, return 0 if success, 1 if odr is same, -1 if general error
 
-	void (*mag_oneshot)(void); // trigger oneshot if exists
-	bool (*mag_read)(float[3]); // any unit (usually gauss); returns true if new data was available
+	void (*mag_oneshot)(void);    // trigger oneshot if exists
+	bool (*mag_read)(float[3]);   // any unit (usually gauss); returns true if new data was available
 	float (*temp_read)(float[3]); // deg C
 
-	void (*mag_process)(uint8_t*, float[3]); // use if magnetometer is present as an auxiliary sensor, from data read by IMU
+	void (*mag_process)(
+		uint8_t *,
+		float[3]
+	);                     // use if magnetometer is present as an auxiliary sensor, from data read by IMU
 	uint8_t ext_min_burst; // minimum external-interface read transaction length
-	uint8_t ext_burst; // preferred full burst length
+	uint8_t ext_burst;     // preferred full burst length
 } sensor_mag_t;
 
 #endif
