@@ -675,12 +675,20 @@ bool sensor_is_initialized(void)
 	return sensor_sensor_init;
 }
 
+static const char *sensor_mag_display_name(int mag_id, uint16_t addr)
+{
+	if (mag_id == MAG_QMC6309 && (addr & 0x7f) == 0x0c) {
+		return "QMC6309H";
+	}
+	return dev_mag_names[mag_id];
+}
+
 const char *sensor_get_sensor_mag_name(void)
 {
 	if (sensor_mag_id < 0) {
 		return "None";
 	}
-	return dev_mag_names[sensor_mag_id];
+	return sensor_mag_display_name(sensor_mag_id, sensor_mag_dev.addr);
 }
 
 const char *sensor_get_sensor_fusion_name(void)
@@ -930,7 +938,7 @@ int sensor_scan(void)
 	} else if (mag_id < 0) {
 		LOG_WRN("No magnetometer detected");
 	} else {
-		LOG_INF("Found %s", dev_mag_names[mag_id]);
+		LOG_INF("Found %s", sensor_mag_display_name(mag_id, sensor_mag_dev.addr));
 	}
 	if (mag_id >= 0) // if there is no magnetometer we do not care as much
 	{
@@ -941,6 +949,11 @@ int sensor_scan(void)
 			LOG_ERR("Magnetometer not supported");
 		} else {
 			sensor_mag = sensor_mags[mag_id];
+#if IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309)
+			if (mag_id == MAG_QMC6309) {
+				qmc_set_variant((sensor_mag_dev.addr & 0x7f) == 0x0c);
+			}
+#endif
 			mag_available = true;
 		}
 	} else {

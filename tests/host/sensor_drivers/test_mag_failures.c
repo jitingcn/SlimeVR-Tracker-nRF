@@ -724,16 +724,22 @@ static int test_ak09940_rejects_invalid_frames(void)
 	return 0;
 }
 
-static int test_qmc_direct_status_gate_and_low_odr(void)
+static int test_qmc_direct_status_gate_and_variant_odr(void)
 {
 	float actual = -1.0f;
 	float m[3] = {1.0f, 2.0f, 3.0f};
 
 	reset_driver(&odr_cases[10]);
+	qmc_set_variant(false);
 	CHECK(qmc_update_odr(0.25f, &actual) == 0);
 	CHECK(float_equal(actual, 0.1f));
 	CHECK(bus.ops[0].type == FAKE_REG_WRITE && bus.ops[0].reg == 0x0B && bus.ops[0].value == 0x18);
 
+	fake_bus_clear_transactions();
+	qmc_set_variant(true);
+	CHECK(qmc_update_odr(0.25f, &actual) == 0);
+	CHECK(float_equal(actual, 1.0f / 50));
+	CHECK(bus.ops[0].type == FAKE_REG_WRITE && bus.ops[0].reg == 0x0B && bus.ops[0].value == 0x28);
 	fake_bus_clear_transactions();
 	CHECK(!qmc_mag_read(m));
 	CHECK(bus.op_count == 1 && bus.ops[0].type == FAKE_REG_READ);
@@ -912,7 +918,7 @@ int main(void)
 		{"MMC oneshot timeouts", test_mmc_timeouts_stop_before_data},
 		{"MMC temperature read failures", test_mmc_temperature_failures_do_not_publish_bias},
 		{"QMC oneshot timeouts", test_qmc_timeouts_stop_before_data},
-		{"QMC direct status and low ODR", test_qmc_direct_status_gate_and_low_odr},
+		{"QMC direct status and variant ODR", test_qmc_direct_status_gate_and_variant_odr},
 		{"QMC trigger and burst failures", test_qmc_trigger_and_burst_failures_are_not_published},
 		{"QMC oneshot overflow", test_qmc_oneshot_overflow_is_not_published},
 		{"QMC unaligned decode", test_qmc_raw_decode_allows_unaligned_input},

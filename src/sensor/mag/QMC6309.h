@@ -3,6 +3,7 @@
 
 #include "sensor/sensor.h"
 
+void qmc_set_variant(bool is_qmc6309h);
 int qmc_init(float time, float *actual_time);
 void qmc_shutdown(void);
 

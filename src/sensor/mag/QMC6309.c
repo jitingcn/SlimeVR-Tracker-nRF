@@ -6,7 +6,8 @@
 #include "QMC6309.h"
 #include "sensor/sensor_none.h"
 
-// https://www.lcsc.com/datasheet/lcsc_datasheet_2410121623_QST-QMC6309_C5439871.pdf
+// QMC6309 Rev C: https://www.qstcorp.com/upload/pdf/202512/587AA782C1A94BF3B11CC72DB8A11E67.pdf
+// QMC6309H Rev E: https://www.qstcorp.com/upload/pdf/202601/CF382A94E1424763B3DE87DC967757FC.pdf
 
 #define QMC6309_OUTX_L_REG 0x01
 
@@ -49,9 +50,8 @@
 #define RNG_16G 0b01
 #define RNG_8G 0b10
 #define RNG_MASK(rng) ((rng) << 2)
-
-#define ODR_1Hz  0b000
-#define ODR_10Hz  0b001
+#define ODR_1Hz  0b000 // QMC6309 only; unsupported on QMC6309H
+#define ODR_10Hz  0b001 // QMC6309 only; unsupported on QMC6309H
 #define ODR_50Hz  0b010
 #define ODR_100Hz 0b011
 #define ODR_200Hz 0b100
@@ -67,6 +67,7 @@ static bool lastOvfl = false;
 static int64_t oneshot_trigger_time = 0;
 static bool oneshot_pending;
 static bool oneshot_failed;
+static bool qmc6309h;
 // In Normal Mode, data registers are latched and hold stable values between
 // measurement cycles. Byte-level comparison detects when sensor hub (or direct
 // I2C at loop rate > mag ODR) reads the same sample twice, without requiring
@@ -77,6 +78,12 @@ static int64_t last_mag_time_ms;
 static int32_t mag_period_ms = 20; // default 50Hz
 
 LOG_MODULE_REGISTER(QMC6309, LOG_LEVEL_INF);
+
+void qmc_set_variant(bool is_qmc6309h)
+{
+	qmc6309h = is_qmc6309h;
+	last_state = 0xff;
+}
 
 int qmc_init(float time, float *actual_time)
 {
@@ -136,8 +143,9 @@ int qmc_update_odr(float time, float *actual_time)
 		MODR = ODR_100Hz;
 		time = 1.f / 100;
 	}
-	else if (ODR > 25)
+	else if (qmc6309h || ODR > 25)
 	{
+		/* QMC6309H codes 000/001 are unsupported; QMC6309 uses them for 1/10 Hz. */
 		MODR = ODR_50Hz;
 		time = 1.f / 50;
 	}
