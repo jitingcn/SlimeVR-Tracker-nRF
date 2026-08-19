@@ -132,7 +132,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.venv
-          key: venv-${{ env.ZEPHYR_SDK_VERSION }}
+          key: venv-bootstrap-${{ env.ZEPHYR_SDK_VERSION }}
 
       - name: 🐍 Setup Python venv + West
         id: setup-venv
@@ -158,14 +158,14 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.venv
-          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
+          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements*.txt', 'zephyr-workspace/nrf/scripts/requirements-build.txt', 'zephyr-workspace/bootloader/mcuboot/scripts/requirements.txt') }}
 
-      - name: 🐍 Install Zephyr Python Requirements
+      - name: 🐍 Install NCS, Zephyr, and MCUboot Python Requirements
         id: install-pip
         if: steps.cache-pip.outputs.cache-hit != 'true'
         run: |
           cd zephyr-workspace
-          ~/.venv/bin/pip install -r zephyr/scripts/requirements.txt
+          ~/.venv/bin/pip install -r zephyr/scripts/requirements.txt -r nrf/scripts/requirements-build.txt -r bootloader/mcuboot/scripts/requirements.txt
 
       - name: 📦 Cache Repository
         id: cache-repository
@@ -191,7 +191,6 @@ jobs:
 
   build:
     needs: setup
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -270,10 +269,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ~/.venv
-          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements.txt') }}
-          restore-keys: |
-            venv-pip-
-            venv-
+          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements*.txt', 'zephyr-workspace/nrf/scripts/requirements-build.txt', 'zephyr-workspace/bootloader/mcuboot/scripts/requirements.txt') }}
           fail-on-cache-miss: true
 
       - name: ♻️ Register Zephyr Workspace
