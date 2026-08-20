@@ -32,26 +32,18 @@ LOG_MODULE_REGISTER(cal_sample, LOG_LEVEL_INF);
 
 float aBuf[3] = {0};
 static uint64_t accel_sample = 0;
-static uint64_t accel_wait_sample = 0;
+static K_SEM_DEFINE(accel_sem, 0, 64);
 
 void sensor_sample_accel(const float a[3])
 {
 	memcpy(aBuf, a, sizeof(aBuf));
 	accel_sample++;
-	if (accel_wait_sample) {
-		k_usleep(1); // yield to waiting thread
-	}
+	k_sem_give(&accel_sem);
 }
 
 int sensor_wait_accel(float a[3], k_timeout_t timeout)
 {
-	int64_t sample_end_time = MAX(k_uptime_ticks() + timeout.ticks, timeout.ticks);
-	accel_wait_sample = accel_sample;
-	while (accel_sample <= accel_wait_sample && k_uptime_ticks() < sample_end_time) {
-		k_usleep(1);
-	}
-	accel_wait_sample = 0;
-	if (k_uptime_ticks() >= sample_end_time) {
+	if (k_sem_take(&accel_sem, timeout) != 0) {
 		LOG_ERR("Accelerometer wait timed out");
 		return -1;
 	}
@@ -69,27 +61,21 @@ bool sensor_peek_accel(float a[3])
 }
 
 static float gBuf[3] = {0};
-static uint64_t gyro_sample = 0;
-static uint64_t gyro_wait_sample = 0;
+/* Counting semaphore: one give per published sample. The limit covers the
+ * largest possible FIFO batch (buffer / packet size) so a burst while the
+ * consumer is busy is never dropped, and the consumer can never lose a
+ * sample to a poll/vs-yield race the way the old counter spin could. */
+static K_SEM_DEFINE(gyro_sem, 0, 64);
 
 void sensor_sample_gyro(const float g[3])
 {
 	memcpy(gBuf, g, sizeof(gBuf));
-	gyro_sample++;
-	if (gyro_wait_sample) {
-		k_usleep(1); // yield to waiting thread
-	}
+	k_sem_give(&gyro_sem);
 }
 
 int sensor_wait_gyro(float g[3], k_timeout_t timeout)
 {
-	int64_t sample_end_time = MAX(k_uptime_ticks() + timeout.ticks, timeout.ticks);
-	gyro_wait_sample = gyro_sample;
-	while (gyro_sample <= gyro_wait_sample && k_uptime_ticks() < sample_end_time) {
-		k_usleep(1);
-	}
-	gyro_wait_sample = 0;
-	if (k_uptime_ticks() >= sample_end_time) {
+	if (k_sem_take(&gyro_sem, timeout) != 0) {
 		LOG_ERR("Gyroscope wait timed out");
 		return -1;
 	}
@@ -98,27 +84,17 @@ int sensor_wait_gyro(float g[3], k_timeout_t timeout)
 }
 
 static float mBuf[3] = {0};
-static uint64_t mag_sample = 0;
-static uint64_t mag_wait_sample = 0;
+static K_SEM_DEFINE(mag_sem, 0, 64);
 
 void sensor_sample_mag(const float m[3])
 {
 	memcpy(mBuf, m, sizeof(mBuf));
-	mag_sample++;
-	if (mag_wait_sample) {
-		k_usleep(1); // yield to waiting thread
-	}
+	k_sem_give(&mag_sem);
 }
 
 int sensor_wait_mag(float m[3], k_timeout_t timeout)
 {
-	int64_t sample_end_time = MAX(k_uptime_ticks() + timeout.ticks, timeout.ticks);
-	mag_wait_sample = mag_sample;
-	while (mag_sample <= mag_wait_sample && k_uptime_ticks() < sample_end_time) {
-		k_usleep(1);
-	}
-	mag_wait_sample = 0;
-	if (k_uptime_ticks() >= sample_end_time) {
+	if (k_sem_take(&mag_sem, timeout) != 0) {
 		LOG_ERR("Magnetometer wait timed out");
 		return -1;
 	}
