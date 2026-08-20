@@ -23,6 +23,8 @@
 #ifndef SLIMENRF_UTILS
 #define SLIMENRF_UTILS
 #include "stdbool.h"
+#include <stddef.h>
+#include <stdint.h>
 
 #ifndef M_PI
 #define M_PI 3.141592653589793238462643383279502884f
@@ -69,6 +71,10 @@ float v_avg(const float* a);
 float v_diff_mag(const float* a, const float* b);
 bool q_epsilon(const float* x, const float* y, float eps);
 bool v_epsilon(const float* a, const float* b, float eps);
+/* True if all n floats are finite. NaN/±inf = all-ones exponent bits. Unlike
+ * v_epsilon(), whose CMSIS arm_sqrt_f32() turns NaN into 0 (in-range), this
+ * rejects NaN and ±inf on every target. */
+bool v_finite(const float *v, size_t n);
 
 // TODO: does this need to be moved?
 void apply_BAinv(float xyz[3], float BAinv[4][3]);

@@ -29,6 +29,7 @@
 
 #include "cal_sample.h"
 #include "cal_sens.h"
+#include "util.h"
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 
@@ -241,7 +242,7 @@ void sensor_calibrate_sens(void)
 	);
 	LOG_INF("Sensitivity calibration: computed scale %.5f", (double)scale);
 
-	if (!isfinite(scale)) {
+	if (!v_finite(&scale, 1)) {
 		LOG_WRN("Sensitivity calibration: computed non-finite scale, not applied");
 		printk("Gyro sensitivity auto-calibration rejected: invalid scale. Nothing saved.\n");
 		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);

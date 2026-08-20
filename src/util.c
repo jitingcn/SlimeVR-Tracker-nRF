@@ -21,6 +21,8 @@
 	THE SOFTWARE.
 */
 #include <math.h>
+#include <stdint.h>
+#include <string.h>
 #include <zephyr/kernel.h>
 
 #if CONFIG_CMSIS_DSP
@@ -28,6 +30,18 @@
 #endif
 
 #include "util.h"
+
+bool v_finite(const float *v, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		uint32_t bits;
+		memcpy(&bits, &v[i], sizeof(bits));
+		if ((bits & 0x7F800000u) == 0x7F800000u) {
+			return false;
+		}
+	}
+	return true;
+}
 
 void q_normalize(const float *q, float *out)
 {

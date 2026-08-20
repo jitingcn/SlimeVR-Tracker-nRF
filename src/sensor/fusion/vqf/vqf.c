@@ -23,6 +23,7 @@
 #include "util.h"
 
 #include <math.h>
+#include <zephyr/sys/printk.h>
 #if defined(CONFIG_VQF_BENCH)
 #include <zephyr/kernel.h>
 #include "thread_priority.h"
@@ -93,6 +94,11 @@ static vqf_coeffs_t coeffs;
 #define VQF_MEM_SIZE (sizeof(vqf_state_t) + sizeof(vqf_coeffs_t))
 
 static float last_a[3] = {0};
+/* Sample periods from the last vqf_init(); used to re-init cleanly when a
+ * corrupt (non-finite) retained state is rejected at load. */
+static float vqf_init_gyr_time;
+static float vqf_init_acc_time;
+static float vqf_init_mag_time;
 #if defined(CONFIG_VQF_BENCH)
 static volatile float vqf_bench_sink;
 static vqf_params_t vqf_bench_params;
@@ -190,6 +196,9 @@ static void set_params()
 void vqf_init(float g_time, float a_time, float m_time)
 {
 	set_params();
+	vqf_init_gyr_time = g_time;
+	vqf_init_acc_time = a_time;
+	vqf_init_mag_time = m_time;
 	initVqf(&params, &state, &coeffs, g_time, a_time, m_time);
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	motion_intensity = 0.0f;
@@ -207,6 +216,60 @@ void vqf_init(float g_time, float a_time, float m_time)
 	rest_event_total = 0;
 }
 
+/* Finite test by exponent bits (all ones = NaN/±inf). The ARM isfinite()
+ * builtin compiles to vcmp+bhi, which lets NaN through (an unordered
+ * compare never sets the branch condition) — test the bit pattern. */
+static ALWAYS_INLINE bool vqf_float_finite(float x)
+{
+	uint32_t bits;
+	memcpy(&bits, &x, sizeof(bits));
+	return (bits & 0x7F800000u) != 0x7F800000u;
+}
+
+static ALWAYS_INLINE bool vqf_vec3_finite(const float v[3])
+{
+	return vqf_float_finite(v[0]) && vqf_float_finite(v[1]) && vqf_float_finite(v[2]);
+}
+
+static bool vqf_loaded_state_valid(void)
+{
+	/* Reject NaN/inf retained state: it propagates permanently (clip()
+	 * and the Kalman update carry NaN). LP filter *states* are excluded:
+	 * they legitimately hold NaN markers during initialization. */
+	for (size_t i = 0; i < 3; i++) {
+		if (!vqf_float_finite(state.bias[i]) || !vqf_float_finite(state.restLastGyrLp[i])
+		    || !vqf_float_finite(state.restLastAccLp[i]) || !vqf_float_finite(state.lastAccLp[i])) {
+			return false;
+		}
+	}
+	for (size_t i = 0; i < 4; i++) {
+		if (!vqf_float_finite(state.gyrQuat[i]) || !vqf_float_finite(state.accQuat[i])) {
+			return false;
+		}
+	}
+	for (size_t i = 0; i < 9; i++) {
+		if (!vqf_float_finite(state.biasP[i])) {
+			return false;
+		}
+	}
+	return vqf_float_finite(coeffs.gyrTs) && coeffs.gyrTs > 0.0f
+	       && vqf_float_finite(coeffs.accTs) && coeffs.accTs > 0.0f
+	       && vqf_float_finite(coeffs.magTs);
+}
+
+/* Prefer the period recorded by vqf_init(); fall back to the loaded coeffs,
+ * then a fixed 100 Hz default so a corrupt block can't give zero-time filters. */
+static float vqf_safe_init_time(float saved_time, float loaded_time)
+{
+	if (vqf_float_finite(saved_time) && saved_time > 0.0f) {
+		return saved_time;
+	}
+	if (vqf_float_finite(loaded_time) && loaded_time > 0.0f) {
+		return loaded_time;
+	}
+	return 0.01f;
+}
+
 void vqf_load(const void *data)
 {
 	BUILD_ASSERT(
@@ -216,6 +279,15 @@ void vqf_load(const void *data)
 	set_params();
 	memcpy(&state, data, sizeof(state));
 	memcpy(&coeffs, (uint8_t *)data + sizeof(state), sizeof(coeffs));
+	if (!vqf_loaded_state_valid()) {
+		printk("VQF: rejecting non-finite retained state, reinitializing\n");
+		vqf_init(
+			vqf_safe_init_time(vqf_init_gyr_time, coeffs.gyrTs),
+			vqf_safe_init_time(vqf_init_acc_time, coeffs.accTs),
+			vqf_safe_init_time(vqf_init_mag_time, coeffs.magTs)
+		);
+		return;
+	}
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	motion_intensity = 0.0f;
 	current_tau_level = -1.0f;
@@ -245,6 +317,9 @@ void vqf_save(void *data)
 void vqf_update_gyro(float *g, float time)
 {
 	ARG_UNUSED(time);
+	if (!vqf_vec3_finite(g)) {
+		return;
+	}
 	float g_rad[3] = {0};
 	// g is in deg/s, convert to rad/s
 	for (int i = 0; i < 3; i++) {
@@ -364,6 +439,9 @@ static void vqf_track_rest_diag(void)
 void vqf_update_accel(float *a, float time)
 {
 	ARG_UNUSED(time);
+	if (!vqf_vec3_finite(a)) {
+		return;
+	}
 	float a_m_s2[3] = {0};
 	// a is in g, convert to m/s^2
 	for (int i = 0; i < 3; i++) {
@@ -382,6 +460,9 @@ void vqf_update_accel(float *a, float time)
 
 void vqf_update_mag(float *m, float time)
 {
+	if (!vqf_vec3_finite(m)) {
+		return;
+	}
 	// Use the caller-supplied time step when valid so that VQF time accumulators
 	// (magCandidateT, magRejectT, etc.) and gain k run at the correct real-time
 	// rate even when the sensor loop runs faster or slower than the mag ODR.

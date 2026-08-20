@@ -207,6 +207,40 @@ uint8_t *sensor_calibration_get_sensor_data()
 
 void sensor_calibration_read(void)
 {
+	/* Heal NaN/±inf persisted by older builds: validation used v_epsilon(),
+	 * whose CMSIS path treated NaN as in-range, so invalid calibrations could
+	 * be stored with a valid CRC. Clean retained first so the copies below
+	 * and the online-mag install stay finite. */
+	bool healed = false;
+	if (!v_finite(retained->accelBias, 3) || !v_finite(retained->gyroBias, 3)
+	    || !v_finite(retained->magBias, 3)) {
+		memset(retained->accelBias, 0, sizeof(retained->accelBias));
+		memset(retained->gyroBias, 0, sizeof(retained->gyroBias));
+		memset(retained->magBias, 0, sizeof(retained->magBias));
+		healed = true;
+	}
+	if (!v_finite(&retained->accBAinv[0][0], 12)) {
+		sensor_calibration_clear_6_side(retained->accBAinv, false);
+		healed = true;
+	}
+	if (!v_finite(&retained->magBAinv[0][0], 12)) {
+		float identity[4][3] = {{0}};
+		for (int i = 0; i < 3; i++) {
+			identity[i + 1][i] = 1.0f;
+		}
+		memcpy(retained->magBAinv, identity, sizeof(identity));
+		healed = true;
+	}
+	if (!v_finite(retained->gyroSensScale, 3)) {
+		retained->gyroSensScale[0] = 1.0f;
+		retained->gyroSensScale[1] = 1.0f;
+		retained->gyroSensScale[2] = 1.0f;
+		healed = true;
+	}
+	if (healed) {
+		LOG_WRN("Calibration: cleared non-finite values persisted by an older build");
+		retained_update();
+	}
 	memcpy(sensor_data, retained->sensor_data, sizeof(sensor_data));
 	memcpy(accelBias, retained->accelBias, sizeof(accelBias));
 	memcpy(gyroBias, retained->gyroBias, sizeof(gyroBias));
@@ -249,7 +283,10 @@ int sensor_calibration_validate(float *a_bias, float *g_bias, bool write)
 		g_bias = gyroBias;
 	}
 	float zero[3] = {0};
-	if (!v_epsilon(a_bias, zero, 0.5) || !v_epsilon(g_bias, zero, 50.0)) // check accel is <0.5G and gyro <50dps
+	/* NaN/±inf first: v_epsilon()'s CMSIS path (arm_sqrt_f32 returns 0 for
+	 * NaN) treats NaN as in-range, so a NaN calibration would pass. */
+	if (!v_finite(a_bias, 3) || !v_finite(g_bias, 3)
+	    || !v_epsilon(a_bias, zero, 0.5) || !v_epsilon(g_bias, zero, 50.0)) // check accel is <0.5G and gyro <50dps
 	{
 		sensor_calibration_clear(a_bias, g_bias, write);
 		// Validation failure: do NOT call any fusion function
@@ -274,7 +311,8 @@ int sensor_calibration_validate_6_side(float a_inv[][3], bool write)
 	}
 	float magnitude = v_avg(diagonal);
 	float average[3] = {magnitude, magnitude, magnitude};
-	if (!v_epsilon(a_inv[0], zero, 0.5)
+	if (!v_finite(&a_inv[0][0], 12) // NaN/±inf must never pass (v_epsilon CMSIS leak)
+		|| !v_epsilon(a_inv[0], zero, 0.5)
 		|| !v_epsilon(diagonal, average, magnitude * 0.1f)) // check accel is <0.5G and diagonals are within 10%
 	{
 		sensor_calibration_clear_6_side(a_inv, write);

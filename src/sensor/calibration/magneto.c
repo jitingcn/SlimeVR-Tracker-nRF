@@ -153,6 +153,11 @@ bool magneto_centered_direction(const mag_center_estimator_t *estimator, const f
 
 bool mag_bainv_structurally_ok(const float m_inv[4][3], float bias_limit)
 {
+	/* NaN/±inf must never pass: the fit (magneto1_4) emits them under
+	 * degenerate data, and v_epsilon()'s CMSIS path treats NaN as in-range. */
+	if (!v_finite(&m_inv[0][0], 12)) {
+		return false;
+	}
 	float zero[3] = {0};
 	float diagonal[3];
 

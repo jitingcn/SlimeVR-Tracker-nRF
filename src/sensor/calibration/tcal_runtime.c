@@ -130,6 +130,28 @@ const char *sensor_tcal_get_apply_mode_name(void)
 
 void sensor_tcal_runtime_init_from_retained(void)
 {
+	/* Heal NaN/±inf points persisted by older builds: one bad point breaks
+	 * every MLS/LUT lookup (NaN weights never fall below the min-weight
+	 * gate), so clear it and recompute the point count. */
+	uint8_t healed_points = 0;
+	uint8_t valid_points = 0;
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (!v_finite(&retained->tempCalPoints[i].temp, 1)
+		    || !v_finite(retained->tempCalPoints[i].bias, 3)) {
+			LOG_WRN("T-Cal: clearing non-finite calibration point at slot %d", i);
+			memset(&retained->tempCalPoints[i], 0, sizeof(retained->tempCalPoints[i]));
+			healed_points++;
+		}
+		if (retained->tempCalPoints[i].temp != 0.0f) {
+			valid_points++;
+		}
+	}
+	if (healed_points > 0) {
+		retained->tempCalState.count = valid_points;
+		retained->tempCalState.valid = false;
+		retained_update();
+	}
+
 	tcal_compensation_enabled = retained->tcal_enabled;
 	sensor_tcal_refresh_apply_cache();
 	LOG_INF(
@@ -245,6 +267,12 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp)
 	}
 	if (isnan(measured_temp)) {
 		LOG_WRN("T-Cal: Invalid measured temperature, skipping save");
+		return;
+	}
+	/* One NaN point breaks every MLS/LUT lookup (NaN weights pass the
+	 * min-weight gate), so never commit a non-finite bias. */
+	if (!v_finite(bias, 3)) {
+		LOG_WRN("T-Cal: Non-finite bias, skipping save");
 		return;
 	}
 
@@ -423,6 +451,12 @@ void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
 
 	// Validate temperature
 	if (isnan(temp) || temp < (float)CONFIG_SENSOR_POLY_TEMP_MIN || temp > (float)CONFIG_SENSOR_POLY_TEMP_MAX) {
+		return;
+	}
+
+	// A NaN/±inf sample would poison gyro_sum and be committed as a NaN
+	// calibration point (tcal_save_point validates temperature only).
+	if (!v_finite(g, 3)) {
 		return;
 	}
 
@@ -863,7 +897,12 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 		float doffset = measured_bias[axis] - curve_bias[axis];
 
 		// Apply threshold: if D_offset is too small, it's likely noise - don't correct
-		if (fabsf(doffset) < BOOT_CAL_DOFFSET_MIN_THRESHOLD) {
+		// Reject NaN/±inf (all-ones exponent): NaN < threshold is false, so the
+		// plain comparison would persist NaN into retained memory.
+		uint32_t doffset_bits;
+		memcpy(&doffset_bits, &doffset, sizeof(doffset_bits));
+		if ((doffset_bits & 0x7F800000u) == 0x7F800000u
+		    || fabsf(doffset) < BOOT_CAL_DOFFSET_MIN_THRESHOLD) {
 			retained->bootCalState.doffset[axis] = 0.0f;
 		} else {
 			retained->bootCalState.doffset[axis] = doffset;
