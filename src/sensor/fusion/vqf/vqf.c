@@ -175,20 +175,20 @@ static void set_params()
 	params.biasVerticalForgettingFactor = 0.0001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.4f;
-	params.restMinT = 1.4f;
+	params.restFilterTau = 1.34f;
+	params.restMinT = 1.5f;
 	params.restThGyr = 0.8f;
 	params.restThAcc = 0.08f;
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 9.0f;
 	params.magCurrentTau = 0.50f;
-	params.magNormTh = 0.03f;
-	params.magDipTh = 3.0f;
-	params.magRefTau = 20.0f;
+	params.magNormTh = 0.10f;
+	params.magDipTh = 4.0f;
+	params.magRefTau = 10.0f;
 	params.magNewTime = 3.0f;
 	params.magNewFirstTime = 3.0f;
 	params.magNewMinGyr = 20.0f;
-	params.magMinUndisturbedTime = 1.0f;
+	params.magMinUndisturbedTime = 0.5f;
 	params.magMaxRejectionTime = 3200.0f;
 	params.magRejectionFactor = 1150.0f;
 }
