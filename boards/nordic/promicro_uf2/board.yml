@@ -17,5 +17,6 @@ board:
       - name: 'smspi'
       - name: 'chrysalis'
       - name: 'lwkj_icm45v1'
+      - name: '601n1'
       - name: 'default_spi'
       - name: 'default_i2c'
