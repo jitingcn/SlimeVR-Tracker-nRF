@@ -36,6 +36,9 @@
 #include "system/watchdog.h"
 #include "system/test_mode.h"
 #include "system/esb_ota.h"
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+#include "radio_capture.h"
+#endif
 
 #include <math.h>
 #include <stdbool.h>
@@ -67,10 +70,113 @@ static bool connection_sensor_get_precise_quat(void)
 }
 
 static uint8_t packet_sequence = 0;
-static int64_t last_ping_time = 0;
+static atomic_t next_ping_deadline_ms = ATOMIC_INIT(0);
+static atomic_t ping_server_phase_aligned = ATOMIC_INIT(0);
 static uint32_t ping_interval_ms = PING_INTERVAL_MS;
+static uint32_t ping_aligned_interval_ms;
 
 #define PING_RESYNC_MIN_INTERVAL_MS 500
+#define PING_QUEUE_RETRY_MS 50
+#define PING_SERVER_PHASE_TOLERANCE_MS 2
+
+static struct {
+	atomic_t due;
+	atomic_t attempts;
+	atomic_t queue_ok;
+	atomic_t queue_fail;
+	atomic_t retry_deferred;
+	atomic_t attempts_in_window;
+	atomic_t attempts_rate_max;
+	atomic_t window_started_ms;
+} ping_sched_stats;
+static atomic_t ping_resync_requested;
+
+static uint32_t ping_phase_ms(uint32_t interval_ms)
+{
+	if (interval_ms == 0) {
+		return 0;
+	}
+	return ((uint32_t)(tracker_id % TDMA_MAX_TRACKERS) * interval_ms) / TDMA_MAX_TRACKERS;
+}
+
+static uint32_t ping_next_periodic_deadline(uint32_t previous_deadline, uint32_t now, uint32_t interval_ms)
+{
+	uint32_t next = previous_deadline + interval_ms;
+	if ((int32_t)(next - now) <= 0) {
+		next = now + interval_ms;
+	}
+	return next;
+}
+
+static uint32_t ping_server_phase_delay_ms(uint32_t interval_ms)
+{
+	uint64_t server_ticks = esb_get_server_time_ticks_64();
+	if (server_ticks == 0 || interval_ms == 0) {
+		return 0;
+	}
+
+	uint32_t interval_ticks = (uint32_t)(((uint64_t)interval_ms * 32768U + 500U) / 1000U);
+	uint32_t phase_ticks
+		= (uint32_t)(((uint64_t)ping_phase_ms(interval_ms) * 32768U + 500U) / 1000U);
+	uint32_t server_phase_ticks = (uint32_t)(server_ticks % interval_ticks);
+	uint32_t delay_ticks = phase_ticks >= server_phase_ticks ? phase_ticks - server_phase_ticks
+											  : interval_ticks - server_phase_ticks + phase_ticks;
+	uint32_t delay_ms = (uint32_t)(((uint64_t)delay_ticks * 1000U + 32767U) / 32768U);
+	if (delay_ms <= PING_SERVER_PHASE_TOLERANCE_MS) {
+		delay_ms += interval_ms;
+	}
+	return delay_ms;
+}
+
+static void ping_stats_attempt(uint32_t now)
+{
+	uint32_t window_started_ms = (uint32_t)atomic_get(&ping_sched_stats.window_started_ms);
+	if (window_started_ms == 0) {
+		atomic_set(&ping_sched_stats.window_started_ms, (atomic_val_t)now);
+	} else if (now - window_started_ms >= 1000) {
+		uint32_t attempts = (uint32_t)atomic_set(&ping_sched_stats.attempts_in_window, 0);
+		uint32_t max_rate = (uint32_t)atomic_get(&ping_sched_stats.attempts_rate_max);
+		if (attempts > max_rate) {
+			atomic_set(&ping_sched_stats.attempts_rate_max, (atomic_val_t)attempts);
+		}
+		atomic_set(&ping_sched_stats.window_started_ms, (atomic_val_t)now);
+	}
+	atomic_inc(&ping_sched_stats.attempts_in_window);
+}
+
+static void connection_signal_wake(void);
+
+void connection_request_ping_resync(void)
+{
+	/* Called from ESB event context. The connection thread owns the deadline. */
+	atomic_set(&ping_resync_requested, 1);
+	atomic_set(&ping_server_phase_aligned, 0);
+	ping_aligned_interval_ms = 0;
+	atomic_set(&next_ping_deadline_ms, (atomic_val_t)k_uptime_get_32());
+	connection_signal_wake();
+}
+
+void connection_print_ping_stats(void)
+{
+	uint32_t attempts_in_window = (uint32_t)atomic_get(&ping_sched_stats.attempts_in_window);
+	uint32_t max_rate = (uint32_t)atomic_get(&ping_sched_stats.attempts_rate_max);
+	if (attempts_in_window > max_rate) {
+		max_rate = attempts_in_window;
+	}
+	printk(
+		"PING SCHED due=%u attempt=%u queue_ok=%u queue_fail=%u retry_deferred=%u rate_max=%u/s next_ms=%u phase_ms=%u aligned=%u resync_pending=%u\n",
+		(uint32_t)atomic_get(&ping_sched_stats.due),
+		(uint32_t)atomic_get(&ping_sched_stats.attempts),
+		(uint32_t)atomic_get(&ping_sched_stats.queue_ok),
+		(uint32_t)atomic_get(&ping_sched_stats.queue_fail),
+		(uint32_t)atomic_get(&ping_sched_stats.retry_deferred),
+		max_rate,
+		(uint32_t)atomic_get(&next_ping_deadline_ms),
+		ping_phase_ms(get_ping_interval_ms()),
+		(uint32_t)atomic_get(&ping_server_phase_aligned),
+		(uint32_t)atomic_get(&ping_resync_requested)
+	);
+}
 
 LOG_MODULE_REGISTER(connection, LOG_LEVEL_INF);
 
@@ -85,7 +191,6 @@ uint32_t get_ping_interval_ms(void)
 	return ping_interval_ms + esb_get_ping_backoff_ms();
 }
 
-static void connection_signal_wake(void);
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 2048, connection_thread, NULL, NULL, NULL, CONNECTION_THREAD_PRIORITY, K_FP_REGS, 0);
 
@@ -117,6 +222,12 @@ uint8_t connection_get_id(void)
 void connection_set_id(uint8_t id)
 {
 	tracker_id = id;
+	atomic_set(&ping_server_phase_aligned, 0);
+	ping_aligned_interval_ms = 0;
+	atomic_set(
+		&next_ping_deadline_ms,
+		(atomic_val_t)(k_uptime_get_32() + ping_phase_ms(PING_INTERVAL_MS))
+	);
 	tdma_init(id);
 }
 
@@ -301,8 +412,10 @@ static void write_normal_packet(const uint8_t data[16])
 	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
 
 	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence++;
-	esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN);
+	esb_pkt[16] = packet_sequence;
+	if (esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN) == 0) {
+		packet_sequence++;
+	}
 }
 
 #if CONFIG_CONNECTION_OVER_HID
@@ -1085,8 +1198,10 @@ static void send_composite(const uint8_t *types, int n)
 		}
 	}
 
-	buf[pos++] = packet_sequence++;
-	esb_write(buf, no_ack, pos);
+	buf[pos++] = packet_sequence;
+	if (esb_write(buf, no_ack, pos) == 0) {
+		packet_sequence++;
+	}
 }
 
 static void composite_builder_reset(struct composite_builder *builder)
@@ -1165,12 +1280,15 @@ static int64_t connection_next_deadline_ms(int64_t now)
 	int64_t deadline = now + 1000; /* bounded fallback */
 	int quat_interval_ms = connection_quat_interval_ms();
 
-	if (esb_ready()) {
-		uint32_t ping_iv = get_ping_interval_ms();
-		int64_t ping_dl = last_ping_time + (int64_t)ping_iv;
-		if (ping_dl < deadline) {
-			deadline = ping_dl;
+	uint32_t ping_deadline = (uint32_t)atomic_get(&next_ping_deadline_ms);
+	uint32_t ping_window_delay_ms;
+	if (esb_ready() && tdma_ping_wake_delay_ms(&ping_window_delay_ms)) {
+		int64_t guarded_deadline = now + ping_window_delay_ms;
+		if (guarded_deadline < deadline) {
+			deadline = guarded_deadline;
 		}
+	} else if (esb_ready() && (int32_t)(ping_deadline - (uint32_t)deadline) < 0) {
+		deadline = ping_deadline;
 	}
 	if (sensor_data_snapshot_qa_pending(&sensor_data_snapshot)) {
 		int64_t q_dl = last_sensor_quat_time + quat_interval_ms;
@@ -1222,6 +1340,10 @@ void connection_thread(void)
 {
 	/* Register connection thread with watchdog */
 	watchdog_register_thread(WDT_CHANNEL_CONNECTION, 0);
+	atomic_set(
+		&next_ping_deadline_ms,
+		(atomic_val_t)(k_uptime_get_32() + ping_phase_ms(PING_INTERVAL_MS))
+	);
 
 	while (1) {
 		int64_t now = k_uptime_get();
@@ -1242,48 +1364,80 @@ void connection_thread(void)
 			continue;
 		}
 
-		if (radio_ready) {
-			/*
-			 * Process OTA packets queued from ESB ISR (safe in thread context).
-			 * Must run before esb_ota_is_active() check since BEGIN activates OTA.
-			 * Also must run before PING to process ACK payloads from previous PINGs.
-			 */
-			esb_process_ota_rx_queue();
+		esb_process_ota_rx_queue();
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		radio_capture_process();
+#endif
 
-			/* PING has highest priority.
-			 *
-			 * When TDMA is enabled and the last sync is getting stale
-			 * (>2× PING interval), force an early PING to re-sync before
-			 * the TDMA slot estimate drifts too far.  This prevents the
-			 * gradual TPS degradation caused by transmitting in wrong slots.
-			 */
+		if (radio_ready) {
+			/* Synchronized operation derives the next PING directly from server
+			 * frame time. The deterministic interval is always <=1 second and the
+			 * following physical slot is reserved by every tracker. Startup and
+			 * receiver-reset recovery retain the immediate unslotted path. */
 			uint32_t effective_ping_interval_ms = get_ping_interval_ms();
-			bool ping_due = (now - last_ping_time >= effective_ping_interval_ms);
-#if CONFIG_CONNECTION_TDMA
-			if (!ping_due && tdma_is_enabled()) {
-				int64_t sync_age = esb_get_sync_age_ms();
-				uint32_t resync_interval_ms = effective_ping_interval_ms / 2;
-				if (resync_interval_ms < PING_RESYNC_MIN_INTERVAL_MS) {
-					resync_interval_ms = PING_RESYNC_MIN_INTERVAL_MS;
+			uint32_t ping_deadline = (uint32_t)atomic_get(&next_ping_deadline_ms);
+			bool force_resync = atomic_cas(&ping_resync_requested, 1, 0);
+			uint32_t ping_window_delay_ms = 0;
+			bool guarded_schedule = !force_resync && tdma_ping_wake_delay_ms(&ping_window_delay_ms);
+			if (guarded_schedule) {
+				ping_deadline = (uint32_t)now + ping_window_delay_ms;
+				ping_aligned_interval_ms = effective_ping_interval_ms;
+				atomic_set(&ping_server_phase_aligned, 1);
+			} else if (!force_resync) {
+				if (ping_aligned_interval_ms != effective_ping_interval_ms) {
+					atomic_set(&ping_server_phase_aligned, 0);
 				}
-				if (sync_age > (int64_t)effective_ping_interval_ms * 2
-					&& (now - last_ping_time) >= resync_interval_ms) {
-					ping_due = true;
+				if (!atomic_get(&ping_server_phase_aligned)) {
+					uint32_t phase_delay_ms = ping_server_phase_delay_ms(effective_ping_interval_ms);
+					if (phase_delay_ms > 0) {
+						ping_deadline = (uint32_t)now + phase_delay_ms;
+						atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
+						ping_aligned_interval_ms = effective_ping_interval_ms;
+						atomic_set(&ping_server_phase_aligned, 1);
+					}
 				}
 			}
-#endif
+
+			bool ping_due = force_resync
+				|| (guarded_schedule ? ping_window_delay_ms == 0
+					: (int32_t)((uint32_t)now - ping_deadline) >= 0);
 			if (ping_due) {
+				enum tdma_ping_admission admission = force_resync
+					? TDMA_PING_UNAVAILABLE : tdma_wait_for_ping_window();
+				if (!force_resync && admission == TDMA_PING_DEFERRED) {
+					uint32_t retry_delay_ms = 0;
+					if (tdma_ping_wake_delay_ms(&retry_delay_ms)) {
+						atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
+					}
+					continue;
+				}
+				atomic_inc(&ping_sched_stats.due);
+				atomic_inc(&ping_sched_stats.attempts);
+				ping_stats_attempt((uint32_t)now);
+				if (!guarded_schedule) {
+					ping_deadline = ping_next_periodic_deadline(
+						ping_deadline, (uint32_t)now, effective_ping_interval_ms
+					);
+					atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
+				}
+
 				uint8_t ping[ESB_PING_LEN] = {0};
 				ping[0] = ESB_PING_TYPE;
 				ping[1] = connection_get_id();
-				ping[2] = 0;
-				memset(&ping[3], 0x00, 4);
 				ping[7] = esb_get_ping_ack_flag();
-				memset(&ping[8], 0x00, 4);
-				ping[ESB_PING_LEN - 1] = 0;
-				esb_write(ping, false, ESB_PING_LEN);
-				last_ping_time = now;
-				// k_usleep(400);
+				int err = esb_write(ping, false, ESB_PING_LEN);
+				if (err == 0) {
+					atomic_inc(&ping_sched_stats.queue_ok);
+				} else {
+					atomic_inc(&ping_sched_stats.queue_fail);
+					atomic_inc(&ping_sched_stats.retry_deferred);
+					atomic_set(&ping_server_phase_aligned, 0);
+					uint32_t retry_delay_ms = PING_QUEUE_RETRY_MS;
+					if (guarded_schedule) {
+						(void)tdma_ping_wake_delay_ms(&retry_delay_ms);
+					}
+					atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
+				}
 				continue;
 			}
 

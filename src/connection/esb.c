@@ -33,8 +33,6 @@
 
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <hal/nrf_clock.h>
-#include <hal/nrf_timer.h>
-#include <nrfx_timer.h>
 #include <nrfx_power.h>
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/atomic.h>
@@ -43,13 +41,14 @@
 #include <stdlib.h>
 #include "esb.h"
 #include "tdma.h"
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+#include "radio_capture.h"
+#endif
 #include "console.h"
 #include "system/clock_control.h"
 
 uint8_t last_reset = 0;
-// const nrfx_timer_t m_timer = NRFX_TIMER_INSTANCE(1);
 bool esb_state = false;
-bool timer_state = false;
 uint16_t led_clock = 0;
 uint32_t led_clock_offset = 0;
 
@@ -112,14 +111,11 @@ static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS[] = {
 #define PING_RECOVERY_THRESHOLD 1
 #endif
 
+/* Keep recovery probes comfortably inside the receiver membership timeout.
+ * Long exponential backoff created a feedback loop after receiver reboot:
+ * ~10 s PING cadence versus a 5 s active timeout repeatedly removed slots. */
 #define PING_BACKOFF_LVL1_THRESHOLD 2
-#define PING_BACKOFF_LVL2_THRESHOLD 5
-#define PING_BACKOFF_LVL3_THRESHOLD 10
-#define PING_BACKOFF_LVL4_THRESHOLD 20
 #define PING_BACKOFF_LVL1_MS        500
-#define PING_BACKOFF_LVL2_MS        1500
-#define PING_BACKOFF_LVL3_MS        4000
-#define PING_BACKOFF_LVL4_MS        9000
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
@@ -590,6 +586,8 @@ static uint32_t g_min_rtt_age = 0; // PONGs since last min_rtt update
 #define MIN_RTT_AGE_LIMIT 120      // Age out after ~120 PONGs (~2 min at 1/s)
 #define MIN_RTT_CEILING   20       // Never age beyond this (conservative upper bound)
 
+#define RECEIVER_RESTART_BACKWARD_TICKS (32768U * 2U)
+static uint32_t receiver_restart_detections;
 // Warm-up counter: first few PONGs use faster EMA for quick convergence
 static uint32_t g_sync_update_count = 0;
 #define SYNC_WARM_UP_COUNT 5
@@ -732,20 +730,7 @@ static void esb_clear_time_sync_state(void)
 
 uint32_t esb_get_ping_backoff_ms(void)
 {
-	if (ping_failures >= PING_BACKOFF_LVL4_THRESHOLD) {
-		return PING_BACKOFF_LVL4_MS;
-	}
-	if (ping_failures >= PING_BACKOFF_LVL3_THRESHOLD) {
-		return PING_BACKOFF_LVL3_MS;
-	}
-	if (ping_failures >= PING_BACKOFF_LVL2_THRESHOLD) {
-		return PING_BACKOFF_LVL2_MS;
-	}
-	if (ping_failures >= PING_BACKOFF_LVL1_THRESHOLD) {
-		return PING_BACKOFF_LVL1_MS;
-	}
-
-	return 0;
+	return ping_failures >= PING_BACKOFF_LVL1_THRESHOLD ? PING_BACKOFF_LVL1_MS : 0;
 }
 
 bool clock_status = false;
@@ -1121,7 +1106,7 @@ void event_handler(struct esb_evt const *event)
 					float pong_sens_data[3] = {0.0f, 0.0f, 0.0f};
 					uint8_t pong_sens_auto_axis = 0;
 					uint16_t pong_sens_auto_revolutions = 0;
-
+					bool receiver_clock_restarted = false;
 					if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
 						// Special case: SENS_SET command repurposes time sync bytes for data
 						// Skip time sync update
@@ -1153,6 +1138,22 @@ void event_handler(struct esb_evt const *event)
 							);
 						}
 					} else if (ping_ticks_for_this_ctr != 0) {
+						receiver_clock_restarted = g_time_initialized
+							&& (int32_t)(ping_rx_ticks - g_last_rx_raw_ticks)
+								< -(int32_t)RECEIVER_RESTART_BACKWARD_TICKS;
+						if (receiver_clock_restarted) {
+							receiver_restart_detections++;
+							LOG_WRN(
+								"Receiver clock restart detected old=%u new=%u count=%u",
+								g_last_rx_raw_ticks,
+								ping_rx_ticks,
+								receiver_restart_detections
+							);
+							esb_clear_time_sync_state();
+							tdma_set_enabled(false);
+							ping_failures = 0;
+							connection_request_ping_resync();
+						}
 						// ====================================================================
 						// RTT and Server Time Offset Calculation (Reference-Point Model)
 						// ====================================================================
@@ -1235,21 +1236,14 @@ void event_handler(struct esb_evt const *event)
 								server_time_synced = true;
 								LOG_DBG("Server offset initialized: %d ticks", server_offset_ticks);
 							} else {
-								// Long-baseline skew estimation:
-								// Keep skew reference point fixed, compute total drift
-								// over growing baseline to average out RTT noise
 								uint32_t delta_from_ref = ping_ticks_for_this_ctr - g_skew_ref_local_ticks;
-
-								// Compute innovation (prediction residual) for diagnostics
-								int32_t predicted_drift = (int32_t)((int64_t)g_clock_skew_ppb * (int64_t)delta_from_ref / 1000000000LL);
+								int32_t predicted_drift = (int32_t)((int64_t)g_clock_skew_ppb
+									* (int64_t)delta_from_ref / 1000000000LL);
 								int32_t predicted_offset = g_skew_ref_offset + predicted_drift;
 								int32_t innovation = server_offset_ticks - predicted_offset;
-
-								// Large jump detection (> 1 second ≈ 32000 ticks)
 								if (abs(innovation) > 32000) {
 									LOG_WRN(
-										"Large offset jump detected (%d ticks), resetting "
-										"(old=%d new=%d)",
+										"Large offset jump detected (%d ticks), resetting (old=%d new=%d)",
 										innovation,
 										g_server_ticks_offset,
 										server_offset_ticks
@@ -1259,49 +1253,31 @@ void event_handler(struct esb_evt const *event)
 									g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
 									g_clock_skew_ppb = 0;
 								} else {
-									// Update skew from long-baseline total drift
-									// As baseline grows, RTT noise effect shrinks
 									if (delta_from_ref >= 32768) {
 										int64_t total_drift = (int64_t)(server_offset_ticks - g_skew_ref_offset);
-										int32_t raw_skew_ppb = (int32_t)(total_drift * 1000000000LL / (int64_t)delta_from_ref);
-										// Gentle EMA: long baseline already provides stability
-										g_clock_skew_ppb = g_clock_skew_ppb + (raw_skew_ppb - g_clock_skew_ppb) / 4;
+										int32_t raw_skew_ppb = (int32_t)(total_drift * 1000000000LL
+											/ (int64_t)delta_from_ref);
+										g_clock_skew_ppb += (raw_skew_ppb - g_clock_skew_ppb) / 4;
 									}
-
-									/*
-								 * Predict-Update EMA offset filter.
-								 *
-								 * Use skew prediction as the expected offset,
-								 * so EMA innovation contains only measurement
-								 * noise (not deterministic drift).  This allows
-								 * a smaller alpha for better noise rejection
-								 * while skew handles drift tracking.
-								 *
-								 * Warm-up (first 5 PONGs): alpha=3/4 for fast
-								 * initial convergence before skew is estimated.
-								 */
-								g_sync_update_count++;
-								/* Predict from last accepted sync (prev), not current stamp. */
-								uint32_t delta_since_sync = ping_ticks_for_this_ctr - prev_sync_local_ticks;
-								int32_t predicted_current = (int32_t)g_server_ticks_offset
-									+ (int32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
-								int32_t offset_innovation = server_offset_ticks - predicted_current;
-								if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
-									/* Warm-up: alpha=3/4 for fast convergence */
-									g_server_ticks_offset = predicted_current + (offset_innovation * 3 + 2) / 4;
-								} else {
-									/* Steady state: alpha=1/4 (skew handles drift) */
-									g_server_ticks_offset = predicted_current + (offset_innovation + 2) / 4;
-								}
-								// Refresh skew reference periodically to avoid uint32 wrap
-								if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
+									g_sync_update_count++;
+									uint32_t delta_since_sync = ping_ticks_for_this_ctr - prev_sync_local_ticks;
+									int32_t predicted_current = (int32_t)g_server_ticks_offset
+										+ (int32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
+									int32_t offset_innovation = server_offset_ticks - predicted_current;
+									if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
+										g_server_ticks_offset = predicted_current + (offset_innovation * 3 + 2) / 4;
+									} else {
+										g_server_ticks_offset = predicted_current + (offset_innovation + 2) / 4;
+									}
+									if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
 										g_skew_ref_offset = server_offset_ticks;
 										g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
 									}
-
-									LOG_DBG("Offset update: innovation=%d offset=%d skew=%d ppb (rtt=%u min=%u)",
+									LOG_DBG(
+										"Offset update: innovation=%d offset=%d skew=%d ppb (rtt=%u min=%u)",
 										innovation, g_server_ticks_offset, g_clock_skew_ppb,
-										rtt_ticks, g_min_rtt_ticks);
+										rtt_ticks, g_min_rtt_ticks
+									);
 								}
 							}
 
@@ -1457,14 +1433,7 @@ void event_handler(struct esb_evt const *event)
 	} // end of event switch
 }
 
-// this was randomly generated
-// TODO: I have no idea?
-// TODO: see esb information, check CONFIG_ESB_PIPE_COUNT
-/*
-base_addr_p0: Base address for pipe 0, in big endian.
-base_addr_p1: Base address for pipe 1-7, in big endian.
-pipe_prefixes: Address prefix for pipe 0 to 7.
-*/
+/* ESB pipe addresses (base addresses big-endian; prefixes for pipes 0-7). */
 static const uint8_t discovery_base_addr_0[4] = {0x62, 0x39, 0x8A, 0xF2};
 static const uint8_t discovery_base_addr_1[4] = {0x28, 0xFF, 0x50, 0xB8};
 static const uint8_t discovery_addr_prefix[8] = {0xFE, 0xFF, 0x29, 0x27, 0x09, 0x02, 0xB2, 0xD6};
@@ -1479,33 +1448,42 @@ int esb_initialize(bool tx)
 
 	if (tx) {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
-		// config.mode = ESB_MODE_PTX;
 		config.event_handler = event_handler;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		config.tx_capture_handler = radio_capture_record;
+#endif
 		config.bitrate = ESB_BITRATE_2MBPS;
-		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		config.retransmit_count = 2;
+		config.retransmit_count = 1;
 		config.tx_mode = ESB_TXMODE_MANUAL_START;
-		// config.payload_length = 252; // config by CONFIG_ESB_MAX_PAYLOAD_LENGTH
 		config.selective_auto_ack = true;
 		config.use_fast_ramp_up = true;
 	} else {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
 		config.event_handler = event_handler;
-		// config.bitrate = ESB_BITRATE_2MBPS;
-		// config.crc = ESB_CRC_16BIT;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		config.tx_capture_handler = radio_capture_record;
+#endif
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
-		// config.retransmit_count = 3;
-		// config.tx_mode = ESB_TXMODE_AUTO;
-		// config.payload_length = 252; // config by CONFIG_ESB_MAX_PAYLOAD_LENGTH
 		config.selective_auto_ack = true;
 		config.use_fast_ramp_up = true;
 	}
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	radio_capture_deinit();
+#endif
 
 	err = esb_init(&config);
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	if (!err) {
+		int capture_err = radio_capture_init();
+		if (capture_err) {
+			LOG_WRN("RADIO capture unavailable: %d", capture_err);
+		}
+	}
+#endif
 
 	if (!err) {
 		// Read and apply RF channel from retained/NVS (stored value is encoded).
@@ -1548,8 +1526,10 @@ int esb_initialize(bool tx)
 void esb_deinitialize(void)
 {
 	if (esb_initialized) {
-		/* Clear first so esb_write / connection_thread stop before radio teardown. */
 		esb_initialized = false;
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		radio_capture_deinit();
+#endif
 		k_msleep(5); // wait for in-flight writers to observe flag + drain TX
 		esb_disable();
 	}
@@ -1764,10 +1744,10 @@ void esb_process_ota_rx_queue(void)
 	}
 }
 
-void esb_write(uint8_t *data, bool no_ack, size_t data_length)
+int esb_write(uint8_t *data, bool no_ack, size_t data_length)
 {
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
-		return;
+		return -EACCES;
 	}
 	if (!clock_status) {
 		clocks_start();
@@ -1775,7 +1755,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	drop_failed_tx_payload_if_pending();
 	if (data_length < 1) {
 		LOG_ERR("Invalid data length %u", data_length);
-		return;
+		return -EINVAL;
 	}
 
 	bool is_ping = data[0] == ESB_PING_TYPE;
@@ -1817,27 +1797,34 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	last_tx.timestamp = k_uptime_get();
 
 	/*
-	 * TDMA slot gating / random backoff for noack sensor-data packets.
-	 *
-	 * Wait BEFORE queuing: if the packet were queued first and the radio
-	 * were still auto-draining a previous TX, the new packet could be
-	 * transmitted before the TDMA slot (bypassing the wait entirely).
-	 *
-	 * PING / ACK packets bypass this (no_ack == false) so time-sync and
-	 * connection-health probes are never delayed.
-	 * Raw data-collection packets always bypass for minimum latency.
-	 *
-	 * When TDMA is disabled (compile-time or runtime), use random backoff
-	 * to reduce collision
+	 * Synchronized PING already claimed the shared own-slot frame in the
+	 * connection thread. Normal NoACK claims it here. Both must queue only while
+	 * ESB is idle: MANUAL_START auto-drains queued payloads once a TX chain runs.
 	 */
-	if (no_ack && !is_raw) {
+	if (is_ping && tdma_is_enabled() && esb_get_sync_age_ms() >= 0
+	    && esb_get_sync_age_ms() <= PING_INTERVAL_MS * 10) {
+		if (!esb_is_idle()) {
+			tdma_note_radio_busy();
+			return -EBUSY;
+		}
+	} else if (no_ack && !is_raw) {
 #if CONFIG_CONNECTION_TDMA
 		if (tdma_is_enabled()) {
-			tdma_wait_for_slot();
+			do {
+				if (!tdma_wait_for_slot((uint8_t)data_length)) {
+					return -EAGAIN;
+				}
+				if (esb_is_idle()) {
+					break;
+				}
+				tdma_note_radio_busy();
+			} while (esb_ready());
+			if (!esb_is_idle()) {
+				return -EBUSY;
+			}
 		} else
 #endif
 		{
-			/* Random backoff: 0-1ms jitter using low bits of cycle counter */
 			uint32_t jitter_us = (k_cycle_get_32() & 0x3FF) % 1000;
 			if (jitter_us > 100) {
 				k_usleep(jitter_us);
@@ -1853,7 +1840,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		if (esb_is_idle()) {
 			esb_start_queued_tx();
 		}
-		return;
+		return queue_status;
 	}
 
 	if (queue_status == -ENOMEM) {
@@ -2013,6 +2000,7 @@ void esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	if (queue_status == 0) {
 		esb_start_queued_tx();
 	}
+	return queue_status;
 }
 
 bool esb_ready(void)

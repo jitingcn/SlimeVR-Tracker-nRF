@@ -635,7 +635,23 @@ config CLOCK_USE_LF_SYNTH
 config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
     bool "Enable RC oscillator calibration for K32SRC"
     default y if CLOCK_USE_LF_SYNTH && CONNECTION_TDMA
+
+menu "TDMA diagnostics"
+
+config TDMA_DIAGNOSTICS
+    bool "Compile in TDMA/RF radio capture diagnostics"
     default n
+    help
+        RADIO READY/ADDRESS/END hardware timestamp capture, PING
+        transaction capture and the tdma stats / tdma capture console
+        commands. Disable for production builds: reclaims ~5 KB RAM
+        and removes the capture hook from the ESB transmit path.
+        TDMA scheduling itself stays fully functional without this
+        option; only measurement instrumentation is removed at compile
+        time. The admission/guard counters shown by "tdma stats" are
+        also compiled out with this option.
+
+endmenu
 
 rsource "Kconfig.sensors_drivers"
 

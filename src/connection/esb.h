@@ -24,17 +24,11 @@
 #define SLIMENRF_ESB
 
 #include <esb.h>
-#include <nrfx_timer.h>
 
-// TODO: timer?
 #define LAST_RESET_LIMIT 10
 extern uint8_t last_reset;
-// TODO: move to esb/timer
-// extern const nrfx_timer_t m_timer;
 extern bool esb_state;
-extern bool timer_state;
 
-// TODO: esb/sensor?
 extern uint16_t led_clock;
 extern uint32_t led_clock_offset;
 
@@ -88,7 +82,7 @@ void esb_reset_pair(void);
 void esb_clear_pair(void);
 
 void esb_process_ota_rx_queue(void);
-void esb_write(uint8_t *data, bool no_ack, size_t data_length); // TODO: give packets some names
+int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 
 #define PING_INTERVAL_MS 997
 // Ping/Pong types for ACK payload validation

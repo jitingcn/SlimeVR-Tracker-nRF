@@ -8,7 +8,11 @@
 #include "sensor/fusion/vqf/vqf.h"
 #endif
 #include "connection/esb.h"
+#include "connection/connection.h"
 #include "connection/tdma.h"
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+#include "connection/radio_capture.h"
+#endif
 #include "build_defines.h"
 #include "parse_args.h"
 #include "zephyr/sys/printk.h"
@@ -1442,8 +1446,10 @@ static void console_cmd_dfu(size_t argc, char **argv)
 
 static void console_cmd_ping(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	if (argc > 1 && strcmp(argv[1], "stats") == 0) {
+		connection_print_ping_stats();
+		return;
+	}
 	cmd_ping_start();
 }
 
@@ -1560,6 +1566,28 @@ static void console_cmd_tdma(size_t argc, char **argv)
 	} else if (arg && strcmp(arg, "off") == 0) {
 		tdma_set_enabled(false);
 		printk("TDMA disabled\n");
+	} else if (arg && strcmp(arg, "capture") == 0) {
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		char *state = argc > 2 ? argv[2] : NULL;
+		if (state && strcmp(state, "on") == 0) {
+			radio_capture_set_enabled(true);
+			printk("RADIO capture enabled\n");
+		} else if (state && strcmp(state, "off") == 0) {
+			radio_capture_set_enabled(false);
+			printk("RADIO capture disabled\n");
+		} else {
+			printk("RADIO capture: %s\n", radio_capture_is_enabled() ? "enabled" : "disabled");
+			radio_capture_print_stats();
+		}
+#else
+		printk("tdma capture requires CONFIG_TDMA_DIAGNOSTICS=y\n");
+#endif
+	} else if (arg && strcmp(arg, "stats") == 0) {
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		tdma_print_stats();
+#else
+		printk("tdma stats requires CONFIG_TDMA_DIAGNOSTICS=y\n");
+#endif
 	} else {
 		printk("TDMA: %s\n", tdma_is_enabled() ? "enabled" : "disabled");
 	}

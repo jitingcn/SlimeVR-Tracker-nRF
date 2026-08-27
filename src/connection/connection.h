@@ -26,6 +26,9 @@
 #include <stdint.h>
 
 uint32_t get_ping_interval_ms(void);
+void connection_print_ping_stats(void);
+/** Force the next PING to run immediately without old receiver-time slot gating. */
+void connection_request_ping_resync(void);
 void connection_clocks_request_start(void);
 void connection_clocks_request_start_delay_us(uint32_t delay_us);
 void connection_clocks_request_stop(void);

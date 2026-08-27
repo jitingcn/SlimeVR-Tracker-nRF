@@ -37,35 +37,35 @@
  * Frame structure (repeats every frame_ticks):
  *   [Slot 0][Slot 1][Slot 2]...[Slot N-1]   (N = total_slots, dynamic)
  *
+ * Every slot is 22 network ticks. Normal NoACK traffic may use the owner's
+ * slot once per frame. Approximately once per second, each tracker has a
+ * deterministic guarded PING window spanning its slot and the following slot;
+ * the following owner remains silent for that frame. Empty opportunities do
+ * not cause transmissions.
+ *
  * Parameters are dynamically assigned by the receiver via PONG bytes 8-11:
  *   byte 8:  assigned_slot_index (0-15, or 0xFF = unassigned)
  *   byte 9:  total_slots (1-16)
- *   byte 10: slot_ticks (14-163)
+ *   byte 10: slot_ticks (22 for the measured-safe nRF52 guarded mode)
  *   byte 11: config_epoch (wrapping uint8_t)
  *
- * NoACK sensor data TX at 2Mbps ≈ 200-250μs air time, fits in minimum 427μs slot.
+ * Normal NoACK traffic is limited to one packet per tracker frame. Before
+ * queueing, payload-aware admission reserves measured READY->END airtime plus
+ * queue/ramp margin; late packets wait for the next unguarded own slot.
  *
  * Architecture:
  *   - Connection thread prepares packets and calls esb_write()
- *   - For noack data: tdma_wait_for_slot() blocks until assigned slot
- *   - esb_write() then queues payload (ESB MANUAL TX mode)
- *   - For PING/ACK packets: esb_start_tx() is called immediately (bypasses TDMA)
+ *   - Every tracker derives the same PING/guard schedule from server frame time
+ *   - A synchronized PING consumes its own frame and the next physical slot
+ *   - Unsynced, stale-sync, or unconfigured PINGs transmit immediately for recovery
  */
-
 /* Compile-time defaults / fallbacks (used if no dynamic config received) */
 #define TDMA_NUM_TRACKERS  10
-#define TDMA_SLOT_TICKS    18  /* ~550μs at 32768Hz */
-#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)  /* 180 ticks ≈ 5.5ms */
+#define TDMA_SLOT_TICKS    22  /* ~671μs at 32768Hz */
+#define TDMA_FRAME_TICKS   (TDMA_SLOT_TICKS * TDMA_NUM_TRACKERS)
 
-/*
- * Grace window (ticks) past the nominal slot end.
- * If the connection thread overshoots the slot boundary (e.g. preempted
- * by the higher-priority sensor thread), allow TX anyway rather than
- * waiting a full frame.  Half a slot covers minor scheduler jitter
- * while leaving room before the neighbour's
- * target point (neighbour aims for their slot_start + 4 ticks).
- */
-#define TDMA_OVERSHOOT_GRACE 3
+/** Number of receiver-supported tracker IDs used to partition PING phase. */
+#define TDMA_MAX_TRACKERS 16
 
 /**
  * Initialize the TDMA module with this tracker's ID.
@@ -73,23 +73,34 @@
 void tdma_init(uint8_t tracker_id);
 
 /**
- * Block the calling thread until this tracker's TDMA slot begins.
+ * Block until this tracker can safely launch one normal NoACK packet.
  *
- * Must be called from esb_write() BEFORE esb_write_payload() (and thus
- * before esb_start_tx()). Waiting before queue avoids the radio auto-draining
- * a newly queued packet during the wait. After wakeup, queue + start_tx run
- * immediately inside the slot window.
- *
- * Returns immediately if:
- *   - CONFIG_CONNECTION_TDMA is disabled
- *   - runtime TDMA is disabled
- *   - server time is not yet synced (fallback: transmit now)
- *   - already inside our slot window
- *
- * Uses k_sleep(K_TICKS(n)) which on nRF52 is backed by the 32768 Hz RTC,
- * giving ±1 tick (~30 µs) accuracy — sufficient for 610 µs slots.
+ * Admission allows at most one normal NoACK packet per TDMA frame and reserves
+ * a payload-size-specific call-to-END budget. A late packet, guarded frame, or
+ * second packet in one frame waits for the next usable own slot. Waiting occurs
+ * before esb_write_payload(), so the ESB FIFO cannot auto-drain while sleeping.
+ * Returns immediately when TDMA or synchronized server time is unavailable.
  */
-void tdma_wait_for_slot(void);
+bool tdma_wait_for_slot(uint8_t payload_length);
+
+/** Result of attempting the current deterministic guarded PING window. */
+enum tdma_ping_admission {
+	TDMA_PING_UNAVAILABLE,
+	TDMA_PING_DEFERRED,
+	TDMA_PING_ADMITTED,
+};
+
+/** Coarse delay until the next deterministic PING window; wakes early. */
+bool tdma_ping_wake_delay_ms(uint32_t *delay_ms);
+
+/** Admit the current two-slot PING window without waiting a full period. */
+enum tdma_ping_admission tdma_wait_for_ping_window(void);
+
+/** Record that an admitted frame was skipped because another ESB TX was active. */
+void tdma_note_radio_busy(void);
+
+/** Print cumulative payload-admission counters for a field canary. */
+void tdma_print_stats(void);
 
 /**
  * Enable or disable TDMA at runtime.
@@ -105,6 +116,9 @@ bool tdma_is_enabled(void);
  * Current TDMA frame width in 32768 Hz server ticks (0 = no dynamic config yet).
  */
 uint16_t tdma_frame_ticks_get(void);
+
+/** Snapshot the active TDMA slot configuration for diagnostics. */
+bool tdma_config_get(uint8_t *slot_index, uint8_t *slot_ticks, uint16_t *frame_ticks);
 
 /**
  * Update TDMA parameters from receiver's dynamic config (PONG bytes 8-11).
