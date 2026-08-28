@@ -155,8 +155,11 @@ static uint8_t ping_history_idx = 0;
 
 static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
+static uint16_t acked_test_rate_tps = 0; // TEST_MODE_ON payload at ack time
+static uint16_t executing_test_rate_tps = 0; // Snapshot for the in-flight TEST_MODE_ON execution
 static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
+static uint32_t received_test_rate_tps = 0; // Optional target TPS riding on TEST_MODE_ON (data[8-9])
 static float received_sens_data[3] = {0};   // Store sensitivity data
 static uint8_t received_sens_auto_axis = 0;
 static uint16_t received_sens_auto_revolutions = 0;
@@ -274,8 +277,25 @@ static void esb_remote_cmd_tdma_off(void)
 
 static void esb_remote_cmd_test_mode_on(void)
 {
-	LOG_INF("Executing remote command: TEST_MODE_ON");
+	/* Optional target TPS rides in PING data[8-9]; 0 = built-in default.
+	 * Read the pre-execution snapshot (see esb_thread) so a PONG landing
+	 * mid-execution cannot split apply/ack across different values. */
+	uint16_t tps = executing_test_rate_tps;
+	test_mode_set_target_tps(tps);
 	test_mode_set(true);
+	if (tps == 0) {
+		LOG_INF("Executing remote command: TEST_MODE_ON (default rate)");
+		return;
+	}
+	/* Field-diagnosis view: raw target vs capacity-clamped effective rate. */
+	uint16_t effective_tps = test_mode_effective_tps();
+	uint16_t frame_ticks = tdma_frame_ticks_get();
+	LOG_INF(
+		"Executing remote command: TEST_MODE_ON target=%u TPS effective=%u TPS (frame=%u ticks)",
+		tps,
+		effective_tps,
+		frame_ticks
+	);
 }
 
 static void esb_remote_cmd_test_mode_off(void)
@@ -1393,12 +1413,16 @@ void event_handler(struct esb_evt const *event)
 
 					// handle remote commands and delayed execution
 					if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-						if (received_remote_command == ESB_PONG_FLAG_NORMAL ||
+						uint16_t pong_test_rate_tps = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
+							&& rx_payload.length >= 10
+							? ((uint16_t)rx_payload.data[8] << 8) | rx_payload.data[9] : 0;
+						bool test_rate_changed = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
+							&& pong_test_rate_tps != received_test_rate_tps;
+						if (received_remote_command == ESB_PONG_FLAG_NORMAL || test_rate_changed ||
 						    (received_remote_command == acked_remote_command &&
 						     pong_flags != received_remote_command)) {
-							// new command received, or override already-executed command
-							// whose confirmation was superseded by the receiver
-							// (but skip re-accepting the same command repeatedly)
+							// New flag, a TEST_MODE_ON payload update, or override of
+							// an executed command whose confirmation was superseded.
 							received_remote_command = pong_flags;
 							remote_command_receive_time = k_uptime_get();
 
@@ -1412,6 +1436,8 @@ void event_handler(struct esb_evt const *event)
 							} else if (pong_flags == ESB_PONG_FLAG_SENS_AUTO) {
 								received_sens_auto_axis = pong_sens_auto_axis;
 								received_sens_auto_revolutions = pong_sens_auto_revolutions;
+							} else if (pong_flags == ESB_PONG_FLAG_TEST_MODE_ON) {
+								received_test_rate_tps = pong_test_rate_tps;
 							}
 
 							const char *cmd_name = esb_remote_cmd_name(pong_flags);
@@ -2202,16 +2228,36 @@ static void esb_thread(void)
 		}
 		int64_t now_idle = k_uptime_get();
 
-		if (received_remote_command != ESB_PONG_FLAG_NORMAL && received_remote_command != acked_remote_command
-			&& remote_command_receive_time > 0) {
+		bool command_pending = received_remote_command != ESB_PONG_FLAG_NORMAL
+			&& remote_command_receive_time > 0;
+		if (command_pending) {
+			if (received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON) {
+				/* Same-flag payload change stays pending while the
+				 * applied (acked) target differs from the received
+				 * one; ack happens only after application below. */
+				command_pending = acked_remote_command != ESB_PONG_FLAG_TEST_MODE_ON
+					|| received_test_rate_tps != acked_test_rate_tps;
+			} else {
+				command_pending = received_remote_command != acked_remote_command;
+			}
+		}
+		if (command_pending) {
 			/* OTA commands (0x30-0x33) bypass the safety delay since they are
 			 * time-sensitive and not destructive like SHUTDOWN/CALIBRATE. */
 			bool is_ota_cmd = (received_remote_command >= ESB_PONG_FLAG_OTA_QUERY_INFO &&
 					   received_remote_command <= ESB_PONG_FLAG_OTA_UNSUPPRESS);
 			if (is_ota_cmd || now_idle - remote_command_receive_time >= REMOTE_COMMAND_DELAY_MS) {
+				/* Snapshot before executing: a PONG landing mid-execution
+				 * must not apply one rate while the ack records another. */
+				if (received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON) {
+					executing_test_rate_tps = received_test_rate_tps;
+				}
 				esb_remote_command_execute(received_remote_command);
 
 				acked_remote_command = received_remote_command;
+				if (received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON) {
+					acked_test_rate_tps = executing_test_rate_tps;
+				}
 
 				if (received_remote_command == ESB_PONG_FLAG_SHUTDOWN) {
 					return;

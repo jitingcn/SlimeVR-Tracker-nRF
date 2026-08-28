@@ -2991,7 +2991,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 
 	// Check if we need to force send based on time to maintain minimum packet rate
 	now = k_uptime_get();
-	int64_t min_interval = test_mode_get() ? TEST_MODE_MIN_SEND_INTERVAL_MS : 1000;
+	int64_t min_interval = test_mode_min_send_interval_ms();
 	bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
 	if (send_quat_data || send_lin_accel_data || force_send_by_time) {

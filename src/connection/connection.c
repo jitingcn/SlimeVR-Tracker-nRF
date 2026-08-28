@@ -336,6 +336,8 @@ static int fill_sub_runtime(uint8_t *buf)
 
 struct composite_builder {
 	uint8_t types[5];
+	int64_t *last_times[5];
+	int64_t stamps[5];
 	int n;
 	int used;
 };
@@ -397,53 +399,68 @@ static void fill_normal_packet(uint8_t type, uint8_t data[16])
 	}
 }
 
-static void write_normal_packet(const uint8_t data[16])
+static bool write_normal_packet(const uint8_t data[16])
 {
+	/* Radio unavailable: HID is the configured output path, so its
+	 * enqueue success is the send success. */
+	if (!esb_ready()) {
+#if CONFIG_CONNECTION_OVER_HID
+		if (!connection_hid_output_ready()) {
+			return false;
+		}
+		return hid_write_packet_n(data);
+#else
+		return false;
+#endif
+	}
+
+	/* Radio available: only ESB queue success counts, so a failed
+	 * admission cannot consume the test-rate slot or mirror to HID;
+	 * HID stays a mirror of successful sends. */
+	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
+
+	memcpy(esb_pkt, data, 16);
+	esb_pkt[16] = packet_sequence;
+	if (esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN) != 0) {
+		return false;
+	}
+	packet_sequence++;
 #if CONFIG_CONNECTION_OVER_HID
 	if (connection_hid_output_ready()) {
 		hid_write_packet_n(data);
 	}
 #endif
-
-	if (!esb_ready()) {
-		return;
-	}
-
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence;
-	if (esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN) == 0) {
-		packet_sequence++;
-	}
+	return true;
 }
 
 #if CONFIG_CONNECTION_OVER_HID
-static void write_hid_packet_type(uint8_t type)
+static bool write_hid_packet_type(uint8_t type)
 {
 	if (!connection_hid_output_ready()) {
-		return;
+		return false;
 	}
 
 	uint8_t data[16];
 
 	fill_normal_packet(type, data);
-	hid_write_packet_n(data);
+	return hid_write_packet_n(data);
 }
 
-static void write_hid_composite_as_normal_packets(const struct composite_builder *builder)
+static bool write_hid_composite_as_normal_packets(const struct composite_builder *builder)
 {
+	bool queued = true;
 	for (int i = 0; i < builder->n; i++) {
-		write_hid_packet_type(builder->types[i]);
+		queued &= write_hid_packet_type(builder->types[i]);
 	}
+	return queued;
 }
 #endif
 
-static void connection_write_packet_type(uint8_t type)
+static bool connection_write_packet_type(uint8_t type)
 {
 	uint8_t data[16];
 	fill_normal_packet(type, data);
-	write_normal_packet(data);
+	return write_normal_packet(data);
 }
 
 void connection_update_sensor_ids(int imu, int mag)
@@ -554,53 +571,53 @@ void connection_update_status(int status)
 //| |4      |id      |q0               |q1               |q2               |q3               |m0 |m1 |m2 |
 //| |5      |id      |runtime (uint64, us)                              |resv              |rssi |
 
-void connection_write_packet_0() // device info
+bool connection_write_packet_0() // device info
 {
 	uint8_t data[16];
 
 	fill_normal_packet(0, data);
-	write_normal_packet(data);
+	return write_normal_packet(data);
 }
 
-void connection_write_packet_1() // full precision quat and accel
+bool connection_write_packet_1() // full precision quat and accel
 {
 	uint8_t data[16];
 
 	fill_normal_packet(1, data);
-	write_normal_packet(data);
+	return write_normal_packet(data);
 }
 
-void connection_write_packet_2() // reduced precision quat and accel with battery,
-								 // temp, and rssi
+bool connection_write_packet_2() // reduced precision quat and accel with battery,
+				 // temp, and rssi
 {
 	uint8_t data[16];
 
 	fill_normal_packet(2, data);
-	write_normal_packet(data);
+	return write_normal_packet(data);
 }
 
-void connection_write_packet_3() // status
+bool connection_write_packet_3() // status
 {
 	uint8_t data[16];
 
 	fill_normal_packet(3, data);
-	write_normal_packet(data);
+	return write_normal_packet(data);
 }
 
-void connection_write_packet_4() // full precision quat and magnetometer
+bool connection_write_packet_4() // full precision quat and magnetometer
 {
 	uint8_t data[16];
 
 	fill_normal_packet(4, data);
-	write_normal_packet(data);
+	return write_normal_packet(data);
 }
 
-void connection_write_packet_5() // runtime estimate
+bool connection_write_packet_5() // runtime estimate
 {
 	uint8_t data[16];
 
 	fill_normal_packet(5, data);
-	write_normal_packet(data);
+	return write_normal_packet(data);
 }
 
 static int64_t last_info_time = 0;
@@ -1161,9 +1178,61 @@ bool connection_process_raw_data(void)
 	return false;
 }
 
-static int64_t last_sensor_quat_time = 0;
-#define SENSOR_QUAT_INTERVAL_TDMA_MS 1
-#define SENSOR_QUAT_INTERVAL_NOTDMA_MS 6
+/* Exact test-mode rate schedule in local monotonic microseconds. TDMA still
+ * owns slot admission; this schedule only selects which slot opportunities
+ * carry a test packet. Fractional microseconds are accumulated so arbitrary
+ * TPS values have no integer-ms bias. */
+static struct {
+	uint64_t next_due_us;
+	uint32_t remainder;
+	uint16_t tps;
+} test_rate_schedule;
+static uint64_t test_wake_delay_us;
+static bool test_wake_delay_valid;
+
+static void test_rate_schedule_sync(uint64_t now_us)
+{
+	uint16_t tps = test_mode_effective_tps();
+	if (tps == 0) {
+		memset(&test_rate_schedule, 0, sizeof(test_rate_schedule));
+		return;
+	}
+	if (test_rate_schedule.tps != tps || test_rate_schedule.next_due_us == 0
+		|| test_rate_schedule.next_due_us + 1000000ULL < now_us) {
+		test_rate_schedule.tps = tps;
+		test_rate_schedule.next_due_us = now_us;
+		test_rate_schedule.remainder = 0;
+	}
+}
+
+static bool test_rate_due(uint64_t now_us)
+{
+	test_rate_schedule_sync(now_us);
+	return test_rate_schedule.tps != 0 && now_us >= test_rate_schedule.next_due_us;
+}
+
+static void test_rate_advance(uint64_t now_us)
+{
+	uint16_t tps = test_rate_schedule.tps;
+	if (tps == 0) {
+		return;
+	}
+	do {
+		test_rate_schedule.next_due_us += 1000000U / tps;
+		test_rate_schedule.remainder += 1000000U % tps;
+		if (test_rate_schedule.remainder >= tps) {
+			test_rate_schedule.next_due_us++;
+			test_rate_schedule.remainder -= tps;
+		}
+	} while (test_rate_schedule.next_due_us <= now_us);
+}
+
+static uint64_t test_rate_delay_us(uint64_t now_us)
+{
+	test_rate_schedule_sync(now_us);
+	return test_rate_schedule.next_due_us > now_us
+		? test_rate_schedule.next_due_us - now_us : 0;
+}
 
 /* Lookahead window: if a low-freq packet is within this many ms of being due,
  * piggyback it onto the current transmission as a composite sub-packet. */
@@ -1180,7 +1249,7 @@ static int64_t last_sensor_quat_time = 0;
  * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub0_type][sub0_data...]
  *         [sub1_type][sub1_data...]...[sequence]
  */
-static void send_composite(const uint8_t *types, int n)
+static bool send_composite(const uint8_t *types, int n)
 {
 	uint8_t buf[ESB_MAX_PAYLOAD_LEN];
 	int pos = 0;
@@ -1199,15 +1268,18 @@ static void send_composite(const uint8_t *types, int n)
 	}
 
 	buf[pos++] = packet_sequence;
-	if (esb_write(buf, no_ack, pos) == 0) {
-		packet_sequence++;
+	if (esb_write(buf, no_ack, pos) != 0) {
+		return false;
 	}
+	packet_sequence++;
+	return true;
 }
 
 static void composite_builder_reset(struct composite_builder *builder)
 {
 	builder->n = 0;
 	builder->used = 0;
+	memset(builder->last_times, 0, sizeof(builder->last_times));
 }
 
 /*
@@ -1235,22 +1307,47 @@ composite_try_add_due(struct composite_builder *builder, uint8_t type, bool want
 	if (!composite_try_add(builder, type)) {
 		return false;
 	}
-	*last_time = now;
+	builder->last_times[builder->n - 1] = last_time;
+	builder->stamps[builder->n - 1] = now;
 	return true;
 }
 
-static void send_composite_or_single(const struct composite_builder *builder, uint8_t fallback_type)
+/* Apply deferred low-frequency last-sent timestamps once the packet that
+ * carries them was actually queued; a failed send must leave them unchanged
+ * so the data is retried. */
+static void composite_commit_timestamps(const struct composite_builder *builder)
+{
+	for (int i = 0; i < builder->n; i++) {
+		if (builder->last_times[i]) {
+			*builder->last_times[i] = builder->stamps[i];
+		}
+	}
+}
+
+static bool send_composite_or_single(const struct composite_builder *builder, uint8_t fallback_type)
 {
 	if (builder->n > 1) {
-		if (esb_ready()) {
-			send_composite(builder->types, builder->n);
+		if (!esb_ready()) {
+#if CONFIG_CONNECTION_OVER_HID
+			/* Radio unavailable: HID is the configured output path;
+			 * its enqueue success is the send success. */
+			return write_hid_composite_as_normal_packets(builder);
+#else
+			return false;
+#endif
+		}
+
+		/* Radio available: only ESB queue success counts, so a failed
+		 * admission cannot advance the schedule or mirror to HID. */
+		if (!send_composite(builder->types, builder->n)) {
+			return false;
 		}
 #if CONFIG_CONNECTION_OVER_HID
 		write_hid_composite_as_normal_packets(builder);
 #endif
-	} else {
-		connection_write_packet_type(fallback_type);
+		return true;
 	}
+	return connection_write_packet_type(fallback_type);
 }
 
 static void connection_signal_wake(void)
@@ -1258,27 +1355,9 @@ static void connection_signal_wake(void)
 	k_sem_give(&connection_wake_sem);
 }
 
-static int connection_quat_interval_ms(void)
-{
-#if CONFIG_CONNECTION_TDMA
-	if (tdma_is_enabled()) {
-		uint16_t frame_ticks = tdma_frame_ticks_get();
-		if (frame_ticks > 0) {
-			/* One sensor packet per TDMA frame; ceil the tick interval to
-			 * stay inside the per-tracker slot budget (e.g. 127 ticks ->
-			 * 4 ms -> ~250 TPS, under the ~258 TPS frame limit). */
-			return (int)(((uint32_t)frame_ticks * 1000U + 32767U) / 32768U);
-		}
-		return SENSOR_QUAT_INTERVAL_TDMA_MS;
-	}
-#endif
-	return SENSOR_QUAT_INTERVAL_NOTDMA_MS;
-}
-
 static int64_t connection_next_deadline_ms(int64_t now)
 {
 	int64_t deadline = now + 1000; /* bounded fallback */
-	int quat_interval_ms = connection_quat_interval_ms();
 
 	uint32_t ping_deadline = (uint32_t)atomic_get(&next_ping_deadline_ms);
 	uint32_t ping_window_delay_ms;
@@ -1290,31 +1369,33 @@ static int64_t connection_next_deadline_ms(int64_t now)
 	} else if (esb_ready() && (int32_t)(ping_deadline - (uint32_t)deadline) < 0) {
 		deadline = ping_deadline;
 	}
-	if (sensor_data_snapshot_qa_pending(&sensor_data_snapshot)) {
-		int64_t q_dl = last_sensor_quat_time + quat_interval_ms;
-		if (q_dl < deadline) {
-			deadline = q_dl;
+	test_wake_delay_valid = false;
+	if (test_mode_get()) {
+		uint64_t now_us = k_ticks_to_us_near64(k_uptime_ticks());
+		test_wake_delay_us = test_rate_delay_us(now_us);
+		test_wake_delay_valid = true;
+		int64_t t_dl = now + (int64_t)((test_wake_delay_us + 999ULL) / 1000ULL);
+		if (t_dl < deadline) {
+			deadline = t_dl;
 		}
 	}
-	if (sensor_data_snapshot_m_pending(&sensor_data_snapshot)) {
-		int64_t m_dl = last_mag_time + 100;
-		if (m_dl < deadline) {
-			deadline = m_dl;
+	if (!test_mode_get()) {
+		if (sensor_data_snapshot_m_pending(&sensor_data_snapshot)) {
+			int64_t m_dl = last_mag_time + 100;
+			if (m_dl < deadline) {
+				deadline = m_dl;
+			}
 		}
-	}
-	if (sensor_ids_set) {
-		int64_t i_dl = last_info_time + 100;
-		if (i_dl < deadline) {
-			deadline = i_dl;
+		if (sensor_ids_set) {
+			int64_t i_dl = last_info_time + 100;
+			if (i_dl < deadline) {
+				deadline = i_dl;
+			}
 		}
-	}
-	{
 		int64_t s_dl = last_status_time + 1000;
 		if (s_dl < deadline) {
 			deadline = s_dl;
 		}
-	}
-	{
 		int64_t r_dl = last_runtime_time + 1000;
 		if (r_dl < deadline) {
 			deadline = r_dl;
@@ -1332,6 +1413,14 @@ static void connection_idle_wait(int64_t now)
 	}
 	if (wait_ms > 1000) {
 		wait_ms = 1000;
+	}
+	if (test_wake_delay_valid) {
+		uint64_t wait_us = (uint64_t)wait_ms * 1000ULL;
+		if (test_wake_delay_us < wait_us) {
+			wait_us = test_wake_delay_us;
+		}
+		(void)k_sem_take(&connection_wake_sem, K_USEC((uint32_t)wait_us));
+		return;
 	}
 	(void)k_sem_take(&connection_wake_sem, K_MSEC(wait_ms));
 }
@@ -1424,7 +1513,13 @@ void connection_thread(void)
 				uint8_t ping[ESB_PING_LEN] = {0};
 				ping[0] = ESB_PING_TYPE;
 				ping[1] = connection_get_id();
-				ping[7] = esb_get_ping_ack_flag();
+				uint8_t ping_ack_flag = esb_get_ping_ack_flag();
+				ping[7] = ping_ack_flag;
+				if (ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON) {
+					uint16_t tps = test_mode_get_target_tps();
+					ping[8] = (tps >> 8) & 0xFF;
+					ping[9] = tps & 0xFF;
+				}
 				int err = esb_write(ping, false, ESB_PING_LEN);
 				if (err == 0) {
 					atomic_inc(&ping_sched_stats.queue_ok);
@@ -1503,17 +1598,28 @@ void connection_thread(void)
 			last_fusion_dc_time = now;
 		}
 
-		/* Determine which data types are due or nearly due */
-		int quat_interval_ms = connection_quat_interval_ms();
-		bool quat_ready = sensor_data_snapshot_qa_pending(&sensor_data_snapshot)
-			&& (now - last_sensor_quat_time >= quat_interval_ms);
-		bool mag_due = sensor_data_snapshot_m_pending(&sensor_data_snapshot)
+		/* TDMA is the sole frame scheduler. In normal mode a fresh snapshot
+		 * enters admission immediately. In test mode the configured interval
+		 * is both floor and ceiling: publications only refresh the latest
+		 * snapshot; exactly one packet enters admission when the interval is
+		 * due. */
+		bool pending = sensor_data_snapshot_qa_pending(&sensor_data_snapshot);
+		bool in_test_mode = test_mode_get();
+		if (!in_test_mode && test_rate_schedule.tps != 0) {
+			memset(&test_rate_schedule, 0, sizeof(test_rate_schedule));
+		}
+		uint64_t now_us = k_ticks_to_us_near64(k_uptime_ticks());
+		bool test_send_due = in_test_mode && test_rate_due(now_us);
+		bool quat_ready = in_test_mode ? test_send_due : pending;
+		/* In test mode all low-frequency data rides the next target-rate
+		 * packet. Standalone sends would violate the configured ceiling. */
+		bool mag_due = !in_test_mode && sensor_data_snapshot_m_pending(&sensor_data_snapshot)
 			&& (now - last_mag_time > 100);
-		bool info_due = sensor_ids_set && (now - last_info_time > 100);
-		bool status_due = (now - last_status_time > 1000);
-		bool runtime_due = (now - last_runtime_time > 1000);
+		bool info_due = !in_test_mode && sensor_ids_set && (now - last_info_time > 100);
+		bool status_due = !in_test_mode && (now - last_status_time > 1000);
+		bool runtime_due = !in_test_mode && (now - last_runtime_time > 1000);
 
-		/* Lookahead: consider nearly-due low-freq packets for piggybacking */
+		/* Low-frequency fields may always piggyback on a quat/test packet. */
 		bool info_soon = sensor_ids_set && (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool runtime_soon = (now - last_runtime_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
@@ -1532,8 +1638,7 @@ void connection_thread(void)
 			/* Primary: quat sub-packet */
 			if (mag_wanted) {
 				/* mag includes full quat, use type 4 instead of separate quat+mag */
-				composite_try_add(&builder, 4);
-				last_mag_time = now;
+				composite_try_add_due(&builder, 4, true, &last_mag_time, now);
 				fallback_type = 4;
 			} else if (!connection_sensor_get_precise_quat() && info_wanted) {
 				/* compact quat (type 2) contains batt/temp but NOT imu_id/mag_id.
@@ -1550,8 +1655,15 @@ void connection_thread(void)
 			composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
 			composite_try_add_due(&builder, 0, info_wanted, &last_info_time, now);
 
-			send_composite_or_single(&builder, fallback_type);
-			last_sensor_quat_time = now;
+			if (send_composite_or_single(&builder, fallback_type)) {
+				/* Only a successfully queued packet consumes the test-rate
+				 * slot; missed ESB admission is retried without advancing
+				 * the schedule. */
+				if (in_test_mode) {
+					test_rate_advance(k_ticks_to_us_near64(k_uptime_ticks()));
+				}
+				composite_commit_timestamps(&builder);
+			}
 			continue;
 		}
 
@@ -1561,14 +1673,15 @@ void connection_thread(void)
 			if (status_wanted || runtime_wanted) {
 				struct composite_builder builder;
 				composite_builder_reset(&builder);
-				composite_try_add(&builder, 4);
+				composite_try_add_due(&builder, 4, true, &last_mag_time, now);
 				composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
 				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
-				send_composite_or_single(&builder, 4);
-			} else {
-				connection_write_packet_4();
+				if (send_composite_or_single(&builder, 4)) {
+					composite_commit_timestamps(&builder);
+				}
+			} else if (connection_write_packet_4()) {
+				last_mag_time = now;
 			}
-			last_mag_time = now;
 			continue;
 		}
 
@@ -1577,14 +1690,15 @@ void connection_thread(void)
 			if (status_wanted || runtime_wanted) {
 				struct composite_builder builder;
 				composite_builder_reset(&builder);
-				composite_try_add(&builder, 0);
+				composite_try_add_due(&builder, 0, true, &last_info_time, now);
 				composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
 				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
-				send_composite_or_single(&builder, 0);
-			} else {
-				connection_write_packet_0();
+				if (send_composite_or_single(&builder, 0)) {
+					composite_commit_timestamps(&builder);
+				}
+			} else if (connection_write_packet_0()) {
+				last_info_time = now;
 			}
-			last_info_time = now;
 			continue;
 		}
 
@@ -1592,20 +1706,21 @@ void connection_thread(void)
 			if (runtime_wanted) {
 				struct composite_builder builder;
 				composite_builder_reset(&builder);
-				composite_try_add(&builder, 3);
+				composite_try_add_due(&builder, 3, true, &last_status_time, now);
 				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
+				if (send_composite_or_single(&builder, 3)) {
+					composite_commit_timestamps(&builder);
+				}
+			} else if (connection_write_packet_3()) {
 				last_status_time = now;
-				send_composite_or_single(&builder, 3);
-			} else {
-				last_status_time = now;
-				connection_write_packet_3();
 			}
 			continue;
 		}
 
 		if (runtime_due) {
-			last_runtime_time = now;
-			connection_write_packet_5();
+			if (connection_write_packet_5()) {
+				last_runtime_time = now;
+			}
 			continue;
 		}
 

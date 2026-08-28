@@ -323,6 +323,12 @@ static void print_sensor_detail(void)
 	} else {
 		printk("  Loop:        n/a\n");
 	}
+	printk(
+		"  Test mode:   %s (target=%u, effective=%u TPS)\n",
+		test_mode_get() ? "enabled" : "disabled",
+		test_mode_get_target_tps(),
+		test_mode_effective_tps()
+	);
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("\nAccelerometer matrix:\n");
