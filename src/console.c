@@ -1652,12 +1652,9 @@ static const struct console_cmd console_cmds[] = {
 
 static void console_thread(void)
 {
-#if USB_EXISTS && DFU_EXISTS
-	if (button_read()) // button held on usb connect, enter DFU
-	{
-		sys_enter_dfu(false);
-	}
-#endif
+	// USB serial readiness is handled by usb.c usb_ctrl_thread via DTR;
+	// this thread starts only once the terminal has asserted DTR.
+	// DFU-on-button also lives in usb_ctrl_thread (needs button_read_filtered).
 
 #if USB_EXISTS || UART_CONSOLE_EXISTS
 	console_getline_init();
@@ -1667,25 +1664,7 @@ static void console_thread(void)
 		k_usleep(1);
 	}
 
-#if USB_EXISTS
-	// Wait for USB CDC to be ready by checking DTR (Data Terminal Ready) signal
-	// This ensures the terminal is actually connected and ready to receive data
-	const struct device *uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
-	if (device_is_ready(uart_dev)) {
-		uint32_t dtr = 0;
-		// Wait up to 5 seconds for DTR to be asserted (terminal connected)
-		for (int i = 0; i < 50; i++) {
-			if (uart_line_ctrl_get(uart_dev, UART_LINE_CTRL_DTR, &dtr) == 0 && dtr) {
-				break;
-			}
-			k_msleep(100);
-		}
-		// Give a bit more time for the terminal to be fully ready
-		k_msleep(100);
-	}
-
 	printk("*** " CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER " " CONFIG_SLIMEVR_USB_DEVICE_PRODUCT " ***\n");
-#endif
 #endif
 	printk(FW_STRING);
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);

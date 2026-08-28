@@ -36,6 +36,9 @@ void set_status(enum sys_status status, bool set) {
 		case SYS_STATUS_USB_CONNECTED:
 			LOG_INF("USB connected");
 			break;
+		case SYS_STATUS_SERIAL_ACTIVE:
+			LOG_INF("Serial connected");
+			break;
 		case SYS_STATUS_PLUGGED:
 			LOG_INF("Charger plugged");
 			break;
@@ -69,7 +72,7 @@ static void status_thread(void)
 {
 	while (1) // cycle through errors
 	{
-		int status = status_state & STATUS_LED_ERROR_MASK;
+		int status = status_state & (SYS_STATUS_ERROR | SYS_STATUS_WARN);
 		if (status & SYS_STATUS_SENSOR_ERROR) {
 			set_led(SYS_LED_PATTERN_ERROR_A, SYS_LED_PRIORITY_STATUS);
 			(void)k_sem_take(&status_wake_sem, K_MSEC(5000));
