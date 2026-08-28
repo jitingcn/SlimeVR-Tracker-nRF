@@ -58,6 +58,7 @@ void sys_nvs_stats(void);
 int set_sensor_clock(bool enable, float rate, float* actual_rate);
 
 bool button_read(void);
+bool button_read_filtered(void);
 
 bool dock_read(void);
 bool chg_read(void);
