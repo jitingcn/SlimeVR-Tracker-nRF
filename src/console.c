@@ -319,9 +319,9 @@ static void print_sensor_detail(void)
 	);
 #endif
 	if (loop_ms > 0.0f) {
-		printk("  Loop:        ~%.1f ms\n", (double)loop_ms);
+		printk("  Work time:   ~%.1f ms/loop\n", (double)loop_ms);
 	} else {
-		printk("  Loop:        n/a\n");
+		printk("  Work time:   n/a\n");
 	}
 	printk(
 		"  Test mode:   %s (target=%u, effective=%u TPS)\n",
