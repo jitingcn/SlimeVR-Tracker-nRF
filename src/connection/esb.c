@@ -145,8 +145,10 @@ static int64_t ping_send_time = 0;
 #define PING_HISTORY_SIZE 10
 struct ping_history_entry {
 	uint8_t counter;
-	// ticks at ping send time
+	// ticks at ping send time, NETWORK tick domain (sync/offset math)
 	uint32_t ping_ticks;
+	// ticks at ping send time, KERNEL tick domain (RTT vs t4 stamp)
+	uint32_t ping_ticks_kernel;
 };
 static struct ping_history_entry ping_history[PING_HISTORY_SIZE] = {0};
 static uint8_t ping_history_idx = 0;
@@ -566,6 +568,61 @@ static volatile uint8_t ota_rx_tail;
 static bool server_time_synced = false;
 
 // Server time synchronization
+/*
+ * Network (TDMA) tick domain conversion. The TDMA network runs at 32768 Hz
+ * on all nodes. On nRF52 the kernel tick is also 32768 Hz, so kernel and
+ * network ticks are the same domain. On nRF54L the kernel runs at 31250 Hz
+ * (GRTC 1 MHz / 32): kernel ticks advance 4.88% slower than network ticks,
+ * so any sync-path stamp kept in kernel ticks injects a 4.63% rate error
+ * into the server-time extrapolation.
+ *
+ * Conversion takes the full 64-bit monotonic kernel time and yields 64-bit
+ * network ticks. Truncating a 32-bit kernel stamp BEFORE converting makes
+ * the network value jump at every kernel-tick wrap (the two 32-bit domains
+ * wrap at different points, corrupting wrap-safe differences); converting
+ * the 64-bit timeline first keeps truncated (wire) stamps and 32-bit
+ * wrap-safe differences exact. RTT math (t1/t4 differences) stays in kernel
+ * ticks where both stamps share the domain and k_ticks_to_us is
+ * kernel-aware. Network ticks convert back to us/ms explicitly (32768 Hz),
+ * never via kernel-tick macros.
+ */
+static inline uint64_t net_ticks_from_kernel64(uint64_t kernel_ticks)
+{
+#if defined(CONFIG_SOC_SERIES_NRF54L) || defined(CONFIG_SOC_COMPATIBLE_NRF54L)
+	return (k_ticks_to_us_near64(kernel_ticks) * 32768ULL) / 1000000ULL;
+#else
+	return kernel_ticks;
+#endif
+}
+
+/* Reassemble a wrapping 32-bit kernel-tick stamp onto the 64-bit monotonic
+ * timeline: the nearest 64-bit value whose low 32 bits equal short_ticks.
+ * Valid for stamps within +/-2^31 kernel ticks of the current time. */
+static inline uint64_t kernel_ticks_extend32(uint32_t short_ticks)
+{
+	uint64_t now = k_uptime_ticks();
+	uint64_t candidate = (now & ~(uint64_t)0xFFFFFFFFULL) | short_ticks;
+	int64_t diff = (int64_t)(candidate - now);
+	if (diff < -(int64_t)0x80000000LL) {
+		candidate += 0x100000000ULL;
+	} else if (diff > (int64_t)0x7FFFFFFFLL) {
+		candidate -= 0x100000000ULL;
+	}
+	return candidate;
+}
+
+/* 32768 Hz network ticks -> microseconds (floor), platform-independent. */
+static inline uint64_t net_ticks_to_us_64(uint64_t net_ticks)
+{
+	return (net_ticks * 1000000ULL) / 32768ULL;
+}
+
+/* 32768 Hz network ticks -> milliseconds (floor), platform-independent. */
+static inline uint32_t net_ticks_to_ms_32(uint32_t net_ticks)
+{
+	return (uint32_t)(((uint64_t)net_ticks * 1000ULL) / 32768ULL);
+}
+
 static uint32_t g_server_ticks_offset = 0;
 static uint32_t g_last_rx_raw_ticks = 0;
 static uint32_t g_last_sync_local_ticks = 0;
@@ -1166,10 +1223,23 @@ void event_handler(struct esb_evt const *event)
 						//
 						// offset = T2 - T4 (constant one-way bias cancels for TDMA)
 						// ====================================================================
+						/* T4 = ACK RX stamp exported by the ESB lib (radio
+						 * moment). Read the wrapping uint32 once; RTT keeps
+						 * the kernel-domain pair, and only the network-domain
+						 * view extends it to the nearest 64-bit epoch. */
 						uint32_t t4_ticks = esb_last_ack_rx_ticks;
+						uint32_t t4_net_ticks =
+							(uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(t4_ticks));
 
 						// Calculate full RTT: from PING send (T1) to PONG receive (T4)
-						uint32_t rtt_ticks = t4_ticks - ping_ticks_for_this_ctr;
+						uint32_t ping_ticks_kernel_for_this_ctr = 0;
+						for (int i = 0; i < PING_HISTORY_SIZE; i++) {
+							if (ping_history[i].counter == rx_ctr && ping_history[i].ping_ticks_kernel != 0) {
+								ping_ticks_kernel_for_this_ctr = ping_history[i].ping_ticks_kernel;
+								break;
+							}
+						}
+						uint32_t rtt_ticks = t4_ticks - ping_ticks_kernel_for_this_ctr;
 						rtt_us = k_ticks_to_us_floor32(rtt_ticks);
 
 						// Track minimum RTT (no-retransmission baseline)
@@ -1218,7 +1288,7 @@ void event_handler(struct esb_evt const *event)
 							// Decoupling from min_rtt avoids noise injection when
 							// min_rtt ages/updates.
 							int32_t server_offset_ticks
-								= (int32_t)(ping_rx_ticks - t4_ticks);
+								= (int32_t)(ping_rx_ticks - t4_net_ticks);
 
 							/* Save prior sync stamp before overwrite — EMA predict
 							 * needs elapsed since last accepted PONG, not zero. */
@@ -1284,11 +1354,11 @@ void event_handler(struct esb_evt const *event)
 							server_time_synced = true;
 
 							// Display skew-compensated estimated server time
-							uint32_t local_now = sys_clock_tick_get_32();
+							uint32_t local_now = (uint32_t)net_ticks_from_kernel64(k_uptime_ticks());
 							uint32_t elapsed_since_meas = local_now - ping_ticks_for_this_ctr;
 							int32_t skew_corr = (int32_t)((int64_t)g_clock_skew_ppb * elapsed_since_meas / 1000000000LL);
 							uint32_t est_ticks = (uint32_t)((int32_t)g_server_ticks_offset + (int32_t)local_now + skew_corr);
-							uint32_t server_time_ms = k_ticks_to_ms_near32(est_ticks);
+							uint32_t server_time_ms = net_ticks_to_ms_32(est_ticks);
 							uint32_t server_ms = server_time_ms % 1000;
 							uint32_t server_s = (server_time_ms / 1000) % 60;
 							uint32_t server_m = (server_time_ms / 60000) % 60;
@@ -1985,8 +2055,12 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	 * moment the radio actually begins transmitting.
 	 */
 	if (tx_payload.data[0] == ESB_PING_TYPE && queue_status == 0) {
+		/* Single 64-bit T1 sample; low 32 bits stay the kernel-domain
+		 * RTT stamp, full value converts to network ticks. */
+		uint64_t t1_kernel64 = k_uptime_ticks();
 		unsigned key = irq_lock();
-		ping_history[ping_history_idx].ping_ticks = sys_clock_tick_get_32();
+		ping_history[ping_history_idx].ping_ticks = (uint32_t)net_ticks_from_kernel64(t1_kernel64);
+		ping_history[ping_history_idx].ping_ticks_kernel = (uint32_t)t1_kernel64;
 		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
 		irq_unlock(key);
 		ping_send_time = k_uptime_get();
@@ -2032,19 +2106,22 @@ uint64_t esb_get_server_time_ticks_64(void)
 		return 0;
 	}
 
-	uint32_t local_now = sys_clock_tick_get_32();
+	uint64_t local_now = net_ticks_from_kernel64(k_uptime_ticks());
 	// Apply clock skew compensation only for time elapsed since last PONG
 	// (g_server_ticks_offset already incorporates all drift up to last measurement)
-	uint32_t elapsed = local_now - g_last_sync_local_ticks;
+	uint32_t elapsed = (uint32_t)local_now - g_last_sync_local_ticks;
 	int32_t skew_correction = (int32_t)((int64_t)g_clock_skew_ppb * elapsed / 1000000000LL);
-	return (uint32_t)(g_server_ticks_offset + local_now) + skew_correction;
+	/* 64-bit monotonic estimate; low 32 bits are the 32-bit wire-stamp
+	 * domain (PING data[3-6]) and stay wrap-safe. */
+	return local_now + (uint64_t)(int64_t)(int32_t)g_server_ticks_offset
+		+ (uint64_t)(int64_t)skew_correction;
 }
 
 uint64_t esb_get_server_time_us_64(void)
 {
 	uint64_t ticks = esb_get_server_time_ticks_64();
 
-	return k_ticks_to_us_near64(ticks);
+	return net_ticks_to_us_64(ticks);
 }
 
 uint32_t esb_get_server_time(void)
