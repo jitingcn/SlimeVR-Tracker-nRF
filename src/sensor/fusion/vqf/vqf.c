@@ -170,13 +170,13 @@ static void set_params()
 	params.biasClip = 5.0f;
 	params.biasForgettingTime = 100.0f;
 	params.biasSigmaInit = 1.0f;
-	params.biasSigmaMotion = 0.20f;
-	params.biasSigmaRest = 0.06f;
+	params.biasSigmaMotion = 0.28f;
+	params.biasSigmaRest = 0.05f;
 	params.biasVerticalForgettingFactor = 0.0001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
 	params.restFilterTau = 1.34f;
-	params.restMinT = 2.1f;
+	params.restMinT = 2.8f;
 	params.restThGyr = 0.8f;
 	params.restThAcc = 0.08f;
 	params.magDistRejectionEnabled = true;
