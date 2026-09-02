@@ -1,0 +1,90 @@
+/*
+ * SlimeNRF tracker adaptation of the Seeed Studio XIAO nRF54L15 Sense,
+ * selected with -DFILE_SUFFIX=sense.
+ * Sense variant: onboard LSM6DS3TR-C 6DOF IMU on i2c30 (interrupt on
+ * P0.02) powered by the P0.01 sensor rail, plus an MSM261DGT006 PDM
+ * microphone (unused by the tracker firmware). The IMU address is left
+ * at 0 (auto-scan, stored address first): pin-to-pin replacement IMUs
+ * are expected on this bus. An external magnetometer can be attached to
+ * the XIAO I2C pins (D4/D5 = i2c22).
+ */
+&pdm20 {
+	status = "disabled";
+};
+
+&uart21 {
+	status = "disabled";
+};
+
+/* Use SlimeNRF's own register driver (LSM6DSM covers the LSM6DS3TR-C
+ * WHO_AM_I 0x6a), not Zephyr's st,lsm6dsl driver.
+ */
+&lsm6ds3tr_c {
+	status = "disabled";
+	/delete-property/ irq-gpios;
+};
+
+/* No external SPI IMU wiring on the Sense variant: the SPI pins D8/D9/D10
+ * stay free and the sensor scan runs I2C-only.
+ */
+&spi00 {
+	status = "disabled";
+};
+
+/* The upstream board only aliases watchdog0 to wdt31 but leaves the node
+ * disabled; the tracker watchdog thread expects the device to exist.
+ */
+&wdt31 {
+	status = "okay";
+};
+
+/* Battery sense: hand the TPS22916 load-switch GPIO (P1.15) to the app's
+ * voltage-divider node instead of the always-on board regulator, so the
+ * /2 divider on AIN7 (P1.14) only draws power while sampling.
+ */
+&vbat_pwr {
+	status = "disabled";
+};
+
+/ {
+	battery-divider {
+		compatible = "voltage-divider";
+		status = "okay";
+		io-channels = <&adc 7>;
+		/* VBAT through the TPS22916 load switch into a /2 divider on
+		 * AIN7; Seeed's battery example scales the reading by 2.
+		 */
+		output-ohms = <1000000>;
+		full-ohms = <(1000000+1000000)>;
+		power-gpios = <&gpio1 15 GPIO_ACTIVE_HIGH>;
+	};
+
+	zephyr,user {
+		/* Onboard LSM6DS3TR-C interrupt (INT1 = P0.02). */
+		int0-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&i2c30 {
+	zephyr,concat-buf-size = <1023>;
+	zephyr,flash-buf-max-size = <1023>;
+
+	/* reg = <0> scans every supported IMU address (stored address first),
+	 * so a pin-to-pin replacement IMU is picked up without a rebuild
+	 * change; stock boards find the LSM6DS3TR-C at 0x6a.
+	 */
+	imu: imu@0 {
+		compatible = "i2c-device";
+		reg = <0>;
+	};
+};
+
+&i2c22 {
+	zephyr,concat-buf-size = <1023>;
+	zephyr,flash-buf-max-size = <1023>;
+
+	mag: mag@0 {
+		compatible = "i2c-device";
+		reg = <0>;
+	};
+};

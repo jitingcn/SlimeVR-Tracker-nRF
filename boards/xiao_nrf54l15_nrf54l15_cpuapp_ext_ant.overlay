@@ -1,0 +1,17 @@
+/*
+ * External-antenna build of the XIAO nRF54L15 tracker
+ * (-DFILE_SUFFIX=ext_ant). Everything matches the default (onboard
+ * ceramic antenna) build except the RF switch port select.
+ *
+ * The RF switch port select (P2.05) is physically LOW when the upstream
+ * rfsw_ctl regulator is enabled (enable-gpios is active-low), selecting
+ * the onboard ceramic antenna. Seeed's antenna-switch example drives the
+ * pin physically HIGH for the external antenna connector. Inverting the
+ * polarity keeps the boot-on regulator doing the work — no application
+ * logic — with the enabled state now holding P2.05 HIGH.
+ */
+#include "xiao_nrf54l15_nrf54l15_cpuapp.overlay"
+
+&rfsw_ctl {
+	enable-gpios = <&gpio2 5 GPIO_ACTIVE_HIGH>;
+};

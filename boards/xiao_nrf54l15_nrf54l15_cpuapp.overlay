@@ -1,0 +1,98 @@
+/*
+ * SlimeNRF tracker adaptation of the Seeed Studio XIAO nRF54L15.
+ * The board definition itself comes from the Zephyr tree
+ * (seeed/xiao_nrf54l15); this overlay repurposes it for the tracker.
+ *
+ * Base variant: no onboard IMU. An external tracker IMU is expected on the
+ * XIAO connector, either on I2C (D4/D5 = i2c22) or on SPI
+ * (D8/D9/D10 = spi00, chip select on D2, interrupt on D3).
+ */
+
+/* Unused onboard peripherals: the PDM mic (P1.12/P1.13), the onboard-IMU
+ * I2C bus (D11/D12 pads, unpopulated on the non-Sense board), and uart21
+ * (D6/D7) — the console runs on uart20 via the SAMD11 USB-UART bridge.
+ */
+&pdm20 {
+	status = "disabled";
+};
+
+&i2c30 {
+	status = "disabled";
+};
+
+&uart21 {
+	status = "disabled";
+};
+
+/* Zephyr driver node for the (on this variant absent) onboard LSM6DS3TR-C;
+ * the tracker uses its own register drivers behind the scan nodes below.
+ */
+&lsm6ds3tr_c {
+	status = "disabled";
+	/delete-property/ irq-gpios;
+};
+
+/* The upstream board only aliases watchdog0 to wdt31 but leaves the node
+ * disabled; the tracker watchdog thread expects the device to exist.
+ */
+&wdt31 {
+	status = "okay";
+};
+
+/* Battery sense: hand the TPS22916 load-switch GPIO (P1.15) to the app's
+ * voltage-divider node instead of the always-on board regulator, so the
+ * /2 divider on AIN7 (P1.14) only draws power while sampling.
+ */
+&vbat_pwr {
+	status = "disabled";
+};
+
+/ {
+	battery-divider {
+		compatible = "voltage-divider";
+		status = "okay";
+		io-channels = <&adc 7>;
+		/* VBAT through the TPS22916 load switch into a /2 divider on
+		 * AIN7; Seeed's battery example scales the reading by 2.
+		 */
+		output-ohms = <1000000>;
+		full-ohms = <(1000000+1000000)>;
+		power-gpios = <&gpio1 15 GPIO_ACTIVE_HIGH>;
+	};
+
+	zephyr,user {
+		/* External tracker IMU interrupt on XIAO D3. */
+		int0-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+&i2c22 {
+	zephyr,concat-buf-size = <1023>;
+	zephyr,flash-buf-max-size = <1023>;
+
+	imu: imu@0 {
+		compatible = "i2c-device";
+		reg = <0>;
+	};
+
+	mag: mag@0 {
+		compatible = "i2c-device";
+		reg = <0>;
+	};
+};
+
+&spi00 {
+	/* nRF54L SPIM00 prescaler accepts only even divisors: the IMU
+	 * drivers' 24 MHz request is invalid, so clamp the controller (and
+	 * child) to the safe 8 MHz used everywhere else.
+	 */
+	max-frequency = <DT_FREQ_M(8)>;
+	/* XIAO D2 is the default external tracker IMU chip select. */
+	cs-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
+
+	imu_spi: imu@0 {
+		compatible = "vnd,spi-device";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(8)>;
+	};
+};

@@ -1,0 +1,12 @@
+/*
+ * External-antenna build of the XIAO nRF54L15 Sense tracker
+ * (-DFILE_SUFFIX=sense_ext_ant): sense hardware plus the RF switch
+ * holding the external antenna connector selected. See
+ * xiao_nrf54l15_nrf54l15_cpuapp_ext_ant.overlay for the switching
+ * rationale.
+ */
+#include "xiao_nrf54l15_nrf54l15_cpuapp_sense.overlay"
+
+&rfsw_ctl {
+	enable-gpios = <&gpio2 5 GPIO_ACTIVE_HIGH>;
+};

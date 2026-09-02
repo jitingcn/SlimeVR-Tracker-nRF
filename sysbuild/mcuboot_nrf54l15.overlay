@@ -1,0 +1,28 @@
+/* Slim MCUboot for the XIAO nRF54L15 boards: keep the sensor buses, PDM
+ * mic, battery sense rail, and watchdog off in the bootloader image. This
+ * board has neither an nPM1300 PMIC nor a native USB controller, so there
+ * is nothing else to trim. */
+
+&i2c22 {
+	status = "disabled";
+};
+
+&i2c30 {
+	status = "disabled";
+};
+
+&spi00 {
+	status = "disabled";
+};
+
+&pdm20 {
+	status = "disabled";
+};
+
+&vbat_pwr {
+	status = "disabled";
+};
+
+&wdt31 {
+	status = "disabled";
+};

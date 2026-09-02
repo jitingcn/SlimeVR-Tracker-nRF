@@ -22,6 +22,10 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf54lm20a_mcuboot.overlay)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
        ${partition_overlay_dir}/nrf54lm20a_mcuboot.overlay)
+elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf54l15_mcuboot.overlay)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${partition_overlay_dir}/nrf54l15_mcuboot.overlay)
 elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_BOARD STREQUAL "xiao_ble")
   list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_xiao_mcuboot.overlay)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
@@ -40,6 +44,8 @@ elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF52832)
        ${partition_overlay_dir}/nrf52832_mcuboot_single.overlay)
 elseif(NOT SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf54lm20a.overlay)
+elseif(NOT SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15)
+  list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf54l15.overlay)
 elseif(SB_CONFIG_BOARD STREQUAL "xiao_ble")
   list(APPEND extra_dtc_overlay_candidates ${partition_overlay_dir}/nrf52840_xiao.overlay)
 elseif(SB_CONFIG_SOC_NRF52840 AND uses_uf2_layout AND WITH_SOFTDEVICE)
@@ -91,6 +97,21 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   else()
     list(APPEND mcuboot_EXTRA_CONF_FILE
          ${mcuboot_overlay_dir}/mcuboot_usb_next.conf)
+  endif()
+endif()
+
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${mcuboot_overlay_dir}/mcuboot_nrf54l15.overlay)
+  if(SB_CONFIG_BOARD STREQUAL "xiao_nrf54l15")
+    # XIAO nRF54L15: the nRF54L15 has no native USB controller and the
+    # onboard SAMD11 serves the USB-C connector as a USB-UART bridge on
+    # uart20, so MCUboot serial recovery runs over uart20 instead of USB
+    # CDC ACM.
+    list(APPEND mcuboot_EXTRA_CONF_FILE
+         ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.conf)
+    list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+         ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.overlay)
   endif()
 endif()
 

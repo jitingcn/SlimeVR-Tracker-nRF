@@ -1,0 +1,6 @@
+/*
+ * MCUboot-suffix build of the XIAO nRF54L15 Sense tracker
+ * (-DFILE_SUFFIX=sense_mcuboot). Device tree is identical to the plain
+ * sense build; only the Kconfig fragments differ.
+ */
+#include "xiao_nrf54l15_nrf54l15_cpuapp_sense.overlay"
