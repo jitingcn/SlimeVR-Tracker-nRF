@@ -64,6 +64,11 @@ struct raw_imu_sample {
 void connection_set_data_collection(bool enable);
 bool connection_get_data_collection(void);
 
+// Batch raw sensor data collection (runtime controlled via PONG command)
+void connection_set_data_collection_batch(bool enable, uint16_t rate_hz);
+bool connection_get_data_collection_batch(void);
+uint16_t connection_get_data_collection_batch_rate(void);
+
 // OTA suppression: reduce poll rate when another tracker is being updated
 void connection_set_ota_suppressed(bool suppressed);
 bool connection_get_ota_suppressed(void);
@@ -80,8 +85,10 @@ void connection_send_raw_metadata(float gyro_range, float accel_range,
 				  float mag_odr, uint8_t imu_id, uint8_t mag_id,
 				  float chip_gyro_hz, float fusion_gyro_hz);
 
-/* Send calibration drip packets (after metadata). */
-void connection_send_raw_calibration(void);
+
+/* Send calibration drip packets (after metadata). include_tcal=false skips
+ * the T-Cal state/points chunks (batch mode re-sends; sent once at start). */
+void connection_send_raw_calibration(bool include_tcal);
 
 // Check if metadata needs periodic re-send (returns true if due)
 bool connection_raw_metadata_resend_due(void);

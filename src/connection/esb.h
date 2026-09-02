@@ -140,6 +140,8 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 #define ESB_PONG_FLAG_OTA_ABORT 0x31        // Abort ESB OTA update
 #define ESB_PONG_FLAG_OTA_SUPPRESS 0x32     // Suppress tracker during OTA (reduce poll rate)
 #define ESB_PONG_FLAG_OTA_UNSUPPRESS 0x33   // Resume normal poll rate after OTA
+#define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 0x34  // Start batch raw data collection (data[8] = target Hz, 0 = accel ODR)
+#define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 0x35 // Stop batch raw data collection
 
 // Raw data collection packet types
 // DEPRECATED on tracker: ESB_RAW_IMU/MAG unused; live TX is ESB_RAW_IMU_QUAT_TYPE.

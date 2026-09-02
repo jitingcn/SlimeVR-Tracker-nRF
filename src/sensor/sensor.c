@@ -36,6 +36,7 @@
 #include <math.h>
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_power.h>
+#include <zephyr/sys/atomic.h>
 
 #if CONFIG_CMSIS_DSP
 #include <arm_math.h>
@@ -257,22 +258,27 @@ static float accel_effective_time; // Effective time step for fusion after overs
 static float accel_actual_range; // Actual accelerometer full scale range (g)
 static float gyro_actual_range;  // Actual gyroscope full scale range (deg/s)
 
-/* Raw gyrQuat emit plan: same N as fusion INT_merge, separate uncalibrated accum. */
+/* Raw gyrQuat emit plan: same N as fusion unless batch collection requests a
+ * lower rate. The sensor thread owns the accumulator; the connection thread
+ * publishes batch configuration through atomics. */
 struct raw_rate_plan {
 	uint8_t n_raw; /* == gyro_oversample_n */
 	uint8_t emit_count;
 	float chip_hz;
-	float send_hz; /* == fusion_hz; meta gyro_odr (host gyrTs) */
+	float send_hz; /* meta gyro_odr (host gyrTs) */
 	float fusion_hz;
+	bool batch_active;
+	float batch_accum;
+	float batch_interval;
 };
 
 static struct raw_rate_plan raw_rate_plan = {
 	.n_raw = 1,
-	.emit_count = 0,
-	.chip_hz = 0.0f,
-	.send_hz = 0.0f,
-	.fusion_hz = 0.0f,
 };
+
+static atomic_t batch_collect_active;
+static atomic_t batch_collect_rate_hz;
+static atomic_t batch_collect_generation;
 
 static void sensor_send_raw_metadata(void);
 
@@ -1345,7 +1351,7 @@ void sensor_set_mag_enabled(bool enabled)
 	sensor_mag_ref_reset();
 	sensor_refresh_sensor_ids();
 
-	if (connection_get_data_collection()) {
+	if (connection_get_data_collection() || connection_get_data_collection_batch()) {
 		sensor_send_raw_metadata();
 	}
 
@@ -1793,9 +1799,9 @@ int sensor_init(void)
 	sensor_fusion_init = true;
 	sensor_mag_timing_reset();
 
-	if (connection_get_data_collection()) {
+	if (connection_get_data_collection() || connection_get_data_collection_batch()) {
 		sensor_send_raw_metadata();
-		connection_send_raw_calibration();
+		connection_send_raw_calibration(true);
 		LOG_INF(
 			"Data collection mode: metadata + calibration sent (gyro %.0fdps, accel %.0fg, send %.0fHz, chip %.0fHz)",
 			(double)gyro_actual_range,
@@ -1816,21 +1822,42 @@ static int64_t max_loop_time = 0;
 static float loop_period_ema_ms; /* ~actual publish/loop period */
 
 static bool last_data_collection_state = false;
+static atomic_val_t last_batch_collect_generation;
 
 /* Raw gyro quaternion accumulator for data collection.
  * Integrates raw gyro (no bias correction) so offline VQF can re-estimate bias.
  * Reset when data collection starts. */
 static float raw_gyr_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
 
+void sensor_set_batch_collect(bool active, float emit_hz)
+{
+	uint32_t rate_hz = emit_hz > 0.0f ? (uint32_t)emit_hz : 0;
+	atomic_set(&batch_collect_rate_hz, (atomic_val_t)rate_hz);
+	atomic_set(&batch_collect_active, active ? 1 : 0);
+	atomic_inc(&batch_collect_generation);
+}
+
 static void raw_rate_plan_refresh(void)
 {
 	float chip_hz = 1.0f / gyro_actual_time;
 	uint8_t n_raw = gyro_oversample_n > 0 ? gyro_oversample_n : 1;
+	bool batch_active = atomic_get(&batch_collect_active) != 0;
+	float requested_hz = (float)atomic_get(&batch_collect_rate_hz);
+	float accel_hz = 1.0f / accel_actual_time;
+	float emit_hz = requested_hz > 0.0f ? requested_hz : accel_hz;
+	if (emit_hz > chip_hz) {
+		emit_hz = chip_hz;
+	}
+	if (emit_hz <= 0.0f) {
+		emit_hz = chip_hz;
+	}
 
 	raw_rate_plan.n_raw = n_raw;
 	raw_rate_plan.chip_hz = chip_hz;
 	raw_rate_plan.fusion_hz = chip_hz / (float)n_raw;
-	raw_rate_plan.send_hz = raw_rate_plan.fusion_hz;
+	raw_rate_plan.batch_active = batch_active;
+	raw_rate_plan.batch_interval = batch_active ? chip_hz / emit_hz : 0.0f;
+	raw_rate_plan.send_hz = batch_active ? emit_hz : raw_rate_plan.fusion_hz;
 }
 
 static void sensor_send_raw_metadata(void)
@@ -2264,28 +2291,36 @@ static void feed_accel_sample(
 
 static void sensor_loop_handle_data_collection(bool *dc_active)
 {
-	/* Detect data collection activation transition and send metadata */
-	*dc_active = connection_get_data_collection();
-	if (*dc_active && !last_data_collection_state) {
+	/* Both collection modes share the sensor producer. A generation change
+	 * also catches an in-place batch rate update or a batch→single cutover. */
+	*dc_active = connection_get_data_collection() || connection_get_data_collection_batch();
+	atomic_val_t generation = atomic_get(&batch_collect_generation);
+	bool config_changed = *dc_active && generation != last_batch_collect_generation;
+	if (*dc_active && (!last_data_collection_state || config_changed)) {
 		sys_interface_resume();
-		/* Reset raw gyro quaternion accumulator and emit counter */
 		raw_gyr_quat[0] = 1.0f;
 		raw_gyr_quat[1] = 0.0f;
 		raw_gyr_quat[2] = 0.0f;
 		raw_gyr_quat[3] = 0.0f;
 		raw_rate_plan.emit_count = 0;
+		raw_rate_plan.batch_accum = 0.0f;
 		sensor_send_raw_metadata();
-		connection_send_raw_calibration();
+		connection_send_raw_calibration(true);
 		LOG_INF(
-			"Data collection activated: send %.0fHz n_raw=%u chip %.0fHz",
+			"Data collection activated: send %.0fHz n_raw=%u chip %.0fHz%s",
 			(double)raw_rate_plan.send_hz,
 			raw_rate_plan.n_raw,
-			(double)raw_rate_plan.chip_hz
+			(double)raw_rate_plan.chip_hz,
+			raw_rate_plan.batch_active ? " batch" : ""
 		);
 	} else if (*dc_active && connection_raw_metadata_resend_due()) {
 		sensor_send_raw_metadata();
-		connection_send_raw_calibration();
+		/* Batch re-sends skip T-Cal chunks: they are retained static data,
+		 * already delivered in full at session start, and re-dripping
+		 * ~28 chunks/tracker every 60 s floods the shared TDMA airtime. */
+		connection_send_raw_calibration(!connection_get_data_collection_batch());
 	}
+	last_batch_collect_generation = generation;
 	last_data_collection_state = *dc_active;
 }
 
@@ -2419,7 +2454,8 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 			}
 		}
 	}
-	if (frame->new_mag_data && connection_get_data_collection()) {
+	if (frame->new_mag_data
+	    && (connection_get_data_collection() || connection_get_data_collection_batch())) {
 		connection_queue_raw_mag(frame->raw_m);
 	}
 
@@ -2521,10 +2557,22 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 					raw_gyr_quat[3] = q3 * inv_norm;
 				}
 
-				raw_rate_plan.emit_count++;
-				if (raw_rate_plan.emit_count >= raw_rate_plan.n_raw) {
+				bool emit_raw = false;
+				if (raw_rate_plan.batch_active) {
+					raw_rate_plan.batch_accum += 1.0f;
+					if (raw_rate_plan.batch_accum >= raw_rate_plan.batch_interval) {
+						raw_rate_plan.batch_accum -= raw_rate_plan.batch_interval;
+						emit_raw = true;
+					}
+				} else {
+					raw_rate_plan.emit_count++;
+					if (raw_rate_plan.emit_count >= raw_rate_plan.n_raw) {
+						raw_rate_plan.emit_count = 0;
+						emit_raw = true;
+					}
+				}
+				if (emit_raw) {
 					struct raw_imu_sample raw_sample;
-					raw_rate_plan.emit_count = 0;
 					memcpy(raw_sample.gyr_quat, raw_gyr_quat, sizeof(raw_sample.gyr_quat));
 					memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
 					raw_sample.temp_c = frame->raw_collect_temp_c;

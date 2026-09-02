@@ -79,6 +79,9 @@ float sensor_get_gyro_odr(void);
 float sensor_get_mag_odr(void);        /* driver-reported Hz; 0.0f => n/a */
 float sensor_get_mag_feed_hz(void);    /* measured fusion feed Hz; 0.0f => n/a */
 float sensor_get_fusion_rate(void);    /* effective gyro feed into fusion */
+
+/* Batch raw collection: fractional-rate emission, 0 = accelerometer ODR. */
+void sensor_set_batch_collect(bool active, float emit_hz);
 float sensor_get_loop_period_ms(void); /* processing-work EMA, not full loop period */
 
 // Debug mode functions

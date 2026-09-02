@@ -667,6 +667,13 @@ K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4
 
 static uint16_t raw_sequence = 0;
 static atomic_t data_collection_active;
+static atomic_t data_collection_batch_active;
+static uint16_t data_collection_batch_rate_hz;
+static int64_t dc_conn_error_start;
+/* While batch collection runs, fusion data only needs to keep the server
+ * side minimally alive; 10 TPS leaves the radio almost fully to raw+TDMA.
+ * 0 restores the built-in 100 TPS default on every batch exit path. */
+#define DC_BATCH_FUSION_TPS 10U
 static volatile bool ota_suppressed = false; /* Reduce poll rate during parallel OTA */
 static int64_t ota_suppress_start_time = 0;  /* Timestamp when suppress was enabled */
 #define OTA_SUPPRESS_TIMEOUT_MS (10 * 60 * 1000)
@@ -714,6 +721,7 @@ static uint8_t raw_cal_phase = 0;      /* 0=accel, 1=mag, 2=gyro, 3=tcal_state, 
 static uint16_t raw_cal_point_idx = 0; /* current TCal slot index */
 static uint8_t raw_cal_chunk_idx = 0;  /* emitted TCal chunk index */
 
+static bool raw_cal_include_tcal = true; /* T-Cal chunks only on full sends */
 #if CONFIG_SENSOR_USE_TCAL
 static bool connection_tcal_point_valid(const struct TempCalPoint *point)
 {
@@ -776,30 +784,46 @@ static void connection_align_mag_BAinv_body(float out[4][3], const float in[4][3
 	}
 }
 
-void connection_set_data_collection(bool enable)
+static bool connection_raw_collection_active(void)
 {
-	bool was_active = atomic_get(&data_collection_active) != 0;
-	if (!enable) {
-		atomic_set(&data_collection_active, 0);
-	}
-	if (enable && !was_active) {
-		/* Flush any stale data in queues */
-		k_msgq_purge(&raw_imu_msgq);
-		raw_sequence = 0;
-		raw_metadata_sent = false;
-		raw_metadata_pending = false;
-		raw_meta_cal_last_ms = 0;
-		atomic_inc(&raw_collection_session);
-		k_spinlock_key_t mag_key = k_spin_lock(&latest_mag_lock);
-		latest_mag_valid = false;
-		k_spin_unlock(&latest_mag_lock, mag_key);
-		raw_cal_pending = false;
-		/* Reset ARQ state */
+	return connection_get_data_collection() || connection_get_data_collection_batch();
+}
+
+static void connection_reset_raw_collection(bool reset_arq)
+{
+	k_msgq_purge(&raw_imu_msgq);
+	raw_sequence = 0;
+	raw_metadata_sent = false;
+	raw_metadata_pending = false;
+	raw_meta_cal_last_ms = 0;
+	atomic_inc(&raw_collection_session);
+	k_spinlock_key_t mag_key = k_spin_lock(&latest_mag_lock);
+	latest_mag_valid = false;
+	k_spin_unlock(&latest_mag_lock, mag_key);
+	raw_cal_pending = false;
+	if (reset_arq) {
 		memset(raw_ring_valid, 0, sizeof(raw_ring_valid));
 		unsigned key = irq_lock();
 		raw_retx_count = 0;
 		irq_unlock(key);
 		raw_retx_total = 0;
+	}
+}
+
+void connection_set_data_collection(bool enable)
+{
+	bool was_active = connection_get_data_collection();
+	if (enable && connection_get_data_collection_batch()) {
+		atomic_set(&data_collection_batch_active, 0);
+		data_collection_batch_rate_hz = 0;
+		sensor_set_batch_collect(false, 0.0f);
+		test_mode_set_target_tps(0);
+	}
+	if (!enable) {
+		atomic_set(&data_collection_active, 0);
+	}
+	if (enable && !was_active) {
+		connection_reset_raw_collection(true);
 	} else if (!enable && was_active) {
 		k_spinlock_key_t mag_key = k_spin_lock(&latest_mag_lock);
 		latest_mag_valid = false;
@@ -815,6 +839,53 @@ bool connection_get_data_collection(void)
 {
 	return atomic_get(&data_collection_active) != 0;
 }
+
+void connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
+{
+	bool was_active = connection_get_data_collection_batch();
+	if (enable && connection_get_data_collection()) {
+		connection_set_data_collection(false);
+	}
+	if (!enable) {
+		atomic_set(&data_collection_batch_active, 0);
+		data_collection_batch_rate_hz = 0;
+		sensor_set_batch_collect(false, 0.0f);
+		test_mode_set_target_tps(0);
+	} else if (was_active && data_collection_batch_rate_hz == rate_hz) {
+		/* Redundant re-enable at the same rate: no session reset, no
+		 * accumulator reset — keeps the gyr_quat stream continuous
+		 * when the host repeats `collectall` while already running. */
+		LOG_INF("Batch data collection already active at %u Hz", rate_hz);
+		test_mode_set_target_tps(DC_BATCH_FUSION_TPS);
+	} else {
+		data_collection_batch_rate_hz = rate_hz;
+		if (!was_active) {
+			connection_reset_raw_collection(false);
+		}
+		atomic_set(&data_collection_batch_active, 1);
+		sensor_set_batch_collect(true, (float)rate_hz);
+		test_mode_set_target_tps(DC_BATCH_FUSION_TPS);
+		if (rate_hz == 0) {
+			LOG_INF("Batch data collection STARTED at accelerometer ODR");
+		} else {
+			LOG_INF("Batch data collection STARTED at %u Hz", rate_hz);
+		}
+	}
+	if (!enable) {
+		LOG_INF("Batch data collection STOPPED");
+	}
+}
+
+bool connection_get_data_collection_batch(void)
+{
+	return atomic_get(&data_collection_batch_active) != 0;
+}
+
+uint16_t connection_get_data_collection_batch_rate(void)
+{
+	return data_collection_batch_rate_hz;
+}
+
 
 void connection_set_ota_suppressed(bool suppressed)
 {
@@ -834,7 +905,7 @@ bool connection_get_ota_suppressed(void)
 
 void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 {
-	if (!connection_get_data_collection()) {
+	if (!connection_raw_collection_active()) {
 		return;
 	}
 
@@ -853,7 +924,7 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 
 void connection_queue_raw_mag(const float mag[3])
 {
-	if (!connection_get_data_collection()) {
+	if (!connection_raw_collection_active()) {
 		return;
 	}
 	uint32_t session = (uint32_t)atomic_get(&raw_collection_session);
@@ -861,7 +932,7 @@ void connection_queue_raw_mag(const float mag[3])
 	float aligned[3];
 	connection_align_mag_body(mag, aligned);
 	k_spinlock_key_t key = k_spin_lock(&latest_mag_lock);
-	if (connection_get_data_collection()
+	if (connection_raw_collection_active()
 	    && session == (uint32_t)atomic_get(&raw_collection_session)) {
 		memcpy(latest_mag, aligned, sizeof(latest_mag));
 		latest_mag_session = session;
@@ -906,7 +977,7 @@ void connection_send_raw_metadata(
 	raw_metadata_last_ms = k_uptime_get();
 }
 
-void connection_send_raw_calibration(void)
+void connection_send_raw_calibration(bool include_tcal)
 {
 	/* Mark calibration for drip-feed sending.
 	 * Actual packets are sent one-per-cycle in connection_process_raw_data().
@@ -914,6 +985,7 @@ void connection_send_raw_calibration(void)
 	raw_cal_phase = 0;
 	raw_cal_point_idx = 0;
 	raw_cal_chunk_idx = 0;
+	raw_cal_include_tcal = include_tcal;
 	raw_cal_pending = true;
 }
 
@@ -936,7 +1008,9 @@ static bool connection_cal_drip_send(void)
 	case 0: /* Accel calibration */
 		buf[2] = RAW_CAL_SUB_ACCEL;
 		memcpy(&buf[3], retained->accBAinv, sizeof(retained->accBAinv));
-		esb_write(buf, false, RAW_PACKET_SIZE);
+		if (esb_write(buf, false, RAW_PACKET_SIZE) != 0) {
+			return false; /* retry this chunk next drip */
+		}
 		raw_cal_phase = 1;
 		return true;
 
@@ -947,7 +1021,9 @@ static bool connection_cal_drip_send(void)
 		magneto_online_snapshot_BAinv(mag_BAinv);
 		connection_align_mag_BAinv_body(mag_body_BAinv, mag_BAinv);
 		memcpy(&buf[3], mag_body_BAinv, sizeof(mag_body_BAinv));
-		esb_write(buf, false, RAW_PACKET_SIZE);
+		if (esb_write(buf, false, RAW_PACKET_SIZE) != 0) {
+			return false;
+		}
 		raw_cal_phase = 2;
 		return true;
 	}
@@ -956,9 +1032,15 @@ static bool connection_cal_drip_send(void)
 		buf[2] = RAW_CAL_SUB_GYRO;
 		memcpy(&buf[3], retained->gyroBias, sizeof(retained->gyroBias));
 		memcpy(&buf[15], retained->gyroSensScale, sizeof(retained->gyroSensScale));
-		esb_write(buf, false, RAW_PACKET_SIZE);
+		if (esb_write(buf, false, RAW_PACKET_SIZE) != 0) {
+			return false;
+		}
 #if CONFIG_SENSOR_USE_TCAL
-		raw_cal_phase = 3;
+		if (raw_cal_include_tcal) {
+			raw_cal_phase = 3;
+		} else {
+			raw_cal_pending = false;
+		}
 #else
 		raw_cal_pending = false;
 #endif
@@ -997,7 +1079,9 @@ static bool connection_cal_drip_send(void)
 		/* [14]: apply mode enum; rest of former correction-offset area zeroed */
 		memset(&buf[14], 0, 12);
 		buf[14] = (uint8_t)sensor_tcal_get_apply_mode();
-		esb_write(buf, false, RAW_PACKET_SIZE);
+		if (esb_write(buf, false, RAW_PACKET_SIZE) != 0) {
+			return false;
+		}
 		if (npoints > 0) {
 			raw_cal_phase = 4;
 			raw_cal_point_idx = 0;
@@ -1019,8 +1103,9 @@ static bool connection_cal_drip_send(void)
 		buf[3] = raw_cal_chunk_idx;
 		memcpy(&buf[4], &total_count, 2);
 		uint8_t n = 0;
-		while (raw_cal_point_idx < TCAL_BUFFER_SIZE && n < 2) {
-			const struct TempCalPoint *point = &retained->tempCalPoints[raw_cal_point_idx++];
+		uint16_t point_idx = raw_cal_point_idx;
+		while (point_idx < TCAL_BUFFER_SIZE && n < 2) {
+			const struct TempCalPoint *point = &retained->tempCalPoints[point_idx++];
 
 			if (!connection_tcal_point_valid(point)) {
 				continue;
@@ -1036,7 +1121,10 @@ static bool connection_cal_drip_send(void)
 		}
 
 		buf[6] = n;
-		esb_write(buf, false, RAW_PACKET_SIZE);
+		if (esb_write(buf, false, RAW_PACKET_SIZE) != 0) {
+			return false; /* indices stay uncommitted; retry same chunk */
+		}
+		raw_cal_point_idx = point_idx;
 		raw_cal_chunk_idx++;
 		if (raw_cal_point_idx >= TCAL_BUFFER_SIZE) {
 			raw_cal_pending = false;
@@ -1053,7 +1141,7 @@ static bool connection_cal_drip_send(void)
 
 bool connection_raw_metadata_resend_due(void)
 {
-	if (!connection_get_data_collection() || !raw_metadata_sent) {
+	if (!connection_raw_collection_active() || !raw_metadata_sent) {
 		return false;
 	}
 	return (k_uptime_get() - raw_metadata_last_ms) >= RAW_METADATA_RESEND_MS;
@@ -1061,14 +1149,14 @@ bool connection_raw_metadata_resend_due(void)
 
 bool connection_process_raw_data(void)
 {
-	if (!connection_get_data_collection()) {
+	if (!connection_raw_collection_active()) {
 		return false;
 	}
 
 	/* Priority 1: Process retransmit requests from ARQ ACK payloads */
 	uint16_t retx_seq = 0;
 	bool have_retx = false;
-	{
+	if (!connection_get_data_collection_batch()) {
 		unsigned irq_key = irq_lock();
 		if (raw_retx_count > 0) {
 			retx_seq = raw_retx_queue[0];
@@ -1099,17 +1187,30 @@ bool connection_process_raw_data(void)
 	if (raw_metadata_pending || raw_cal_pending) {
 		int64_t now = k_uptime_get();
 		if (now - raw_meta_cal_last_ms >= RAW_META_CAL_DRIP_MS) {
+			bool sent = false;
 			if (raw_metadata_pending) {
-				esb_write(raw_metadata_buf, false, RAW_PACKET_SIZE);
-				raw_metadata_pending = false;
-				raw_metadata_sent = true;
-				raw_metadata_last_ms = now;
+				/* Consume only on successful admission. A TDMA
+				 * deferral (-EAGAIN) or busy radio retries at the
+				 * next drip interval instead of silently dropping
+				 * the host's only metadata source for 60 s. */
+				sent = esb_write(raw_metadata_buf, false, RAW_PACKET_SIZE) == 0;
+				if (sent) {
+					raw_metadata_pending = false;
+					raw_metadata_sent = true;
+					raw_metadata_last_ms = now;
+				}
 			} else {
-				connection_cal_drip_send();
-				k_usleep(600);
+				sent = connection_cal_drip_send();
+				if (sent) {
+					k_usleep(600);
+				}
 			}
 			raw_meta_cal_last_ms = now;
-			return true;
+			if (sent || !raw_metadata_pending) {
+				return true;
+			}
+			/* Meta admission failed: fall through to the gate below so
+			 * raw data keeps waiting for metadata (no busy spin). */
 		}
 		/* Throttled — fall through to IMU data if metadata already sent */
 	}
@@ -1165,11 +1266,13 @@ bool connection_process_raw_data(void)
 		buf[44] = flags;
 		memcpy(&buf[45], &sample.temp_c, sizeof(sample.temp_c));
 
-		/* Save to ring buffer for potential retransmission */
-		uint16_t ring_idx = seq % RAW_RING_SIZE;
-		memcpy(raw_ring[ring_idx], buf, RAW_PACKET_SIZE);
-		raw_ring_seq[ring_idx] = seq;
-		raw_ring_valid[ring_idx] = true;
+		/* Only reliable single-target collection retains ARQ history. */
+		if (!connection_get_data_collection_batch()) {
+			uint16_t ring_idx = seq % RAW_RING_SIZE;
+			memcpy(raw_ring[ring_idx], buf, RAW_PACKET_SIZE);
+			raw_ring_seq[ring_idx] = seq;
+			raw_ring_valid[ring_idx] = true;
+		}
 
 		esb_write(buf, false, RAW_PACKET_SIZE);
 		return true;
@@ -1519,6 +1622,8 @@ void connection_thread(void)
 					uint16_t tps = test_mode_get_target_tps();
 					ping[8] = (tps >> 8) & 0xFF;
 					ping[9] = tps & 0xFF;
+				} else if (ping_ack_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
+					ping[8] = (uint8_t)connection_get_data_collection_batch_rate();
 				}
 				int err = esb_write(ping, false, ESB_PING_LEN);
 				if (err == 0) {
@@ -1562,16 +1667,15 @@ void connection_thread(void)
 				}
 			}
 
-			/* Skip sensor data during connection error */
+			/* Skip sensor data during connection error. Auto-stop either raw
+			 * collection mode after 60 seconds to avoid a stuck battery drain. */
 			if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-				/* Auto-stop data collection after prolonged connection error
-				 * to avoid indefinite battery drain and stuck state. */
-				if (connection_get_data_collection()) {
-					static int64_t dc_conn_error_start;
+				if (connection_raw_collection_active()) {
 					if (dc_conn_error_start == 0) {
 						dc_conn_error_start = now;
 					} else if (now - dc_conn_error_start > 60000) {
 						connection_set_data_collection(false);
+						connection_set_data_collection_batch(false, 0);
 						test_mode_set(false);
 						dc_conn_error_start = 0;
 						LOG_WRN("Data collection auto-stopped (connection error for 60s)");
@@ -1580,6 +1684,7 @@ void connection_thread(void)
 				k_msleep(100);
 				continue;
 			}
+			dc_conn_error_start = 0;
 
 			/* Raw data has priority over fusion data to minimize latency */
 			if (connection_process_raw_data()) {
@@ -1589,7 +1694,7 @@ void connection_thread(void)
 
 		/* During data collection, throttle fusion data
 		 * to leave radio bandwidth for raw data. */
-		if (radio_ready && connection_get_data_collection()) {
+		if (radio_ready && connection_raw_collection_active()) {
 			static int64_t last_fusion_dc_time;
 			if (now - last_fusion_dc_time < 9) {
 				k_usleep(300);
