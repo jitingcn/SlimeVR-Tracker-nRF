@@ -1,5 +1,5 @@
 /*
- * External SPI IMU test variant (-DFILE_SUFFIX=testspi).
+ * External software-SPI IMU test variant (-DFILE_SUFFIX=testspi).
  * Same XIAO connector positions as the LM20A testspi variant, with the
  * nRF54L15 GPIO mapping:
  *   D0  (P1.04) -> 3V3 (active-high sensor power)
@@ -9,33 +9,39 @@
  *   D7  (P2.07) -> SDO (SPI MISO)
  *   D6  (P2.08) -> INT
  *   GND         -> GND
+ * These wires cannot use nRF54L15 SPIM00's dedicated signal routing.
+ * Bitbang SPI preserves them for validation, not full-rate performance.
  * The base overlay already disables uart21 on D6/D7; the uart20 console
  * remains available through the SAMD11 bridge.
  */
 #include "xiao_nrf54l15_nrf54l15_cpuapp.overlay"
 
-&spi00_default {
-	group1 {
-		psels = <NRF_PSEL(SPIM_SCK, 2, 2)>,
-			<NRF_PSEL(SPIM_MOSI, 2, 4)>,
-			<NRF_PSEL(SPIM_MISO, 2, 7)>;
-	};
-};
-
-&spi00_sleep {
-	group1 {
-		psels = <NRF_PSEL(SPIM_SCK, 2, 2)>,
-			<NRF_PSEL(SPIM_MOSI, 2, 4)>,
-			<NRF_PSEL(SPIM_MISO, 2, 7)>;
-		low-power-enable;
-	};
-};
+/* Replace the inherited hardware child while keeping the scanner's label. */
+/delete-node/ &imu_spi;
 
 &spi00 {
-	cs-gpios = <&xiao_d 8 GPIO_ACTIVE_LOW>;
+	status = "disabled";
 };
 
 / {
+	imu_spi_bitbang: spi-bitbang {
+		compatible = "zephyr,spi-bitbang";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		clk-gpios = <&gpio2 2 GPIO_ACTIVE_HIGH>;
+		mosi-gpios = <&gpio2 4 GPIO_ACTIVE_HIGH>;
+		miso-gpios = <&gpio2 7 GPIO_ACTIVE_HIGH>;
+		cs-gpios = <&gpio2 1 GPIO_ACTIVE_LOW>;
+
+		imu_spi: imu@0 {
+			compatible = "vnd,spi-device";
+			reg = <0>;
+			/* 2 us per half-cycle, plus software/GPIO overhead. */
+			spi-max-frequency = <250000>;
+		};
+	};
+
 	zephyr,user {
 		int0-gpios = <&xiao_d 6 GPIO_ACTIVE_HIGH>;
 		pwr-gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
