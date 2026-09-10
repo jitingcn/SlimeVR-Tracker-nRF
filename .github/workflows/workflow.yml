@@ -9,10 +9,6 @@ on:
       - dev
     tags:
       - "*"
-  create:
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 concurrency:
@@ -371,18 +367,14 @@ jobs:
     if: >-
       ${{
         needs.build.result == 'success'
-        && (
-          github.event_name == 'release'
-          || github.ref_type == 'tag'
-          || (github.event_name == 'create' && github.event.ref_type == 'tag')
-        )
+        && github.ref_type == 'tag'
       }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: write
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name || github.event.ref }}
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - name: 📥 Download Firmware Artifacts
         uses: actions/download-artifact@v7
