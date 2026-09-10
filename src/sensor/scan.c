@@ -24,6 +24,11 @@
 #include <zephyr/types.h>
 #include <zephyr/drivers/i2c.h>
 
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+#include "mag/ICT153xx.h"
+#include "sensors_enum.h"
+#endif
+
 #define SCAN_ADDR_START 8
 /* Include high 7-bit addrs (e.g. QMC6309 0x7C); 0x7F is "ignored" sentinel elsewhere. */
 #define SCAN_ADDR_STOP 0x7E
@@ -79,7 +84,15 @@ int sensor_scan_i2c(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_a
 			for (int k = 0; k < reg_count; k++)
 			{
 				uint8_t reg = dev_reg[reg_index + k];
-				if (*i2c_dev_reg == 0xFF || *i2c_dev_reg == reg)
+				bool ict_probe = false;
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+				// Match the complete table row: IMU and magnetometer enum values overlap.
+				ict_probe = addr == ICT153XX_I2C_ADDR && reg == ICT153XX_MANU_ID && id_cnt == 1
+					&& dev_id[id_ind] == ICT153XX_MANU_ID_VALUE && dev_ids[fnd_id] == MAG_ICT153XX;
+#endif
+				// A retained legacy 0x1E probe must not identify ICT magnetic data as another chip.
+				if (*i2c_dev_reg == 0xFF || *i2c_dev_reg == reg
+					|| (ict_probe && (*i2c_dev_reg == 0x0A || *i2c_dev_reg == 0x0F || *i2c_dev_reg == 0x4F)))
 				{
 					uint8_t id = 0;
 					int err;
@@ -110,6 +123,15 @@ int sensor_scan_i2c(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_a
 					{
 						if (id == dev_id[id_ind + l])
 						{
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+							if (ict_probe)
+							{
+								uint8_t chip_id = 0;
+								if (i2c_reg_read_byte(dev, addr, ICT153XX_CHIP_ID, &chip_id)
+									|| chip_id != ICT153XX_CHIP_ID_VALUE)
+									break;
+							}
+#endif
 							i2c_dev->addr = addr;
 							*i2c_dev_reg = reg;
 							LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)", addr, reg, id);
@@ -119,8 +141,11 @@ int sensor_scan_i2c(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg, int dev_a
 				}
 				id_ind += id_cnt;
 				fnd_id += id_cnt;
-				id_cnt = dev_id[id_ind];
-				id_ind++;
+				if (k + 1 < reg_count)
+				{
+					id_cnt = dev_id[id_ind];
+					id_ind++;
+				}
 			}
 		}
 		addr_index += addr_count;

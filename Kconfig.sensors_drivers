@@ -79,6 +79,15 @@ config SENSOR_DRV_BMM350
 	default y if !SENSOR_MAG_DRIVERS_MINIMAL
 	default n
 
+config SENSOR_DRV_ICT153XX
+	bool "ICT-15312 / ICT-15318"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+	help
+	  I2C magnetometers, including access through an IMU external I2C proxy.
+	  Both require VDD 1.62–1.98 V; ICT-15312 uses 1.2 V bus logic and
+	  ICT-15318 uses 1.8 V bus logic.
+
 config SENSOR_DRV_IST8306
 	bool "IST8306"
 	default y if !SENSOR_MAG_DRIVERS_MINIMAL

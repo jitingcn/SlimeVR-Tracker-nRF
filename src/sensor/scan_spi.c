@@ -24,6 +24,11 @@
 #include <zephyr/types.h>
 #include <zephyr/drivers/spi.h>
 
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+#include "mag/ICT153xx.h"
+#include "sensors_enum.h"
+#endif
+
 LOG_MODULE_REGISTER(sensor_scan_spi, LOG_LEVEL_DBG);
 
 int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_count, const uint8_t dev_reg[], const uint8_t dev_id[], const int dev_ids[])
@@ -62,9 +67,8 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 				LOG_DBG("err: %d", err);
 				id = buf[1] ? buf[1] : buf[2]; // ID may be in first byte, or skip one byte (such as BMI270)
 				LOG_DBG("Read value: 0x%02X, 0x%02X, 0x%02X (0x%02X)", buf[0], buf[1], buf[2], id);
-				if (err)
-					continue;
-				for (int l = 0; l < id_cnt; l++)
+				// Advance packed-table cursors even when a register transaction fails.
+				for (int l = 0; !err && l < id_cnt; l++)
 				{
 					// 0xFF is a "no real WHO_AM_I" sentinel (e.g. QMC5883L, an
 					// I2C-only part). On SPI a reserved-register read floats to
@@ -72,6 +76,12 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 					// later in the table (e.g. LIS2MDL at 0x4F). Skip it on SPI.
 					if (dev_id[id_ind + l] == 0xFF)
 						continue;
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+					// Shared tables include this I2C-only family; do not match native SPI data.
+					if ((reg & 0x7F) == ICT153XX_MANU_ID && dev_id[id_ind + l] == ICT153XX_MANU_ID_VALUE
+						&& dev_ids[fnd_id + l] == MAG_ICT153XX)
+						continue;
+#endif
 					if (id == dev_id[id_ind + l])
 					{
 						*spi_dev_reg = reg;
@@ -82,8 +92,11 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 			}
 			id_ind += id_cnt;
 			fnd_id += id_cnt;
-			id_cnt = dev_id[id_ind];
-			id_ind++;
+			if (k + 1 < reg_count)
+			{
+				id_cnt = dev_id[id_ind];
+				id_ind++;
+			}
 		}
 		reg_index += reg_count;
 		id_index += id_count;

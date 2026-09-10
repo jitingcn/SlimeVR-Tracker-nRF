@@ -26,6 +26,11 @@
 
 #include "interface.h"
 
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+#include "mag/ICT153xx.h"
+#include "sensors_enum.h"
+#endif
+
 #define SCAN_ADDR_START 8
 /* Include high 7-bit addrs (e.g. QMC6309 0x7C); 0x7F is "ignored" sentinel elsewhere. */
 #define SCAN_ADDR_STOP 0x7E
@@ -80,7 +85,14 @@ scan_loop:;
 			for (int k = 0; k < reg_count; k++)
 			{
 				uint8_t reg = dev_reg[reg_index + k];
-				if (*ext_dev_reg == 0xFF || *ext_dev_reg == reg)
+				bool ict_probe = false;
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+				ict_probe = addr == ICT153XX_I2C_ADDR && reg == ICT153XX_MANU_ID && id_cnt == 1
+					&& dev_id[id_ind] == ICT153XX_MANU_ID_VALUE && dev_ids[fnd_id] == MAG_ICT153XX;
+#endif
+				// Check ICT identity before a retained legacy probe can read its magnetic data.
+				if (*ext_dev_reg == 0xFF || *ext_dev_reg == reg
+					|| (ict_probe && (*ext_dev_reg == 0x0A || *ext_dev_reg == 0x0F || *ext_dev_reg == 0x4F)))
 				{
 					uint8_t id = 0;
 					int err;
@@ -94,6 +106,9 @@ scan_loop:;
 						k_msleep(2); // BMM150 start-up
 					}
 					err = sensor_scan_ext_read_byte(ext_ssi, addr, reg, &id);
+					// ICT153xx may NACK its first power-up transaction; retry only this identity probe.
+					if (err && ict_probe)
+						err = sensor_scan_ext_read_byte(ext_ssi, addr, reg, &id);
 					LOG_DBG("Read value: 0x%02X", id);
 					if (err)
 						break;
@@ -116,8 +131,16 @@ scan_loop:;
 								// the same value. Real devices return different values on
 								// different registers; stale/ghost data returns the same.
 								uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+								if (ict_probe)
+									cross_reg = ICT153XX_CHIP_ID;
+#endif
 								uint8_t cross_val = 0;
 								int c_err = sensor_scan_ext_read_byte(ext_ssi, addr, cross_reg, &cross_val);
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+								if (ict_probe && (c_err || cross_val != ICT153XX_CHIP_ID_VALUE))
+									break;
+#endif
 								if (!c_err && cross_val == id)
 								{
 									LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data", addr, reg, cross_reg, id);
@@ -141,8 +164,11 @@ scan_loop:;
 				}
 				id_ind += id_cnt;
 				fnd_id += id_cnt;
-				id_cnt = dev_id[id_ind];
-				id_ind++;
+				if (k + 1 < reg_count)
+				{
+					id_cnt = dev_id[id_ind];
+					id_ind++;
+				}
 			}
 		}
 		addr_index += addr_count;

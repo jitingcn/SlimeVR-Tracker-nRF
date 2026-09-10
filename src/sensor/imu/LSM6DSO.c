@@ -487,4 +487,9 @@ const sensor_imu_t sensor_imu_lsm6dso = {
 	*lsm6dso_ext_setup,
 };
 
-const sensor_ext_ssi_t sensor_ext_lsm6dso = {*lsm6dso_ext_write, *lsm6dso_ext_write_read, 8};
+const sensor_ext_ssi_t sensor_ext_lsm6dso = {
+	.ext_write = lsm6dso_ext_write,
+	.ext_write_read = lsm6dso_ext_write_read,
+	.ext_burst = 8,
+	.ext_set_prefetch = NULL,
+};

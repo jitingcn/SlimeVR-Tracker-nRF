@@ -23,6 +23,10 @@ static uint8_t ext_read_regs[16];
 static size_t ext_read_lengths[16];
 static int ext_read_calls;
 static uint8_t ext_seen_dummy;
+static uint8_t ext_registers[256], ext_cache[8], ext_cache_reg;
+static size_t ext_capacity = 8, ext_cache_len;
+static bool ext_prefetch;
+static int ext_prefetch_error;
 
 #define CHECK(condition) do { \
 	if (!(condition)) { \
@@ -119,16 +123,19 @@ static int ext_write(uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	return 0;
 }
 
-static int ext_write_read(
-	uint8_t addr,
+static int read_external(
 	const void *write_buf,
 	size_t num_write,
 	void *read_buf,
-	size_t num_read
+	size_t num_read,
+	bool cached
 )
 {
-	(void)addr;
 	CHECK(num_write == 1);
+	if (num_read > ext_capacity)
+		return -EMSGSIZE; /* Hardware transaction width, independent of SSI. */
+	if (num_read == 0 || num_read > sizeof(ext_cache))
+		return -EINVAL;
 	CHECK(ext_read_calls < (int)(sizeof(ext_read_regs) / sizeof(ext_read_regs[0])));
 	uint8_t reg = *(const uint8_t *)write_buf;
 	ext_read_regs[ext_read_calls] = reg;
@@ -138,8 +145,40 @@ static int ext_write_read(
 	 * dummy prefix the interface layer must strip; the remaining bytes are
 	 * register data starting at the requested register. */
 	uint8_t *out = read_buf;
+	if (cached && ext_cache_len == num_read && ext_cache_reg == reg) {
+		memcpy(out, ext_cache, num_read);
+		return 0;
+	}
 	for (size_t i = 0; i < num_read; i++)
-		out[i] = i < ext_seen_dummy ? 0xee : (uint8_t)(reg + (i - ext_seen_dummy));
+		out[i] = i < ext_seen_dummy ? 0xee : ext_registers[(uint8_t)(reg + i - ext_seen_dummy)];
+	if (cached) {
+		memcpy(ext_cache, out, num_read);
+		ext_cache_len = num_read;
+		ext_cache_reg = reg;
+	}
+	return 0;
+}
+
+static int ext_write_read(uint8_t addr, const void *write_buf, size_t num_write,
+	void *read_buf, size_t num_read)
+{
+	(void)addr;
+	return read_external(write_buf, num_write, read_buf, num_read, ext_prefetch);
+}
+
+static int synchronous_write_read(uint8_t addr, const void *write_buf, size_t num_write,
+	void *read_buf, size_t num_read)
+{
+	(void)addr;
+	return read_external(write_buf, num_write, read_buf, num_read, false);
+}
+
+static int ext_set_prefetch(bool enabled)
+{
+	if (ext_prefetch_error)
+		return ext_prefetch_error;
+	ext_prefetch = enabled;
+	ext_cache_len = 0;
 	return 0;
 }
 
@@ -152,8 +191,88 @@ static void reset_counts(void)
 	fail_i2c_write_read_call = 0;
 	ext_read_calls = 0;
 	ext_seen_dummy = 0;
+	ext_capacity = 8;
+	ext_cache_len = 0;
+	ext_prefetch = false;
+	ext_prefetch_error = 0;
+	for (unsigned i = 0; i < sizeof(ext_registers); i++)
+		ext_registers[i] = (uint8_t)i;
 	memset(ext_read_regs, 0, sizeof(ext_read_regs));
 	memset(ext_read_lengths, 0, sizeof(ext_read_lengths));
+}
+
+static int test_seven_byte_frame_and_prefetch(void)
+{
+	const sensor_ext_ssi_t proxy = {
+		.ext_write = ext_write,
+		.ext_write_read = ext_write_read,
+		.ext_burst = 7,
+		.ext_set_prefetch = ext_set_prefetch,
+	};
+	const sensor_ext_ssi_t synchronous = {
+		.ext_write = ext_write,
+		.ext_write_read = synchronous_write_read,
+		.ext_burst = 7,
+		.ext_set_prefetch = NULL,
+	};
+	reset_counts();
+	ext_capacity = 7;
+	ext_prefetch = true;
+	sensor_interface_ext_configure(&proxy);
+	CHECK(sensor_interface_register_sensor_mag_ext(0x14, 3, 8) == 0);
+	const uint8_t frame[] = {0x60, 0xff, 0x90, 0x01, 0xe0, 0xfc, 0xb0, 0x04};
+	memcpy(ext_registers + 0x08, frame, sizeof(frame));
+	uint8_t result[sizeof(frame)] = {0};
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, sizeof(result)) == 0);
+	CHECK(memcmp(result, frame, sizeof(frame)) == 0);
+
+	/* A same-shape cached read hides later register changes until disabled. */
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	ext_registers[0x08] = 0x19;
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == frame[0]);
+	ext_prefetch_error = -EBUSY;
+	CHECK(sensor_interface_ext_set_prefetch(false) == -EBUSY);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == frame[0]);
+	ext_prefetch_error = 0;
+	CHECK(sensor_interface_ext_set_prefetch(false) == 0);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == 0x19 && result[1] == frame[1] && result[2] == frame[2]);
+	ext_registers[0x08] = 0x27;
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == 0x27);
+
+	CHECK(sensor_interface_ext_set_prefetch(true) == 0);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	ext_registers[0x08] = 0x35;
+	/* Direct-bus policy changes must not touch the previously registered proxy. */
+	struct i2c_dt_spec direct = {0};
+	sensor_interface_register_sensor_mag_i2c(&direct);
+	CHECK(sensor_interface_ext_set_prefetch(false) == 0);
+	CHECK(sensor_interface_register_sensor_mag_ext(0x14, 3, 8) == 0);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == 0x27);
+	sensor_interface_register_sensor_mag_spi(NULL);
+	CHECK(sensor_interface_ext_set_prefetch(false) == 0);
+	CHECK(sensor_interface_register_sensor_mag_ext(0x14, 3, 8) == 0);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == 0x27);
+
+	/* Replacing the backend with a legacy synchronous one must neither retain
+	 * the old cache nor dispatch the old callback to alter that backend. */
+	sensor_interface_ext_configure(&synchronous);
+	CHECK(sensor_interface_ext_set_prefetch(false) == 0);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == 0x35);
+	sensor_interface_ext_configure(&proxy);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
+	CHECK(result[0] == 0x27);
+	CHECK(sensor_interface_ext_set_prefetch(false) == 0);
+	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, sizeof(result)) == 0);
+	CHECK(memcmp(result, ext_registers + 0x08, sizeof(result)) == 0);
+	sensor_interface_ext_configure(NULL);
+	return EXIT_SUCCESS;
 }
 
 int main(void)
@@ -187,6 +306,7 @@ int main(void)
 		.ext_write = ext_write,
 		.ext_write_read = ext_write_read,
 		.ext_burst = 8,
+		.ext_set_prefetch = NULL,
 	};
 	sensor_interface_ext_configure(&ext);
 	CHECK(sensor_interface_register_sensor_mag_ext(0x14, 3, 8) == 0);
@@ -227,6 +347,8 @@ int main(void)
 	uint8_t tiny[4] = {0};
 	CHECK(ssi_burst_read_dummy(SENSOR_INTERFACE_DEV_MAG, 0x40, 8, tiny, sizeof(tiny)) != 0);
 	CHECK(ext_read_calls == 0);
+
+	CHECK(test_seven_byte_frame_and_prefetch() == EXIT_SUCCESS);
 
 	printf("All interface interval tests passed\n");
 	return EXIT_SUCCESS;

@@ -43,7 +43,8 @@ static uint8_t ext_cont_addr = 0;
 static uint8_t ext_cont_sub = 0;
 static uint8_t ext_cont_len = 0;
 static bool ext_scanning_mode = true;
-static void icm45_ext_stop_continuous(void);
+static bool ext_prefetch_enabled = true;
+static int icm45_ext_stop_continuous(void);
 
 // Cache the latest FIFO temperature so temperature reads can stay synchronized
 // with the current accel/gyro batch when FIFO packets are available.
@@ -278,14 +279,15 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 {
 	// After init, switch to operational mode for immediate continuous I2CM reads
 	ext_scanning_mode = false;
-	ext_continuous_active = false;
 	fifo_temp = 25.0f;
 	fifo_temp_valid = false;
 
 	// setup interface for SPI
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0);
 
-	int err = 0;
+	int err = icm45_ext_stop_continuous();
+	if (err)
+		return err;
 
 	// sensor_init() already issued shutdown/reset before calling init.
 	// Continue from the post-reset state and rebuild runtime configuration below.
@@ -390,14 +392,14 @@ int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel
 
 void icm45_shutdown(void)
 {
-	icm45_ext_stop_continuous();
+	int err = icm45_ext_stop_continuous();
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff;  // reset last odr
 	last_accel_mode = 0xff;
 	last_gyro_mode = 0xff;
 	fifo_temp = 25.0f;
 	fifo_temp_valid = false;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
 	k_msleep(2); // Wait for reset to complete (datasheet: 1ms) - ensures clean state for init
 	// TODO: not working
 	//	uint8_t ireg_buf[3];
@@ -714,14 +716,19 @@ uint8_t icm45_setup_DRDY(uint16_t threshold)
 
 uint8_t icm45_setup_WOM(void) // TODO: check if working
 {
+	int err = icm45_ext_stop_continuous();
+	if (err) {
+		LOG_ERR("Failed to stop I2CM: %d", err);
+		return 0xFF;
+	}
 	// Disable FIFO streaming before entering WOM mode.
 	// Prevents stale data accumulation and FIFO trigger storm after wake.
-	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x00); // stop FIFO streaming
-	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG0, 0x00); // bypass mode flushes FIFO
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x00); // stop FIFO streaming
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG0, 0x00); // bypass mode flushes FIFO
 
 	uint8_t interrupts;
 	uint8_t ireg_buf[5];
-	int err = ssi_reg_read_byte(
+	err |= ssi_reg_read_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		ICM45686_INT1_STATUS0,
 		&interrupts
@@ -772,7 +779,9 @@ static int icm45_i2cm_wait_done(void)
 	uint8_t status = 0;
 	int timeout = 1000;
 	do {
-		icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+		int err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+		if (err)
+			return err;
 		if (--timeout <= 0) {
 			break;
 		}
@@ -780,14 +789,22 @@ static int icm45_i2cm_wait_done(void)
 	return (timeout > 0) ? 0 : -1;
 }
 
-/** Stop continuous I2CM read mode if active */
-static void icm45_ext_stop_continuous(void)
+/** Drain any in-flight GO before discarding cached data or changing its command.
+ * I2CM GO is a single transaction, not an autonomous repeating schedule. */
+static int icm45_ext_stop_continuous(void)
 {
-	if (!ext_continuous_active) {
-		return;
-	}
-	icm45_i2cm_wait_done();
-	ext_continuous_active = false;
+	int err = icm45_i2cm_wait_done();
+	if (!err)
+		ext_continuous_active = false;
+	return err;
+}
+
+static int icm45_ext_set_prefetch(bool enabled)
+{
+	int err = icm45_ext_stop_continuous();
+	if (!err)
+		ext_prefetch_enabled = enabled;
+	return err;
 }
 
 int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
@@ -798,16 +815,17 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	}
 
 	// Save continuous state before stopping (we'll restore it after write)
-	bool was_continuous = ext_continuous_active;
+	bool was_continuous = ext_prefetch_enabled && ext_continuous_active;
 	uint8_t saved_addr = ext_cont_addr;
 	uint8_t saved_sub = ext_cont_sub;
 	uint8_t saved_len = ext_cont_len;
 
 	// Stop continuous mode before writing (I2CM config will be changed)
-	icm45_ext_stop_continuous();
+	int err = icm45_ext_stop_continuous();
+	if (err)
+		return err;
 
 	int retries = 2;
-	int err;
 	uint8_t dev_profile[2];
 	uint8_t status;
 	uint8_t dev_status;
@@ -872,22 +890,29 @@ retry_write:
 	// Restore continuous I2CM read: re-setup DEV_PROFILE + COMMAND for the
 	// previously cached read and trigger it. This way the next ext_write_read
 	// finds fresh data ready without the full oneshot cycle.
-	if (was_continuous && !err) {
-		// The write transaction just completed; make sure the I2CM engine is
-		// idle before re-arming GO so the restored read is not aborted.
-		icm45_i2cm_wait_done();
+	if (was_continuous && ext_prefetch_enabled && !err) {
+		// Do not restore a read unless the preceding write is confirmed idle.
+		err = icm45_i2cm_wait_done();
+		if (err)
+			return err;
 		uint8_t rd_profile[2] = {saved_sub, saved_addr};
-		icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2);
-		icm45_bank_write_byte(
+		err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2);
+		if (err)
+			return err;
+		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_COMMAND_0,
 			ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | saved_len
 		);
-		icm45_bank_write_byte(
+		if (err)
+			return err;
+		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_CONTROL,
 			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
 		);
+		if (err)
+			return err;
 		ext_continuous_active = true;
 		ext_cont_addr = saved_addr;
 		ext_cont_sub = saved_sub;
@@ -910,48 +935,43 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 	// The I2C transaction was triggered at the end of the previous call and has
 	// completed in the background during FIFO processing. If it is still
 	// running, BUSY/DONE checks below keep the cached read from racing it.
-	if (ext_continuous_active && addr == ext_cont_addr && sub_addr == ext_cont_sub && num_read == ext_cont_len) {
-		// Wait only if I2CM is still busy (rare - only if called very quickly)
+	if (ext_prefetch_enabled && ext_continuous_active && addr == ext_cont_addr && sub_addr == ext_cont_sub && num_read == ext_cont_len) {
+		int err = icm45_i2cm_wait_done();
+		if (err)
+			return err;
 		uint8_t status = 0;
-		icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
-		if (status & ICM45686_BIT_I2CM_STATUS_BUSY) {
-			// Transaction still in progress - wait briefly
-			int timeout = 200;
-			do {
-				icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
-				if (--timeout <= 0) {
-					LOG_WRN("I2CM continuous read timeout, falling back");
-					ext_continuous_active = false;
-					goto oneshot_read;
-				}
-			} while (status & ICM45686_BIT_I2CM_STATUS_BUSY);
-		}
-
+		err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status);
+		if (err)
+			return err;
 		if (!(status & ICM45686_BIT_I2CM_STATUS_DONE)
 			|| (status & (ICM45686_BIT_I2CM_STATUS_SDA_ERR | ICM45686_BIT_I2CM_STATUS_SCL_ERR))) {
 			LOG_WRN("I2CM continuous read error: 0x%02x, falling back", status);
-			ext_continuous_active = false;
 			goto oneshot_read;
 		}
+		uint8_t dev_status = 0;
+		err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status);
+		if (err)
+			return err;
+		if (dev_status & 0x01)
+			return -1;
 
-		// Read cached data from previous I2CM transaction
-		int err = icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read);
-
-		// Pre-trigger next I2CM read (DEV_PROFILE + COMMAND persist in IPREG_TOP1)
-		icm45_bank_write_byte(
-			ICM45686_IPREG_TOP1,
-			ICM45686_I2CM_CONTROL,
-			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
-		);
+		err = icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read);
+		// Only a successful foreground read may pre-trigger its successor.
+		if (!err)
+			err = icm45_bank_write_byte(
+				ICM45686_IPREG_TOP1,
+				ICM45686_I2CM_CONTROL,
+				ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
+			);
+		if (err)
+			ext_continuous_active = false;
 		return err;
 	}
 
-	// If continuous was active with different params, stop it
-	if (ext_continuous_active) {
-		icm45_ext_stop_continuous();
-	}
-
 oneshot_read:;
+	int stop_err = icm45_ext_stop_continuous();
+	if (stop_err)
+		return stop_err;
 	// Full one-shot I2CM read with retry for transient bus errors
 	int retries = 2;
 	int err;
@@ -1020,12 +1040,14 @@ retry_read:
 	// DEV_PROFILE + COMMAND persist in IPREG_TOP1, so just writing GO is enough.
 	// The I2CM transaction completes in the background during FIFO processing.
 	// The next fast-path read still checks BUSY/DONE before using cached data.
-	if (!err && !ext_scanning_mode) {
-		icm45_bank_write_byte(
+	if (!err && !ext_scanning_mode && ext_prefetch_enabled) {
+		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_CONTROL,
 			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
 		);
+		if (err)
+			return err;
 		ext_continuous_active = true;
 		ext_cont_addr = addr;
 		ext_cont_sub = sub_addr;
@@ -1035,14 +1057,21 @@ retry_read:
 	return err;
 }
 
-const sensor_ext_ssi_t sensor_ext_icm45686 = {icm45_ext_write, icm45_ext_write_read, 15};
+const sensor_ext_ssi_t sensor_ext_icm45686 = {
+	.ext_write = icm45_ext_write,
+	.ext_write_read = icm45_ext_write_read,
+	.ext_burst = 15,
+	.ext_set_prefetch = icm45_ext_set_prefetch,
+};
 
 int icm45_ext_setup(enum sensor_ext_mode mode)
 {
-	icm45_ext_stop_continuous();
+	int err = icm45_ext_stop_continuous();
+	if (err)
+		return err;
 
 	if (mode == SENSOR_EXT_MODE_OFF || mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH) {
-		int err = ssi_reg_write_byte(
+		err = ssi_reg_write_byte(
 			SENSOR_INTERFACE_DEV_IMU,
 			ICM45686_IOC_PAD_SCENARIO_AUX_OVRD,
 			mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH ? 0x18 : 0x00
@@ -1056,9 +1085,6 @@ int icm45_ext_setup(enum sensor_ext_mode mode)
 	if (mode != SENSOR_EXT_MODE_I2CM_PROXY) {
 		return -1;
 	}
-
-	int err = 0;
-	ext_scanning_mode = true;
 
 	// I2CM with OSC_ID_OVRD=2 requires the gyro oscillator. After WOM wake or
 	// shutdown, gyro may be off, so use standby while discovering the sensor.
@@ -1086,6 +1112,8 @@ int icm45_ext_setup(enum sensor_ext_mode mode)
 		return err;
 	}
 
+	ext_scanning_mode = true;
+	ext_prefetch_enabled = true;
 	sensor_interface_ext_configure(&sensor_ext_icm45686);
 	return 0;
 }

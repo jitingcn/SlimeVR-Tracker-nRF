@@ -177,6 +177,15 @@ const sensor_ext_ssi_t *sensor_interface_ext_get(void)
 	return ext_ssi;
 }
 
+int sensor_interface_ext_set_prefetch(bool enabled)
+{
+	if (sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] != SENSOR_INTERFACE_SPEC_EXT)
+		return 0;
+	if (ext_ssi == NULL)
+		return -1;
+	return ext_ssi->ext_set_prefetch ? ext_ssi->ext_set_prefetch(enabled) : 0;
+}
+
 enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev)
 {
 	if (dev < 0 || dev >= SENSOR_INTERFACE_DEV_COUNT)

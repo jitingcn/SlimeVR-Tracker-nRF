@@ -71,7 +71,8 @@ static bool ext_continuous_active = false;
 static uint8_t ext_cont_addr = 0;
 static uint8_t ext_cont_sub = 0;
 static uint8_t ext_cont_len = 0;
-static void lsm_ext_stop_continuous(void);
+static bool ext_prefetch_enabled = true;
+static int lsm_ext_stop_continuous(void);
 
 // Scanning mode: when true, one-shot reads never start continuous mode.
 // Set during ext_setup() for device scanning, cleared by lsm_init() for normal operation.
@@ -88,10 +89,10 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 
 	// sensor_init() already issued shutdown/reset before calling init.
 	// Continue from the post-reset state and rebuild runtime configuration below.
-	ext_continuous_active = false;
-	ext_scanning_mode = false; // After init, switch to operational mode for immediate continuous
-
-	int err = 0;
+	int err = lsm_ext_stop_continuous();
+	if (err)
+		return err;
+	ext_scanning_mode = false; // Keep the magnetometer's prefetch policy across IMU init.
 
 	// Read WHO_AM_I to verify communication
 	uint8_t who_am_i = 0;
@@ -193,11 +194,11 @@ int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 
 void lsm_shutdown(void)
 {
-	ext_continuous_active = false;
+	int err = lsm_ext_stop_continuous();
 	lsm_unknown_tag_count = 0;
 	last_accel_odr = 0xff;                                                       // reset last odr
 	last_gyro_odr = 0xff;                                                        // reset last odr
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
 	k_msleep(2); // Wait for reset to complete before the next init path continues
 	if (err) {
 		LOG_ERR("Communication error");
@@ -551,15 +552,18 @@ uint8_t lsm_setup_WOM(void)
 	// Enter a clean WOM state explicitly. This path is exercised right before system-off,
 	// and if FIFO / BDR / sensor-hub state is left running, wake-up can boot into a state
 	// where FIFO no longer starts producing packets reliably.
-	lsm_ext_stop_continuous();
+	int err = lsm_ext_stop_continuous();
+	if (err) {
+		LOG_ERR("Failed to stop sensor hub: %d", err);
+		return 0xFF;
+	}
 	lsm_unknown_tag_count = 0;
 	last_accel_mode = 0xff;
 	last_gyro_mode = 0xff;
 	last_accel_odr = 0xff;
 	last_gyro_odr = 0xff;
 
-	int err
-		= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_INT1_CTRL, 0x00); // disable FIFO/BDR interrupt routing
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_INT1_CTRL, 0x00); // disable FIFO/BDR interrupt routing
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MD1_CFG, 0x00);  // clear previous wake routing first
 	err |= ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
@@ -615,9 +619,11 @@ uint8_t lsm_setup_WOM(void)
 
 int lsm_ext_setup(enum sensor_ext_mode mode)
 {
+	int err = lsm_ext_stop_continuous();
+	if (err)
+		return err;
 	if (mode == SENSOR_EXT_MODE_OFF || mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH) {
-		lsm_ext_stop_continuous();
-		int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
 		err |= ssi_reg_write_byte(
 			SENSOR_INTERFACE_DEV_IMU,
 			LSM6DSV_MASTER_CONFIG,
@@ -634,11 +640,7 @@ int lsm_ext_setup(enum sensor_ext_mode mode)
 		return -1;
 	}
 
-	// Reset I2C master state for clean discovery after reset or WOM.
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
-	k_usleep(350);
+	// The checked stop above resets the master before discovery.
 	// One-shot sensor-hub transactions need an accel data-ready trigger.
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, (OP_MODE_XL_HP << 4) | ODR_480Hz);
 	k_msleep(5);
@@ -648,28 +650,40 @@ int lsm_ext_setup(enum sensor_ext_mode mode)
 		return err;
 	}
 
-	ext_continuous_active = false;
+	ext_prefetch_enabled = true;
 	ext_scanning_mode = true;
 	sensor_interface_ext_configure(&sensor_ext_lsm6dsv);
 	return 0;
 }
 
-/** Stop continuous sensor hub reading if active */
-static void lsm_ext_stop_continuous(void)
+/** Quiesce the hub, including a transaction left running by a failed transfer. */
+static int lsm_ext_stop_continuous(void)
 {
-	if (!ext_continuous_active) {
-		return;
-	}
-	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
-	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00);
-	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
+	if (!err)
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00);
+	int restore_err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
 	k_usleep(350);
+	if (err || restore_err)
+		return err ? err : restore_err;
 	ext_continuous_active = false;
+	return 0;
+}
+
+static int lsm_ext_set_prefetch(bool enabled)
+{
+	int err = lsm_ext_stop_continuous();
+	if (!err)
+		ext_prefetch_enabled = enabled;
+	return err;
 }
 
 /** Start continuous sensor hub reading for addr/sub_addr/num_bytes */
 static int lsm_ext_start_continuous(uint8_t addr, uint8_t sub_addr, uint8_t num_bytes)
 {
+	// SLV0_CONFIG.NUMOP is three bits; bit 3 enables FIFO batching, not length 8.
+	if (!ext_prefetch_enabled || num_bytes < 1 || num_bytes > 7)
+		return -1;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
 	uint8_t slv0[3]
 		= {(addr << 1) | 0x01, sub_addr, 0xA0 | num_bytes}; // rw_0=1 for read, SHUB_ODR = 240Hz, num_bytes to read
@@ -693,10 +707,11 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 		return -1;
 	}
 	// Stop continuous mode before writing (I2C master must be reconfigured)
-	lsm_ext_stop_continuous();
+	int err = lsm_ext_stop_continuous();
+	if (err)
+		return err;
 	// Configure transaction and begin one-shot (AN5922, page 80, One-shot write routine)
-	int err
-		= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
 	// SLV0_ADD format: bits[7:1]=slave_addr[6:0], bit0=rw_0 (0=write, 1=read)
 	uint8_t slv0[3] = {(addr << 1) | 0x00, buf[0], 0xA0 | 0x00}; // rw_0=0 for write, SHUB_ODR = 240Hz, reading no bytes
 	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
@@ -743,7 +758,7 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 
 int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
 {
-	if (num_write != 1 || num_read < 1 || num_read > 8) {
+	if (num_write != 1 || num_read < 1 || num_read > 7) {
 		LOG_ERR("Unsupported write_read");
 		return -1;
 	}
@@ -752,7 +767,7 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 
 	// Fast path: if continuous mode is active and request matches, read SENSOR_HUB directly
 	// This avoids the ~8ms one-shot cycle (waiting for XLDA) and takes only ~20us via SPI
-	if (ext_continuous_active && addr == ext_cont_addr && sub_addr == ext_cont_sub && num_read == ext_cont_len) {
+	if (ext_prefetch_enabled && ext_continuous_active && addr == ext_cont_addr && sub_addr == ext_cont_sub && num_read == ext_cont_len) {
 		int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
 		err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, read_buf, num_read);
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
@@ -760,11 +775,12 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	}
 
 	// If continuous mode was active for different params, stop it first
-	lsm_ext_stop_continuous();
+	int err = lsm_ext_stop_continuous();
+	if (err)
+		return err;
 
 	// One-shot read (AN5922, page 79, One-shot read routine)
-	int err
-		= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
 	// SLV0_ADD format: bits[7:1]=slave_addr[6:0], bit0=rw_0 (0=write, 1=read)
 	uint8_t slv0[3]
 		= {(addr << 1) | 0x01, sub_addr, 0xA0 | num_read}; // rw_0=1 for read, SHUB_ODR = 240Hz, reading num_read bytes
@@ -803,7 +819,7 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	); // switch to sensor hub registers
 	// Check for NACK and timeout before reading data
 	uint8_t master_status = 0;
-	ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &master_status);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &master_status);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master
 	k_usleep(350);
 	if ((master_status & 0x04) || !(status & 0x01)) // SLAVE0_NACK or   timeout
@@ -822,8 +838,8 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 
 	// In operational mode, start continuous immediately for fast subsequent reads.
 	// In scanning mode, skip continuous to avoid start/stop overhead per address.
-	if (!err && !ext_scanning_mode) {
-		lsm_ext_start_continuous(addr, sub_addr, num_read);
+	if (!err && !ext_scanning_mode && ext_prefetch_enabled) {
+		err = lsm_ext_start_continuous(addr, sub_addr, num_read);
 	}
 
 	return err;
@@ -848,4 +864,9 @@ const sensor_imu_t sensor_imu_lsm6dsv = {
 	lsm_ext_setup,
 };
 
-const sensor_ext_ssi_t sensor_ext_lsm6dsv = {lsm_ext_write, lsm_ext_write_read, 8};
+const sensor_ext_ssi_t sensor_ext_lsm6dsv = {
+	.ext_write = lsm_ext_write,
+	.ext_write_read = lsm_ext_write_read,
+	.ext_burst = 7,
+	.ext_set_prefetch = lsm_ext_set_prefetch,
+};

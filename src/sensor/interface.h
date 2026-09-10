@@ -53,6 +53,9 @@ typedef struct sensor_ext_ssi {
 	 * than this are segmented by the interface layer (sub-register advanced by
 	 * the number of data bytes already read). */
 	uint8_t ext_burst;
+	/* Optional policy hook. Disabling must quiesce pending background reads
+	 * before returning success. NULL means a synchronous-only backend. */
+	int (*ext_set_prefetch)(bool enabled);
 } sensor_ext_ssi_t;
 
 void sensor_interface_register_sensor_imu_spi(struct spi_dt_spec *dev);
@@ -67,6 +70,8 @@ bool sensor_interface_imu_is_i2c(void);
 int sensor_interface_spi_configure(enum sensor_interface_dev dev, uint32_t frequency, uint32_t dummy_reads);
 void sensor_interface_ext_configure(const sensor_ext_ssi_t *ext);
 const sensor_ext_ssi_t *sensor_interface_ext_get(void);
+/* Direct I2C/SPI is a no-op; EXT requires a configured backend. */
+int sensor_interface_ext_set_prefetch(bool enabled);
 enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev);
 
 int ssi_write(enum sensor_interface_dev dev, const uint8_t *buf, uint32_t num_bytes);

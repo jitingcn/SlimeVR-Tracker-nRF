@@ -60,6 +60,9 @@
 #if IS_ENABLED(CONFIG_SENSOR_DRV_BMM350)
 #include "mag/BMM350.h"
 #endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_ICT153XX)
+#include "mag/ICT153xx.h"
+#endif
 #if IS_ENABLED(CONFIG_SENSOR_DRV_IST8306)
 #include "mag/IST8306.h"
 #endif
@@ -93,7 +96,7 @@
 
 /* Sized so ARRAY_SIZE() works for callers; keep in sync with sensors_tables.c. */
 #define SENSOR_DEV_IMU_COUNT (IMU_ISM330BX + 1)
-#define SENSOR_DEV_MAG_COUNT (MAG_MMC5983MA + 1)
+#define SENSOR_DEV_MAG_COUNT (MAG_ICT153XX + 1)
 
 extern const char *dev_imu_names[SENSOR_DEV_IMU_COUNT];
 extern const sensor_imu_t *sensor_imus[SENSOR_DEV_IMU_COUNT];

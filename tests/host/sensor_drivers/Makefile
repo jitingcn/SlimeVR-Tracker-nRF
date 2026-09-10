@@ -18,9 +18,10 @@ MAG_SOURCES := \
 
 .PHONY: check clean
 
-check: test_mag_failures test_interface_intervals
+check: test_mag_failures test_interface_intervals test_ict153xx
 	./test_mag_failures
 	./test_interface_intervals
+	./test_ict153xx
 
 test_mag_failures: test_mag_failures.c $(MAG_SOURCES)
 	$(CC) $(CFLAGS) -o $@ test_mag_failures.c $(MAG_SOURCES) $(LDLIBS)
@@ -28,5 +29,8 @@ test_mag_failures: test_mag_failures.c $(MAG_SOURCES)
 test_interface_intervals: test_interface_intervals.c ../../../src/sensor/interface.c
 	$(CC) $(CFLAGS) -o $@ test_interface_intervals.c ../../../src/sensor/interface.c $(LDLIBS)
 
+test_ict153xx: test_ict153xx.c ../../../src/sensor/mag/ICT153xx.c
+	$(CC) $(CFLAGS) -o $@ test_ict153xx.c ../../../src/sensor/mag/ICT153xx.c $(LDLIBS)
+
 clean:
-	$(RM) test_mag_failures test_interface_intervals
+	$(RM) test_mag_failures test_interface_intervals test_ict153xx
