@@ -738,8 +738,12 @@ static int sensor_scan_imu_once(void)
 {
 	int imu_id = -1;
 #if SENSOR_IMU_SPI_EXISTS
-	// for SPI scan, set frequency of 10MHz, it will be set later by the driver initialization if needed
+	/* Bitbang has no controller frequency clamp; retain its DT validation cap. */
+#if DT_NODE_HAS_COMPAT(DT_BUS(SENSOR_IMU_SPI_NODE), zephyr_spi_bitbang)
+	sensor_imu_spi_dev.config.frequency = MIN(MHZ(10), DT_PROP(SENSOR_IMU_SPI_NODE, spi_max_frequency));
+#else
 	sensor_imu_spi_dev.config.frequency = MHZ(10);
+#endif
 	LOG_INF("Scanning SPI bus for IMU");
 	imu_id = sensor_scan_imu_spi(&sensor_imu_spi_dev, &sensor_imu_dev_reg);
 	if (imu_id >= 0) {

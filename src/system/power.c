@@ -116,6 +116,15 @@ static const struct gpio_dt_spec vcc = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, vcc_gp
 /* CS/VCC -> Hi-Z (GPIO_DISCONNECTED); pwr enable -> driven inactive. */
 static void sys_disconnect_interface_pins(void)
 {
+#if DT_NODE_HAS_COMPAT(DT_BUS(DT_NODELABEL(imu_spi)), zephyr_spi_bitbang)
+	/* Bitbang has no PM suspend hook. Stop driving before cutting sensor power. */
+	const struct gpio_dt_spec imu_sck = GPIO_DT_SPEC_GET(DT_BUS(DT_NODELABEL(imu_spi)), clk_gpios);
+	const struct gpio_dt_spec imu_mosi = GPIO_DT_SPEC_GET(DT_BUS(DT_NODELABEL(imu_spi)), mosi_gpios);
+	const struct gpio_dt_spec imu_miso = GPIO_DT_SPEC_GET(DT_BUS(DT_NODELABEL(imu_spi)), miso_gpios);
+	nrf_gpio_configure_dt_log("Disconnected SPI SCK", &imu_sck, GPIO_DISCONNECTED);
+	nrf_gpio_configure_dt_log("Disconnected SPI MOSI", &imu_mosi, GPIO_DISCONNECTED);
+	nrf_gpio_configure_dt_log("Disconnected SPI MISO", &imu_miso, GPIO_DISCONNECTED);
+#endif
 #if DT_SPI_DEV_HAS_CS_GPIOS(DT_NODELABEL(imu_spi))
 	const struct gpio_dt_spec imu_cs = GPIO_DT_SPEC_GET_BY_IDX(
 		DT_BUS(DT_NODELABEL(imu_spi)), cs_gpios, DT_REG_ADDR_RAW(DT_NODELABEL(imu_spi)));
