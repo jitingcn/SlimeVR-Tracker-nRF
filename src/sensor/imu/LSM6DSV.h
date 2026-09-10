@@ -85,6 +85,15 @@
 #define LSM6DSV_DATAWRITE_SLV0 0x21
 #define LSM6DSV_STATUS_MASTER 0x22
 
+#define LSM6DSV_SHUB_REG_ACCESS 0x40
+#define LSM6DSV_MASTER_ON 0x04
+#define LSM6DSV_WRITE_ONCE 0x40 // Limits writes only; does not make reads single-shot.
+#define LSM6DSV_RST_MASTER_REGS 0x80
+#define LSM6DSV_SENS_HUB_ENDOP 0x01
+#define LSM6DSV_SLAVE0_NACK 0x08
+#define LSM6DSV_WR_ONCE_DONE 0x80
+#define LSM6DSV_SHUB_ODR_240HZ 0xA0
+
 // Same for XL and G
 #define ODR_OFF 0x00
 #define ODR_1_875Hz 0x01

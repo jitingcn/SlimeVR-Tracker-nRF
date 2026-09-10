@@ -18,11 +18,12 @@ MAG_SOURCES := \
 
 .PHONY: check clean
 
-check: test_mag_failures test_interface_intervals test_ict153xx test_icm45686
+check: test_mag_failures test_interface_intervals test_ict153xx test_icm45686 test_lsm6dsv
 	./test_mag_failures
 	./test_interface_intervals
 	./test_ict153xx
 	./test_icm45686
+	./test_lsm6dsv
 
 test_mag_failures: test_mag_failures.c $(MAG_SOURCES)
 	$(CC) $(CFLAGS) -o $@ test_mag_failures.c $(MAG_SOURCES) $(LDLIBS)
@@ -36,5 +37,8 @@ test_ict153xx: test_ict153xx.c ../../../src/sensor/mag/ICT153xx.c
 test_icm45686: test_icm45686.c ../../../src/sensor/imu/ICM45686.c ../../../src/sensor/imu/ICM45686.h hal/nrf_gpio.h
 	$(CC) $(CFLAGS) -o $@ test_icm45686.c ../../../src/sensor/imu/ICM45686.c $(LDLIBS)
 
+test_lsm6dsv: test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c ../../../src/sensor/imu/LSM6DSV.h hal/nrf_gpio.h
+	$(CC) $(CFLAGS) -o $@ test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c $(LDLIBS)
+
 clean:
-	$(RM) test_mag_failures test_interface_intervals test_ict153xx test_icm45686
+	$(RM) test_mag_failures test_interface_intervals test_ict153xx test_icm45686 test_lsm6dsv
