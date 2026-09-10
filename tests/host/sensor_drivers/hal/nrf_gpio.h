@@ -1,0 +1,7 @@
+#ifndef HOST_NRF_GPIO_H
+#define HOST_NRF_GPIO_H
+
+#define NRF_GPIO_PIN_PULLUP 3
+#define NRF_GPIO_PIN_SENSE_LOW 3
+
+#endif
