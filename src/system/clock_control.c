@@ -145,13 +145,15 @@ void clock_pre_shutdown(void)
 // Switch to external oscillator for LF clock for good TDMA precision
 void clock_init_external(void)
 {
-#if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
 	if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO)) {
+#if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
 		if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO_MODE_FULL_SWING)) {
 			clock_switch(NRF_CLOCK_LFCLK_XTAL_FULL_SWING);
 		} else if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO_MODE_LOW_SWING)) {
 			clock_switch(NRF_CLOCK_LFCLK_XTAL_LOW_SWING);
-		} else {
+		} else
+#endif
+		{
 			clock_switch(NRF_CLOCK_LFCLK_XTAL);
 		}
 	} else if (IS_ENABLED(CONFIG_CLOCK_USE_LF_SYNTH)) {
@@ -164,7 +166,6 @@ void clock_init_external(void)
 		LOG_WRN("clock_init_external: LF_SYNTH requested but not supported");
 #endif
 	}
-#endif
 }
 
 // Async version of clock_init_external

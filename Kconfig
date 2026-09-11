@@ -651,6 +651,19 @@ config CLOCK_USE_LF_SYNTH
         Use the LF synthesizer (derived from HFXO) for the low-frequency
         clock instead of LFXO or LFRC.
 
+# GRTC selects its LF source independently of the system LFCLK. Match the
+# application's clock policy instead of inheriting the temporary RC boot source.
+# Select at driver initialization; do not retime the running kernel counter.
+if NRF_GRTC_TIMER && NRF_GRTC_START_SYSCOUNTER
+
+choice NRF_GRTC_TIMER_SOURCE
+    default NRF_GRTC_TIMER_SOURCE_LFXO if CLOCK_USE_LFXO
+    default NRF_GRTC_TIMER_SOURCE_SYSTEM_LFCLK if CLOCK_USE_LF_SYNTH
+    default NRF_GRTC_TIMER_SOURCE_LFLPRC
+endchoice
+
+endif
+
 config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
     bool "Enable RC oscillator calibration for K32SRC"
     default y if CLOCK_USE_LF_SYNTH && CONNECTION_TDMA
