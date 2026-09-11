@@ -8,27 +8,31 @@
 	/delete-node/ partitions;
 
 	partitions {
-		compatible = "fixed-partitions";
+		ranges;
 		#address-cells = <1>;
 		#size-cells = <1>;
 
 		reserved_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
 			label = "MBR";
 			read-only;
 			reg = <0x00000000 0x00001000>;
 		};
 
 		slot0_partition: partition@1000 {
+			compatible = "zephyr,mapped-partition";
 			label = "application";
 			reg = <0x00001000 0x0006d000>;
 		};
 
 		storage_partition: partition@6e000 {
+			compatible = "zephyr,mapped-partition";
 			label = "storage";
 			reg = <0x0006e000 0x00006000>;
 		};
 
 		boot_partition: partition@74000 {
+			compatible = "zephyr,mapped-partition";
 			label = "UF2";
 			read-only;
 			reg = <0x00074000 0x0000c000>;

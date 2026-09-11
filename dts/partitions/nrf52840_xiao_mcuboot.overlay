@@ -8,36 +8,42 @@
 	/delete-node/ partitions;
 
 	partitions {
-		compatible = "fixed-partitions";
+		ranges;
 		#address-cells = <1>;
 		#size-cells = <1>;
 
 		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
 			label = "mcuboot";
 			reg = <0x00000000 0x0000c000>;
 		};
 
 		slot0_partition: partition@c000 {
+			compatible = "zephyr,mapped-partition";
 			label = "image-0";
 			reg = <0x0000c000 0x0006d000>;
 		};
 
 		slot1_partition: partition@79000 {
+			compatible = "zephyr,mapped-partition";
 			label = "image-1";
 			reg = <0x00079000 0x0006d000>;
 		};
 
 		storage_partition: partition@e6000 {
+			compatible = "zephyr,mapped-partition";
 			label = "storage";
 			reg = <0x000e6000 0x00006000>;
 		};
 
 		settings_storage_partition: partition@ec000 {
+			compatible = "zephyr,mapped-partition";
 			label = "settings-reserved";
 			reg = <0x000ec000 0x00008000>;
 		};
 
 		reserved_top_partition: partition@f4000 {
+			compatible = "zephyr,mapped-partition";
 			label = "reserved-legacy-uf2";
 			read-only;
 			reg = <0x000f4000 0x0000c000>;

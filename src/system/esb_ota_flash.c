@@ -130,7 +130,7 @@ int esb_ota_flash_mcuboot_region(uint32_t *addr, uint32_t *capacity)
 		return -EBUSY;
 	}
 
-	const uint8_t area_id = FIXED_PARTITION_ID(slot1_partition);
+	const uint8_t area_id = PARTITION_ID(slot1_partition);
 	const struct flash_area *area;
 	int err = flash_area_open(area_id, &area);
 	if (err) {
@@ -160,7 +160,7 @@ int esb_ota_flash_prepare_mcuboot_slot(void)
 {
 #if OTA_MCUBOOT_HAS_SECONDARY
 	const struct flash_area *area;
-	int err = flash_area_open(FIXED_PARTITION_ID(slot1_partition), &area);
+	int err = flash_area_open(PARTITION_ID(slot1_partition), &area);
 	if (err) {
 		return err;
 	}

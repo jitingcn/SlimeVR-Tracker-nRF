@@ -579,6 +579,25 @@ config SLIMEVR_USB_DEVICE_MAX_POWER
     help
         USB bMaxPower value in 2 mA units.
 
+# Keep USB-only settings conditional for boards using a UART bridge instead.
+configdefault UDC_BUF_POOL_SIZE
+    default 4096 if UDC_DRIVER
+
+choice USBD_LOG_LEVEL_CHOICE
+    depends on USB_DEVICE_STACK_NEXT && LOG
+    default USBD_LOG_LEVEL_ERR
+endchoice
+
+choice UDC_DRIVER_LOG_LEVEL_CHOICE
+    depends on UDC_DRIVER && LOG
+    default UDC_DRIVER_LOG_LEVEL_ERR
+endchoice
+
+choice USBD_CDC_ACM_LOG_LEVEL_CHOICE
+    depends on USB_DEVICE_STACK_NEXT && USBD_CDC_ACM_CLASS && LOG
+    default USBD_CDC_ACM_LOG_LEVEL_OFF
+endchoice
+
 config CLOCK_USE_LFXO
     bool "Use external low-frequency crystal oscillator (LFXO)"
     default y

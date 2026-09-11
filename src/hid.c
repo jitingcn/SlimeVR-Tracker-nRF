@@ -325,13 +325,13 @@ static int composite_pre_init(void)
 
 SYS_INIT(composite_pre_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
 
-void hid_write_packet_n(const uint8_t *data)
+bool hid_write_packet_n(const uint8_t *data)
 {
 	uint32_t prod = (uint32_t)atomic_get(&hid_prod);
 	uint32_t cons = (uint32_t)atomic_get(&hid_cons);
 
 	if ((prod - cons) >= REPORT_COUNT) {
-		return;
+		return false;
 	}
 
 	uint8_t *report = &reports[REPORT_SIZE * (prod % REPORT_COUNT)];
@@ -342,6 +342,7 @@ void hid_write_packet_n(const uint8_t *data)
 	}
 	report[1] = 0;
 	atomic_set(&hid_prod, (atomic_val_t)(prod + 1));
+	return true;
 }
 
 #endif

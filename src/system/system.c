@@ -12,7 +12,7 @@
 #include <zephyr/sys/reboot.h>
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
-#include <zephyr/fs/nvs.h>
+#include <zephyr/kvss/nvs.h>
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 #include <zephyr/retention/bootmode.h>
 #endif
@@ -26,9 +26,9 @@ static struct nvs_fs fs;
 static K_MUTEX_DEFINE(sys_storage_lock);
 
 #define NVS_PARTITION storage_partition
-#define NVS_PARTITION_DEVICE FIXED_PARTITION_DEVICE(NVS_PARTITION)
-#define NVS_PARTITION_OFFSET FIXED_PARTITION_OFFSET(NVS_PARTITION)
-#define NVS_PARTITION_SIZE FIXED_PARTITION_SIZE(NVS_PARTITION)
+#define NVS_PARTITION_DEVICE PARTITION_DEVICE(NVS_PARTITION)
+#define NVS_PARTITION_OFFSET PARTITION_OFFSET(NVS_PARTITION)
+#define NVS_PARTITION_SIZE PARTITION_SIZE(NVS_PARTITION)
 
 LOG_MODULE_REGISTER(system, LOG_LEVEL_INF);
 

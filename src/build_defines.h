@@ -134,10 +134,9 @@ static uint8_t get_server_constant_tracker_status(int status) __attribute__((unu
 #define FW_BOARD SVR_BOARD_GENERIC_NRF
 #endif
 
-/* NCS 3.3 renamed series Kconfig (NRF52X/NRF54LX deprecated). Keep both. */
-#if CONFIG_SOC_SERIES_NRF52X || CONFIG_SOC_SERIES_NRF52
+#if CONFIG_SOC_SERIES_NRF52
 #define FW_MCU SVR_MCU_NRF52
-#elif CONFIG_SOC_SERIES_NRF54LX || CONFIG_SOC_SERIES_NRF54L
+#elif CONFIG_SOC_SERIES_NRF54L
 #define FW_MCU SVR_MCU_NRF54L
 #else
 #define FW_MCU 0

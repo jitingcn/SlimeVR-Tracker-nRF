@@ -30,12 +30,12 @@
  *
  * Flash layout (nRF52840 with Adafruit bootloader):
  *   0x00000 - 0x00FFF  MBR (4 KB)
- *   0x01000 - 0xE9FFF  Application (CONFIG_FLASH_LOAD_OFFSET = 0x1000)
- *   0xEA000 - 0xF3FFF  App Data / NVS
+ *   0x01000 - 0xEDFFF  Application (zephyr,code-partition)
+ *   0xEE000 - 0xF3FFF  App Data / NVS
  *   0xF4000 - 0xFFFFF  Bootloader + Settings
  *
  * The new firmware overwrites the application region starting at
- * FLASH_LOAD_OFFSET. This is a single-bank in-place update – power loss
+ * the code partition offset. This is a single-bank in-place update – power loss
  * during flash write will brick the device (recoverable via UF2 bootloader).
  *
  * Transport architecture:
@@ -60,6 +60,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/storage/flash_map.h>
 #include <hal/nrf_radio.h>
 #include <zephyr/toolchain.h>
 #include <stddef.h>
@@ -71,16 +72,12 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 
 /* ── Flash configuration ─────────────────────────────────────────── */
 
-#if !defined(CONFIG_BOOTLOADER_MCUBOOT) && !defined(CONFIG_FLASH_LOAD_OFFSET)
-#error "CONFIG_FLASH_LOAD_OFFSET must be defined by board defconfig"
-#endif
-
 /* MCUboot update BINs include the image header and therefore start at slot0.
  * Legacy raw images start after the MBR. */
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
-#define OTA_FLASH_BASE      DT_REG_ADDR(DT_NODELABEL(slot0_partition))
+#define OTA_FLASH_BASE      PARTITION_OFFSET(slot0_partition)
 #else
-#define OTA_FLASH_BASE      MAX(CONFIG_FLASH_LOAD_OFFSET, 0x1000)
+#define OTA_FLASH_BASE      MAX(PARTITION_NODE_OFFSET(DT_CHOSEN(zephyr_code_partition)), 0x1000)
 #endif
 
 /*
@@ -97,7 +94,7 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 #define OTA_SUPPORTED        1
 #elif defined(CONFIG_BOOTLOADER_MCUBOOT)
 #if CONFIG_SOC_NRF52833
-#define OTA_FLASH_END        DT_REG_ADDR(DT_NODELABEL(storage_partition))
+#define OTA_FLASH_END        PARTITION_OFFSET(storage_partition)
 #define OTA_USE_RAM_ENGINE   1
 #define OTA_SUPPORTED        1
 #else
@@ -121,7 +118,7 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 #define OTA_SUPPORTED        1
 #elif CONFIG_SOC_NRF52833
 #if DT_NODE_EXISTS(DT_NODELABEL(storage_partition))
-#define OTA_FLASH_END DT_REG_ADDR(DT_NODELABEL(storage_partition))
+#define OTA_FLASH_END PARTITION_OFFSET(storage_partition)
 #else
 #error "nRF52833 OTA requires a storage_partition DT app boundary"
 #endif
