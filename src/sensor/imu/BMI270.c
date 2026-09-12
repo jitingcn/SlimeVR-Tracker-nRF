@@ -515,7 +515,8 @@ int bmi_crt(uint8_t *data)
 	// in case of SPI, where CS pin must trigger rising edge for BMI to enable interface
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x00, &tmp);
 	k_usleep(200);
-	bmi_init(0, 0, 0, 0, 0);
+	float accel_actual_time, gyro_actual_time;
+	err |= bmi_init(0, 0, 0, &accel_actual_time, &gyro_actual_time);
 	if (acc_odr != 0) {
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_ACC_CONF, 0xA0 | acc_odr);
 	}
@@ -535,6 +536,7 @@ int bmi_crt(uint8_t *data)
 		LOG_ERR("Communication error");
 		last_accel_odr = 0xff;
 		last_gyro_odr = 0xff;
+		return err;
 	} else {
 		last_accel_odr = acc_odr;
 		last_gyro_odr = gyr_odr;
