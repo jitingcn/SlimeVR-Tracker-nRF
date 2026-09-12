@@ -7,7 +7,10 @@
 #include "BMI270_firmware.h"
 #include "sensor/sensor_none.h"
 
-#define PACKET_SIZE 12
+#define PACKET_SIZE 12 // Headerless FIFO: gyro XYZ, then accel XYZ; little-endian 16-bit axes.
+#define BMI270_PWR_CTRL_GYRO_EN 0x02
+#define BMI270_PWR_CTRL_ACCEL_EN 0x04
+#define BMI270_PWR_CTRL_TEMP_EN 0x08
 
 static float accel_sensitivity = 16.0f / 32768.0f;  // default 16g
 static float gyro_sensitivity = 2000.0f / 32768.0f; // default 2000dps
@@ -32,7 +35,13 @@ static int asic_init(void);
 static int upload_config_file(void);
 static float factor_zx_read(void);
 
-int bmi_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
+int bmi_init(
+	float clock_rate,
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+)
 {
 	ARG_UNUSED(clock_rate);
 	// setup interface for SPI
@@ -47,7 +56,7 @@ int bmi_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 	factor_zx = factor_zx_read();
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_ACC_RANGE, accel_fs);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_GYR_RANGE, gyro_fs);
-	err |= bmi_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
+	err |= bmi_update_odr(accel_period_s, gyro_period_s, accel_actual_period_s, gyro_actual_period_s);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_CONFIG_0, 0x00); // do not return sensortime frame
 	err |= ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
@@ -108,49 +117,49 @@ void bmi_update_fs(float accel_range, float gyro_range, float *accel_actual_rang
 	*gyro_actual_range = gyro_range;
 }
 
-int bmi_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
+int bmi_update_odr(float accel_period_s, float gyro_period_s, float *accel_actual_period_s, float *gyro_actual_period_s)
 {
-	float requested_odr;
+	float requested_odr_hz;
 	uint8_t acc_odr = 0;
 	uint8_t gyr_odr = 0;
 
 	// Calculate accel
-	if (accel_time <= 0 || accel_time == INFINITY) // off, standby interpreted as off
+	if (accel_period_s <= 0 || accel_period_s == INFINITY) // off, standby interpreted as off
 	{
-		accel_time = 0; // off
+		accel_period_s = 0; // off
 	} else {
-		requested_odr = 1.0f / accel_time;
+		requested_odr_hz = 1.0f / accel_period_s;
 		size_t selected = 0;
 		for (size_t i = 1; i < ARRAY_SIZE(accel_odr_hz); i++) {
-			if (requested_odr > accel_odr_hz[i]) {
+			if (requested_odr_hz > accel_odr_hz[i]) {
 				break;
 			}
 			selected = i;
 		}
 		acc_odr = accel_odrs[selected];
-		accel_time = 1.0f / accel_odr_hz[selected];
+		accel_period_s = 1.0f / accel_odr_hz[selected];
 	}
 
 	// Calculate gyro
-	if (gyro_time <= 0 || gyro_time == INFINITY) // off, standby interpreted as off
+	if (gyro_period_s <= 0 || gyro_period_s == INFINITY) // off, standby interpreted as off
 	{
-		gyro_time = 0; // off
+		gyro_period_s = 0; // off
 	} else {
-		requested_odr = 1.0f / gyro_time;
+		requested_odr_hz = 1.0f / gyro_period_s;
 		size_t selected = 0;
 		for (size_t i = 1; i < ARRAY_SIZE(gyro_odr_hz); i++) {
-			if (requested_odr > gyro_odr_hz[i]) {
+			if (requested_odr_hz > gyro_odr_hz[i]) {
 				break;
 			}
 			selected = i;
 		}
 		gyr_odr = gyro_odrs[selected];
-		gyro_time = 1.0f / gyro_odr_hz[selected];
+		gyro_period_s = 1.0f / gyro_odr_hz[selected];
 	}
 
 	if (last_accel_odr == acc_odr && last_gyro_odr == gyr_odr) {
-		*accel_actual_time = accel_time;
-		*gyro_actual_time = gyro_time;
+		*accel_actual_period_s = accel_period_s;
+		*gyro_actual_period_s = gyro_period_s;
 		return 0; /* already configured — success for err|= callers */
 	}
 
@@ -169,7 +178,8 @@ int bmi_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 	err |= ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		BMI270_PWR_CTRL,
-		0x08 | (acc_odr != 0 ? 0x04 : 0) | (gyr_odr != 0 ? 0x02 : 0)
+		BMI270_PWR_CTRL_TEMP_EN | (acc_odr != 0 ? BMI270_PWR_CTRL_ACCEL_EN : 0)
+			| (gyr_odr != 0 ? BMI270_PWR_CTRL_GYRO_EN : 0)
 	); // enable temp, set accel and gyro power
 	if (err) {
 		last_accel_odr = 0xff;
@@ -180,46 +190,45 @@ int bmi_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 
 	last_accel_odr = acc_odr;
 	last_gyro_odr = gyr_odr;
-	*accel_actual_time = accel_time;
-	*gyro_actual_time = gyro_time;
+	*accel_actual_period_s = accel_period_s;
+	*gyro_actual_period_s = gyro_period_s;
 
 	return 0;
 }
 
-// TODO: gyro rotation data is delayed for some reason, accelerometer still responds instantly
-uint16_t bmi_fifo_read(uint8_t *data, uint16_t len)
+// Historical gyro/accel latency difference has no verified cause here.
+uint16_t bmi_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 {
-	uint16_t total = 0;
-	uint16_t packets = UINT16_MAX;
-	while (packets > 0 && len >= PACKET_SIZE) {
-		uint8_t rawCount[2];
-		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_LENGTH_0, &rawCount[0], 2);
+	uint16_t total_packets = 0;
+	uint16_t packet_count = UINT16_MAX;
+	while (packet_count > 0 && capacity_bytes >= PACKET_SIZE) {
+		uint8_t raw_count[2];
+		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_LENGTH_0, &raw_count[0], 2);
 		if (err) {
 			LOG_ERR("Failed to read FIFO count");
-			return total;
+			return total_packets;
 		}
-		uint16_t count
-			= (uint16_t)((rawCount[1] & 0x3F) << 8 | rawCount[0]); // Turn the 16 bits into a unsigned 16-bit value
-		if (!count) {                                              // nothing to do
+		uint16_t byte_count = (uint16_t)((raw_count[1] & 0x3F) << 8 | raw_count[0]); // FIFO byte count.
+		if (!byte_count) {                                                           // nothing to do
 			break;
 		}
-		packets = count / PACKET_SIZE;
-		uint16_t limit = len / PACKET_SIZE;
-		if (packets > limit) {
-			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", packets - limit);
-			packets = limit;
-			count = packets * PACKET_SIZE;
+		packet_count = byte_count / PACKET_SIZE;
+		uint16_t packet_capacity = capacity_bytes / PACKET_SIZE;
+		if (packet_count > packet_capacity) {
+			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", packet_count - packet_capacity);
+			packet_count = packet_capacity;
+			byte_count = packet_count * PACKET_SIZE;
 		}
-		err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_DATA, data, count, PACKET_SIZE);
+		err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_DATA, data, byte_count, PACKET_SIZE);
 		if (err) {
 			LOG_ERR("Communication error");
-			return total;
+			return total_packets;
 		}
-		data += packets * PACKET_SIZE;
-		len -= packets * PACKET_SIZE;
-		total += packets;
+		data += packet_count * PACKET_SIZE;
+		capacity_bytes -= packet_count * PACKET_SIZE;
+		total_packets += packet_count;
 	}
-	return total;
+	return total_packets;
 }
 
 static const uint8_t overread[2] = {0x00, 0x80};
@@ -228,28 +237,29 @@ static const uint8_t invalid_gyro[6] = {0x02, 0x7F, 0x00, 0x80, 0x00, 0x80};
 
 int bmi_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
-	index *= PACKET_SIZE;
-	if (!memcmp(&data[index], overread, sizeof(overread))) {
+	const uint16_t packet_offset = index * PACKET_SIZE;
+	const uint8_t *packet = &data[packet_offset];
+	if (!memcmp(packet, overread, sizeof(overread))) {
 		return 1; // Skip overread packets
 	}
 	float a_bmi[3];
 	float g_bmi[3];
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
-		a_bmi[i] = (int16_t)((((uint16_t)data[index + 7 + (i * 2)]) << 8) | data[index + 6 + (i * 2)]);
+		a_bmi[i] = (int16_t)((((uint16_t)packet[7 + (i * 2)]) << 8) | packet[6 + (i * 2)]);
 		a_bmi[i] *= accel_sensitivity;
-		g_bmi[i] = (int16_t)((((uint16_t)data[index + 1 + (i * 2)]) << 8) | data[index + (i * 2)]);
+		g_bmi[i] = (int16_t)((((uint16_t)packet[1 + (i * 2)]) << 8) | packet[i * 2]);
 		g_bmi[i] *= gyro_sensitivity;
 	}
-	if (memcmp(&data[index + 6], invalid_accel, sizeof(invalid_accel))) // valid accel data
+	if (memcmp(&packet[6], invalid_accel, sizeof(invalid_accel))) // Invalid channels leave their output unchanged.
 	{
 		a[0] = -a_bmi[1];
 		a[1] = a_bmi[0];
 		a[2] = a_bmi[2];
 	}
-	if (memcmp(&data[index], invalid_gyro, sizeof(invalid_gyro))) // valid gyro data
+	if (memcmp(packet, invalid_gyro, sizeof(invalid_gyro))) // valid gyro data
 	{
-		// Ratex = DATA_15<<8+DATA_14 - GYR_CAS.factor_zx * (DATA_19<<8+DATA_18) / 2^9
+		// factor_zx already includes the GYR_CAS coefficient's 1/512 scale.
 		g_bmi[0] -= g_bmi[2] * factor_zx;
 		g[0] = -g_bmi[1];
 		g[1] = g_bmi[0];
@@ -260,8 +270,8 @@ int bmi_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 
 void bmi_accel_read(float a[3])
 {
-	uint8_t rawAccel[6];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_DATA_8, &rawAccel[0], 6);
+	uint8_t raw_accel[6];
+	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_DATA_8, &raw_accel[0], 6);
 	if (err) {
 		LOG_ERR("Communication error");
 		memset(a, 0, 3 * sizeof(*a));
@@ -270,7 +280,7 @@ void bmi_accel_read(float a[3])
 	float a_bmi[3];
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
-		a_bmi[i] = (int16_t)((((uint16_t)rawAccel[1 + (i * 2)]) << 8) | rawAccel[i * 2]);
+		a_bmi[i] = (int16_t)((((uint16_t)raw_accel[1 + (i * 2)]) << 8) | raw_accel[i * 2]);
 		a_bmi[i] *= accel_sensitivity;
 	}
 	a[0] = -a_bmi[1];
@@ -280,8 +290,8 @@ void bmi_accel_read(float a[3])
 
 void bmi_gyro_read(float g[3])
 {
-	uint8_t rawGyro[6];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_DATA_14, &rawGyro[0], 6);
+	uint8_t raw_gyro[6];
+	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_DATA_14, &raw_gyro[0], 6);
 	if (err) {
 		LOG_ERR("Communication error");
 		memset(g, 0, 3 * sizeof(*g));
@@ -290,7 +300,7 @@ void bmi_gyro_read(float g[3])
 	float g_bmi[3];
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
-		g_bmi[i] = (int16_t)((((uint16_t)rawGyro[1 + (i * 2)]) << 8) | rawGyro[i * 2]);
+		g_bmi[i] = (int16_t)((((uint16_t)raw_gyro[1 + (i * 2)]) << 8) | raw_gyro[i * 2]);
 		g_bmi[i] *= gyro_sensitivity;
 	}
 	// Ratex = DATA_15<<8+DATA_14 - GYR_CAS.factor_zx * (DATA_19<<8+DATA_18) / 2^9
@@ -302,18 +312,18 @@ void bmi_gyro_read(float g[3])
 
 float bmi_temp_read(void)
 {
-	uint8_t rawTemp[2];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_TEMPERATURE_0, &rawTemp[0], 2);
+	uint8_t raw_temp[2];
+	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, BMI270_TEMPERATURE_0, &raw_temp[0], 2);
 	if (err) {
 		LOG_ERR("Communication error");
 		return NAN;
 	}
-	if (rawTemp[0] == 0x00 && rawTemp[1] == 0x80) {
+	if (raw_temp[0] == 0x00 && raw_temp[1] == 0x80) {
 		return NAN;
 	}
 	// 0x0000 -> 23°C
 	// The resolution is 1/2^9 K/LSB
-	float temp = (int16_t)((((uint16_t)rawTemp[1]) << 8) | rawTemp[0]);
+	float temp = (int16_t)((((uint16_t)raw_temp[1]) << 8) | raw_temp[0]);
 	temp /= 512;
 	temp += 23;
 	return temp;
@@ -343,7 +353,7 @@ uint8_t bmi_setup_DRDY(uint16_t threshold)
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
-uint8_t bmi_setup_WOM(void) // TODO: seems too sensitive? try to match icm at least // TODO: half working.
+uint8_t bmi_setup_WOM(void) // Historical sensitivity/compatibility concerns remain unverified.
 {
 	uint8_t config[4] = {0};
 	uint16_t *ptr = (uint16_t *)config;     // bmi is little endian
@@ -419,10 +429,10 @@ static int asic_init(void)
 /* Config upload adapted from Zephyr BMI270 driver. */
 static int upload_config_file(void)
 {
-	uint16_t count = sizeof(bmi270_config_file) / sizeof(bmi270_config_file[0]);
+	uint16_t byte_count = sizeof(bmi270_config_file) / sizeof(bmi270_config_file[0]);
 	uint8_t init_addr[2] = {0};
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INIT_CTRL, 0x00); // prepare config load
-	for (int i = 0; i < count; i += 64) {
+	for (int i = 0; i < byte_count; i += 64) {
 		init_addr[0] = (i / 2) & 0xF;
 		init_addr[1] = (i / 2) >> 4;
 		err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, BMI270_INIT_ADDR_0, init_addr, 2);
@@ -431,7 +441,7 @@ static int upload_config_file(void)
 			BMI270_INIT_DATA,
 			&bmi270_config_file[i],
 			64
-		); // 64 works, 128 doesn't? either way it takes forever
+		); // Preserve 64-byte chunks; the historical larger-transfer limitation is unverified.
 	}
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_INIT_CTRL, 0x01); // complete config load
 	if (err) {
@@ -515,8 +525,8 @@ int bmi_crt(uint8_t *data)
 	// in case of SPI, where CS pin must trigger rising edge for BMI to enable interface
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x00, &tmp);
 	k_usleep(200);
-	float accel_actual_time, gyro_actual_time;
-	err |= bmi_init(0, 0, 0, &accel_actual_time, &gyro_actual_time);
+	float accel_actual_period_s, gyro_actual_period_s;
+	err |= bmi_init(0, 0, 0, &accel_actual_period_s, &gyro_actual_period_s);
 	if (acc_odr != 0) {
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, BMI270_ACC_CONF, 0xA0 | acc_odr);
 	}

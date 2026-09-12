@@ -32,10 +32,10 @@
 #define MD_SINGLE     0x01 // Performs oneshot, then switches to idle
 #define MD_IDLE       0x03
 
-int lis2_init(float time, float *actual_time);
+int lis2_init(float period_s, float *actual_period_s);
 void lis2_shutdown(void);
 
-int lis2_update_odr(float time, float *actual_time);
+int lis2_update_odr(float period_s, float *actual_period_s);
 
 void lis2_mag_oneshot(void);
 bool lis2_mag_read(float m[3]);

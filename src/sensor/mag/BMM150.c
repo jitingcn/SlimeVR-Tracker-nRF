@@ -53,12 +53,12 @@ static uint8_t dig_xy1;
 static int8_t dig_xy2;
 static uint16_t dig_xyz1;
 
-static uint8_t last_odr = 0xff;
+static uint8_t last_config_code = 0xff;
 static uint8_t current_rep_xy;
 static uint8_t current_rep_z;
 static bool oneshot_pending;
 static bool oneshot_failed;
-static int64_t oneshot_deadline;
+static int64_t oneshot_deadline_ms;
 
 LOG_MODULE_REGISTER(BMM150, LOG_LEVEL_DBG);
 
@@ -67,9 +67,9 @@ static float compensate_x(int16_t mag_data_x, uint16_t data_rhall);
 static float compensate_y(int16_t mag_data_y, uint16_t data_rhall);
 static float compensate_z(int16_t mag_data_z, uint16_t data_rhall);
 
-int bmm1_init(float time, float *actual_time)
+int bmm1_init(float period_s, float *actual_period_s)
 {
-	last_odr = 0xff; // reset before bus work so failure paths never cache-hit
+	last_config_code = 0xff; // reset before bus work so failure paths never cache-hit
 	oneshot_pending = false;
 	oneshot_failed = false;
 
@@ -85,120 +85,118 @@ int bmm1_init(float time, float *actual_time)
 		return (err < 0 ? err : 0);
 	}
 
-	err = bmm1_update_odr(time, actual_time);
+	err = bmm1_update_odr(period_s, actual_period_s);
 	return (err < 0 ? err : 0);
 }
 
 void bmm1_shutdown(void)
 {
-	last_odr = 0xff; // reset last odr
+	last_config_code = 0xff; // invalidate configuration cache
 	oneshot_pending = false;
 	oneshot_failed = false;
-	//	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_POWER_CTRL, 0x82); // soft reset
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_POWER_CTRL, 0x00);
 	if (err) {
 		LOG_ERR("Communication error");
 	}
 }
 
-int bmm1_update_odr(float time, float *actual_time)
+int bmm1_update_odr(float period_s, float *actual_period_s)
 {
-	int ODR;
-	uint8_t DR;
-	uint8_t OPMODE;
-	uint8_t REP_XY; // 1+2(REP_XY)
-	uint8_t REP_Z;  // 1+REP_Z
+	int requested_odr_hz; // Truncate fractional Hz before selecting a supported rate.
+	uint8_t odr_code;
+	uint8_t mode_code;
+	uint8_t xy_repetitions_code; // repetitions = 1 + 2 * code
+	uint8_t z_repetitions_code;  // repetitions = 1 + code
 
-	if (time <= 0 || time == INFINITY) // sleep and forced mode both use sleep mode
+	if (period_s <= 0 || period_s == INFINITY) // sleep and forced mode both use sleep mode
 	{
-		OPMODE = OPMODE_SLEEP;
-		ODR = 0;
+		mode_code = OPMODE_SLEEP;
+		requested_odr_hz = 0;
 	} else {
-		OPMODE = OPMODE_NORMAL;
+		mode_code = OPMODE_NORMAL;
 		// Regular preset, 0.6uT RMS Noise or 6mG
-		REP_XY = 4; // 9
-		REP_Z = 14; // 15
-		ODR = 1 / time;
+		xy_repetitions_code = 4; // 9
+		z_repetitions_code = 14; // 15
+		requested_odr_hz = 1 / period_s;
 	}
 
-	if (time <= 0) {
-		DR = 0;
-		REP_XY = 0;
-		REP_Z = 0;
-		time = 0;        // off
-	} else if (ODR > 25) // TODO: this sucks
-	{
-		DR = DR_ODR_30Hz;
-		time = 1.0 / 30;
-	} else if (ODR > 20) {
-		DR = DR_ODR_25Hz;
-		time = 1.0 / 25;
-	} else if (ODR > 15) {
-		DR = DR_ODR_20Hz;
-		time = 1.0 / 20;
-	} else if (ODR > 10) {
-		DR = DR_ODR_15Hz;
-		time = 1.0 / 15;
-	} else if (ODR > 8) {
-		DR = DR_ODR_10Hz;
-		time = 1.0 / 10;
-	} else if (ODR > 6) {
-		DR = DR_ODR_8Hz;
-		time = 1.0 / 8;
-	} else if (ODR > 2) {
-		DR = DR_ODR_6Hz;
-		time = 1.0 / 6;
-	} else if (ODR > 0) {
-		DR = DR_ODR_2Hz;
-		time = 1.0 / 2;
+	if (period_s <= 0) {
+		odr_code = 0;
+		xy_repetitions_code = 0;
+		z_repetitions_code = 0;
+		period_s = 0; // off
+	} else if (requested_odr_hz > 25) {
+		odr_code = DR_ODR_30Hz;
+		period_s = 1.0 / 30;
+	} else if (requested_odr_hz > 20) {
+		odr_code = DR_ODR_25Hz;
+		period_s = 1.0 / 25;
+	} else if (requested_odr_hz > 15) {
+		odr_code = DR_ODR_20Hz;
+		period_s = 1.0 / 20;
+	} else if (requested_odr_hz > 10) {
+		odr_code = DR_ODR_15Hz;
+		period_s = 1.0 / 15;
+	} else if (requested_odr_hz > 8) {
+		odr_code = DR_ODR_10Hz;
+		period_s = 1.0 / 10;
+	} else if (requested_odr_hz > 6) {
+		odr_code = DR_ODR_8Hz;
+		period_s = 1.0 / 8;
+	} else if (requested_odr_hz > 2) {
+		odr_code = DR_ODR_6Hz;
+		period_s = 1.0 / 6;
+	} else if (requested_odr_hz > 0) {
+		odr_code = DR_ODR_2Hz;
+		period_s = 1.0 / 2;
 	} else {
-		DR = DR_ODR_30Hz;
+		odr_code = DR_ODR_30Hz;
 		// Low power preset, 1.0uT RMS Noise or 10mG
-		REP_XY = 1; // 3
-		REP_Z = 4;  // 5
-		time = INFINITY;
+		xy_repetitions_code = 1; // 3
+		z_repetitions_code = 4;  // 5
+		period_s = INFINITY;
 	}
 
-	uint8_t OP_SET = DR << 2 | OPMODE;
-	if (last_odr == OP_SET) {
-		*actual_time = time;
+	uint8_t odr_mode_code = odr_code << 2 | mode_code;
+	if (last_config_code == odr_mode_code) {
+		*actual_period_s = period_s;
 		return 0; /* already configured */
 	}
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_OP_CTRL, OP_SET << 1);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_OP_CTRL, odr_mode_code << 1);
 	if (err) {
 		goto error;
 	}
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_REP_XY, REP_XY);
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_REP_XY, xy_repetitions_code);
 	if (err) {
 		goto error;
 	}
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_REP_Z, REP_Z);
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_REP_Z, z_repetitions_code);
 	if (err) {
 		goto error;
 	}
 
-	last_odr = OP_SET;
-	current_rep_xy = REP_XY;
-	current_rep_z = REP_Z;
+	last_config_code = odr_mode_code;
+	current_rep_xy = xy_repetitions_code;
+	current_rep_z = z_repetitions_code;
 	oneshot_pending = false;
 	oneshot_failed = false;
-	*actual_time = time;
+	*actual_period_s = period_s;
 	return 0;
 error:
-	last_odr = 0xff;
+	last_config_code = 0xff;
 	LOG_ERR("Communication error");
 	return err;
 }
 
 void bmm1_mag_oneshot(void)
 {
-	last_odr = 0xff;
+	last_config_code = 0xff;
 	int err = ssi_reg_update_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_OP_CTRL, 0x06, OPMODE_FORCED << 1);
 	uint32_t measurement_us = 145U * (2U * current_rep_xy + 1U) + 500U * (current_rep_z + 1U) + 980U;
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
-	oneshot_deadline = k_uptime_get() + (measurement_us + 999U) / 1000U + 1;
+	oneshot_deadline_ms = k_uptime_get() + (measurement_us + 999U) / 1000U + 1;
 	if (err) {
 		LOG_ERR("Communication error");
 	}
@@ -225,7 +223,7 @@ bool bmm1_mag_read(float m[3])
 			if ((status & 0x06) != (OPMODE_FORCED << 1)) {
 				break;
 			}
-			if (k_uptime_get() >= oneshot_deadline) {
+			if (k_uptime_get() >= oneshot_deadline_ms) {
 				LOG_ERR("Read timeout");
 				oneshot_pending = false;
 				return false;

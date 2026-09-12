@@ -77,16 +77,21 @@
 
 int lsm6dso_init(
 	float clock_rate,
-	float accel_time,
-	float gyro_time,
-	float *accel_actual_time,
-	float *gyro_actual_time
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
 );
 
 void lsm6dso_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range);
-int lsm6dso_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int lsm6dso_update_odr(
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 
-uint16_t lsm6dso_fifo_read(uint8_t *data, uint16_t len);
+uint16_t lsm6dso_fifo_read(uint8_t *data, uint16_t capacity_bytes);
 
 uint8_t lsm6dso_setup_WOM(void);
 

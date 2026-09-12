@@ -75,13 +75,24 @@
 #define RANGE_250  0x03
 #define RANGE_125  0x04
 
-int bmi_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int bmi_init(
+	float clock_rate,
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 void bmi_shutdown(void);
 
 void bmi_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range);
-int bmi_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int bmi_update_odr(
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 
-uint16_t bmi_fifo_read(uint8_t *data, uint16_t len);
+uint16_t bmi_fifo_read(uint8_t *data, uint16_t capacity_bytes);
 int bmi_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3]);
 void bmi_accel_read(float a[3]);
 void bmi_gyro_read(float g[3]);

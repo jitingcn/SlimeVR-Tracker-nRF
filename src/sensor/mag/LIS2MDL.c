@@ -4,7 +4,6 @@
 #include <zephyr/logging/log.h>
 
 #include "LIS2MDL.h"
-#include "LIS3MDL.h" // Common functions
 
 static const float sensitivity = 1.5 / 1000; // ~1.5 mgauss/LSB -> 0.0015 G/LSB
 
@@ -48,7 +47,7 @@ static int lis2_soft_reset(void)
 	return -1;
 }
 
-int lis2_init(float time, float *actual_time)
+int lis2_init(float period_s, float *actual_period_s)
 {
 	last_cfg_a = 0xff;
 
@@ -71,7 +70,7 @@ int lis2_init(float time, float *actual_time)
 		return err;
 	}
 
-	err = lis2_update_odr(time, actual_time);
+	err = lis2_update_odr(period_s, actual_period_s);
 	return (err < 0 ? err : 0);
 }
 
@@ -83,75 +82,61 @@ void lis2_shutdown(void)
 		LOG_ERR("Communication error");
 }
 
-int lis2_update_odr(float time, float *actual_time)
+int lis2_update_odr(float period_s, float *actual_period_s)
 {
-	int ODR;
-	uint8_t MODR;
-	uint8_t MD;
+	int requested_odr_hz; // Truncate fractional Hz before selecting a supported rate.
+	uint8_t odr_code;
+	uint8_t mode_code;
 
-	if (time <= 0) // off
+	if (period_s <= 0) // off
 	{
-		MD = MD_IDLE;
-		ODR = 0;
-	}
-	else if (time == INFINITY) // oneshot/single — keep continuous + fixed ODR
+		mode_code = MD_IDLE;
+		requested_odr_hz = 0;
+	} else if (period_s == INFINITY) // oneshot/single — keep continuous + fixed ODR
 	{
-		MD = MD_CONTINUOUS;
-		ODR = 0;
-	}
-	else
-	{
-		MD = MD_CONTINUOUS;
-		ODR = 1 / time;
+		mode_code = MD_CONTINUOUS;
+		requested_odr_hz = 0;
+	} else {
+		mode_code = MD_CONTINUOUS;
+		requested_odr_hz = 1 / period_s;
 	}
 
-	if (MD == MD_IDLE)
-	{
-		MODR = 0;
-		time = 0; // off
-	}
-	else if (ODR > 50) // TODO: this sucks
-	{
-		MODR = ODR_100Hz;
-		time = 1.0 / 100;
-	}
-	else if (ODR > 20)
-	{
-		MODR = ODR_50Hz;
-		time = 1.0 / 50;
-	}
-	else if (ODR > 10)
-	{
-		MODR = ODR_20Hz;
-		time = 1.0 / 20;
-	}
-	else if (ODR > 0)
-	{
-		MODR = ODR_10Hz;
-		time = 1.0 / 10;
-	}
-	else
-	{
+	if (mode_code == MD_IDLE) {
+		odr_code = 0;
+		period_s = 0; // off
+	} else if (requested_odr_hz > 50) {
+		odr_code = ODR_100Hz;
+		period_s = 1.0 / 100;
+	} else if (requested_odr_hz > 20) {
+		odr_code = ODR_50Hz;
+		period_s = 1.0 / 50;
+	} else if (requested_odr_hz > 10) {
+		odr_code = ODR_20Hz;
+		period_s = 1.0 / 20;
+	} else if (requested_odr_hz > 0) {
+		odr_code = ODR_10Hz;
+		period_s = 1.0 / 10;
+	} else {
 		/* INFINITY path: continuous at lowest fixed ODR */
-		MODR = ODR_10Hz;
-		time = 1.0 / 10;
+		odr_code = ODR_10Hz;
+		period_s = 1.0 / 10;
 	}
 
 	uint8_t cfg_a;
-	if (MD == MD_IDLE)
+	if (mode_code == MD_IDLE) {
 		cfg_a = MD_IDLE;
-	else
-		cfg_a = CFG_A_COMP_TEMP_EN | (MODR << 2) | MD_CONTINUOUS;
+	} else
+		cfg_a = CFG_A_COMP_TEMP_EN | (odr_code << 2) | MD_CONTINUOUS;
 
 	if (last_cfg_a == cfg_a) {
-		*actual_time = time;
+		*actual_period_s = period_s;
 		return 0; /* already configured */
 	}
 
 	bool was_idle = (last_cfg_a == 0xff) || ((last_cfg_a & 0x03) == MD_IDLE);
 	int err;
 
-	if (MD == MD_CONTINUOUS) {
+	if (mode_code == MD_CONTINUOUS) {
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, lis2_cfg_c());
 		if (err)
 			goto error;
@@ -162,11 +147,12 @@ int lis2_update_odr(float time, float *actual_time)
 		goto error;
 
 	/* First sample after continuous enable needs turn-on delay. */
-	if (MD == MD_CONTINUOUS && was_idle)
+	if (mode_code == MD_CONTINUOUS && was_idle) {
 		k_msleep(LIS2MDL_TURN_ON_MS);
+	}
 
 	last_cfg_a = cfg_a;
-	*actual_time = time;
+	*actual_period_s = period_s;
 	return 0;
 error:
 	last_cfg_a = 0xff;
@@ -202,7 +188,7 @@ float lis2_temp_read(float bias[3])
 		LOG_ERR("Communication error");
 		return NAN;
 	}
-	// The output value is expressed as a signed 16-bit byte in two’s complement.
+	// The output value is a signed 16-bit word in two's complement.
 	// The four most significant bits contain a copy of the sign bit.
 	// The nominal sensitivity is 8 LSB/°C
 	float temp = (int16_t)((((uint16_t)rawTemp[1]) << 8) | rawTemp[0]);

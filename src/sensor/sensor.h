@@ -124,43 +124,76 @@ enum sensor_ext_mode {
 };
 
 typedef struct sensor_imu {
-	int (*init)(float, float, float, float *, float *); // first float is clock_rate, nonzero means use CLKIN, return
-														// update time, return 0 if success, -1 if general error
+	/* Periods are in seconds; a positive clock rate requests external CLKIN
+	 * where supported. Return 0 on success, negative on failure. */
+	int (*init)(
+		float clock_rate_hz,
+		float accel_period_s,
+		float gyro_period_s,
+		float *actual_accel_period_s,
+		float *actual_gyro_period_s
+	);
 	void (*shutdown)(void);
 
-	void (*update_fs)(float, float, float *, float *); // return actual range
-	int (*update_odr)(float, float, float *, float *); // return actual update time, return 0 if success, 1 if odr is
-													   // same, -1 if general error
+	/* Requested and actual full-scale ranges: g for accel, deg/s for gyro. */
+	void (*update_fs)(
+		float accel_range_g,
+		float gyro_range_dps,
+		float *actual_accel_range_g,
+		float *actual_gyro_range_dps
+	);
+	/* Return 0 on success, including an unchanged configuration; negative on
+	 * failure. Off/standby support for <= 0 and INFINITY is driver-specific.
+	 * Actual-period outputs are not guaranteed on failure. */
+	int (*update_odr)(
+		float accel_period_s,
+		float gyro_period_s,
+		float *actual_accel_period_s,
+		float *actual_gyro_period_s
+	);
 
-	uint16_t (*fifo_read)(uint8_t *, uint16_t);
-	int (*fifo_process)(uint16_t, uint8_t *, float[3], float[3]); // g, deg/s
-	void (*accel_read)(float[3]);                                 // g
-	void (*gyro_read)(float[3]);                                  // deg/s
-	float (*temp_read)(void);                                     // deg C
+	/* Buffer capacity is in bytes; return the number of complete driver
+	 * records available to fifo_process (possibly a prefix on I/O failure). */
+	uint16_t (*fifo_read)(uint8_t *data, uint16_t capacity_bytes);
+	/* Index selects a driver record, not a byte offset. Return 0 to consume,
+	 * nonzero to skip. Initialize both vectors before calling: a record may
+	 * update only one channel; invalid-channel handling is driver-specific. */
+	int (*fifo_process)(uint16_t packet_index, uint8_t *data, float accel_g[3], float gyro_dps[3]);
+	void (*accel_read)(float accel_g[3]);
+	void (*gyro_read)(float gyro_dps[3]);
+	float (*temp_read)(void); // deg C; failure sentinel is driver-specific
 
-	uint8_t (*setup_DRDY)(uint16_t);
+	/* Return packed nRF GPIO pull (high nibble) and sense (low nibble)
+	 * settings. Zero means unavailable; some drivers only log I/O failures
+	 * and still return pin settings. Watermark encoding is chip-specific. */
+	uint8_t (*setup_DRDY)(uint16_t threshold);
 	uint8_t (*setup_WOM)(void);
 
 	int (*ext_setup)(enum sensor_ext_mode mode); // select auxiliary route; 0 on success, negative on error/unsupported
 } sensor_imu_t;
 
 typedef struct sensor_mag {
-	int (*init)(float, float *); // return update time, return 0 if success, 1 if general error
+	/* Periods are in seconds. Return 0 on success, negative on failure;
+	 * actual-period output is not guaranteed on failure. */
+	int (*init)(float period_s, float *actual_period_s);
 	void (*shutdown)(void);
 
-	int (*update_odr)(
-		float,
-		float *
-	); // return actual update time, return 0 if success, 1 if odr is same, -1 if general error
+	/* Return 0 on success, including an unchanged configuration; negative on
+	 * failure. <= 0 and INFINITY may select idle, oneshot or a supported
+	 * continuous rate, depending on the chip. Check the actual period. */
+	int (*update_odr)(float period_s, float *actual_period_s);
 
-	void (*mag_oneshot)(void);    // trigger oneshot if exists
-	bool (*mag_read)(float[3]);   // any unit (usually gauss); returns true if new data was available
-	float (*temp_read)(float[3]); // deg C
+	void (*mag_oneshot)(void); // trigger a single measurement where supported
+	/* True means the output was updated; freshness checks are driver-specific.
+	 * Vector units are driver-specific (usually gauss). */
+	bool (*mag_read)(float mag[3]);
+	/* Return deg C. Drivers with SET/RESET offset measurement may update bias
+	 * in the same units as mag_read; other drivers leave it untouched. */
+	float (*temp_read)(float bias[3]);
 
-	void (*mag_process)(
-		uint8_t *,
-		float[3]
-	);                     // use if magnetometer is present as an auxiliary sensor, from data read by IMU
+	/* Decode the chip-specific raw magnetic payload, without initiating a
+	 * bus read. Frame/status validation belongs to the acquisition path. */
+	void (*mag_process)(uint8_t *raw_mag, float mag[3]);
 	uint8_t ext_min_burst; // minimum external-interface read transaction length
 	uint8_t ext_burst;     // preferred full burst length
 } sensor_mag_t;

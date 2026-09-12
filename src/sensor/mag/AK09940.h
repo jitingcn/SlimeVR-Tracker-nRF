@@ -40,10 +40,10 @@
 #define MT_LND1 0b10 // Low noise drive 1
 #define MT_LND2 0b11 // Low noise drive 2
 
-int ak_init(float time, float *actual_time);
+int ak_init(float period_s, float *actual_period_s);
 void ak_shutdown(void);
 
-int ak_update_odr(float time, float *actual_time);
+int ak_update_odr(float period_s, float *actual_period_s);
 
 void ak_mag_oneshot(void);
 bool ak_mag_read(float m[3]);

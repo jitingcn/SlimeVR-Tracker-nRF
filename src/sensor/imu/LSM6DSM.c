@@ -19,7 +19,13 @@ static bool fifo_pattern_gyro_dominant; // if more samples are gyro than accel i
 
 LOG_MODULE_REGISTER(LSM6DSM, LOG_LEVEL_DBG);
 
-int lsm6dsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
+int lsm6dsm_init(
+	float clock_rate,
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+)
 {
 	// setup interface for SPI
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(10), 0);
@@ -34,7 +40,7 @@ int lsm6dsm_init(float clock_rate, float accel_time, float gyro_time, float *acc
 	}
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff;  // reset last odr
-	err |= lsm6dsm_update_odr(accel_time, gyro_time, accel_actual_time, gyro_actual_time);
+	err |= lsm6dsm_update_odr(accel_period_s, gyro_period_s, accel_actual_period_s, gyro_actual_period_s);
 	if (err) {
 		LOG_ERR("Communication error");
 	}
@@ -78,182 +84,207 @@ void lsm6dsm_update_fs(float accel_range, float gyro_range, float *accel_actual_
 	*gyro_actual_range = gyro_range;
 }
 
-int lsm6dsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
+int lsm6dsm_update_odr(
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+)
 {
-	int ODR;
-	uint8_t OP_MODE_XL;
-	uint8_t OP_MODE_G;
-	uint8_t ODR_XL;
-	uint8_t ODR_G;
-	uint8_t GYRO_SLEEP = DSM_OP_MODE_G_AWAKE;
+	int requested_odr_hz;
+	uint8_t accel_mode;
+	uint8_t gyro_mode;
+	uint8_t accel_odr_bits;
+	uint8_t gyro_odr_bits;
+	uint8_t gyro_sleep_bits = DSM_OP_MODE_G_AWAKE;
 
 	// Calculate accel
-	if (accel_time <= 0 || accel_time == INFINITY) // off, standby interpreted as off
+	if (accel_period_s <= 0 || accel_period_s == INFINITY) // off, standby interpreted as off
 	{
 		// set High perf mode and off odr on XL
-		OP_MODE_XL = DSM_OP_MODE_XL_HP;
-		ODR_XL = DSM_ODR_OFF;
-		ODR = 0;
+		accel_mode = DSM_OP_MODE_XL_HP;
+		accel_odr_bits = DSM_ODR_OFF;
+		requested_odr_hz = 0;
 	} else {
 		// set High perf mode and select odr on XL
-		OP_MODE_XL = DSM_OP_MODE_XL_HP;
-		ODR = 1 / accel_time;
+		accel_mode = DSM_OP_MODE_XL_HP;
+		requested_odr_hz = 1 / accel_period_s;
 	}
 
-	if (ODR == 0) {
-		accel_time = 0; // off
-		ODR_XL = DSM_ODR_OFF;
-	} else if (accel_time < 0.3f / 1000) // in this case it seems better to compare accel_time
+	if (requested_odr_hz == 0) {
+		accel_period_s = 0; // off
+		accel_odr_bits = DSM_ODR_OFF;
+	} else if (accel_period_s < 0.3f / 1000) // Preserve the period thresholds and rounded period outputs.
 	{
-		ODR_XL = DSM_ODR_6_66kHz; // TODO: this is absolutely awful
-		accel_time = 0.15 / 1000;
-	} else if (accel_time < 0.6f / 1000) {
-		ODR_XL = DSM_ODR_3_33kHz;
-		accel_time = 0.3 / 1000;
-	} else if (accel_time < 1.2f / 1000) {
-		ODR_XL = DSM_ODR_1_66kHz;
-		accel_time = 0.6 / 1000;
-	} else if (accel_time < 2.4f / 1000) {
-		ODR_XL = DSM_ODR_833Hz;
-		accel_time = 1.2 / 1000;
-	} else if (accel_time < 4.8f / 1000) {
-		ODR_XL = DSM_ODR_416Hz;
-		accel_time = 2.4 / 1000;
-	} else if (accel_time < 9.6f / 1000) {
-		ODR_XL = DSM_ODR_208Hz;
-		accel_time = 4.8 / 1000;
-	} else if (accel_time < 19.2f / 1000) {
-		ODR_XL = DSM_ODR_104Hz;
-		accel_time = 9.6 / 1000;
-	} else if (accel_time < 38.4f / 1000) {
-		ODR_XL = DSM_ODR_52Hz;
-		accel_time = 19.2 / 1000;
-	} else if (ODR > 12.5) {
-		ODR_XL = DSM_ODR_26Hz;
-		accel_time = 38.4 / 1000;
+		accel_odr_bits = DSM_ODR_6_66kHz;
+		accel_period_s = 0.15 / 1000;
+	} else if (accel_period_s < 0.6f / 1000) {
+		accel_odr_bits = DSM_ODR_3_33kHz;
+		accel_period_s = 0.3 / 1000;
+	} else if (accel_period_s < 1.2f / 1000) {
+		accel_odr_bits = DSM_ODR_1_66kHz;
+		accel_period_s = 0.6 / 1000;
+	} else if (accel_period_s < 2.4f / 1000) {
+		accel_odr_bits = DSM_ODR_833Hz;
+		accel_period_s = 1.2 / 1000;
+	} else if (accel_period_s < 4.8f / 1000) {
+		accel_odr_bits = DSM_ODR_416Hz;
+		accel_period_s = 2.4 / 1000;
+	} else if (accel_period_s < 9.6f / 1000) {
+		accel_odr_bits = DSM_ODR_208Hz;
+		accel_period_s = 4.8 / 1000;
+	} else if (accel_period_s < 19.2f / 1000) {
+		accel_odr_bits = DSM_ODR_104Hz;
+		accel_period_s = 9.6 / 1000;
+	} else if (accel_period_s < 38.4f / 1000) {
+		accel_odr_bits = DSM_ODR_52Hz;
+		accel_period_s = 19.2 / 1000;
+	} else if (requested_odr_hz > 12.5) {
+		accel_odr_bits = DSM_ODR_26Hz;
+		accel_period_s = 38.4 / 1000;
 	} else {
-		ODR_XL = DSM_ODR_12_5Hz;
-		accel_time = 1.0 / 12.5; // 13Hz -> 76.8 / 1000
+		accel_odr_bits = DSM_ODR_12_5Hz;
+		accel_period_s = 1.0 / 12.5;
 	}
 
 	// Calculate gyro
-	if (gyro_time <= 0) // off
+	if (gyro_period_s <= 0) // off
 	{
-		OP_MODE_G = DSM_OP_MODE_G_HP;
-		ODR_G = DSM_ODR_OFF;
-		ODR = 0;
-	} else if (gyro_time == INFINITY) // sleep
+		gyro_mode = DSM_OP_MODE_G_HP;
+		gyro_odr_bits = DSM_ODR_OFF;
+		requested_odr_hz = 0;
+	} else if (gyro_period_s == INFINITY) // sleep
 	{
-		OP_MODE_G = DSM_OP_MODE_G_NP;
-		GYRO_SLEEP = DSM_OP_MODE_G_SLEEP;
-		ODR_G = last_gyro_odr; // using last ODR
-		ODR = -1;              /* not off: skip ODR_OFF overwrite below */
+		gyro_mode = DSM_OP_MODE_G_NP;
+		gyro_sleep_bits = DSM_OP_MODE_G_SLEEP;
+		gyro_odr_bits = last_gyro_odr; // using last ODR
+		requested_odr_hz = -1;         /* not off: skip ODR_OFF overwrite below */
 	} else {
-		OP_MODE_G = DSM_OP_MODE_G_HP;
-		ODR_G = 0; // the compiler complains unless I do this
-		ODR = 1 / gyro_time;
+		gyro_mode = DSM_OP_MODE_G_HP;
+		gyro_odr_bits = 0; // Initialized before the rate-selection branches below.
+		requested_odr_hz = 1 / gyro_period_s;
 	}
 
-	if (ODR == 0) {
-		gyro_time = 0; // off
-		ODR_G = DSM_ODR_OFF;
-	} else if (ODR < 0) {
-		/* sleep: keep ODR_G = last_gyro_odr */
-		gyro_time = INFINITY;
-	} else if (gyro_time < 0.3f / 1000) // in this case it seems better to compare gyro_time
+	if (requested_odr_hz == 0) {
+		gyro_period_s = 0; // off
+		gyro_odr_bits = DSM_ODR_OFF;
+	} else if (requested_odr_hz < 0) {
+		/* Sleep retains the previously selected gyro ODR. */
+		gyro_period_s = INFINITY;
+	} else if (gyro_period_s < 0.3f / 1000) // Preserve the period thresholds and rounded period outputs.
 	{
-		ODR_G = DSM_ODR_6_66kHz; // TODO: this is absolutely awful
-		gyro_time = 1.0 / 6660;
-	} else if (gyro_time < 0.6f / 1000) {
-		ODR_G = DSM_ODR_3_33kHz;
-		gyro_time = 0.3 / 1000;
-	} else if (gyro_time < 1.2f / 1000) {
-		ODR_G = DSM_ODR_1_66kHz;
-		gyro_time = 0.6 / 1000;
-	} else if (gyro_time < 2.4f / 1000) {
-		ODR_G = DSM_ODR_833Hz;
-		gyro_time = 1.2 / 1000;
-	} else if (gyro_time < 4.8f / 1000) {
-		ODR_G = DSM_ODR_416Hz;
-		gyro_time = 2.4 / 1000;
-	} else if (gyro_time < 9.6f / 1000) {
-		ODR_G = DSM_ODR_208Hz;
-		gyro_time = 4.8 / 1000;
-	} else if (gyro_time < 19.2f / 1000) {
-		ODR_G = DSM_ODR_104Hz;
-		gyro_time = 9.6 / 1000;
-	} else if (gyro_time < 38.4f / 1000) {
-		ODR_G = DSM_ODR_52Hz;
-		gyro_time = 19.2 / 1000;
-	} else if (ODR > 12.5) {
-		ODR_G = DSM_ODR_26Hz;
-		gyro_time = 38.4 / 1000;
+		gyro_odr_bits = DSM_ODR_6_66kHz;
+		gyro_period_s = 1.0 / 6660;
+	} else if (gyro_period_s < 0.6f / 1000) {
+		gyro_odr_bits = DSM_ODR_3_33kHz;
+		gyro_period_s = 0.3 / 1000;
+	} else if (gyro_period_s < 1.2f / 1000) {
+		gyro_odr_bits = DSM_ODR_1_66kHz;
+		gyro_period_s = 0.6 / 1000;
+	} else if (gyro_period_s < 2.4f / 1000) {
+		gyro_odr_bits = DSM_ODR_833Hz;
+		gyro_period_s = 1.2 / 1000;
+	} else if (gyro_period_s < 4.8f / 1000) {
+		gyro_odr_bits = DSM_ODR_416Hz;
+		gyro_period_s = 2.4 / 1000;
+	} else if (gyro_period_s < 9.6f / 1000) {
+		gyro_odr_bits = DSM_ODR_208Hz;
+		gyro_period_s = 4.8 / 1000;
+	} else if (gyro_period_s < 19.2f / 1000) {
+		gyro_odr_bits = DSM_ODR_104Hz;
+		gyro_period_s = 9.6 / 1000;
+	} else if (gyro_period_s < 38.4f / 1000) {
+		gyro_odr_bits = DSM_ODR_52Hz;
+		gyro_period_s = 19.2 / 1000;
+	} else if (requested_odr_hz > 12.5) {
+		gyro_odr_bits = DSM_ODR_26Hz;
+		gyro_period_s = 38.4 / 1000;
 	} else {
-		ODR_G = DSM_ODR_12_5Hz;
-		gyro_time = 1.0 / 12.5; // 13Hz -> 76.8 / 1000
+		gyro_odr_bits = DSM_ODR_12_5Hz;
+		gyro_period_s = 1.0 / 12.5;
 	}
 
-	if (last_accel_mode == OP_MODE_XL && last_gyro_mode == OP_MODE_G && last_accel_odr == ODR_XL
-		&& last_gyro_odr == ODR_G) {
-		*accel_actual_time = accel_time;
-		*gyro_actual_time = gyro_time;
+	if (last_accel_mode == accel_mode && last_gyro_mode == gyro_mode && last_accel_odr == accel_odr_bits
+		&& last_gyro_odr == gyro_odr_bits) {
+		*accel_actual_period_s = accel_period_s;
+		*gyro_actual_period_s = gyro_period_s;
 		return 0; /* already configured — success for err|= callers */
 	}
 
-	uint8_t ODR_FIFO = MAX(ODR_XL, ODR_G);
+	uint8_t fifo_odr_bits = MAX(accel_odr_bits, gyro_odr_bits);
 
-	// calculate decimation configuration, see datasheet
-	uint8_t DEC_G = (ODR_FIFO - ODR_G) >> 4; // difference is the decimation factor
-	DEC_G = DEC_G >= 6 ? 0 : (DEC_G >= 2 ? DEC_G + 2 : DEC_G + 1);
+	// Convert the ODR-code distance to the FIFO decimation field encoding.
+	uint8_t gyro_decimation_bits = (fifo_odr_bits - gyro_odr_bits) >> 4;
+	gyro_decimation_bits = gyro_decimation_bits >= 6
+							 ? 0
+							 : (gyro_decimation_bits >= 2 ? gyro_decimation_bits + 2 : gyro_decimation_bits + 1);
 
-	uint8_t DEC_XL = (ODR_FIFO - ODR_XL) >> 4;
-	DEC_XL = DEC_XL >= 6 ? 0 : (DEC_XL >= 2 ? DEC_XL + 2 : DEC_XL + 1);
+	uint8_t accel_decimation_bits = (fifo_odr_bits - accel_odr_bits) >> 4;
+	accel_decimation_bits = accel_decimation_bits >= 6
+							  ? 0
+							  : (accel_decimation_bits >= 2 ? accel_decimation_bits + 2 : accel_decimation_bits + 1);
 
-	if (gyro_time > accel_time) {
+	if (gyro_period_s > accel_period_s) {
 		fifo_pattern_gyro_dominant = false;
-		fifo_pattern_length = accel_time == 0 ? 1 : gyro_time / accel_time + 0.5f;
+		fifo_pattern_length = accel_period_s == 0 ? 1 : gyro_period_s / accel_period_s + 0.5f;
 	} else {
 		fifo_pattern_gyro_dominant = true;
-		fifo_pattern_length = gyro_time == 0 ? 1 : accel_time / gyro_time + 0.5f;
+		fifo_pattern_length = gyro_period_s == 0 ? 1 : accel_period_s / gyro_period_s + 0.5f;
 	}
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL1, ODR_XL | accel_fs); // set accel ODR and FS
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL6, OP_MODE_XL); // set accelerator perf mode
+	int err = ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_IMU,
+		LSM6DSM_CTRL1,
+		accel_odr_bits | accel_fs
+	);                                                                              // set accel ODR and FS
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL6, accel_mode); // set accelerator perf mode
 
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL2, ODR_G | gyro_fs); // set gyro ODR and mode
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL7, OP_MODE_G);       // set gyroscope perf mode
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL4, GYRO_SLEEP); // set gyroscope awake/sleep mode
+	err |= ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_IMU,
+		LSM6DSM_CTRL2,
+		gyro_odr_bits | gyro_fs
+	);                                                                             // set gyro ODR and mode
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL7, gyro_mode); // set gyroscope perf mode
+	err |= ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_IMU,
+		LSM6DSM_CTRL4,
+		gyro_sleep_bits
+	); // set gyroscope awake/sleep mode
 
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_CTRL3, (DEC_G << 3) | DEC_XL); // set decimation
+	err |= ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_IMU,
+		LSM6DSM_FIFO_CTRL3,
+		(gyro_decimation_bits << 3) | accel_decimation_bits
+	); // set decimation
 	err |= ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		LSM6DSM_FIFO_CTRL5,
-		(ODR_FIFO >> 1) | 0x06
+		(fifo_odr_bits >> 1) | 0x06
 	); // set FIFO ODR, FIFO Continuous mode
 	if (err) {
 		LOG_ERR("Communication error");
 		return err;
 	}
 
-	last_accel_mode = OP_MODE_XL;
-	last_gyro_mode = OP_MODE_G;
-	last_accel_odr = ODR_XL;
-	last_gyro_odr = ODR_G;
-	*accel_actual_time = accel_time;
-	*gyro_actual_time = gyro_time;
+	last_accel_mode = accel_mode;
+	last_gyro_mode = gyro_mode;
+	last_accel_odr = accel_odr_bits;
+	last_gyro_odr = gyro_odr_bits;
+	*accel_actual_period_s = accel_period_s;
+	*gyro_actual_period_s = gyro_period_s;
 
 	return 0;
 }
 
-uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len)
+uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 {
 	int err = 0;
-	uint16_t total = 0;
+	uint16_t total_packets = 0;
 	/* Samples per FIFO pattern cycle; tags cycle in FIFO order and
 	 * fifo_process maps them to gyro/accel as before. */
 	const uint8_t cycle_samples = (uint8_t)(fifo_pattern_length + 1);
 
-	while (len >= PACKET_SIZE) {
+	while (capacity_bytes >= PACKET_SIZE) {
 		uint8_t status[4];
 		int64_t st0 = k_uptime_ticks();
 		err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_STATUS1, status, 4);
@@ -289,13 +320,12 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len)
 		}
 
 		uint16_t samples = words / 3;
-		uint16_t limit = len / PACKET_SIZE;
-		if (samples > limit) {
-			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", samples - limit);
-			samples = limit;
+		uint16_t packet_capacity = capacity_bytes / PACKET_SIZE;
+		if (samples > packet_capacity) {
+			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", samples - packet_capacity);
+			samples = packet_capacity;
 		}
-		/* A corrupted DIFF_FIFO byte could report 2047 words and turn
-		 * into a ~20 ms garbage read; clamp to a sane ceiling. */
+		/* Bound each batch when a status read reports an implausibly large word count. */
 		if (samples > FIFO_SANITY_MAX_SAMPLES) {
 			LOG_DBG("FIFO status spike: %u words -> clamped to %u samples", words, FIFO_SANITY_MAX_SAMPLES);
 			samples = FIFO_SANITY_MAX_SAMPLES;
@@ -304,8 +334,8 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len)
 			break;
 		}
 
-		/* Raw 16-bit words, no tags; the deterministic pattern supplies
-		 * the tag per 6-byte sample (cf. Linux st_lsm6dsx pattern FIFO). */
+		/* Hardware supplies untagged 16-bit words; prepend a software
+		 * pattern index to each six-byte sample for fifo_process. */
 		uint8_t raw[24 * 6];
 		while (samples > 0) {
 			uint16_t n = samples;
@@ -316,7 +346,7 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len)
 			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_DATA_OUT_L, raw, n * 6);
 			if (err) {
 				LOG_ERR("Communication error");
-				return total;
+				return total_packets;
 			}
 			{
 				uint64_t d_us = k_ticks_to_us_near64(k_uptime_ticks() - d0);
@@ -331,29 +361,30 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t len)
 			samples -= n;
 			tag = (uint16_t)((tag + n) % cycle_samples);
 			data += n * PACKET_SIZE;
-			len -= n * PACKET_SIZE;
-			total += n;
+			capacity_bytes -= n * PACKET_SIZE;
+			total_packets += n;
 		}
 	}
-	return total;
+	return total_packets;
 }
 
 int lsm6dsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
-	index *= PACKET_SIZE;
-	uint8_t pattern = data[index];
+	const uint16_t packet_offset = index * PACKET_SIZE;
+	const uint8_t *packet = &data[packet_offset];
+	uint8_t pattern = packet[0]; // Software pattern index, not a hardware FIFO tag.
 	if ((pattern == 0 && (fifo_pattern_length != 1 || fifo_pattern_gyro_dominant))
 		|| (pattern > 1 && fifo_pattern_gyro_dominant)) {
 		for (int i = 0; i < 3; i++) // x, y, z
 		{
-			g[i] = (int16_t)((((uint16_t)data[index + 2 + (i * 2)]) << 8) | data[index + 1 + (i * 2)]);
+			g[i] = (int16_t)((((uint16_t)packet[2 + (i * 2)]) << 8) | packet[1 + (i * 2)]);
 			g[i] *= gyro_sensitivity;
 		}
 		return 0;
 	} else {
 		for (int i = 0; i < 3; i++) // x, y, z
 		{
-			a[i] = (int16_t)((((uint16_t)data[index + 2 + (i * 2)]) << 8) | data[index + 1 + (i * 2)]);
+			a[i] = (int16_t)((((uint16_t)packet[2 + (i * 2)]) << 8) | packet[1 + (i * 2)]);
 			a[i] *= accel_sensitivity;
 		}
 		return 0;
@@ -385,10 +416,8 @@ uint8_t lsm6dsm_setup_DRDY(uint16_t threshold)
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
-uint8_t lsm6dsm_setup_WOM(void) // TODO:
-{                               // TODO: should be off by the time WOM will be setup
-	//	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL1, ODR_OFF); // set accel off
-	//	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_CTRL2, ODR_OFF); // set gyro off
+uint8_t lsm6dsm_setup_WOM(void)
+{
 
 	int err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,

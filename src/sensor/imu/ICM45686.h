@@ -3,8 +3,10 @@
 
 #include "sensor/sensor.h"
 
-// https://invensense.tdk.com/wp-content/uploads/documentation/DS-000577_ICM-45686.pdf
-// https://invensense.tdk.com/wp-content/uploads/2024/07/AN-000478_ICM-45605-ICM-45686-User-Guide.pdf
+// https://www.invensense.tdk.com/en-us/download-resource/ds-000577-icm-45686-datasheet-0
+// https://www.invensense.tdk.com/en-us/download-resource/000478-icm-45605-icm-45686-user-guide
+// Register fields also cross-checked against TDK icm456xx inv_imu_regmap_le.h
+// and inv_imu_defs.h in the NCS hal/tdk module.
 
 // User Bank 0
 #define ICM45686_ACCEL_DATA_X1_UI 0x00
@@ -29,11 +31,24 @@
 #define ICM45686_FIFO_CONFIG1_0 0x1E
 #define ICM45686_FIFO_CONFIG3 0x21
 
+// FIFO_CONFIG0 fields, already shifted into register position.
+#define ICM45686_FIFO_MODE_STREAM (0x01 << 6)
+#define ICM45686_FIFO_DEPTH_2K 0x07
+// FIFO_CONFIG3: external-sensor enables [5:4] remain clear in this driver.
+#define ICM45686_FIFO_IF_EN (1 << 0)
+#define ICM45686_FIFO_ACCEL_EN (1 << 1)
+#define ICM45686_FIFO_GYRO_EN (1 << 2)
+#define ICM45686_FIFO_HIRES_EN (1 << 3)
+
+// Unshifted selector codes shared by the gyro and accel filter fields.
+#define ICM45686_SRC_INTERPOLATOR_OFF_FIR_ON 0x01u
+#define ICM45686_UI_LPF_ODR_DIV_4 0x01u
+
 #define ICM45686_TMST_WOM_CONFIG 0x23
 
 #define ICM45686_RTC_CONFIG 0x26
 
-// DMP_EXT_SEN_ODR_CFG (User Bank 0, 0x27) - hardware-triggered I2CM
+// DMP_EXT_SEN_ODR_CFG (User Bank 0, 0x27); not enabled by the host-triggered proxy.
 #define ICM45686_DMP_EXT_SEN_ODR_CFG 0x27
 #define ICM45686_EXT_SENSOR_EN (1 << 6)
 // EXT_ODR[2:0] bits [5:3]: 000=3.125Hz, 001=6.25Hz, 010=12.5Hz, 011=25Hz,
@@ -117,7 +132,7 @@
 
 #define ICM45686_SMC_CONTROL_0 0x58
 
-// INT_I2CM_SOURCE (IPREG_TOP1, 0x74) - I2CM interrupt sources
+// INT_I2CM_SOURCE (IPREG_TOP1, 0x74); autonomous triggers are not configured here.
 #define ICM45686_INT_I2CM_SOURCE 0x74
 #define ICM45686_INT_I2CM_SMC_EXT_ODR_EN (1 << 1)
 #define ICM45686_INT_I2CM_IOC_EXT_TRIG_EN (1 << 0)
@@ -134,24 +149,12 @@
 #define ICM45686_IPREG_SYS2_REG_129 0x81
 
 /*
-Burst-write and burst-read operations are not supported when accessing IREGs from the host.
-The minimum time gap between two consecutive IREG accesses for various IREG components is 4μs.
-1. The host specifies the destination address of an IREG by programming IREG_ADDR_7_0,
-IREG_ADDR_15_8.
-d. If host wants to access a register in IPREG_SYS2, it should add base address 0xA500 to the
-address of that register shown in the IPREG_SYS2 registers section, and then use that resulting
-value in registers IREG_ADDR_7_0, IREG_ADDR_15_8
-e. If host wants to access a register in IPREG_TOP1, it should add base address 0xA200 to the
-address of that register shown in the IPREG_TOP1 registers section, and then use that resulting
-value in registers IREG_ADDR_7_0, IREG_ADDR_15_8
-2. The host programs the write data to the IREG_DATA register.
-3. The above programming steps must be performed in a single burst-write transaction to prevent an un-
-intended read-pre-fetch operation
-5. After the contents from the IREG_DATA register is written to the selected register, the internal 16-bit
-address is auto-incremented.
-6. After a minimum wait time-gap, the host can write to the IREG_DATA register again, which is effectively
-writing to the register pointed by the post-auto-incremented address.
-*/
+ * IREG transport uses a 16-bit address: bank byte followed by register offset.
+ * The bank helpers burst the two address bytes (and first DATA byte for writes),
+ * then access IREG_DATA one byte at a time with 4 us gaps. Subsequent DATA
+ * accesses use the auto-incremented address, not a burst of multiple IREGs.
+ * TDK inv_imu_transport.c read_mreg/write_mreg uses this address/DATA pattern.
+ */
 
 #define GYRO_MODE_OFF 0x00
 #define GYRO_MODE_STANDBY 0x01
@@ -212,11 +215,22 @@ writing to the register pointed by the post-auto-incremented address.
 #define GYRO_ODR_3_125Hz 0x0E
 #define GYRO_ODR_1_5625Hz 0x0F
 
-int icm45_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int icm45_init(
+	float clock_rate_hz,
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 void icm45_shutdown(void);
 
 void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range);
-int icm45_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int icm45_update_odr(
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 
 uint16_t icm45_fifo_read(uint8_t *data, uint16_t len);
 int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3]);

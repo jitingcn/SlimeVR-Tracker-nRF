@@ -36,10 +36,10 @@
 #define OSR_16 0b100100
 #define OSR_32 0b101101
 
-int ist8306_init(float time, float *actual_time);
+int ist8306_init(float period_s, float *actual_period_s);
 void ist8306_shutdown(void);
 
-int ist8306_update_odr(float time, float *actual_time);
+int ist8306_update_odr(float period_s, float *actual_period_s);
 
 void ist8306_mag_oneshot(void);
 bool ist8306_mag_read(float m[3]);

@@ -3,145 +3,130 @@
 #include <zephyr/logging/log.h>
 
 #include "IST8308.h"
-#include "IST8306.h" // Common functions
+#include "IST8306.h" // Shared register addresses and field encodings
 #include "sensor/sensor_none.h"
 
 static const float sensitivity = 0.075; // uT/LSB
 
-static uint8_t last_odr = 0xff;
-static int64_t oneshot_trigger_time = 0;
+static uint8_t last_mode_code = 0xff;
+static int64_t oneshot_trigger_ms = 0;
 static bool oneshot_pending;
 static bool oneshot_failed;
 
 LOG_MODULE_REGISTER(IST8308, LOG_LEVEL_DBG);
 
-int ist8308_init(float time, float *actual_time)
+int ist8308_init(float period_s, float *actual_period_s)
 {
-	last_odr = 0xff; // reset last odr
+	last_mode_code = 0xff; // invalidate mode cache
 	oneshot_pending = false;
 	oneshot_failed = false;
-//	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_ACTR, 0x00); // exit suspend
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8308_CNTL4, DR_200); // set DR
 	if (err) {
 		LOG_ERR("Communication error");
 		return (err < 0 ? err : 0);
 	}
-	err = ist8308_update_odr(time, actual_time);
+	err = ist8308_update_odr(period_s, actual_period_s);
 	return (err < 0 ? err : 0);
 }
 
 void ist8308_shutdown(void)
 {
-	last_odr = 0xff; // reset last odr
+	last_mode_code = 0xff; // invalidate mode cache
 	oneshot_pending = false;
 	oneshot_failed = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL3, 0x01); // soft reset
-//	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_ACTR, 0x02); // suspend
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
-int ist8308_update_odr(float time, float *actual_time)
+int ist8308_update_odr(float period_s, float *actual_period_s)
 {
-	int ODR;
-	uint8_t NSF;
-	uint8_t MODE;
-	uint8_t OSR;
+	int requested_odr_hz; // Truncate fractional Hz before selecting a supported rate.
+	uint8_t noise_filter_code;
+	uint8_t mode_code;
+	uint8_t oversampling_code;
 
-	if (time <= 0 || time == INFINITY) // standby mode or single measurement mode
+	if (period_s <= 0 || period_s == INFINITY) // standby mode or single measurement mode
 	{
-		NSF = NSF_Low; // High Speed
-		OSR = OSR_8;
-		MODE = MODE_STANDBY;
-		ODR = 0;
-	}
-	else
-	{
-		ODR = 1 / time;
+		noise_filter_code = NSF_Low; // High Speed
+		oversampling_code = OSR_8;
+		mode_code = MODE_STANDBY;
+		requested_odr_hz = 0;
+	} else {
+		requested_odr_hz = 1 / period_s;
 	}
 
-	if (time <= 0)
-	{
-		time = 0; // off
-	}
-	else if (ODR > 100) // TODO: this sucks
-	{
-		NSF = NSF_Low; // High Speed
-		OSR = OSR_8;
-		MODE = MODE_CMM_200Hz;
-		time = 1.0 / 200;
-	}
-	else if (ODR > 50)
-	{
-		NSF = NSF_Low; // Normal
-		OSR = OSR_16;
-		MODE = MODE_CMM_100Hz;
-		time = 1.0 / 100;
-	}
-	else if (ODR > 20)
-	{
-		NSF = NSF_Low; // Normal
-		OSR = OSR_16;
-		MODE = MODE_CMM_50Hz;
-		time = 1.0 / 50;
-	}
-	else if (ODR > 10)
-	{
-		NSF = NSF_Low; // Normal
-		OSR = OSR_16;
-		MODE = MODE_CMM_20Hz;
-		time = 1.0 / 20;
-	}
-	else if (ODR > 0)
-	{
-		NSF = NSF_Medium; // Low noise
-		OSR = OSR_32;
-		MODE = MODE_CMM_10Hz;
-		time = 1.0 / 10;
-	}
-	else
-	{
-		NSF = NSF_Low; // High Speed
-		OSR = OSR_8;
-		MODE = MODE_SINGLE;
-		time = INFINITY;
+	if (period_s <= 0) {
+		period_s = 0; // off
+	} else if (requested_odr_hz > 100) {
+		noise_filter_code = NSF_Low; // High Speed
+		oversampling_code = OSR_8;
+		mode_code = MODE_CMM_200Hz;
+		period_s = 1.0 / 200;
+	} else if (requested_odr_hz > 50) {
+		noise_filter_code = NSF_Low; // Normal
+		oversampling_code = OSR_16;
+		mode_code = MODE_CMM_100Hz;
+		period_s = 1.0 / 100;
+	} else if (requested_odr_hz > 20) {
+		noise_filter_code = NSF_Low; // Normal
+		oversampling_code = OSR_16;
+		mode_code = MODE_CMM_50Hz;
+		period_s = 1.0 / 50;
+	} else if (requested_odr_hz > 10) {
+		noise_filter_code = NSF_Low; // Normal
+		oversampling_code = OSR_16;
+		mode_code = MODE_CMM_20Hz;
+		period_s = 1.0 / 20;
+	} else if (requested_odr_hz > 0) {
+		noise_filter_code = NSF_Medium; // Low noise
+		oversampling_code = OSR_32;
+		mode_code = MODE_CMM_10Hz;
+		period_s = 1.0 / 10;
+	} else {
+		noise_filter_code = NSF_Low; // High Speed
+		oversampling_code = OSR_8;
+		mode_code = MODE_SINGLE;
+		period_s = INFINITY;
 	}
 
-	uint8_t desired = MODE;
-	if (last_odr == desired) {
-		*actual_time = time;
+	uint8_t requested_mode_code = mode_code;
+	if (last_mode_code == requested_mode_code) {
+		*actual_period_s = period_s;
 		return 0; /* already configured */
 	}
 
-	if (MODE == MODE_SINGLE)
-		MODE = MODE_STANDBY; // set STBY, oneshot will set SMM
+	if (mode_code == MODE_SINGLE) {
+		mode_code = MODE_STANDBY; // set STBY, oneshot will set SMM
+	}
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL1, NSF << 5);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL1, noise_filter_code << 5);
 	if (err)
 		goto error;
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, MODE);
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, mode_code);
 	if (err)
 		goto error;
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_OSRCNTL, OSR);
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_OSRCNTL, oversampling_code);
 	if (err)
 		goto error;
 
-	last_odr = desired;
+	last_mode_code = requested_mode_code;
 	oneshot_pending = false;
 	oneshot_failed = false;
-	*actual_time = time;
+	*actual_period_s = period_s;
 	return 0;
 error:
-	last_odr = 0xff;
+	last_mode_code = 0xff;
 	LOG_ERR("Communication error");
 	return err;
 }
 
 void ist8308_mag_oneshot(void)
 {
-	last_odr = 0xff;
+	last_mode_code = 0xff;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, MODE_SINGLE); // set single measurement mode
-	oneshot_trigger_time = k_uptime_get();
+	oneshot_trigger_ms = k_uptime_get();
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
 	if (err)
@@ -158,7 +143,7 @@ bool ist8308_mag_read(float m[3])
 
 	uint8_t frame[7];
 	if (oneshot_pending) {
-		int64_t timeout = oneshot_trigger_time + 5;
+		int64_t deadline_ms = oneshot_trigger_ms + 5;
 		while (true) {
 			int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, frame, sizeof(frame));
 			if (err) {
@@ -168,7 +153,7 @@ bool ist8308_mag_read(float m[3])
 			}
 			if (frame[0] & 0x01)
 				break;
-			if (k_uptime_get() >= timeout) {
+			if (k_uptime_get() >= deadline_ms) {
 				LOG_ERR("Read timeout");
 				oneshot_pending = false;
 				return false;

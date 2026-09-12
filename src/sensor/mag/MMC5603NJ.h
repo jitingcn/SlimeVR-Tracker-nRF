@@ -40,8 +40,8 @@
 #define MCTRL2_CMM_EN     0x10
 #define MCTRL2_HPOWER     0x80
 
-// Set/Reset as a function of measurements
-#define MSET_1     0x00 // Set/Reset each data measurement
+// Periodic SET interval in measurements (not periodic RESET).
+#define MSET_1 0x00     // SET each data measurement
 #define MSET_25    0x01 // each 25 data measurements
 #define MSET_75    0x02
 #define MSET_100   0x03
@@ -50,10 +50,10 @@
 #define MSET_1000  0x06
 #define MSET_2000  0x07
 
-int mmc5603_init(float time, float *actual_time);
+int mmc5603_init(float period_s, float *actual_period_s);
 void mmc5603_shutdown(void);
 
-int mmc5603_update_odr(float time, float *actual_time);
+int mmc5603_update_odr(float period_s, float *actual_period_s);
 
 void mmc5603_mag_oneshot(void);
 bool mmc5603_mag_read(float m[3]);

@@ -4,10 +4,10 @@
 #include "sensor/sensor.h"
 
 void qmc_set_variant(bool is_qmc6309h);
-int qmc_init(float time, float *actual_time);
+int qmc_init(float period_s, float *actual_period_s);
 void qmc_shutdown(void);
 
-int qmc_update_odr(float time, float *actual_time);
+int qmc_update_odr(float period_s, float *actual_period_s);
 
 void qmc_mag_oneshot(void);
 bool qmc_mag_read(float m[3]);

@@ -140,7 +140,8 @@ with tempfile.TemporaryDirectory(prefix='sensor-temp-') as directory:
     for model,prefix in [('ICM42688','icm'),('ICM42686','icm42686')]:
         source=(ROOT/f'src/sensor/imu/{model}.c').read_text()
         header=(HEADERS/f'src/sensor/imu/{model}.h').read_text()
-        defines='\n'.join(line for line in header.splitlines() if line.startswith('#define '))
+        # Init also uses driver-local register masks; retain their production definitions.
+        defines='\n'.join(line for text in (header, source) for line in text.splitlines() if line.startswith('#define '))
         names={'INIT':f'{prefix}_init','SHUTDOWN':f'{prefix}_shutdown','FIFO_READ':f'{prefix}_fifo_read','TEMP_READ':f'{prefix}_temp_read','UPDATE_ODR':f'{prefix}_update_odr','COUNT_REG':f'{model}_FIFO_COUNTH','TEMP_REG':f'{model}_TEMP_DATA1'}
         aliases='\n'.join(f'#define {key} {value}' for key,value in names.items())
         state=source[source.index('static uint8_t last_accel_odr'):source.index('LOG_MODULE_REGISTER')]

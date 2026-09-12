@@ -124,16 +124,25 @@
 #define ICM42686_gMode_SBY                 0x01
 #define ICM42686_gMode_LN                  0x03
 
-int icm42686_init(float clock_rate, float accel_time, float gyro_time,
-                  float *accel_actual_time, float *gyro_actual_time);
+int icm42686_init(
+	float clock_rate,
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 void icm42686_shutdown(void);
 
 void icm42686_update_fs(float accel_range, float gyro_range,
                         float *accel_actual_range, float *gyro_actual_range);
-int icm42686_update_odr(float accel_time, float gyro_time,
-                        float *accel_actual_time, float *gyro_actual_time);
+int icm42686_update_odr(
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 
-uint16_t icm42686_fifo_read(uint8_t *data, uint16_t len);
+uint16_t icm42686_fifo_read(uint8_t *data, uint16_t capacity_bytes);
 int icm42686_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3]);
 void icm42686_accel_read(float a[3]);
 void icm42686_gyro_read(float g[3]);

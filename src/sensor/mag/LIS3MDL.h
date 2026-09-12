@@ -42,10 +42,10 @@
 #define MD_SINGLE_CONV     0x01 // <= 80Hz only
 #define MD_POWER_DOWN      0x03
 
-int lis3_init(float time, float *actual_time);
+int lis3_init(float period_s, float *actual_period_s);
 void lis3_shutdown(void);
 
-int lis3_update_odr(float time, float *actual_time);
+int lis3_update_odr(float period_s, float *actual_period_s);
 
 void lis3_mag_oneshot(void);
 bool lis3_mag_read(float m[3]);

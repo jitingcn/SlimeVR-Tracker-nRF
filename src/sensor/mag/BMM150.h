@@ -34,10 +34,10 @@
 #define OPMODE_FORCED 0x01
 #define OPMODE_SLEEP 0x03
 
-int bmm1_init(float time, float *actual_time);
+int bmm1_init(float period_s, float *actual_period_s);
 void bmm1_shutdown(void);
 
-int bmm1_update_odr(float time, float *actual_time);
+int bmm1_update_odr(float period_s, float *actual_period_s);
 
 void bmm1_mag_oneshot(void);
 bool bmm1_mag_read(float m[3]);

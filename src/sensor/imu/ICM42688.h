@@ -110,13 +110,24 @@
 #define gMode_SBY 0x01
 #define gMode_LN  0x03
 
-int icm_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int icm_init(
+	float clock_rate,
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 void icm_shutdown(void);
 
 void icm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range);
-int icm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time);
+int icm_update_odr(
+	float accel_period_s,
+	float gyro_period_s,
+	float *accel_actual_period_s,
+	float *gyro_actual_period_s
+);
 
-uint16_t icm_fifo_read(uint8_t *data, uint16_t len);
+uint16_t icm_fifo_read(uint8_t *data, uint16_t capacity_bytes);
 int icm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3]);
 void icm_accel_read(float a[3]);
 void icm_gyro_read(float g[3]);
