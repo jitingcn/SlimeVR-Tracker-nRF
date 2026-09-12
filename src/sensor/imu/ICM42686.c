@@ -27,8 +27,9 @@
 #define ICM42686_FIFO_ACCEL_EN 0x01
 #define ICM42686_INT_ASYNC_RESET 0x10
 
-static const float accel_sensitivity = 16.0f / 32768.0f; // Existing direct-read scale; distinct from hires below.
-static const float gyro_sensitivity = 2000.0f / 32768.0f;
+// DS-000639: UI registers use the configured +/-32 g and +/-4000 dps ranges.
+static const float accel_sensitivity = 32.0f / 32768.0f;
+static const float gyro_sensitivity = 4000.0f / 32768.0f;
 
 static const float accel_sensitivity_32 = 32.0f / ((uint32_t)2 << 30);  // 32G forced
 static const float gyro_sensitivity_32 = 4000.0f / ((uint32_t)2 << 30); // 4000dps forced

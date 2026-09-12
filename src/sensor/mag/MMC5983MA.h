@@ -40,8 +40,8 @@
 #define MODR_20Hz 0x03
 #define MODR_50Hz 0x04
 #define MODR_100Hz 0x05
-#define MODR_200Hz 0x06  // BW = 0x01 only
-#define MODR_1000Hz 0x07 // BW = 0x11 only
+#define MODR_200Hz 0x06  // Rev. A CM_Freq table pairs this rate with BW = 0x01.
+#define MODR_1000Hz 0x07 // Rev. A CM_Freq table pairs this rate with BW = 0x11.
 
 // Bandwidths
 #define MBW_100Hz 0x00 // 8 ms measurement time

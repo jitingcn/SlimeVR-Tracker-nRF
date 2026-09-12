@@ -2319,7 +2319,7 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 
 	if (reconfig) // TODO: get rid of reconfig?
 	{
-		// Changing FIFO threshold here should be fine since FIFO is empty now
+		// Apply the next loop's watermark after acquisition; drivers may retain FIFO records.
 		// TODO: causing warnings since packet processing and loop timing still expects previous update_time
 		switch (sensor_mode) {
 		case SENSOR_SENSOR_MODE_LOW_NOISE:

@@ -16,7 +16,7 @@
 
 #include "sensor/sensor.h"
 
-// ICM-42686-P Datasheet DS-000348
+// ICM-42686-P Datasheet DS-000639, revision 1.0
 // User Bank 0
 #define ICM42686_DEVICE_CONFIG 0x11
 #define ICM42686_FIFO_CONFIG 0x16

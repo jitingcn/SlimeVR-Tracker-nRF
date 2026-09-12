@@ -32,7 +32,7 @@
 #define ICM45686_FIFO_CONFIG3 0x21
 
 // FIFO_CONFIG0 fields, already shifted into register position.
-#define ICM45686_FIFO_MODE_STREAM (0x01 << 6)
+#define ICM45686_FIFO_MODE_STOP_ON_FULL (0x02 << 6)
 #define ICM45686_FIFO_DEPTH_2K 0x07
 // FIFO_CONFIG3: external-sensor enables [5:4] remain clear in this driver.
 #define ICM45686_FIFO_IF_EN (1 << 0)
@@ -232,12 +232,15 @@ int icm45_update_odr(
 	float *gyro_actual_period_s
 );
 
+// Stop-on-full acquisition reads every available whole frame that fits len.
+// Frames arriving while full are dropped; queued frames are not overwritten.
 uint16_t icm45_fifo_read(uint8_t *data, uint16_t len);
 int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3]);
 void icm45_accel_read(float a[3]);
 void icm45_gyro_read(float g[3]);
 float icm45_temp_read(void);
 
+// Threshold counts available records; zero disables the watermark.
 uint8_t icm45_setup_DRDY(uint16_t threshold);
 uint8_t icm45_setup_WOM(void);
 

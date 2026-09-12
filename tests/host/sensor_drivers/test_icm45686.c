@@ -10,7 +10,11 @@
 /* DS-000577 host/IREG model. The complete production driver is linked, not
  * extracted or reimplemented. AUX completion captures the external registers;
  * STATUS.DONE and EXT_DEV_STATUS are read-clear, RD_DATA is cleared by GO.
- * No electrical behavior or actual sensor conversion accuracy is simulated. */
+ * FIFO uses a deliberately small capacity, not a physical depth/timing model.
+ * DS-000577 section 17.28 models stop-on-full as rejecting writes while full;
+ * reads release space. AN-000364 v1.5 section 2.16 models streaming read-empty
+ * corruption. This is host-model coverage, not hardware proof of recovery,
+ * electrical behavior or actual sensor conversion accuracy. */
 #define TOP(reg) ((uint16_t)(0xa200u | (reg)))
 enum bus_kind { ADDRESS, READ, WRITE };
 struct bus_record {
@@ -21,6 +25,9 @@ struct bus_record {
 };
 static struct {
 	uint8_t host[256], ireg[65536], external[256];
+	uint8_t fifo[8][20];
+	unsigned fifo_count, fifo_capacity, fifo_reads, fifo_events, count_reads;
+	bool fifo_corrupt, stale_count;
 	uint16_t pointer;
 	uint64_t now, last_ireg_end, complete_at, go_at;
 	uint32_t latency, duration;
@@ -142,6 +149,10 @@ int ssi_burst_write(enum sensor_interface_dev dev, uint8_t reg, const uint8_t *b
 	int err = transaction(WRITE, reg, false);
 	if (!err) {
 		memcpy(hw.host + reg, buf, len);
+		if (reg == ICM45686_FIFO_CONFIG0 && (buf[0] & 0xc0) == 0) {
+			hw.fifo_count = 0;
+			hw.fifo_corrupt = false;
+		}
 		if (reg == ICM45686_REG_MISC2 && len == 1 && (buf[0] & 0x02)) {
 			/* Global reset aborts a stuck AUX operation; it is not another GO. */
 			hw.busy = false;
@@ -149,6 +160,9 @@ int ssi_burst_write(enum sensor_interface_dev dev, uint8_t reg, const uint8_t *b
 			memset(hw.host, 0, sizeof(hw.host));
 			hw.host[0x72] = 0xe9;
 			hw.pointer = 0;
+			hw.host[0x20] = 0x20; /* FIFO_CONFIG2 reset: equality comparator. */
+			hw.fifo_count = 0;
+			hw.fifo_corrupt = false;
 		}
 	}
 	return err;
@@ -199,10 +213,36 @@ int ssi_reg_read_byte(enum sensor_interface_dev dev, uint8_t reg, uint8_t *out)
 int ssi_burst_read(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uint32_t len)
 {
 	assert(dev == SENSOR_INTERFACE_DEV_IMU && reg != ICM45686_IREG_DATA);
-	assert((unsigned)reg + len <= 256);
 	int err = transaction(READ, reg, false);
-	if (!err)
-		memcpy(buf, hw.host + reg, len);
+	if (err) {
+		return err;
+	}
+	if (reg == ICM45686_FIFO_COUNT_0) {
+		assert(len == 2);
+		unsigned count = hw.fifo_count;
+		if (hw.stale_count && hw.count_reads == 0) {
+			count++;
+		}
+		hw.count_reads++;
+		buf[0] = count >> 8;
+		buf[1] = count;
+		return 0;
+	}
+	if (reg == ICM45686_FIFO_DATA) {
+		assert(len > 0 && len % 20 == 0 && len / 20 <= hw.fifo_count);
+		hw.fifo_reads++;
+		memcpy(buf, hw.fifo, len);
+		hw.fifo_count -= len / 20;
+		memmove(hw.fifo, (uint8_t *)hw.fifo + len, hw.fifo_count * 20);
+		/* AN-000364 section 2.16: after a streaming empty event the next
+		 * frame may be corrupt, even with an accepted header. */
+		if (hw.fifo_count == 0 && (hw.host[ICM45686_FIFO_CONFIG0] & 0xc0) == 0x40) {
+			hw.fifo_corrupt = true;
+		}
+		return 0;
+	}
+	assert((unsigned)reg + len <= 256);
+	memcpy(buf, hw.host + reg, len);
 	return err;
 }
 
@@ -216,7 +256,7 @@ int ssi_reg_update_byte(enum sensor_interface_dev dev, uint8_t reg, uint8_t mask
 int ssi_burst_read_interval(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf,
 	uint32_t len, uint32_t interval)
 {
-	(void)interval;
+	assert(interval == 20);
 	return ssi_burst_read(dev, reg, buf, len);
 }
 
@@ -242,10 +282,16 @@ static void reset_model(bool prefetch)
 	hw.latency = 1;
 	hw.duration = 80;
 	hw.host[0x72] = 0xe9;
+	hw.host[0x20] = 0x20; /* FIFO_CONFIG2 reset: equality comparator. */
+	hw.fifo_capacity = ARRAY_SIZE(hw.fifo);
 	assert(icm45_ext_setup(SENSOR_EXT_MODE_I2CM_PROXY) == 0);
 	assert(hw.ext);
 	assert(hw.ext->ext_set_prefetch(prefetch) == 0);
 	initialize();
+	/* Observe acquisition only after actual production init selected the mode. */
+	hw.fifo_reads = 0;
+	hw.fifo_events = 0;
+	hw.count_reads = 0;
 }
 
 static int read_sample(uint8_t sub, uint8_t *out, size_t len)
@@ -578,8 +624,226 @@ static void test_wom_register_spacing(void)
 	assert(out == 0x45 && hw.go_count == 1 && !hw.busy);
 }
 
+static void put_be16(uint8_t *out, int16_t value)
+{
+	out[0] = (uint16_t)value >> 8;
+	out[1] = (uint16_t)value;
+}
+
+static void test_icm45686_direct_units(void)
+{
+	reset_model(false);
+	const int16_t counts[][3] = {{32767, -32768, -1}, {1024, -1024, 0}, {8192, -8192, 1}};
+	for (unsigned n = 0; n < ARRAY_SIZE(counts); n++) {
+		uint8_t packet[20] = {0x78};
+		for (unsigned axis = 0; axis < 3; axis++) {
+			put_be16(packet + 1 + 2 * axis, counts[n][axis]);
+			put_be16(packet + 7 + 2 * axis, counts[n][axis]);
+		}
+		memcpy(hw.host + ICM45686_ACCEL_DATA_X1_UI, packet + 1, 6);
+		memcpy(hw.host + ICM45686_GYRO_DATA_X1_UI, packet + 7, 6);
+		float direct_a[3], direct_g[3], fifo_a[3], fifo_g[3];
+		icm45_accel_read(direct_a);
+		icm45_gyro_read(direct_g);
+		assert(icm45_fifo_process(0, packet, fifo_a, fifo_g) == 0);
+		for (unsigned axis = 0; axis < 3; axis++) {
+			assert(direct_a[axis] == counts[n][axis] / 1024.0f);
+			assert(direct_g[axis] == counts[n][axis] * (125.0f / 1024.0f));
+			assert(direct_a[axis] == fifo_a[axis]);
+			assert(direct_g[axis] == fifo_g[axis]);
+		}
+	}
+}
+
+static void append_frame(unsigned id)
+{
+	/* Decode the actual init writes, never seed a desired mode in the fixture.
+	 * This model only produces the configured 20-byte accel+gyro hires format. */
+	unsigned mode = (hw.host[ICM45686_FIFO_CONFIG0] >> 6) & 3;
+	if ((mode != 1 && mode != 2) || (hw.host[ICM45686_FIFO_CONFIG3] & 0x3f) != 0x0f) {
+		return;
+	}
+	assert(hw.fifo_capacity > 0 && hw.fifo_capacity <= ARRAY_SIZE(hw.fifo));
+	if (hw.fifo_count == hw.fifo_capacity) {
+		if (mode == 2) {
+			return; /* Stop-on-full preserves queued frames, drops this new one. */
+		}
+		hw.fifo_count--;
+		memmove(hw.fifo, hw.fifo + 1, hw.fifo_count * 20);
+	}
+	assert(id < 32); /* Keep the encoded acceleration within signed 16-bit range. */
+	uint8_t *frame = hw.fifo[hw.fifo_count++];
+	memset(frame, 0, 20);
+	frame[0] = 0x78;
+	put_be16(frame + 1, hw.fifo_corrupt ? 0 : id * 1024);
+	put_be16(frame + 13, id * 128);
+	/* DS-000577 section 17.31: reset comparator is equality; bit3
+	 * selects >=, not >. Model write-triggered interrupts, not register echoes. */
+	unsigned threshold = hw.host[ICM45686_FIFO_CONFIG1_0] | (unsigned)hw.host[ICM45686_FIFO_CONFIG1_0 + 1] << 8;
+	bool reached = hw.host[0x20] & 8 ? hw.fifo_count >= threshold : hw.fifo_count == threshold;
+	if (threshold && reached && (hw.host[ICM45686_INT1_CONFIG0] & 2)) {
+		hw.fifo_events++;
+	}
+}
+
+static void expect_frame(uint8_t *data, unsigned index, unsigned id)
+{
+	float a[3], g[3];
+	assert(icm45_fifo_process(index, data, a, g) == 0);
+	assert(a[0] == (float)id);
+	assert(a[1] == 0 && a[2] == 0);
+	assert(g[0] == 0 && g[1] == 0 && g[2] == 0);
+}
+
+static void test_icm45686_fifo_lone_frame(void)
+{
+	reset_model(false);
+	uint8_t data[20];
+	assert(icm45_fifo_read(data, sizeof(data)) == 0);
+	assert(hw.fifo_reads == 0);
+	append_frame(1);
+	assert(icm45_fifo_read(data, sizeof(data)) == 1);
+	expect_frame(data, 0, 1);
+	assert(hw.fifo_count == 0);
+	assert(icm45_temp_read() == 26.0f);
+	/* Empty-to-new-frame must not corrupt the next conversion or retain it. */
+	append_frame(2);
+	assert(icm45_fifo_read(data, sizeof(data)) == 1);
+	expect_frame(data, 0, 2);
+	assert(hw.fifo_count == 0);
+	assert(icm45_temp_read() == 27.0f);
+}
+
+static void test_icm45686_fifo_bounded_reads(void)
+{
+	reset_model(false);
+	uint8_t data[61];
+	memset(data, 0xa5, sizeof(data));
+	for (unsigned id = 1; id <= 4; id++) {
+		append_frame(id);
+	}
+	hw.stale_count = true; /* First count is 5; second is the actual 4. */
+	assert(icm45_fifo_read(data, 59) == 2);
+	expect_frame(data, 0, 1);
+	expect_frame(data, 1, 2);
+	for (unsigned i = 40; i < sizeof(data); i++) {
+		assert(data[i] == 0xa5);
+	}
+	assert(hw.fifo_count == 2);
+	assert(icm45_fifo_read(data, 0) == 0);
+	assert(icm45_fifo_read(data, 19) == 0);
+	assert(hw.fifo_reads == 1 && hw.fifo_count == 2);
+	/* The complete remainder fits; no frame may be held back. */
+	assert(icm45_fifo_read(data, sizeof(data)) == 2);
+	expect_frame(data, 0, 3);
+	expect_frame(data, 1, 4);
+	assert(hw.fifo_count == 0);
+
+	append_frame(5);
+	hw.count_reads = 0; /* A stale first count must not cause a FIFO over-read. */
+	assert(icm45_fifo_read(data, sizeof(data)) == 1);
+	expect_frame(data, 0, 5);
+	assert(hw.fifo_count == 0);
+	assert(icm45_fifo_read(data, sizeof(data)) == 0);
+	assert(hw.fifo_reads == 3);
+}
+
+static void test_icm45686_fifo_full_progress(void)
+{
+	reset_model(false);
+	hw.fifo_capacity = 4; /* Exercise full with representable sample IDs. */
+	icm45_setup_DRDY(2);
+	uint8_t data[80];
+	for (unsigned id = 1; id <= 5; id++) {
+		append_frame(id);
+	}
+	assert(hw.fifo_count == 4 && hw.fifo_events == 1);
+	/* Full must retain the oldest frame, not overwrite it with frame 5. */
+	assert(icm45_fifo_read(data, 20) == 1);
+	expect_frame(data, 0, 1);
+	assert(hw.fifo_count == 3);
+	append_frame(6); /* The partial read released one slot. */
+	append_frame(7); /* Full again: this new frame must be dropped. */
+	assert(hw.fifo_count == 4 && hw.fifo_events == 1);
+	assert(icm45_fifo_read(data, sizeof(data)) == 4);
+	expect_frame(data, 0, 2);
+	expect_frame(data, 1, 3);
+	expect_frame(data, 2, 4);
+	expect_frame(data, 3, 6);
+	assert(hw.fifo_count == 0);
+	/* Equality has no fresh edge while above the threshold. After draining
+	 * below it, another complete batch must create an event and readable data. */
+	append_frame(8);
+	assert(hw.fifo_events == 1);
+	append_frame(9);
+	assert(hw.fifo_events == 2);
+	assert(icm45_fifo_read(data, sizeof(data)) == 2);
+	expect_frame(data, 0, 8);
+	expect_frame(data, 1, 9);
+	assert(hw.fifo_count == 0);
+}
+
+static void test_icm45686_fifo_failures(void)
+{
+	/* A cached FIFO temperature must never survive an empty or failed
+	 * acquisition. The direct temperature register now describes 35 C. */
+	for (unsigned failure = 0; failure < 4; failure++) {
+		reset_model(false);
+		uint8_t data[40];
+		append_frame(1);
+		assert(icm45_fifo_read(data, sizeof(data)) == 1);
+		assert(icm45_temp_read() == 26.0f);
+		put_be16(hw.host + ICM45686_TEMP_DATA1_UI, 1280);
+		if (failure < 3) {
+			append_frame(3);
+			fail_on(READ, failure < 2 ? ICM45686_FIFO_COUNT_0 : ICM45686_FIFO_DATA, failure == 1 ? 1 : 0, false);
+		}
+		assert(icm45_fifo_read(data, sizeof(data)) == 0);
+		assert(icm45_temp_read() == 35.0f);
+		assert(hw.fifo_count == (failure < 3 ? 1 : 0));
+		if (failure < 3) {
+			assert(!hw.fault.armed);
+			assert(icm45_fifo_read(data, sizeof(data)) == 1);
+			expect_frame(data, 0, 3);
+		}
+	}
+}
+
+static void test_icm45686_watermark_progress(void)
+{
+	for (unsigned batch = 1; batch <= 2; batch++) {
+		reset_model(false);
+		icm45_setup_DRDY(batch);
+		uint8_t data[40];
+		unsigned next_id = 1;
+		for (unsigned cycle = 0; cycle < 3; cycle++) {
+			for (unsigned n = 0; n < batch; n++) {
+				append_frame(next_id++);
+				assert(hw.fifo_events == cycle + (n + 1 == batch));
+			}
+			assert(hw.fifo_events == cycle + 1);
+			assert(icm45_fifo_read(data, sizeof(data)) == batch);
+			for (unsigned n = 0; n < batch; n++) {
+				expect_frame(data, n, 1 + cycle * batch + n);
+			}
+			assert(hw.fifo_count == 0);
+		}
+	}
+	reset_model(false);
+	icm45_setup_DRDY(0);
+	append_frame(1);
+	append_frame(2);
+	assert(hw.fifo_events == 0);
+}
+
 int main(void)
 {
+	test_icm45686_direct_units();
+	test_icm45686_fifo_lone_frame();
+	test_icm45686_fifo_bounded_reads();
+	test_icm45686_fifo_full_progress();
+	test_icm45686_fifo_failures();
+	test_icm45686_watermark_progress();
 	test_prefetch_snapshot();
 	test_disabled_prefetch_lifecycle();
 	test_error_completions();

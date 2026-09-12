@@ -10,9 +10,9 @@
 
 #define ICM45686_FIFO_PACKET_SIZE 20
 
-// Direct-register conversion factors retained independently of the FIFO path.
-static const float accel_g_per_lsb = 16.0f / 32768.0f;
-static const float gyro_dps_per_lsb = 2000.0f / 32768.0f;
+// DS-000577: UI registers use the configured +/-32 g and +/-4000 dps ranges.
+static const float accel_g_per_lsb = 32.0f / 32768.0f;
+static const float gyro_dps_per_lsb = 4000.0f / 32768.0f;
 
 // FIFO 20-bit samples are left-aligned in int32_t: full scale is 2^31 counts.
 static const float accel_g_per_left_aligned_lsb = 32.0f / ((uint32_t)2 << 30);
@@ -50,7 +50,7 @@ static bool ext_prefetch_enabled = true;
 static int icm45_ext_drain_read_ahead(void);
 
 // Cache the mean temperature of accepted-header packets in the latest FIFO read.
-// Count-read failure retains the previous cache; an empty/data-failed read clears it.
+// Empty or failed acquisition invalidates the cache.
 static float fifo_temp_c = 25.0f;
 static bool fifo_temp_valid = false;
 
@@ -295,7 +295,7 @@ static void icm45_invalidate_odr_cache(void)
 }
 
 // Quiesce FIFO, WOM and interrupt routing before selecting the sampling clock.
-static int icm45_disable_streaming(void)
+static int icm45_disable_acquisition(void)
 {
 	int err;
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x00);
@@ -396,7 +396,7 @@ int icm45_init(
 		return -ENODEV;
 	}
 
-	err = icm45_disable_streaming();
+	err = icm45_disable_acquisition();
 	if (err) {
 		return err;
 	}
@@ -420,11 +420,12 @@ int icm45_init(
 		return err;
 	}
 
-	// FIFO streaming, 2K depth, high-resolution accel + gyro.
+	/* Stop-on-full permits draining all 20-byte frames without the streaming
+	 * read-empty corruption (AN-000364 v1.5 section 2.16). Keep 2K depth. */
 	err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		ICM45686_FIFO_CONFIG0,
-		ICM45686_FIFO_MODE_STREAM | ICM45686_FIFO_DEPTH_2K
+		ICM45686_FIFO_MODE_STOP_ON_FULL | ICM45686_FIFO_DEPTH_2K
 	);
 	if (err) {
 		return err;
@@ -633,10 +634,11 @@ fail:
 
 uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 {
+	fifo_temp_valid = false;
 	int err = 0;
 	uint8_t raw_count[2];
-	/* TDK icm456xx_get_frame_count cites AN-000364 (2.2):
-	 * read FIFO_COUNT twice and use the second value. */
+	/* Retain TDK's conservative double read. AN-000364 v1.5 section 2.2
+	 * requires it specifically for stop-on-full mode with 8-byte frames. */
 	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &raw_count[0], 2);
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &raw_count[0], 2);
 	if (err) {
@@ -645,7 +647,6 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 	}
 	uint16_t packets = (uint16_t)(raw_count[0] << 8 | raw_count[1]); // Big-endian frame count.
 
-	fifo_temp_valid = false;
 	if (packets == 0) {
 		return 0;
 	}
@@ -653,13 +654,13 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 	// Cap the requested read; excess frames are not consumed by this transfer.
 	uint16_t limit = len / ICM45686_FIFO_PACKET_SIZE;
 	if (packets > limit) {
-		LOG_WRN("FIFO read buffer limit reached, %d packets dropped", packets - limit);
+		LOG_WRN("FIFO read buffer limit reached, %d packets retained", packets - limit);
 		packets = limit;
 	}
 
-	/* Read the capped count as fixed 20-byte frames. TDK's advanced driver
-	 * applies AN-000364's M-1 rule in stream mode; this driver does not.
-	 * Header rejection below does not prove that every accepted frame is intact. */
+	if (packets == 0) {
+		return 0;
+	}
 	uint16_t count = packets * ICM45686_FIFO_PACKET_SIZE;
 	err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_DATA, data, count, ICM45686_FIFO_PACKET_SIZE);
 	if (err) {
@@ -801,6 +802,8 @@ float icm45_temp_read(void)
 
 uint8_t icm45_setup_DRDY(uint16_t threshold)
 {
+	/* FIFO_WR_WM_GT_TH defaults to equality (DS-000577 section 17.31).
+	 * All N frames are readable; zero disables the watermark. */
 	uint8_t buf[2];
 	buf[0] = threshold & 0xFF;
 	buf[1] = threshold >> 8;
@@ -818,7 +821,7 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 	if (err) {
 		goto fail;
 	}
-	// Disable FIFO streaming and flush before entering WOM mode.
+	// Disable FIFO acquisition and flush before entering WOM mode.
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x00);
 	if (err) {
 		goto fail;

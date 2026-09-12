@@ -6,8 +6,8 @@
 #include "sensor/imu/ICM42686.h"
 #include "sensor/imu/ICM42688.h"
 
-/* Link both complete production translation units. Section GC discards the
- * unused hardware paths; the decoder path has no mocked I/O or copied code. */
+/* Link both complete production translation units. The direct-read fixture
+ * supplies raw sense registers; section GC discards unused hardware paths. */
 struct decoder {
 	int (*process)(uint16_t index, uint8_t *data, float a[3], float g[3]);
 	float accel_range;
@@ -32,6 +32,43 @@ static const uint8_t sample[20] = {
 static const int32_t accel_counts[3] = {524287, -524288, -1};
 static const int32_t gyro_counts[3] = {1, -2, 74565};
 static const uint8_t invalid[6] = {0x80, 0x00, 0x80, 0x00, 0x80, 0x00};
+
+static uint8_t sense_registers[256];
+
+int ssi_burst_read(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uint32_t len)
+{
+	assert(dev == SENSOR_INTERFACE_DEV_IMU);
+	assert((unsigned)reg + len <= sizeof(sense_registers));
+	memcpy(buf, sense_registers + reg, len);
+	return 0;
+}
+
+static void test_icm42686_direct_units(void)
+{
+	/* Signed endpoints and +/-1 g, +/-1000 dps. FIFO extensions are zero
+	 * so both interfaces describe exactly the same physical samples. */
+	const int16_t counts[][3] = {{32767, -32768, -1}, {1024, -1024, 0}, {8192, -8192, 1}};
+	for (unsigned n = 0; n < sizeof(counts) / sizeof(counts[0]); n++) {
+		uint8_t packet[20] = {0x78};
+		for (unsigned axis = 0; axis < 3; axis++) {
+			uint16_t raw = (uint16_t)counts[n][axis];
+			packet[1 + 2 * axis] = packet[7 + 2 * axis] = raw >> 8;
+			packet[2 + 2 * axis] = packet[8 + 2 * axis] = raw;
+		}
+		memcpy(sense_registers + ICM42686_ACCEL_DATA_X1, packet + 1, 6);
+		memcpy(sense_registers + ICM42686_GYRO_DATA_X1, packet + 7, 6);
+		float direct_a[3], direct_g[3], fifo_a[3], fifo_g[3];
+		icm42686_accel_read(direct_a);
+		icm42686_gyro_read(direct_g);
+		assert(icm42686_fifo_process(0, packet, fifo_a, fifo_g) == 0);
+		for (unsigned axis = 0; axis < 3; axis++) {
+			assert(direct_a[axis] == counts[n][axis] / 1024.0f);
+			assert(direct_g[axis] == counts[n][axis] * (125.0f / 1024.0f));
+			assert(direct_a[axis] == fifo_a[axis]);
+			assert(direct_g[axis] == fifo_g[axis]);
+		}
+	}
+}
 
 static void expect_vector(const float actual[3], const int32_t counts[3], float range)
 {
@@ -119,6 +156,7 @@ static void test_empty_and_zero(const struct decoder *decoder)
 
 int main(void)
 {
+	test_icm42686_direct_units();
 	for (unsigned i = 0; i < sizeof(decoders) / sizeof(decoders[0]); i++) {
 		test_signed_scaling_and_index(&decoders[i]);
 		test_invalid_vectors(&decoders[i]);
