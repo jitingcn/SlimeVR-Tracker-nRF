@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <string.h>
+#include <zephyr/sys/atomic.h>
 
 #include "cal_sample.h"
 
@@ -46,10 +47,15 @@ K_MSGQ_DEFINE(gyro_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QU
 K_MSGQ_DEFINE(mag_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
 
 static float latest_accel[3] = {0};
-static struct k_spinlock accel_snapshot_lock;
+/* Serialize admission, nonblocking queue publication and session purge. The
+ * atomic state gives idle gyro/mag a lock-free exit and identifies publishers
+ * preempted before the lock across an end/begin boundary. */
+static struct k_spinlock sample_lock;
+static atomic_t sample_session;
+#define CAL_SAMPLE_CHANNEL_MASK (CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO | CAL_SAMPLE_MAG)
 static bool accel_snapshot_valid;
 
-static void publish_sample(struct k_msgq *queue, const float v[3])
+static void publish_sample_locked(struct k_msgq *queue, const float v[3])
 {
 	float discarded[3];
 
@@ -61,6 +67,19 @@ static void publish_sample(struct k_msgq *queue, const float v[3])
 	}
 }
 
+static void publish_sample(struct k_msgq *queue, const float v[3], uint8_t channel)
+{
+	atomic_val_t session = atomic_get(&sample_session);
+	if (!(session & channel)) {
+		return;
+	}
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
+	if (session == atomic_get(&sample_session)) {
+		publish_sample_locked(queue, v);
+	}
+	k_spin_unlock(&sample_lock, key);
+}
+
 static int wait_sample(struct k_msgq *queue, float v[3], k_timeout_t timeout, const char *name)
 {
 	if (k_msgq_get(queue, v, timeout) != 0) {
@@ -70,23 +89,43 @@ static int wait_sample(struct k_msgq *queue, float v[3], k_timeout_t timeout, co
 	return 0;
 }
 
-void sensor_calibration_samples_reset(void)
+static void samples_set_channels(uint8_t channels)
 {
-	/* Calibration sessions start with only samples published after the reset.
-	 * The latest accel snapshot intentionally survives: peek is a live sensor
-	 * observation used by online calibration, not a consumable queue. */
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
+	/* Advance the generation even when restarting the same channels. Unsigned
+	 * arithmetic also makes generation wrap defined. No producer can enqueue
+	 * between the purge and publication of the new admission state. */
+	atomic_val_t next = (atomic_val_t)(
+		((unsigned long)atomic_get(&sample_session) + CAL_SAMPLE_CHANNEL_MASK + 1)
+		& ~(unsigned long)CAL_SAMPLE_CHANNEL_MASK
+	);
 	k_msgq_purge(&accel_sample_queue);
 	k_msgq_purge(&gyro_sample_queue);
 	k_msgq_purge(&mag_sample_queue);
+	atomic_set(&sample_session, next | (channels & CAL_SAMPLE_CHANNEL_MASK));
+	k_spin_unlock(&sample_lock, key);
+}
+
+void sensor_calibration_samples_begin(uint8_t channels)
+{
+	samples_set_channels(channels);
+}
+
+void sensor_calibration_samples_end(void)
+{
+	samples_set_channels(0);
 }
 
 void sensor_sample_accel(const float a[3])
 {
-	k_spinlock_key_t key = k_spin_lock(&accel_snapshot_lock);
+	atomic_val_t session = atomic_get(&sample_session);
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
 	memcpy(latest_accel, a, sizeof(latest_accel));
 	accel_snapshot_valid = true;
-	k_spin_unlock(&accel_snapshot_lock, key);
-	publish_sample(&accel_sample_queue, a);
+	if ((session & CAL_SAMPLE_ACCEL) && session == atomic_get(&sample_session)) {
+		publish_sample_locked(&accel_sample_queue, a);
+	}
+	k_spin_unlock(&sample_lock, key);
 }
 
 int sensor_wait_accel(float a[3], k_timeout_t timeout)
@@ -99,18 +138,18 @@ bool sensor_peek_accel(float a[3])
 	if (a == NULL) {
 		return false;
 	}
-	k_spinlock_key_t key = k_spin_lock(&accel_snapshot_lock);
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
 	bool valid = accel_snapshot_valid;
 	if (valid) {
 		memcpy(a, latest_accel, sizeof(latest_accel));
 	}
-	k_spin_unlock(&accel_snapshot_lock, key);
+	k_spin_unlock(&sample_lock, key);
 	return valid;
 }
 
 void sensor_sample_gyro(const float g[3])
 {
-	publish_sample(&gyro_sample_queue, g);
+	publish_sample(&gyro_sample_queue, g, CAL_SAMPLE_GYRO);
 }
 
 int sensor_wait_gyro(float g[3], k_timeout_t timeout)
@@ -120,7 +159,7 @@ int sensor_wait_gyro(float g[3], k_timeout_t timeout)
 
 void sensor_sample_mag(const float m[3])
 {
-	publish_sample(&mag_sample_queue, m);
+	publish_sample(&mag_sample_queue, m, CAL_SAMPLE_MAG);
 }
 
 int sensor_wait_mag(float m[3], k_timeout_t timeout)
