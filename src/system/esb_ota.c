@@ -629,8 +629,15 @@ int esb_ota_handle_verify(void)
 	ota.state = OTA_STATE_VERIFYING;
 	ota_send_status();
 
-	uint32_t calc_crc = esb_ota_flash_compute_crc32(ota.staging_base, ota.image_size,
-							ota.page_buf);
+	uint32_t calc_crc;
+	int err = esb_ota_flash_compute_crc32(ota.staging_base, ota.image_size,
+					    ota.page_buf, &calc_crc);
+	if (err) {
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_FLASH_ERROR;
+		ota_send_status();
+		return err;
+	}
 	if (calc_crc != ota.image_crc32) {
 		LOG_ERR("OTA VERIFY: CRC32 mismatch (calculated 0x%08X, expected 0x%08X)",
 			calc_crc, ota.image_crc32);
