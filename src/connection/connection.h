@@ -64,8 +64,8 @@ struct raw_imu_sample {
 void connection_set_data_collection(bool enable);
 bool connection_get_data_collection(void);
 
-// Batch raw sensor data collection (runtime controlled via PONG command)
-void connection_set_data_collection_batch(bool enable, uint16_t rate_hz);
+// Returns -EBUSY for an active session's rate change; stop before restarting.
+int connection_set_data_collection_batch(bool enable, uint16_t rate_hz);
 bool connection_get_data_collection_batch(void);
 uint16_t connection_get_data_collection_batch_rate(void);
 
@@ -90,6 +90,12 @@ void connection_send_raw_metadata(float gyro_range, float accel_range,
 /* Queue a receiver-requested metadata/calibration subset. The connection
  * thread owns transmission; calls are safe from ESB event context. */
 void connection_request_raw_metadata(uint8_t mask, uint8_t chunk, uint16_t token);
+
+/* ISR/thread-safe, bounded and non-sleeping. 0 = queued or already pending,
+ * -ENOSPC = full (new request dropped), -EACCES = inactive or batch mode.
+ * Connection owns deduplication, FIFO order and session resets; history
+ * validity is checked by its sending thread, never by the ISR. */
+int connection_request_raw_retransmit(uint16_t sequence);
 
 // Drain queued raw data and transmit (called from connection thread)
 // Returns true if a packet was sent or an admission was deliberately retried.

@@ -58,6 +58,7 @@
 #include "sensor/sensor.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/storage/flash_map.h>
@@ -181,6 +182,9 @@ struct ota_context {
 };
 
 static struct ota_context ota;
+/* Terminal handoff survives clearing the session on abort. Publish before any
+ * IDLE/ERROR/COMPLETE transition so another thread cannot admit a new BEGIN. */
+static atomic_t ota_reboot_pending;
 
 BUILD_ASSERT(offsetof(struct ota_context, page_buf) % __alignof__(uint32_t) == 0,
 	     "OTA page buffer member must be word-aligned");
@@ -200,7 +204,7 @@ static void ota_launch_ram_engine(void);
 
 bool esb_ota_is_active(void)
 {
-	return ota.state != OTA_STATE_IDLE;
+	return atomic_get(&ota_reboot_pending) || ota.state != OTA_STATE_IDLE;
 }
 
 uint8_t esb_ota_get_status(void)
@@ -251,8 +255,9 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 #endif
 
 	/* Reject duplicate BEGIN if already in progress */
-	if (ota.state != OTA_STATE_IDLE && ota.state != OTA_STATE_ERROR &&
-	    ota.state != OTA_STATE_COMPLETE) {
+	if (atomic_get(&ota_reboot_pending) ||
+	    (ota.state != OTA_STATE_IDLE && ota.state != OTA_STATE_ERROR &&
+	     ota.state != OTA_STATE_COMPLETE)) {
 		LOG_WRN("OTA BEGIN: session already active (state=%d), ignoring", ota.state);
 		ota_send_status();
 		return -EALREADY;
@@ -659,9 +664,16 @@ int esb_ota_handle_verify(void)
 int esb_ota_handle_activate(void)
 {
 	k_msleep(100);
-	if (ota.state != OTA_STATE_VERIFYING || ota.error_code != OTA_STATUS_VERIFY_OK) {
+	if (atomic_get(&ota_reboot_pending) ||
+	    ota.state != OTA_STATE_VERIFYING || ota.error_code != OTA_STATUS_VERIFY_OK) {
 		LOG_ERR("OTA ACTIVATE: firmware not verified");
 		return -EINVAL;
+	}
+	/* Reserve before bootloader writes: a physically committed shutdown must
+	 * win, but a deferred OFF must not strand a successfully prepared image. */
+	int err = sys_ota_reboot_reserve();
+	if (err) {
+		return err;
 	}
 	LOG_WRN("OTA: Activating new firmware...");
 	ota.state = OTA_STATE_ACTIVATING;
@@ -670,10 +682,10 @@ int esb_ota_handle_activate(void)
 	k_msleep(50);
 
 #if OTA_USE_MCUBOOT
-	int err = esb_ota_flash_request_mcuboot_upgrade();
+	err = esb_ota_flash_request_mcuboot_upgrade();
 #else
-	int err = esb_ota_flash_prepare_bootloader_settings(ota.staging_base, ota.image_size,
-							    ota.page_buf);
+	err = esb_ota_flash_prepare_bootloader_settings(ota.staging_base, ota.image_size,
+						      ota.page_buf);
 #endif
 
 	k_msleep(50);
@@ -682,11 +694,13 @@ int esb_ota_handle_activate(void)
 		LOG_ERR("OTA ACTIVATE: failed to update bootloader settings (err %d)", err);
 		ota.state = OTA_STATE_ERROR;
 		ota.error_code = OTA_STATUS_FLASH_ERROR;
+		sys_ota_reboot_resolve(false);
 		ota_send_status();
 		return err;
 	}
 
 	LOG_WRN("OTA: Activation complete, rebooting in 500ms...");
+	atomic_set(&ota_reboot_pending, 1);
 	ota.state = OTA_STATE_COMPLETE;
 	ota_send_status();
 
@@ -694,9 +708,7 @@ int esb_ota_handle_activate(void)
 	k_msleep(500);
 
 	LOG_INF("OTA: About to activate staged image");
-#if OTA_USE_MCUBOOT
-	sys_request_system_reboot(false);
-#else
+#if !OTA_USE_MCUBOOT
 	LOG_INF("OTA: staging=0x%05X final=0x%05X size=%u",
 		ota.staging_base, ota.target_flash_base, ota.image_size);
 	k_msleep(200);
@@ -704,25 +716,29 @@ int esb_ota_handle_activate(void)
 	/* Copy from staging to final location (with IRQs disabled) and reset */
 	esb_ota_flash_copy_and_reset(ota.staging_base, ota.target_flash_base, ota.image_size);
 
-	/* If first page wasn't deferred, just reboot */
-	sys_request_system_reboot(false);
+	/* If first page wasn't deferred, reboot via the reserved power owner. */
 #endif
-
-	/* Should not reach here */
+	sys_ota_reboot_resolve(true);
 	return 0;
 }
 
 void esb_ota_handle_abort(void)
 {
-	if (ota.state == OTA_STATE_IDLE) {
+	if (atomic_get(&ota_reboot_pending) || ota.state == OTA_STATE_IDLE) {
 		return;
+	}
+
+	if (sys_ota_reboot_reserve()) {
+		return; /* Physical shutdown already owns the hardware. */
 	}
 
 	LOG_WRN("OTA: Aborted (was in state %d, %u/%u bytes written)",
 		ota.state, ota.bytes_written, ota.image_size);
 
-	ota.state = OTA_STATE_IDLE;
+	atomic_set(&ota_reboot_pending, 1);
 	memset(&ota, 0, sizeof(ota));
+	/* Preserve the wire-level IDLE status without admitting sleep or a new
+	 * session before the reserved recovery reboot has actually executed. */
 	ota_send_status();
 
 #if OTA_USE_MCUBOOT
@@ -735,16 +751,20 @@ void esb_ota_handle_abort(void)
 #if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 #endif
-	sys_request_system_reboot(false);
+	sys_ota_reboot_resolve(true);
 }
 
 void esb_ota_check_timeout(void)
 {
-	if (ota.state == OTA_STATE_IDLE || ota.state == OTA_STATE_COMPLETE) {
+	if (atomic_get(&ota_reboot_pending) || ota.state == OTA_STATE_IDLE) {
 		return;
 	}
 
 	if ((k_uptime_get() - ota.last_data_time) > OTA_TIMEOUT_MS) {
+		if (sys_ota_reboot_reserve()) {
+			return; /* Never interrupt physically committed shutdown. */
+		}
+		atomic_set(&ota_reboot_pending, 1);
 		LOG_ERR("OTA: Timed out after %d ms with no data", OTA_TIMEOUT_MS);
 		ota.state = OTA_STATE_ERROR;
 		ota.error_code = OTA_STATUS_TIMEOUT;
@@ -754,7 +774,7 @@ void esb_ota_check_timeout(void)
 #if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 #endif
-		sys_request_system_reboot(false);
+		sys_ota_reboot_resolve(true);
 	}
 }
 

@@ -103,7 +103,7 @@ int main(void)
 		}
 #if USER_SHUTDOWN_ENABLED
 		if (system_uptime_since_boot_ms() < 50 && booting_from_shutdown) { // debounce
-			sys_request_system_off(false);
+			sys_request_system_off();
 		}
 #endif
 		if (system_uptime_since_boot_ms() <= 5000) {

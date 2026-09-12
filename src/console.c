@@ -9,6 +9,7 @@
 #endif
 #include "connection/esb.h"
 #include "connection/connection.h"
+#include "connection/channel_control.h"
 #include "connection/tdma.h"
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 #include "connection/radio_capture.h"
@@ -767,14 +768,16 @@ static void print_odr_summary_line(void)
 
 static void print_sensor_summary(void)
 {
+	sensor_imu_calibration_t calibration;
+	sensor_calibration_snapshot(&calibration);
 	print_sensor_identity();
 	print_odr_summary_line();
 
 	printk(
 		"Gyroscope bias: %.5f %.5f %.5f\n",
-		(double)retained->gyroBias[0],
-		(double)retained->gyroBias[1],
-		(double)retained->gyroBias[2]
+		(double)calibration.gyro_bias[0],
+		(double)calibration.gyro_bias[1],
+		(double)calibration.gyro_bias[2]
 	);
 #if CONFIG_SENSOR_USE_TCAL
 	float current_gyro_offset[3];
@@ -799,6 +802,8 @@ static void print_sensor_summary(void)
 
 static void print_sensor_detail(void)
 {
+	sensor_imu_calibration_t calibration;
+	sensor_calibration_snapshot(&calibration);
 	printk("=== Sensor detail ===\n");
 	printk(
 		"IMU: %s | Mag: %s (%s)\n",
@@ -848,30 +853,30 @@ static void print_sensor_detail(void)
 	for (int i = 0; i < 3; i++) {
 		printk(
 			"%.5f %.5f %.5f %.5f\n",
-			(double)retained->accBAinv[0][i],
-			(double)retained->accBAinv[1][i],
-			(double)retained->accBAinv[2][i],
-			(double)retained->accBAinv[3][i]
+			(double)calibration.accel_matrix[0][i],
+			(double)calibration.accel_matrix[1][i],
+			(double)calibration.accel_matrix[2][i],
+			(double)calibration.accel_matrix[3][i]
 		);
 	}
 
 	printk("\nAccel calibration:\n");
 	printk(
 		"  Offset: [%.5f, %.5f, %.5f]\n",
-		(double)retained->accBAinv[0][0],
-		(double)retained->accBAinv[0][1],
-		(double)retained->accBAinv[0][2]
+		(double)calibration.accel_matrix[0][0],
+		(double)calibration.accel_matrix[0][1],
+		(double)calibration.accel_matrix[0][2]
 	);
-	float diag_x = retained->accBAinv[1][0];
-	float diag_y = retained->accBAinv[2][1];
-	float diag_z = retained->accBAinv[3][2];
+	float diag_x = calibration.accel_matrix[1][0];
+	float diag_y = calibration.accel_matrix[2][1];
+	float diag_z = calibration.accel_matrix[3][2];
 	printk("  Scale: [%.5f, %.5f, %.5f]\n", (double)diag_x, (double)diag_y, (double)diag_z);
 #else
 	printk(
 		"\nAccelerometer bias: %.5f %.5f %.5f\n",
-		(double)retained->accelBias[0],
-		(double)retained->accelBias[1],
-		(double)retained->accelBias[2]
+		(double)calibration.accel_bias[0],
+		(double)calibration.accel_bias[1],
+		(double)calibration.accel_bias[2]
 	);
 #endif
 	printk("Magnetometer matrix:\n");
@@ -1243,105 +1248,31 @@ static void print_help(void)
 
 // --- Command Implementations ---
 
-void cmd_sens_set(float x, float y, float z)
-{
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	if (retained) {
-		float deg_x = x;
-		float deg_y = y;
-		float deg_z = z;
-
-		float den_x = 1.0f - (deg_x / (360.0f * CONFIG_SENSOR_SENS_REV));
-		float den_y = 1.0f - (deg_y / (360.0f * CONFIG_SENSOR_SENS_REV));
-		float den_z = 1.0f - (deg_z / (360.0f * CONFIG_SENSOR_SENS_REV));
-
-		// Prevent division by zero or near-zero
-		if (fabsf(den_x) < 1e-6f || fabsf(den_y) < 1e-6f || fabsf(den_z) < 1e-6f) {
-			printk("Error: Invalid input degrees leading to division by zero. Calibration not applied.\n");
-		} else {
-			retained->gyroSensScale[0] = 1.0f / den_x;
-			retained->gyroSensScale[1] = 1.0f / den_y;
-			retained->gyroSensScale[2] = 1.0f / den_z;
-			retained_update();
-			sys_write(
-				MAIN_GYRO_SENS_ID,
-				&retained->gyroSensScale,
-				retained->gyroSensScale,
-				sizeof(retained->gyroSensScale)
-			);
-			printk(
-				"Gyro sensitivity difference set to: %.3f, %.3f, %.3f\n",
-				(double)deg_x,
-				(double)deg_y,
-				(double)deg_z
-			);
-		}
+static void cmd_sens_set(float x, float y, float z)
+{
+	const float degrees[3] = {x, y, z};
+	int err = sensor_calibration_set_sensitivity(degrees);
+	if (err) {
+		printk("Error: Sensitivity update failed: %d (RAM may already be updated).\n", err);
 	} else {
-		printk("Error: Retained data not available.\n");
+		printk("Gyro sensitivity difference set to: %.3f, %.3f, %.3f\n",
+			(double)x, (double)y, (double)z);
 	}
-#else
-	printk("Error: Sensitivity calibration not enabled.\n");
-#endif
 }
 
-void cmd_sens_reset(void)
+static void cmd_sens_reset(void)
 {
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	if (retained) {
-		printk("Resetting gyro sensitivity calibration.\n");
-		retained->gyroSensScale[0] = 1.0f;
-		retained->gyroSensScale[1] = 1.0f;
-		retained->gyroSensScale[2] = 1.0f;
-		retained_update(); // Save changes
-		sys_write(
-			MAIN_GYRO_SENS_ID,
-			&retained->gyroSensScale,
-			retained->gyroSensScale,
-			sizeof(retained->gyroSensScale)
-		);
+	int err = sensor_calibration_reset_sensitivity();
+	if (err) {
+		printk("Error: Sensitivity reset failed: %d (RAM may already be updated).\n", err);
+	} else {
 		printk("Gyro sensitivity reset.\n");
-	} else {
-		printk("Error: Retained data not available.\n");
 	}
-#else
-	printk("Error: Sensitivity calibration not enabled.\n");
-#endif
 }
 
-void cmd_sens_auto_request(uint8_t axis, uint16_t revolutions)
+static void cmd_sens_auto(const char *axis_str, const char *rev_str)
 {
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	if (axis >= 3) {
-		printk("Error: Invalid sensitivity calibration axis %u.\n", axis);
-		return;
-	}
-
-	if (revolutions == 0) {
-		revolutions = SENS_CAL_DEFAULT_REVOLUTIONS;
-	}
-
-	if (revolutions > SENS_CAL_MAX_REVOLUTIONS) {
-		printk("Error: Invalid revolutions %u. Use 1 to %u.\n", revolutions, SENS_CAL_MAX_REVOLUTIONS);
-		return;
-	}
-
-	char axis_char = "XYZ"[axis];
-	if (sensor_request_calibration_sens(axis, revolutions) != 0) {
-		printk("Error: Calibration busy or parameters invalid.\n");
-		return;
-	}
-
-	printk("Gyro sensitivity auto-calibration started on %c axis (%u rev).\n", axis_char, revolutions);
-	printk("  1. Hold the tracker still until the LED flashes.\n");
-	printk("  2. While flashing, spin it %u full turns about the %c axis, then stop.\n", revolutions, axis_char);
-#else
-	printk("Error: Sensitivity calibration not enabled.\n");
-#endif
-}
-
-void cmd_sens_auto(const char *axis_str, const char *rev_str)
-{
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	// Axis is a single character; the command parser has already lowercased it.
 	if (axis_str == NULL || axis_str[0] == '\0' || axis_str[1] != '\0') {
 		printk("Error: Specify a single axis. Use: 'sens auto <x|y|z> [revolutions]'.\n");
@@ -1375,64 +1306,69 @@ void cmd_sens_auto(const char *axis_str, const char *rev_str)
 		revolutions = (uint16_t)value;
 	}
 
-	cmd_sens_auto_request(axis, revolutions);
-#else
-	printk("Error: Sensitivity calibration not enabled.\n");
+	int err = sensor_request_calibration_sens(axis, revolutions);
+	if (err) {
+		printk("Error: Calibration request rejected: %d.\n", err);
+		return;
+	}
+	char axis_char = "XYZ"[axis];
+	printk("Gyro sensitivity auto-calibration started on %c axis (%u rev).\n", axis_char, revolutions);
+	printk("  1. Hold the tracker still until the LED flashes.\n");
+	printk("  2. While flashing, spin it %u full turns about the %c axis, then stop.\n", revolutions, axis_char);
+}
 #endif
+
+static void cmd_reset_zro(void)
+{
+	int err = sensor_calibration_reset_imu();
+	if (err) {
+		printk("Error: IMU calibration reset rejected: %d.\n", err);
+	}
 }
 
-void cmd_reset_zro(void)
-{
-	sensor_calibration_clear(NULL, NULL, true);
-	// Manual command: invalidate fusion to force quaternion recalculation
-	sensor_fusion_invalidate();
-}
-
-void cmd_reset_acc(void)
-{
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	sensor_calibration_clear_6_side(NULL, true);
-#else
-	printk("Error: 6-side calibration not enabled.\n");
-#endif
-}
-
-void cmd_reset_tcal(void)
+static void cmd_reset_acc(void)
 {
-#if CONFIG_SENSOR_USE_TCAL
-	sensor_tcal_clear();
-#else
-	printk("Error: Temperature calibration not enabled.\n");
-#endif
+	int err = sensor_calibration_reset_accel();
+	if (err) {
+		printk("Error: Accelerometer calibration reset rejected: %d.\n", err);
+	}
 }
+#endif
 
-void cmd_reset_bat(void)
+#if CONFIG_SENSOR_USE_TCAL
+static void cmd_reset_tcal(void)
+{
+	sensor_tcal_clear();
+}
+#endif
+
+static void cmd_reset_bat(void)
 {
 	sys_reset_battery_tracker();
 }
 
-void cmd_fusion_reset(void)
+static void cmd_fusion_reset(void)
 {
 	printk("Resetting fusion (invalidating quaternion).\n");
-	sensor_fusion_invalidate();
-	printk("Fusion reset complete.\n");
+	sensor_request_fusion_reset();
+	printk("Fusion reset requested.\n");
 }
 
-void cmd_bat_debug(void)
-{
-	sys_print_battery_tracker_debug();
-}
-
-void cmd_ping_start(void)
+static void cmd_ping_start(void)
 {
 	printk("Ping received! Flashing LED.\n");
 	set_led(SYS_LED_PATTERN_ONESHOT_PING, SYS_LED_PRIORITY_HIGHEST);
 }
 
-void cmd_shutdown(void)
+static void cmd_shutdown(void)
 {
-	printk("Shutting down device.\n");
-	sys_command_shutdown();
+	int err = sys_command_shutdown();
+	if (err < 0) {
+		printk("Shutdown request rejected: %d\n", err);
+	} else {
+		printk("Shutdown request accepted.\n");
+	}
 }
 
 static inline void strtolower(char *str)
@@ -1490,7 +1426,10 @@ static void console_cmd_reboot(size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
-	sys_request_system_reboot(false);
+	int err = sys_request_system_reboot();
+	if (err) {
+		printk("Error: Reboot request rejected: %d.\n", err);
+	}
 }
 
 static void console_cmd_battery(size_t argc, char **argv)
@@ -1865,24 +1804,14 @@ static void console_cmd_channel(size_t argc, char **argv)
 		char *endptr;
 		long channel = strtol(arg, &endptr, 10);
 
-		if (*endptr != '\0' || channel < 0 || channel > 100) {
+		if (endptr == arg || *endptr != '\0' || channel < 0 || channel > 100) {
 			printk("Invalid channel. Must be a number between 0 and 100.\n");
 		} else {
-			printk("Setting RF channel to %d\n", (int)channel);
-			// Save to retained memory (encoded)
-			retained->rf_channel = esb_rf_channel_encode((uint8_t)channel);
-			retained_update();
-			// Save to NVS
-			sys_write(
-				RF_CHANNEL_ID,
-				&retained->rf_channel,
-				&retained->rf_channel,
-				sizeof(retained->rf_channel)
-			);
-			printk("RF channel saved to NVS: %d\n", (int)channel);
-			if (esb_reinitialize()) {
-				printk("Error: ESB reinitialize failed\n");
+			int err = channel_control_set((int)channel);
+			if (err) {
+				printk("Error: Channel update failed: %d (RAM/radio may already be updated).\n", err);
 			} else {
+				printk("RF channel saved to NVS: %d\n", (int)channel);
 				printk("ESB reinitialized with channel %d\n", (int)channel);
 			}
 		}
@@ -1894,13 +1823,9 @@ static void console_cmd_clearchannel(size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	printk("Clearing RF channel setting (restore default)\n");
-	// Clear saved channel (set to default marker)
-	retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
-	retained_update();
-	sys_write(RF_CHANNEL_ID, &retained->rf_channel, &retained->rf_channel, sizeof(retained->rf_channel));
-	printk("RF channel cleared, will use default on next boot\n");
-	if (esb_reinitialize()) {
-		printk("Error: ESB reinitialize failed\n");
+	int err = channel_control_reset();
+	if (err) {
+		printk("Error: Channel reset failed: %d (RAM/radio may already be updated).\n", err);
 	} else {
 		printk("ESB reinitialized with default channel\n");
 	}

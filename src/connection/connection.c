@@ -28,6 +28,7 @@
 #include "util.h"
 #include "esb.h"
 #include "sensor_data_snapshot.h"
+#include "raw_retx.h"
 #include "tdma.h"
 #include "build_defines.h"
 #include "hid.h"
@@ -719,10 +720,19 @@ static void raw_ring_store(const uint8_t packet[RAW_PACKET_SIZE])
  * retransmit requests (RAW_ARQ_MARKER). Up to RAW_RETX_MAX entries.
  * Connection thread drains this before sending new data.
  */
-#define RAW_RETX_MAX 16
-volatile uint16_t raw_retx_queue[RAW_RETX_MAX];
-volatile uint8_t raw_retx_count;
+static struct raw_retx_requests raw_retx;
 static volatile uint32_t raw_retx_total; /* lifetime retransmit count */
+
+int connection_request_raw_retransmit(uint16_t sequence)
+{
+	unsigned key = irq_lock();
+	int err = -EACCES;
+	if (connection_get_data_collection() && !connection_get_data_collection_batch()) {
+		err = raw_retx_submit(&raw_retx, sequence);
+	}
+	irq_unlock(key);
+	return err;
+}
 static bool raw_metadata_sent = false;
 
 /* Metadata and calibration are captured once at collection-session start.
@@ -801,8 +811,10 @@ static bool connection_tcal_point_valid(const struct TempCalPoint *point)
 
 static void connection_capture_calibration_snapshot(bool include_tcal)
 {
-	memcpy(raw_cal_snapshot.acc_BAinv, retained->accBAinv, sizeof(raw_cal_snapshot.acc_BAinv));
-	memcpy(raw_cal_snapshot.gyro_bias, retained->gyroBias, sizeof(raw_cal_snapshot.gyro_bias));
+	sensor_imu_calibration_t calibration;
+	sensor_calibration_snapshot(&calibration);
+	memcpy(raw_cal_snapshot.acc_BAinv, calibration.accel_matrix, sizeof(raw_cal_snapshot.acc_BAinv));
+	memcpy(raw_cal_snapshot.gyro_bias, calibration.gyro_bias, sizeof(raw_cal_snapshot.gyro_bias));
 	memcpy(raw_cal_snapshot.gyro_scale, retained->gyroSensScale, sizeof(raw_cal_snapshot.gyro_scale));
 	float mag_BAinv[4][3];
 	float mag_body_BAinv[4][3];
@@ -927,7 +939,7 @@ static void connection_reset_raw_collection(bool reset_arq)
 	if (reset_arq) {
 		memset(raw_ring_valid_bits, 0, sizeof(raw_ring_valid_bits));
 		unsigned key = irq_lock();
-		raw_retx_count = 0;
+		raw_retx_reset(&raw_retx);
 		irq_unlock(key);
 		raw_retx_total = 0;
 	}
@@ -957,9 +969,17 @@ bool connection_get_data_collection(void)
 	return atomic_get(&data_collection_active) != 0;
 }
 
-void connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
+int connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
 {
 	bool was_active = connection_get_data_collection_batch();
+	if (enable && was_active) {
+		if (data_collection_batch_rate_hz != rate_hz) {
+			LOG_WRN("Stop batch collection before changing its rate");
+			return -EBUSY;
+		}
+		/* Same-rate retries must not change the session or sensor accumulator. */
+		return 0;
+	}
 	if (enable && connection_get_data_collection()) {
 		connection_set_data_collection(false);
 	}
@@ -968,12 +988,6 @@ void connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
 		data_collection_batch_rate_hz = 0;
 		sensor_set_batch_collect(false, 0.0f);
 		test_mode_set_target_tps(0);
-	} else if (was_active && data_collection_batch_rate_hz == rate_hz) {
-		/* Redundant re-enable at the same rate: no session reset, no
-		 * accumulator reset — keeps the gyr_quat stream continuous
-		 * when the host repeats `collectall` while already running. */
-		LOG_INF("Batch data collection already active at %u Hz", rate_hz);
-		test_mode_set_target_tps(DC_BATCH_FUSION_TPS);
 	} else {
 		data_collection_batch_rate_hz = rate_hz;
 		if (!was_active) {
@@ -988,6 +1002,7 @@ void connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
 	if (!enable) {
 		LOG_INF("Batch data collection STOPPED");
 	}
+	return 0;
 }
 
 bool connection_get_data_collection_batch(void)
@@ -1194,14 +1209,7 @@ bool connection_process_raw_data(void)
 	bool have_retx = false;
 	if (!connection_get_data_collection_batch()) {
 		unsigned irq_key = irq_lock();
-		if (raw_retx_count > 0) {
-			retx_seq = raw_retx_queue[0];
-			have_retx = true;
-			for (uint8_t i = 0; i + 1 < raw_retx_count; i++) {
-				raw_retx_queue[i] = raw_retx_queue[i + 1];
-			}
-			raw_retx_count--;
-		}
+		have_retx = raw_retx_take(&raw_retx, &retx_seq);
 		irq_unlock(irq_key);
 	}
 	if (have_retx) {

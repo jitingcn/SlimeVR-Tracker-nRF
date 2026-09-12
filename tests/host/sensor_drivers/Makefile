@@ -16,6 +16,10 @@ MAG_SOURCES := \
 	../../../src/sensor/mag/QMC5883L.c \
 	../../../src/sensor/mag/QMC6309.c
 
+COMMON_HEADERS := ../../../src/sensor/sensor.h ../../../src/sensor/sensor_none.h \
+	../../../src/sensor/interface.h ../../../src/sensor/diagnostics.h
+HOST_HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h hal/*.h)
+
 .PHONY: check clean
 
 check: test_mag_failures test_interface_intervals test_ict153xx test_icm45686 test_lsm6dsv
@@ -25,19 +29,23 @@ check: test_mag_failures test_interface_intervals test_ict153xx test_icm45686 te
 	./test_icm45686
 	./test_lsm6dsv
 
-test_mag_failures: test_mag_failures.c $(MAG_SOURCES)
+test_mag_failures: test_mag_failures.c $(MAG_SOURCES) $(MAG_SOURCES:.c=.h) $(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ test_mag_failures.c $(MAG_SOURCES) $(LDLIBS)
 
-test_interface_intervals: test_interface_intervals.c ../../../src/sensor/interface.c
+test_interface_intervals: test_interface_intervals.c ../../../src/sensor/interface.c \
+		../../../src/sensor/interface.h $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ test_interface_intervals.c ../../../src/sensor/interface.c $(LDLIBS)
 
-test_ict153xx: test_ict153xx.c ../../../src/sensor/mag/ICT153xx.c
+test_ict153xx: test_ict153xx.c ../../../src/sensor/mag/ICT153xx.c ../../../src/sensor/mag/ICT153xx.h \
+		$(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ test_ict153xx.c ../../../src/sensor/mag/ICT153xx.c $(LDLIBS)
 
-test_icm45686: test_icm45686.c ../../../src/sensor/imu/ICM45686.c ../../../src/sensor/imu/ICM45686.h hal/nrf_gpio.h
+test_icm45686: test_icm45686.c ../../../src/sensor/imu/ICM45686.c ../../../src/sensor/imu/ICM45686.h \
+		$(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ test_icm45686.c ../../../src/sensor/imu/ICM45686.c $(LDLIBS)
 
-test_lsm6dsv: test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c ../../../src/sensor/imu/LSM6DSV.h hal/nrf_gpio.h
+test_lsm6dsv: test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c ../../../src/sensor/imu/LSM6DSV.h \
+		$(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c $(LDLIBS)
 
 clean:

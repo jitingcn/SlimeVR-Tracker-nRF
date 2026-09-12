@@ -60,8 +60,9 @@ void sensor_fusion_reset_mag_ref(void);
 void sensor_fusion_set_mag_ref(float norm, float dip);
 bool sensor_fusion_get_mag_ref(float *norm, float *dip);
 
-void sensor_fusion_invalidate(void);
-void sensor_fusion_update_bias(float *g_off);
+/* Nonblocking requests consumed by the sensor at the next frame boundary. */
+void sensor_request_fusion_reset(void);
+void sensor_request_fusion_bias_reset(void);
 
 void wait_for_threads(void);
 void main_imu_suspend(void);
@@ -84,29 +85,7 @@ float sensor_get_fusion_rate(void);    /* effective gyro feed into fusion */
 void sensor_set_batch_collect(bool active, float emit_hz);
 float sensor_get_loop_period_ms(void); /* processing-work EMA, not full loop period */
 
-// Debug mode functions
-void sensor_debug_start(uint32_t duration_sec);
-void sensor_debug_stop(void);
-bool sensor_debug_is_active(void);
-
-#if CONFIG_SENSOR_RANGE_STATS
-// Sensor range tracking - records min/max values during runtime (not persisted)
-typedef struct {
-	float gyro_max[3];     // Maximum gyro values per axis (deg/s)
-	float gyro_min[3];     // Minimum gyro values per axis (deg/s)
-	float accel_max[3];    // Maximum accel values per axis (g)
-	float accel_min[3];    // Minimum accel values per axis (g)
-	uint64_t sample_count; // Total samples processed
-	bool initialized;      // Whether tracking has been initialized
-} sensor_range_stats_t;
-
-// Get the current range statistics
-const sensor_range_stats_t *sensor_get_range_stats(void);
-// Reset range statistics
-void sensor_reset_range_stats(void);
-// Print range statistics to console
-void sensor_print_range_stats(void);
-#endif // CONFIG_SENSOR_RANGE_STATS
+#include "diagnostics.h"
 
 typedef struct sensor_fusion {
 	void (*init)(float, float, float); // gyro_time, accel_time, mag_time

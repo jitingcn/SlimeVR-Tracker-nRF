@@ -37,6 +37,7 @@
 #include "cal_mag.h"
 #include "cal_sample.h"
 #include "calibration.h"
+#include "imu_calibration.h"
 #include "mag_common.h"
 #include "magneto.h"
 #include "online_mag.h"
@@ -52,9 +53,7 @@
 static uint8_t imu_id;
 static uint8_t sensor_data[128]; // any use sensor data
 
-float accelBias[3] = {0}, gyroBias[3] = {0}, magBias[3] = {0}; // offset biases
-
-float accBAinv[4][3];
+static float magBias[3] = {0};
 float magBAinv[4][3];
 
 K_MUTEX_DEFINE(calibration_request_lock);
@@ -106,13 +105,7 @@ void sensor_calibration_process_accel(float a[3])
 {
 	sensor_sample_accel(a);
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	apply_BAinv(a, accBAinv);
-#else
-	// In single-side calibration mode, accelBias should be zero.
-	// Single-side bias is orientation-dependent and should not be applied.
-	// for (int i = 0; i < 3; i++) {
-	// 	a[i] -= accelBias[i];
-	// }
+	sensor_calibration_apply_accel(a);
 #endif
 }
 
@@ -145,9 +138,7 @@ void sensor_calibration_process_gyro(float g[3])
 	}
 
 	if (!offset_calculated) {
-		calculated_offset[0] = gyroBias[0];
-		calculated_offset[1] = gyroBias[1];
-		calculated_offset[2] = gyroBias[2];
+		sensor_calibration_gyro_bias(calculated_offset);
 	}
 
 	if (retained->bootCalState.doffset_valid) {
@@ -170,13 +161,7 @@ void sensor_calibration_process_gyro(float g[3])
 
 	memcpy(last_gyro_tcal_offset, calculated_offset, sizeof(last_gyro_tcal_offset));
 #else
-#if CONFIG_CMSIS_DSP
-	arm_sub_f32(g, gyroBias, g, 3);
-#else
-	for (int i = 0; i < 3; i++) {
-		g[i] -= gyroBias[i];
-	}
-#endif
+	sensor_calibration_subtract_gyro_bias(g);
 #endif
 }
 
@@ -212,15 +197,8 @@ void sensor_calibration_read(void)
 	 * be stored with a valid CRC. Clean retained first so the copies below
 	 * and the online-mag install stay finite. */
 	bool healed = false;
-	if (!v_finite(retained->accelBias, 3) || !v_finite(retained->gyroBias, 3)
-	    || !v_finite(retained->magBias, 3)) {
-		memset(retained->accelBias, 0, sizeof(retained->accelBias));
-		memset(retained->gyroBias, 0, sizeof(retained->gyroBias));
+	if (!v_finite(retained->magBias, 3)) {
 		memset(retained->magBias, 0, sizeof(retained->magBias));
-		healed = true;
-	}
-	if (!v_finite(&retained->accBAinv[0][0], 12)) {
-		sensor_calibration_clear_6_side(retained->accBAinv, false);
 		healed = true;
 	}
 	if (!v_finite(&retained->magBAinv[0][0], 12)) {
@@ -242,10 +220,8 @@ void sensor_calibration_read(void)
 		retained_update();
 	}
 	memcpy(sensor_data, retained->sensor_data, sizeof(sensor_data));
-	memcpy(accelBias, retained->accelBias, sizeof(accelBias));
-	memcpy(gyroBias, retained->gyroBias, sizeof(gyroBias));
 	memcpy(magBias, retained->magBias, sizeof(magBias));
-	memcpy(accBAinv, retained->accBAinv, sizeof(accBAinv));
+	sensor_calibration_imu_load();
 	if (retained->mag_online_calibration_mode > MAG_ONLINE_CALIBRATION_DISABLED) {
 		retained->mag_online_calibration_mode = MAG_ONLINE_CALIBRATION_DEFAULT;
 	}
@@ -274,55 +250,6 @@ void sensor_calibration_read(void)
 #endif
 }
 
-int sensor_calibration_validate(float *a_bias, float *g_bias, bool write)
-{
-	if (a_bias == NULL) {
-		a_bias = accelBias;
-	}
-	if (g_bias == NULL) {
-		g_bias = gyroBias;
-	}
-	float zero[3] = {0};
-	/* NaN/±inf first: v_epsilon()'s CMSIS path (arm_sqrt_f32 returns 0 for
-	 * NaN) treats NaN as in-range, so a NaN calibration would pass. */
-	if (!v_finite(a_bias, 3) || !v_finite(g_bias, 3)
-	    || !v_epsilon(a_bias, zero, 0.5) || !v_epsilon(g_bias, zero, 50.0)) // check accel is <0.5G and gyro <50dps
-	{
-		sensor_calibration_clear(a_bias, g_bias, write);
-		// Validation failure: do NOT call any fusion function
-		// Let fusion keep its current bias estimate to avoid residual drift
-		LOG_WRN("Invalidated calibration");
-		LOG_WRN("The IMU may be damaged or calibration was not completed properly");
-		return -1;
-	}
-	return 0;
-}
-
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-int sensor_calibration_validate_6_side(float a_inv[][3], bool write)
-{
-	if (a_inv == NULL) {
-		a_inv = accBAinv;
-	}
-	float zero[3] = {0};
-	float diagonal[3];
-	for (int i = 0; i < 3; i++) {
-		diagonal[i] = a_inv[i + 1][i];
-	}
-	float magnitude = v_avg(diagonal);
-	float average[3] = {magnitude, magnitude, magnitude};
-	if (!v_finite(&a_inv[0][0], 12) // NaN/±inf must never pass (v_epsilon CMSIS leak)
-		|| !v_epsilon(a_inv[0], zero, 0.5)
-		|| !v_epsilon(diagonal, average, magnitude * 0.1f)) // check accel is <0.5G and diagonals are within 10%
-	{
-		sensor_calibration_clear_6_side(a_inv, write);
-		LOG_WRN("Invalidated calibration");
-		LOG_WRN("The IMU may be damaged or calibration was not completed properly");
-		return -1;
-	}
-	return 0;
-}
-#endif
 
 int sensor_calibration_validate_mag(float m_inv[][3], bool write)
 {
@@ -341,51 +268,6 @@ int sensor_calibration_validate_mag(float m_inv[][3], bool write)
 	return 0;
 }
 
-void sensor_calibration_clear(float *a_bias, float *g_bias, bool write)
-{
-	if (a_bias == NULL) {
-		a_bias = accelBias;
-	}
-	if (g_bias == NULL) {
-		g_bias = gyroBias;
-	}
-	memset(a_bias, 0, sizeof(accelBias));
-	memset(g_bias, 0, sizeof(gyroBias));
-	if (write) {
-		LOG_INF("Clearing stored calibration data");
-		sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, a_bias, sizeof(accelBias));
-		sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, g_bias, sizeof(gyroBias));
-#if CONFIG_SENSOR_USE_TCAL
-		// Also clear boot/runtime calibration D_offset since ZRO is being reset
-		retained->bootCalState.doffset_valid = false;
-		retained->bootCalState.doffset[0] = 0.0f;
-		retained->bootCalState.doffset[1] = 0.0f;
-		retained->bootCalState.doffset[2] = 0.0f;
-		LOG_INF("Clearing D_offset along with ZRO calibration");
-#endif
-		// Note: Caller is responsible for calling sensor_fusion_update_bias() or
-		// sensor_fusion_invalidate() as appropriate:
-		// - sensor_fusion_update_bias(): for internal/automatic calibration (preserves quaternion)
-		// - sensor_fusion_invalidate(): for manual reset commands (resets quaternion)
-	}
-}
-
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-void sensor_calibration_clear_6_side(float a_inv[][3], bool write)
-{
-	if (a_inv == NULL) {
-		a_inv = accBAinv;
-	}
-	memset(a_inv, 0, sizeof(accBAinv));
-	for (int i = 0; i < 3; i++) { // set identity matrix
-		a_inv[i + 1][i] = 1;
-	}
-	if (write) {
-		LOG_INF("Clearing stored calibration data");
-		sys_write(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, a_inv, sizeof(accBAinv));
-	}
-}
-#endif
 
 void sensor_calibration_clear_mag(float m_inv[][3], bool write)
 {
@@ -420,8 +302,11 @@ void sensor_request_calibration_6_side(void)
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions)
 {
-	if (axis > 2 || revolutions == 0) {
-		return -1;
+	if (axis > 2 || revolutions > 100) {
+		return -EINVAL;
+	}
+	if (revolutions == 0) {
+		revolutions = CONFIG_SENSOR_SENS_REV;
 	}
 
 	k_mutex_lock(&calibration_request_lock, K_FOREVER);
@@ -557,10 +442,6 @@ static void calibration_thread(void)
 
 	// Verify calibrations only after the sensor stack is initialized.
 	if (sensor_ready) {
-		sensor_calibration_validate(NULL, NULL, true);
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		sensor_calibration_validate_6_side(NULL, true);
-#endif
 		if (sensor_get_mag_available()) {
 			sensor_calibration_validate_mag(NULL, true);
 		}
@@ -568,6 +449,7 @@ static void calibration_thread(void)
 
 	// requested calibrations run here
 	while (1) {
+		sensor_calibration_persist_pending();
 		int requested = sensor_calibration_request(0);
 		switch (requested) {
 		case 1:
@@ -856,7 +738,7 @@ void sensor_tcal_clear(void)
 	sensor_tcal_refresh_apply_cache();
 
 	// Manual command: invalidate fusion to force quaternion recalculation
-	sensor_fusion_invalidate();
+	sensor_request_fusion_reset();
 
 	printk("All temperature calibration data and D_offset have been cleared.\n");
 }

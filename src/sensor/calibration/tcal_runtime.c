@@ -221,7 +221,7 @@ void update_tcal_state(void)
 	);
 
 	// Update fusion bias while preserving orientation
-	sensor_fusion_update_bias(NULL);
+	sensor_request_fusion_bias_reset();
 }
 
 void sensor_tcal_set_auto_calibration(bool enabled)
@@ -1102,7 +1102,7 @@ int sensor_perform_boot_calibration(void)
 	runtime_cal_last_time = k_uptime_get();
 
 	LOG_INF("Boot Cal: Completed successfully at %.2fC (uptime: %lld ms)", (double)avg_temp, runtime_cal_last_time);
-	sensor_fusion_update_bias(NULL);
+	sensor_request_fusion_bias_reset();
 
 	// Note: No LED flash for automatic boot calibration - keep it transparent
 	return 0;
@@ -1224,7 +1224,7 @@ int sensor_perform_runtime_calibration(void)
 
 	// Update fusion bias while preserving orientation
 	LOG_INF("Runtime Cal: Completed at %.2fC, D_offset updated", (double)avg_temp);
-	sensor_fusion_update_bias(NULL);
+	sensor_request_fusion_bias_reset();
 
 	return 0;
 }

@@ -24,6 +24,7 @@
 #include "sensor/calibration/calibration.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
+#include "system/battery_tracker.h"
 #include "system/test_mode.h"
 #include "system/watchdog.h"
 #include "system/esb_ota.h"
@@ -44,7 +45,7 @@
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 #include "radio_capture.h"
 #endif
-#include "console.h"
+#include "channel_control.h"
 #include "system/clock_control.h"
 
 uint8_t last_reset = 0;
@@ -57,8 +58,6 @@ static bool shutdown_requested = false;
 static bool pair_ack_pending = false; // True once step 1 is sent and we expect a receiver response
 
 static struct esb_payload rx_payload;
-// Normal data payload (16+1 bytes when used), length set per write
-static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0);
 static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
 
 static uint8_t paired_addr[8] = {0};
@@ -155,6 +154,8 @@ static uint8_t ping_history_idx = 0;
 
 static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
+static bool remote_command_rejected;
+static uint32_t remote_command_generation;
 static uint16_t acked_test_rate_tps = 0; // TEST_MODE_ON payload at ack time
 static uint16_t executing_test_rate_tps = 0; // Snapshot for the in-flight TEST_MODE_ON execution
 static int64_t remote_command_receive_time = 0;
@@ -182,10 +183,10 @@ struct esb_remote_cmd {
 
 static void remote_print_meow(void);
 
-static void esb_remote_cmd_shutdown(void)
+static int esb_remote_cmd_shutdown(void)
 {
 	LOG_WRN("Executing remote command: SHUTDOWN");
-	sys_command_shutdown();
+	return sys_command_shutdown();
 }
 
 static void esb_remote_cmd_calibrate(void)
@@ -313,7 +314,10 @@ static void esb_remote_cmd_test_mode_off(void)
 static void esb_remote_cmd_reboot(void)
 {
 	LOG_WRN("Executing remote command: REBOOT");
-	sys_request_system_reboot(false);
+	int err = sys_request_system_reboot();
+	if (err) {
+		LOG_WRN("Reboot request rejected: %d", err);
+	}
 }
 
 static void esb_remote_cmd_clear(void)
@@ -344,60 +348,42 @@ static void esb_remote_cmd_dfu_ota(void)
 
 static void esb_remote_cmd_set_channel(void)
 {
-	// Validate channel value (0-100)
-	if (received_channel_value <= 100) {
-		LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
-		// Save to retained memory (encoded)
-		retained->rf_channel = esb_rf_channel_encode((uint8_t)received_channel_value);
-		retained_update();
-		// Save to NVS
-		sys_write(
-			RF_CHANNEL_ID,
-			&retained->rf_channel,
-			&retained->rf_channel,
-			sizeof(retained->rf_channel)
-		);
-		LOG_INF("RF channel saved to NVS: %u", received_channel_value);
-		if (esb_reinitialize()) {
-			LOG_ERR("ESB reinitialize failed after channel change");
-		} else {
-			LOG_INF("ESB reinitialized with channel %u", received_channel_value);
-		}
+	LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
+	int err = channel_control_set(received_channel_value);
+	if (err) {
+		LOG_ERR("Channel update failed: %d (RAM/radio may already be updated)", err);
 	} else {
-		LOG_ERR("Invalid channel value: %u (must be 0-100)", received_channel_value);
+		LOG_INF("RF channel saved and ESB reinitialized with channel %u", received_channel_value);
 	}
 }
 
 static void esb_remote_cmd_clear_channel(void)
 {
 	LOG_INF("Executing remote command: CLEAR_CHANNEL (restore default)");
-	// Clear saved channel (set to default marker)
-	retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
-	retained_update();
-	sys_write(
-		RF_CHANNEL_ID,
-		&retained->rf_channel,
-		&retained->rf_channel,
-		sizeof(retained->rf_channel)
-	);
-	LOG_INF("RF channel cleared, will use default on next boot");
-	if (esb_reinitialize()) {
-		LOG_ERR("ESB reinitialize failed after channel clear");
+	int err = channel_control_reset();
+	if (err) {
+		LOG_ERR("Channel reset failed: %d (RAM/radio may already be updated)", err);
 	} else {
-		LOG_INF("ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
+		LOG_INF("RF channel cleared and ESB reinitialized with default channel %u", RADIO_RF_CHANNEL);
 	}
 }
 
 static void esb_remote_cmd_sens_set(void)
 {
 	LOG_INF("Executing remote command: SENS_SET");
-	cmd_sens_set(received_sens_data[0], received_sens_data[1], received_sens_data[2]);
+	int err = sensor_calibration_set_sensitivity(received_sens_data);
+	if (err) {
+		LOG_ERR("Sensitivity update failed: %d", err);
+	}
 }
 
 static void esb_remote_cmd_sens_reset(void)
 {
 	LOG_INF("Executing remote command: SENS_RESET");
-	cmd_sens_reset();
+	int err = sensor_calibration_reset_sensitivity();
+	if (err) {
+		LOG_ERR("Sensitivity reset failed: %d", err);
+	}
 }
 
 static void esb_remote_cmd_sens_auto(void)
@@ -407,31 +393,48 @@ static void esb_remote_cmd_sens_auto(void)
 		received_sens_auto_axis,
 		received_sens_auto_revolutions
 	);
-	cmd_sens_auto_request(received_sens_auto_axis, received_sens_auto_revolutions);
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+	int err = sensor_request_calibration_sens(received_sens_auto_axis, received_sens_auto_revolutions);
+	if (err) {
+		LOG_ERR("Sensitivity calibration request rejected: %d", err);
+	}
+#else
+	LOG_WRN("Sensitivity calibration not enabled");
+#endif
 }
 
 static void esb_remote_cmd_reset_zro(void)
 {
 	LOG_INF("Executing remote command: RESET_ZRO");
-	cmd_reset_zro();
+	int err = sensor_calibration_reset_imu();
+	if (err) {
+		LOG_WRN("IMU calibration reset rejected: %d", err);
+	}
 }
 
 static void esb_remote_cmd_reset_acc(void)
 {
 	LOG_INF("Executing remote command: RESET_ACC");
-	cmd_reset_acc();
+	int err = sensor_calibration_reset_accel();
+	if (err) {
+		LOG_WRN("Accelerometer calibration reset rejected: %d", err);
+	}
 }
 
 static void esb_remote_cmd_reset_bat(void)
 {
 	LOG_INF("Executing remote command: RESET_BAT");
-	cmd_reset_bat();
+	sys_reset_battery_tracker();
 }
 
 static void esb_remote_cmd_reset_tcal(void)
 {
 	LOG_INF("Executing remote command: RESET_TCAL");
-	cmd_reset_tcal();
+#if CONFIG_SENSOR_USE_TCAL
+	sensor_tcal_clear();
+#else
+	LOG_WRN("Temperature calibration not enabled");
+#endif
 }
 
 static void esb_remote_cmd_tcal_auto_on(void)
@@ -457,13 +460,13 @@ static void esb_remote_cmd_tcal_auto_off(void)
 static void esb_remote_cmd_ping(void)
 {
 	LOG_INF("Executing remote command: PING");
-	cmd_ping_start();
+	set_led(SYS_LED_PATTERN_ONESHOT_PING, SYS_LED_PRIORITY_HIGHEST);
 }
 
 static void esb_remote_cmd_fusion_reset(void)
 {
 	LOG_INF("Executing remote command: FUSION_RESET");
-	cmd_fusion_reset();
+	sensor_request_fusion_reset();
 }
 
 static void esb_remote_cmd_tcal_boot_on(void)
@@ -500,11 +503,15 @@ static void esb_remote_cmd_data_collect_off(void)
 	test_mode_set(false);
 }
 
-static void esb_remote_cmd_data_collect_batch_on(void)
+static int esb_remote_cmd_data_collect_batch_on(void)
 {
 	LOG_INF("Executing remote command: DATA_COLLECT_BATCH_ON at %u Hz", executing_batch_rate_hz);
-	connection_set_data_collection_batch(true, executing_batch_rate_hz);
+	int err = connection_set_data_collection_batch(true, executing_batch_rate_hz);
+	if (err) {
+		return err;
+	}
 	test_mode_set(true);  // Prevent sleep during data collection
+	return 0;
 }
 
 static void esb_remote_cmd_data_collect_batch_off(void)
@@ -539,7 +546,7 @@ static void esb_remote_cmd_ota_unsuppress(void)
 }
 
 static const struct esb_remote_cmd esb_remote_cmds[] = {
-	{ESB_PONG_FLAG_SHUTDOWN, "SHUTDOWN", esb_remote_cmd_shutdown},
+	{ESB_PONG_FLAG_SHUTDOWN, "SHUTDOWN", NULL},
 	{ESB_PONG_FLAG_CALIBRATE, "CALIBRATE", esb_remote_cmd_calibrate},
 	{ESB_PONG_FLAG_SIX_SIDE_CAL, "SIX_SIDE_CAL", esb_remote_cmd_six_side_cal},
 	{ESB_PONG_FLAG_MEOW, "MEOW", esb_remote_cmd_meow},
@@ -577,7 +584,7 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_TEST_MODE_OFF, "TEST_MODE_OFF", esb_remote_cmd_test_mode_off},
 	{ESB_PONG_FLAG_DATA_COLLECT_ON, "DATA_COLLECT_ON", esb_remote_cmd_data_collect_on},
 	{ESB_PONG_FLAG_DATA_COLLECT_OFF, "DATA_COLLECT_OFF", esb_remote_cmd_data_collect_off},
-	{ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, "DATA_COLLECT_BATCH_ON", esb_remote_cmd_data_collect_batch_on},
+	{ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, "DATA_COLLECT_BATCH_ON", NULL},
 	{ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, "DATA_COLLECT_BATCH_OFF", esb_remote_cmd_data_collect_batch_off},
 	{ESB_PONG_FLAG_DATA_COLLECT_METADATA, "DATA_COLLECT_METADATA", NULL},
 	{ESB_PONG_FLAG_OTA_QUERY_INFO, "OTA_QUERY_INFO", esb_remote_cmd_ota_query_info},
@@ -722,17 +729,25 @@ static void remote_print_meow(void)
 }
 
 
-static void esb_remote_command_execute(uint8_t cmd)
+static int esb_remote_command_execute(uint8_t cmd)
 {
+	/* These requests may be refused. Do not acknowledge them until accepted. */
+	if (cmd == ESB_PONG_FLAG_SHUTDOWN) {
+		return esb_remote_cmd_shutdown();
+	}
+	if (cmd == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
+		return esb_remote_cmd_data_collect_batch_on();
+	}
 	for (size_t i = 0; i < ARRAY_SIZE(esb_remote_cmds); i++) {
 		if (esb_remote_cmds[i].flag == cmd) {
 			if (esb_remote_cmds[i].fn) {
 				esb_remote_cmds[i].fn();
 			}
-			return;
+			return 0;
 		}
 	}
 	LOG_WRN("Unknown remote command: 0x%02X", cmd);
+	return -EINVAL;
 }
 
 
@@ -1454,9 +1469,11 @@ void event_handler(struct esb_evt const *event)
 							&& pong_batch_rate_hz != received_batch_rate_hz;
 						if (received_remote_command == ESB_PONG_FLAG_NORMAL
 						    || test_rate_changed || batch_rate_changed
-						    || (received_remote_command == acked_remote_command
+						    || ((received_remote_command == acked_remote_command || remote_command_rejected)
 						        && pong_flags != received_remote_command)) {
 							received_remote_command = pong_flags;
+							remote_command_rejected = false;
+							remote_command_generation++;
 							remote_command_receive_time = k_uptime_get();
 							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
 								received_channel_value = ((uint32_t)rx_payload.data[8] << 24)
@@ -1481,6 +1498,8 @@ void event_handler(struct esb_evt const *event)
 							received_remote_command = ESB_PONG_FLAG_NORMAL;
 							acked_remote_command = ESB_PONG_FLAG_NORMAL;
 							remote_command_receive_time = 0;
+							remote_command_rejected = false;
+							remote_command_generation++;
 						}
 					}
 				}
@@ -1491,32 +1510,16 @@ void event_handler(struct esb_evt const *event)
 			default:
 				/* ACK payload from receiver carrying ARQ retransmit requests */
 				if (rx_payload.length >= 4 &&
-				    rx_payload.data[0] == RAW_ARQ_MARKER &&
-				    connection_get_data_collection() &&
-				    !connection_get_data_collection_batch()) {
+				    rx_payload.data[0] == RAW_ARQ_MARKER) {
 					uint8_t retx_n = rx_payload.data[1];
 					uint8_t max_entries = (rx_payload.length - 2) / 2;
 					if (retx_n > max_entries) {
 						retx_n = max_entries;
 					}
-					extern volatile uint16_t raw_retx_queue[];
-					extern volatile uint8_t  raw_retx_count;
-					unsigned retx_key = irq_lock();
 					for (uint8_t i = 0; i < retx_n; i++) {
 						uint16_t seq = sys_get_be16(&rx_payload.data[2 + i * 2]);
-						/* Deduplicate */
-						bool found = false;
-						for (uint8_t j = 0; j < raw_retx_count; j++) {
-							if (raw_retx_queue[j] == seq) {
-								found = true;
-								break;
-							}
-						}
-						if (!found && raw_retx_count < 16) {
-							raw_retx_queue[raw_retx_count++] = seq;
-						}
+						(void)connection_request_raw_retransmit(seq);
 					}
-					irq_unlock(retx_key);
 				}
 				/* OTA packets from receiver (in ACK payload) —
 				 * queue for deferred processing in thread context
@@ -1769,8 +1772,7 @@ void esb_pair(void)
 			// During pairing, only use connection timeout to decide shutdown
 			if (!shutdown_requested && (k_uptime_get() - pair_start_time) > CONFIG_CONNECTION_TIMEOUT_DELAY) {
 				LOG_WRN("Pairing timeout after %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
-				shutdown_requested = true;
-				sys_request_system_off(false);
+				shutdown_requested = sys_request_system_off() == 0;
 			}
 #endif
 			if (paired_addr[0]) {
@@ -1882,6 +1884,7 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	no_ack = no_ack || is_batch_stream;
 	bool drop_on_fifo_full = is_batch_stream || (no_ack && !is_raw);
 
+	struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0);
 	tx_payload.pipe = 1 + (tracker_id % 7);
 	tx_payload.noack = no_ack;
 	tx_payload.length = data_length;
@@ -2264,8 +2267,7 @@ static void esb_thread(void)
 					   > CONFIG_CONNECTION_TIMEOUT_DELAY && get_status(SYS_STATUS_CALIBRATION_RUNNING) == false) // shutdown if receiver is not detected and not in calibrating
 			{
 				LOG_WRN("No response from receiver in %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
-				shutdown_requested = true;
-				sys_request_system_off(false);
+				shutdown_requested = sys_request_system_off() == 0;
 			}
 #endif
 		}
@@ -2289,13 +2291,26 @@ static void esb_thread(void)
 			bool is_ota_cmd = received_remote_command >= ESB_PONG_FLAG_OTA_QUERY_INFO
 				&& received_remote_command <= ESB_PONG_FLAG_OTA_UNSUPPRESS;
 			if (is_ota_cmd || now_idle - remote_command_receive_time >= 100) {
-				if (received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON) executing_test_rate_tps = received_test_rate_tps;
-				else if (received_remote_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) executing_batch_rate_hz = received_batch_rate_hz;
-				esb_remote_command_execute(received_remote_command);
-				acked_remote_command = received_remote_command;
-				if (received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON) acked_test_rate_tps = executing_test_rate_tps;
-				else if (received_remote_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) acked_batch_rate_hz = executing_batch_rate_hz;
-				if (received_remote_command == ESB_PONG_FLAG_SHUTDOWN) return;
+				unsigned key = irq_lock();
+				uint8_t executing_command = received_remote_command;
+				uint32_t executing_generation = remote_command_generation;
+				if (executing_command == ESB_PONG_FLAG_TEST_MODE_ON) executing_test_rate_tps = received_test_rate_tps;
+				else if (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) executing_batch_rate_hz = received_batch_rate_hz;
+				irq_unlock(key);
+				int err = esb_remote_command_execute(executing_command);
+				key = irq_lock();
+				if (executing_generation == remote_command_generation) {
+					/* A batch rate refusal is final for this request. The PING
+					 * still echoes the actual rate, never the rejected rate. */
+					bool consumed = err == 0 || (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON && err == -EBUSY);
+					remote_command_rejected = !consumed;
+					if (consumed) {
+						acked_remote_command = executing_command;
+						if (executing_command == ESB_PONG_FLAG_TEST_MODE_ON) acked_test_rate_tps = executing_test_rate_tps;
+						else if (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) acked_batch_rate_hz = executing_batch_rate_hz;
+					}
+				}
+				irq_unlock(key);
 			}
 		}
 

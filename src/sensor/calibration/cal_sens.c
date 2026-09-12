@@ -24,12 +24,58 @@
 #include "system/system.h"
 #include "system/watchdog.h"
 
+#include <errno.h>
 #include <math.h>
 #include <zephyr/kernel.h>
 
 #include "cal_sample.h"
 #include "cal_sens.h"
+#include "calibration.h"
 #include "util.h"
+
+int sensor_calibration_set_sensitivity(const float degrees[3])
+{
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+	if (!retained) {
+		return -ENODEV;
+	}
+	if (!degrees) {
+		return -EINVAL;
+	}
+
+	float scales[3];
+	for (int i = 0; i < 3; i++) {
+		if (!isfinite(degrees[i])) {
+			return -EINVAL;
+		}
+		float denominator = 1.0f - (degrees[i] / (360.0f * CONFIG_SENSOR_SENS_REV));
+		if (!isfinite(denominator) || fabsf(denominator) < 1e-6f) {
+			return -EINVAL;
+		}
+		scales[i] = 1.0f / denominator;
+		if (!isfinite(scales[i])) {
+			return -EINVAL;
+		}
+	}
+	return sys_write(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, scales, sizeof(scales));
+#else
+	ARG_UNUSED(degrees);
+	return -ENOTSUP;
+#endif
+}
+
+int sensor_calibration_reset_sensitivity(void)
+{
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+	if (!retained) {
+		return -ENODEV;
+	}
+	float scales[3] = {1.0f, 1.0f, 1.0f};
+	return sys_write(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, scales, sizeof(scales));
+#else
+	return -ENOTSUP;
+#endif
+}
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 
@@ -153,13 +199,8 @@ void sensor_calibrate_sens(void)
 	}
 
 	// 4. Integrate the gyro rate over the spin. ON indicates recording.
-	//    sensor_wait_gyro returns only the most recent sample, so crediting each
-	//    observed sample a fixed 1/ODR step would silently drop the rotation from
-	//    any samples produced while this loop was busy and undercount the spin.
-	//    Integrate against the real elapsed time between samples instead (as the
-	//    fusion path does with its measured time step); each observed sample then
-	//    covers the true interval since the previous one, which also tolerates the
-	//    sensor's actual sample rate differing from its nominal ODR.
+	//    Use elapsed consumer time for integration, as before. The raw sample
+	//    FIFO preserves vectors but does not carry acquisition timestamps.
 	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
 	LOG_INF("Sensitivity calibration: recording");
 	double measured = 0.0;

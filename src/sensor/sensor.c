@@ -29,6 +29,7 @@
 #include "util.h"
 #include "connection/connection.h"
 #include "calibration/calibration.h"
+#include "calibration/imu_calibration.h"
 #include "calibration/mag_common.h"
 #include "motion_state.h"
 #include "zephyr/logging/log.h"
@@ -47,27 +48,9 @@
 
 #include "sensor.h"
 
+#include "raw_collection.h"
 #define SPI_OP SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8)
 
-// Debug mode state
-typedef struct {
-	bool enabled;
-	int64_t start_time;
-	int64_t duration_ms;
-	uint32_t accel_count;    // Count accel samples since last output
-	uint32_t output_every_n; // Output every N accel samples
-	uint32_t output_count;   // Total output count
-} sensor_debug_state_t;
-
-static sensor_debug_state_t debug_state = {
-	.enabled = false,
-	.output_every_n = 4 // Default: output every 4 accel samples
-};
-
-// Set to 1 to temporarily enable the extra Qdev/Qout debug line
-#ifndef SENSOR_DEBUG_QDEV_QOUT
-#define SENSOR_DEBUG_QDEV_QOUT 0
-#endif
 
 #ifndef SENSOR_REST_ENTER_STABLE_MS
 #define SENSOR_REST_ENTER_STABLE_MS 1500
@@ -78,16 +61,6 @@ static sensor_debug_state_t debug_state = {
 
 #define SENSOR_ACTIVITY_STARTUP_GUARD_MS 5000
 
-#if CONFIG_SENSOR_RANGE_STATS
-// Sensor range tracking state - records min/max values during runtime (not persisted)
-static sensor_range_stats_t range_stats
-	= {.gyro_max = {-INFINITY, -INFINITY, -INFINITY},
-	   .gyro_min = {INFINITY, INFINITY, INFINITY},
-	   .accel_max = {-INFINITY, -INFINITY, -INFINITY},
-	   .accel_min = {INFINITY, INFINITY, INFINITY},
-	   .sample_count = 0,
-	   .initialized = false};
-#endif // CONFIG_SENSOR_RANGE_STATS
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(imu_spi), okay)
 #define SENSOR_IMU_SPI_EXISTS true
@@ -258,27 +231,9 @@ static float accel_effective_time; // Effective time step for fusion after overs
 static float accel_actual_range; // Actual accelerometer full scale range (g)
 static float gyro_actual_range;  // Actual gyroscope full scale range (deg/s)
 
-/* Raw gyrQuat emit plan: same N as fusion unless batch collection requests a
- * lower rate. The sensor thread owns the accumulator; the connection thread
- * publishes batch configuration through atomics. */
-struct raw_rate_plan {
-	uint8_t n_raw; /* == gyro_oversample_n */
-	uint8_t emit_count;
-	float chip_hz;
-	float send_hz; /* meta gyro_odr (host gyrTs) */
-	float fusion_hz;
-	bool batch_active;
-	float batch_accum;
-	float batch_interval;
-};
-
-static struct raw_rate_plan raw_rate_plan = {
-	.n_raw = 1,
-};
-
-static atomic_t batch_collect_active;
-static atomic_t batch_collect_rate_hz;
-static atomic_t batch_collect_generation;
+static atomic_t fusion_requests;
+#define FUSION_REQUEST_BIAS BIT(0)
+#define FUSION_REQUEST_RESET BIT(1)
 
 static void sensor_send_raw_metadata(void);
 
@@ -293,7 +248,7 @@ static bool sensor_sensor_init;
 
 static bool sensor_sensor_scanning;
 
-static bool main_suspended;
+static atomic_t main_suspended;
 static bool main_running = false;
 
 /* Cooperative idle/scan wait bits — replaces k_usleep(1) spins in suspend paths. */
@@ -497,7 +452,7 @@ static inline void sensor_update_frame_transform_cache(void)
 	q_conj(sensor_to_device_quat, sensor_vector_to_device_quat);
 }
 
-static inline void
+void
 sensor_compute_device_and_reported_quat(const float *fused_quat, float *device_quat, float *reported_quat)
 {
 	sensor_compute_device_quat(fused_quat, device_quat);
@@ -635,10 +590,6 @@ static bool sensor_update_resting_state(
 static int sensor_scan(void);
 static int sensor_init(void);
 static void sensor_loop(void);
-#if CONFIG_SENSOR_RANGE_STATS
-static void sensor_update_range_stats_gyro(float g[3]);
-static void sensor_update_range_stats_accel(float a[3]);
-#endif // CONFIG_SENSOR_RANGE_STATS
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 2048);
 
@@ -1003,7 +954,7 @@ int sensor_request_scan(bool force)
 	// section of an iteration. When the loop is waiting for FIFO/interrupt, `main_running`
 	// becomes false even though the loop may be perfectly healthy. Using it here creates a
 	// race where forced scans can still slip through.
-	if (force && sensor_sensor_init && main_ok && packet_errors == 0 && !no_packets_timeout_logged && !main_suspended) {
+	if (force && sensor_sensor_init && main_ok && packet_errors == 0 && !no_packets_timeout_logged && !atomic_get(&main_suspended)) {
 		int64_t now = k_uptime_get();
 		bool allow_force_scan = false;
 
@@ -1058,7 +1009,7 @@ int sensor_request_scan(bool force)
 	LOG_INF("Aborted sensor thread");
 	sensor_life_mark_idle();
 	sensor_life_mark_scan_done();
-	main_suspended = false;
+	atomic_set(&main_suspended, false);
 	sensor_sensor_init = false;
 	main_ok = false;
 	if (force) {
@@ -1186,16 +1137,16 @@ void sensor_retained_read(void) // TODO: move some of this to sys? or move to ca
 
 void sensor_retained_write(void) // TODO: move to sys?
 {
-	if (!sensor_fusion_init) {
-		return;
-	}
-	//	memcpy(retained->magBias, sensor_calibration_get_magBias(), sizeof(retained->magBias));
-	if (skip_fusion_save) {
-		// Mag toggle pending: invalidate fusion so it reinitializes after reboot
+	if (skip_fusion_save || atomic_get(&fusion_requests) || sensor_calibration_fusion_stale()) {
+		/* Never save fusion against coefficients or reset requests not yet applied. */
 		retained->fusion_id = 0;
 		retained_update();
 		return;
 	}
+	if (!sensor_fusion_init) {
+		return;
+	}
+	//	memcpy(retained->magBias, sensor_calibration_get_magBias(), sizeof(retained->magBias));
 	sensor_fusion->save(retained->fusion_data);
 	retained->fusion_id = fusion_id;
 	retained_update();
@@ -1218,6 +1169,8 @@ void sensor_record_wom_sleep(void)
 
 void sensor_shutdown(void) // Communicate all imus to shut down
 {
+	sensor_calibration_set_consumer_ready(false);
+	main_ok = false;
 	/*
 	 * Do not call sensor_request_scan() here. Rescan aborts the sensor thread and
 	 * re-probes the bus; during OTA / power-off the bus or sensor clock may already
@@ -1314,7 +1267,7 @@ void sensor_set_mag_enabled(bool enabled)
 		bool val = enabled;
 		sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
 		skip_fusion_save = true;
-		sys_request_system_reboot(false);
+		sys_request_system_reboot();
 		return;
 	}
 
@@ -1383,39 +1336,48 @@ void sensor_refresh_sensor_ids(void)
 	connection_update_sensor_ids(sensor_imu_id, sensor_mag_id);
 }
 
-void sensor_fusion_invalidate(void)
+void sensor_request_fusion_reset(void)
 {
-	main_imu_restart();       // reinitialize fusion (resets quaternion to identity)
-	if (sensor_fusion_init) { // clear fusion gyro offset
-		sensor_fusion_update_bias(NULL);
-		sensor_retained_write();
-	} else {                     // TODO: always clearing the fusion?
-		retained->fusion_id = 0; // Invalidate retained fusion data
-		retained_update();
-	}
+	atomic_or(&fusion_requests, FUSION_REQUEST_RESET);
 }
 
-void sensor_fusion_update_bias(float *g_off)
+void sensor_request_fusion_bias_reset(void)
 {
-	// Lightweight bias update that preserves quaternion orientation
-	// Use this after calibration changes that only affect bias/offset values
-	// Pass NULL or a float[3] with the new bias values
-	if (sensor_fusion_init) {
-		float bias[3] = {0};
-		if (g_off != NULL) {
-			// Use provided bias values
-			bias[0] = g_off[0];
-			bias[1] = g_off[1];
-			bias[2] = g_off[2];
-		}
-		sensor_fusion->set_gyro_bias(bias);
+	atomic_or(&fusion_requests, FUSION_REQUEST_BIAS);
+}
+
+/* Only the sensor thread mutates live fusion. Never wait for this thread from
+ * calibration: BMI retrim, power and rescan can have it suspended. */
+static void sensor_apply_calibration_frame(void)
+{
+	enum sensor_calibration_effect effect = sensor_calibration_apply_pending();
+	atomic_val_t requests = atomic_set(&fusion_requests, 0);
+	if (effect == SENSOR_CALIBRATION_SAVE_FUSION && !requests) {
 		sensor_retained_write();
-		LOG_INF("Fusion bias updated: [%.3f, %.3f, %.3f]", (double)bias[0], (double)bias[1], (double)bias[2]);
-	} else {
-		// If fusion is not initialized yet, just invalidate retained data
-		retained->fusion_id = 0;
-		retained_update();
+		return;
 	}
+	bool reset = (requests & FUSION_REQUEST_RESET) || effect == SENSOR_CALIBRATION_FRAME_CHANGED;
+	if (!requests && effect == SENSOR_CALIBRATION_UNCHANGED && !reset) {
+		return;
+	}
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	gyro_oversample_count = 0;
+	gyro_dq_acc[0] = 1.0f;
+	gyro_dq_acc[1] = gyro_dq_acc[2] = gyro_dq_acc[3] = 0.0f;
+#endif
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	accel_oversample_count = 0;
+	memset(accel_oversample_sum, 0, sizeof(accel_oversample_sum));
+#endif
+	if (reset) {
+		main_imu_restart();
+	}
+	if (sensor_fusion_init && (reset || requests || effect == SENSOR_CALIBRATION_BIAS_CHANGED)) {
+		float zero[3] = {0};
+		sensor_fusion->set_gyro_bias(zero);
+	}
+	sensor_calibration_fusion_applied();
+	sensor_retained_write();
 }
 
 int sensor_update_time_ms = 6;
@@ -1576,15 +1538,15 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 		int64_t active_timeout_delay = sensor_get_active_timeout_delay();
 		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_ACTIVITY && last_data_delta > active_timeout_delay) {
 			LOG_INF("No motion from sensors in %llds", active_timeout_delay / 1000);
+			int request_err = 0;
 #if CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
-			// Queue power state request, it is possible for the request to be overridden so the thread may continue
-			// unaware
-			sys_request_WOM(true, false);
+			request_err = sys_request_WOM(true);
 #elif CONFIG_SHUTDOWN_ON_ACTIVE_TIMEOUT && CONFIG_USER_SHUTDOWN
-			// Queue power state request, thread will be suspended when entering system_off
-			sys_request_system_off(false);
+			request_err = sys_request_system_off();
 #endif
-			sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY_ELAPSED; // only try to suspend once
+			if (!request_err) {
+				sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY_ELAPSED;
+			}
 		}
 #endif
 #if CONFIG_USE_IMU_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
@@ -1592,8 +1554,9 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 		{
 			LOG_INF("No motion from sensors in %llds", imu_timeout / 1000);
 			// Queue power state request
-			sys_request_WOM(false, false);
-			sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED; // only try to suspend once
+			if (sys_request_WOM(false) == 0) {
+				sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED;
+			}
 		}
 #endif
 	} else {
@@ -1612,6 +1575,7 @@ int sensor_init(void)
 {
 	int err;
 	sensor_mag_timing_reset();
+	sensor_diagnostics_reset_frame();
 	sensor_update_frame_transform_cache();
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
 	if (mag_available && mag_enabled) // shutdown magnetometer first only when enabled
@@ -1640,6 +1604,9 @@ int sensor_init(void)
 	float accel_range = CONFIG_SENSOR_ACCEL_FS;
 	float gyro_range = CONFIG_SENSOR_GYRO_FS;
 	sensor_imu->update_fs(accel_range, gyro_range, &accel_actual_range, &gyro_actual_range);
+#if CONFIG_SENSOR_RANGE_STATS
+	sensor_diagnostics_set_ranges(accel_actual_range, gyro_actual_range);
+#endif
 	LOG_INF("Accelerometer range: %.2fg", (double)accel_actual_range);
 	LOG_INF("Gyroscope range: %.2fdps", (double)gyro_actual_range);
 
@@ -1814,59 +1781,21 @@ static int64_t last_status_time = 0;
 static int64_t max_loop_time = 0;
 static float loop_period_ema_ms; /* ~actual publish/loop period */
 
-static bool last_data_collection_state = false;
-static atomic_val_t last_batch_collect_generation;
-
-/* Raw gyro quaternion accumulator for data collection.
- * Integrates raw gyro (no bias correction) so offline VQF can re-estimate bias.
- * Reset when data collection starts. */
-static float raw_gyr_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
-
-void sensor_set_batch_collect(bool active, float emit_hz)
-{
-	uint32_t rate_hz = emit_hz > 0.0f ? (uint32_t)emit_hz : 0;
-	atomic_set(&batch_collect_rate_hz, (atomic_val_t)rate_hz);
-	atomic_set(&batch_collect_active, active ? 1 : 0);
-	atomic_inc(&batch_collect_generation);
-}
-
-static void raw_rate_plan_refresh(void)
-{
-	float chip_hz = 1.0f / gyro_actual_time;
-	uint8_t n_raw = gyro_oversample_n > 0 ? gyro_oversample_n : 1;
-	bool batch_active = atomic_get(&batch_collect_active) != 0;
-	float requested_hz = (float)atomic_get(&batch_collect_rate_hz);
-	float accel_hz = 1.0f / accel_actual_time;
-	float emit_hz = requested_hz > 0.0f ? requested_hz : accel_hz;
-	if (emit_hz > chip_hz) {
-		emit_hz = chip_hz;
-	}
-	if (emit_hz <= 0.0f) {
-		emit_hz = chip_hz;
-	}
-
-	raw_rate_plan.n_raw = n_raw;
-	raw_rate_plan.chip_hz = chip_hz;
-	raw_rate_plan.fusion_hz = chip_hz / (float)n_raw;
-	raw_rate_plan.batch_active = batch_active;
-	raw_rate_plan.batch_interval = batch_active ? chip_hz / emit_hz : 0.0f;
-	raw_rate_plan.send_hz = batch_active ? emit_hz : raw_rate_plan.fusion_hz;
-}
 
 static void sensor_send_raw_metadata(void)
 {
-	raw_rate_plan_refresh();
-	connection_send_raw_metadata(
-		gyro_actual_range,
-		accel_actual_range,
-		raw_rate_plan.send_hz,
-		1.0f / accel_actual_time,
-		mag_available && mag_enabled ? 1.0f / mag_actual_time : 0.0f,
-		(uint8_t)sensor_imu_id,
-		(uint8_t)sensor_mag_id,
-		raw_rate_plan.chip_hz,
-		raw_rate_plan.fusion_hz
-	);
+	const struct sensor_raw_collection_config config = {
+		.gyro_period = gyro_actual_time,
+		.accel_period = accel_actual_time,
+		.mag_period = mag_actual_time,
+		.gyro_range = gyro_actual_range,
+		.accel_range = accel_actual_range,
+		.gyro_oversample_n = gyro_oversample_n,
+		.imu_id = (uint8_t)sensor_imu_id,
+		.mag_id = (uint8_t)sensor_mag_id,
+		.mag_active = mag_available && mag_enabled,
+	};
+	sensor_raw_collection_send_metadata(&config);
 }
 
 #if DEBUG
@@ -1967,14 +1896,6 @@ typedef struct {
 	float a_sum[3];
 	int a_count;
 	int processed_packets;
-	float debug_raw_g_sum[3];
-	float debug_raw_a_sum[3];
-	float debug_cal_g_sum[3];
-	int debug_g_samples;
-	int debug_a_samples;
-	float debug_raw_m[3];
-	float debug_cal_m[3];
-	bool debug_mag_valid;
 #if DEBUG
 	bool valid_acquisition;
 	int64_t loop_begin;
@@ -1985,19 +1906,9 @@ typedef struct {
 static float sensor_loop_avg_a[3] = {0};
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING <= 1
-static void feed_calibrated_gyro(float *g, float dt, int *g_count, float *debug_cal_g_sum)
+static void feed_calibrated_gyro(float *g, float dt, int *g_count)
 {
-	// Accumulate calibrated gyro for debug (after zero bias and sensitivity calibration)
-	if (sensor_debug_is_active()) {
-		for (int j = 0; j < 3; j++) {
-			debug_cal_g_sum[j] += g[j];
-		}
-	}
-
-#if CONFIG_SENSOR_RANGE_STATS
-	// Update range statistics with calibrated gyro data
-	sensor_update_range_stats_gyro(g);
-#endif // CONFIG_SENSOR_RANGE_STATS
+	sensor_diagnostics_on_cal_gyro(g);
 
 	sensor_record_rest_gyro_motion(g);
 
@@ -2145,10 +2056,7 @@ static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float f
 
 static void feed_gyro_sample(
 	float *raw_g,
-	int *g_count,
-	float *debug_raw_g_sum,
-	int *debug_g_samples,
-	float *debug_cal_g_sum
+	int *g_count
 #if DEBUG
 	,
 	bool valid_acquisition
@@ -2160,13 +2068,7 @@ static void feed_gyro_sample(
 		total_gyro_samples++;
 	}
 #endif
-	// Accumulate raw gyro for debug
-	if (sensor_debug_is_active()) {
-		for (int j = 0; j < 3; j++) {
-			debug_raw_g_sum[j] += raw_g[j];
-		}
-		(*debug_g_samples)++;
-	}
+	sensor_diagnostics_on_raw_gyro(raw_g);
 
 	/* --- Firmware compensation (layer 1): TCal / static ZRO / D_offset --- */
 	sensor_calibration_process_gyro(raw_g);
@@ -2183,14 +2085,7 @@ static void feed_gyro_sample(
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 	/* Per-sample stats on firmware-compensated g; Δq merge; one fusion step. */
-	if (sensor_debug_is_active()) {
-		for (int j = 0; j < 3; j++) {
-			debug_cal_g_sum[j] += g[j];
-		}
-	}
-#if CONFIG_SENSOR_RANGE_STATS
-	sensor_update_range_stats_gyro(g);
-#endif
+	sensor_diagnostics_on_cal_gyro(g);
 	sensor_record_rest_gyro_motion(g);
 
 	/* Freeze fusion residual bias for the whole window (layer 2). */
@@ -2219,7 +2114,7 @@ static void feed_gyro_sample(
 	gyro_dq_acc[3] = 0.0f;
 	gyro_oversample_count = 0;
 #else
-	feed_calibrated_gyro(g, gyro_actual_time, g_count, debug_cal_g_sum);
+	feed_calibrated_gyro(g, gyro_actual_time, g_count);
 #endif
 }
 
@@ -2227,7 +2122,7 @@ static void feed_calibrated_accel(float *a, float dt, float *a_sum, int *a_count
 {
 #if CONFIG_SENSOR_RANGE_STATS
 	// Update range statistics with calibrated accel data
-	sensor_update_range_stats_accel(a);
+	sensor_diagnostics_on_cal_accel(a);
 #endif // CONFIG_SENSOR_RANGE_STATS
 
 	// Process fusion with calibrated accel data
@@ -2242,9 +2137,7 @@ static void feed_calibrated_accel(float *a, float dt, float *a_sum, int *a_count
 static void feed_accel_sample(
 	float *raw_a,
 	float *a_sum,
-	int *a_count,
-	float *debug_raw_a_sum,
-	int *debug_a_samples
+	int *a_count
 #if DEBUG
 	,
 	bool valid_acquisition
@@ -2256,13 +2149,7 @@ static void feed_accel_sample(
 		total_accel_samples++;
 	}
 #endif
-	// Accumulate raw accel for debug
-	if (sensor_debug_is_active()) {
-		for (int i = 0; i < 3; i++) {
-			debug_raw_a_sum[i] += raw_a[i];
-		}
-		(*debug_a_samples)++;
-	}
+	sensor_diagnostics_on_raw_accel(raw_a);
 
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
 	oversample_accum3(accel_oversample_sum, raw_a);
@@ -2284,24 +2171,11 @@ static void feed_accel_sample(
 
 static void sensor_loop_handle_data_collection(bool *dc_active)
 {
-	/* Both collection modes share the sensor producer. A generation change
-	 * also catches an in-place batch rate update or a batch→single cutover. */
-	*dc_active = connection_get_data_collection() || connection_get_data_collection_batch();
-	atomic_val_t generation = atomic_get(&batch_collect_generation);
-	bool config_changed = *dc_active && generation != last_batch_collect_generation;
-	if (*dc_active && (!last_data_collection_state || config_changed)) {
+	if (sensor_raw_collection_begin_frame(dc_active)) {
 		sys_interface_resume();
-		raw_gyr_quat[0] = 1.0f;
-		raw_gyr_quat[1] = 0.0f;
-		raw_gyr_quat[2] = 0.0f;
-		raw_gyr_quat[3] = 0.0f;
-		raw_rate_plan.batch_accum = 0.0f;
 		sensor_send_raw_metadata();
 		LOG_INF("Data collection activated: metadata snapshot queued");
 	}
-	/* Metadata/calibration are session-stable; no periodic resend. */
-	last_batch_collect_generation = generation;
-	last_data_collection_state = *dc_active;
 }
 
 static void sensor_loop_acquire(sensor_loop_frame_t *frame)
@@ -2474,26 +2348,7 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 	frame->a_count = 0;
 	frame->processed_packets = 0;
 
-	// For debug: accumulate raw and calibrated data
-	frame->debug_raw_g_sum[0] = 0;
-	frame->debug_raw_g_sum[1] = 0;
-	frame->debug_raw_g_sum[2] = 0;
-	frame->debug_raw_a_sum[0] = 0;
-	frame->debug_raw_a_sum[1] = 0;
-	frame->debug_raw_a_sum[2] = 0;
-	frame->debug_cal_g_sum[0] = 0;
-	frame->debug_cal_g_sum[1] = 0;
-	frame->debug_cal_g_sum[2] = 0;
-	frame->debug_g_samples = 0;
-	frame->debug_a_samples = 0;
-	frame->debug_raw_m[0] = 0;
-	frame->debug_raw_m[1] = 0;
-	frame->debug_raw_m[2] = 0;
-	frame->debug_cal_m[0] = 0;
-	frame->debug_cal_m[1] = 0;
-	frame->debug_cal_m[2] = 0;
-	frame->debug_mag_valid = false;
-	static float raw_collect_a[3] = {0};
+	sensor_diagnostics_reset_frame();
 
 	uint8_t *rawData = sensor_fifo_raw_buffer;
 	for (uint16_t i = 0; i < frame->packets; i++) {
@@ -2503,82 +2358,14 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 			continue; // skip on error
 		}
 
-		/* Pair the most recent accel tag with the next gyro tag once. */
-		if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0) {
-			memcpy(raw_collect_a, raw_a, sizeof(raw_collect_a));
-		}
+		sensor_raw_collection_on_sample(raw_a, raw_g, frame->raw_collect_temp_c, frame->dc_active);
 
-		/* Only queue raw samples on gyro tags to avoid
-		 * duplicate entries from separate accel/gyro FIFO tags.
-		 * Pair with the latest accel sample if present; otherwise zeros. */
-		if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
-			if (frame->dc_active) {
-				/* Integrate every chip sample; queue only every n_raw samples. */
-				float g_rad[3] = {raw_g[0] * DEG_TO_RAD, raw_g[1] * DEG_TO_RAD, raw_g[2] * DEG_TO_RAD};
-				float gyr_norm = sqrtf(g_rad[0] * g_rad[0] + g_rad[1] * g_rad[1] + g_rad[2] * g_rad[2]);
-				if (gyr_norm > 1e-6f) {
-					float angle = gyr_norm * gyro_actual_time;
-					float ha = angle * 0.5f;
-					float s = sinf(ha) / gyr_norm;
-					float step[4] = {cosf(ha), s * g_rad[0], s * g_rad[1], s * g_rad[2]};
-					/* q_new = q_old * step */
-					float q0 = raw_gyr_quat[0] * step[0] - raw_gyr_quat[1] * step[1] - raw_gyr_quat[2] * step[2]
-							 - raw_gyr_quat[3] * step[3];
-					float q1 = raw_gyr_quat[0] * step[1] + raw_gyr_quat[1] * step[0] + raw_gyr_quat[2] * step[3]
-							 - raw_gyr_quat[3] * step[2];
-					float q2 = raw_gyr_quat[0] * step[2] - raw_gyr_quat[1] * step[3] + raw_gyr_quat[2] * step[0]
-							 + raw_gyr_quat[3] * step[1];
-					float q3 = raw_gyr_quat[0] * step[3] + raw_gyr_quat[1] * step[2] - raw_gyr_quat[2] * step[1]
-							 + raw_gyr_quat[3] * step[0];
-					float inv_norm = 1.0f / sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-					raw_gyr_quat[0] = q0 * inv_norm;
-					raw_gyr_quat[1] = q1 * inv_norm;
-					raw_gyr_quat[2] = q2 * inv_norm;
-					raw_gyr_quat[3] = q3 * inv_norm;
-				}
-
-				bool emit_raw = false;
-				if (raw_rate_plan.batch_active) {
-					raw_rate_plan.batch_accum += 1.0f;
-					if (raw_rate_plan.batch_accum >= raw_rate_plan.batch_interval) {
-						raw_rate_plan.batch_accum -= raw_rate_plan.batch_interval;
-						emit_raw = true;
-					}
-				} else {
-					raw_rate_plan.emit_count++;
-					if (raw_rate_plan.emit_count >= raw_rate_plan.n_raw) {
-						raw_rate_plan.emit_count = 0;
-						emit_raw = true;
-					}
-				}
-				if (emit_raw) {
-					struct raw_imu_sample raw_sample;
-					memcpy(raw_sample.gyr_quat, raw_gyr_quat, sizeof(raw_sample.gyr_quat));
-					memcpy(raw_sample.accel, raw_collect_a, sizeof(raw_sample.accel));
-					raw_sample.temp_c = frame->raw_collect_temp_c;
-					connection_queue_raw_sample(&raw_sample);
-					/* Clear only on emit so mid-window accel tags stay latched. */
-					memset(raw_collect_a, 0, sizeof(raw_collect_a));
-				}
-			} else {
-				memset(raw_collect_a, 0, sizeof(raw_collect_a));
-			}
-		}
-
-		// Debug: Log gyro values to see if they're all zero
-		static int gyro_log_count = 0;
-		if (gyro_log_count < 10) {
-			LOG_INF("Gyro raw: %.3f, %.3f, %.3f", (double)raw_g[0], (double)raw_g[1], (double)raw_g[2]);
-			gyro_log_count++;
-		}
+		sensor_diagnostics_on_decoded_gyro(raw_g);
 
 		if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
 			feed_gyro_sample(
 				raw_g,
-				&frame->g_count,
-				frame->debug_raw_g_sum,
-				&frame->debug_g_samples,
-				frame->debug_cal_g_sum
+				&frame->g_count
 #if DEBUG
 				,
 				frame->valid_acquisition
@@ -2590,9 +2377,7 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 			feed_accel_sample(
 				raw_a,
 				frame->a_sum,
-				&frame->a_count,
-				frame->debug_raw_a_sum,
-				&frame->debug_a_samples
+				&frame->a_count
 #if DEBUG
 				,
 				frame->valid_acquisition
@@ -2636,12 +2421,7 @@ static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 				sensor_calibration_track_mag_norm(sqrtf(cal_norm_sq));
 			}
 		}
-		// Save mag data for debug output
-		if (sensor_debug_is_active()) {
-			memcpy(frame->debug_raw_m, uncalibrated_m, sizeof(frame->debug_raw_m));
-			memcpy(frame->debug_cal_m, frame->raw_m, sizeof(frame->debug_cal_m));
-			frame->debug_mag_valid = true;
-		}
+		sensor_diagnostics_on_mag(uncalibrated_m, frame->raw_m);
 		float mx = frame->raw_m[0];
 		float my = frame->raw_m[1];
 		float mz = frame->raw_m[2];
@@ -2706,7 +2486,10 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 			set_status(SYS_STATUS_SENSOR_ERROR, true);
 			if (frame->packets) {
 				sensor_retained_write(); // keep the fusion state
-				sys_request_system_reboot(false);
+				if (sys_request_system_reboot() < 0) {
+					/* Keep the threshold armed if another power request owns the slot. */
+					packet_errors--;
+				}
 			}
 		}
 	} else if (frame->processed_packets == frame->packets && frame->packets > 0) {
@@ -2815,203 +2598,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	bool resting = sensor_update_resting_state(q, lin_a, now, &gyro_speed, &lin_accel);
 	sensor_update_sensor_state(resting, gyro_speed, lin_accel);
 
-	// Debug mode output - based on accel sample count, not time interval
-	if (sensor_debug_is_active() && frame->debug_a_samples > 0) {
-		debug_state.accel_count += frame->debug_a_samples;
-		if (debug_state.accel_count >= debug_state.output_every_n) {
-			debug_state.accel_count = 0;
-			debug_state.output_count++;
-
-			int64_t current_time = k_uptime_get();
-			float elapsed_sec = (float)(current_time - debug_state.start_time) / 1000.0f;
-
-			// Calculate average raw and calibrated data
-			float avg_raw_g[3] = {0};
-			float avg_raw_a[3] = {0};
-			float avg_cal_g[3] = {0};
-			if (frame->debug_g_samples > 0) {
-				for (int i = 0; i < 3; i++) {
-					avg_raw_g[i] = frame->debug_raw_g_sum[i] / frame->debug_g_samples;
-					avg_cal_g[i] = frame->debug_cal_g_sum[i] / frame->debug_g_samples;
-				}
-			}
-			if (frame->debug_a_samples > 0) {
-				for (int i = 0; i < 3; i++) {
-					avg_raw_a[i] = frame->debug_raw_a_sum[i] / frame->debug_a_samples;
-				}
-			}
-
-			// Get VQF debug info
-#if CONFIG_SENSOR_USE_VQF
-			vqf_debug_info_t vqf_info;
-			vqf_get_debug_info(&vqf_info);
-#endif
-
-			// Compact output format with raw, calibrated, and fused data
-			printk(
-				"[%.2fs] RAW: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f] T:%.2fC\n",
-				(double)elapsed_sec,
-				(double)avg_raw_a[0],
-				(double)avg_raw_a[1],
-				(double)avg_raw_a[2],
-				(double)avg_raw_g[0],
-				(double)avg_raw_g[1],
-				(double)avg_raw_g[2],
-				(double)temp
-			);
-
-			printk(
-				"     CAL: A[%.3f,%.3f,%.3f] G[%.2f,%.2f,%.2f]\n",
-				(double)sensor_loop_avg_a[0],
-				(double)sensor_loop_avg_a[1],
-				(double)sensor_loop_avg_a[2],
-				(double)avg_cal_g[0],
-				(double)avg_cal_g[1],
-				(double)avg_cal_g[2]
-			);
-
-			if (frame->debug_mag_valid) {
-				printk(
-					"     MAG: RAW[%.2f,%.2f,%.2f] CAL[%.2f,%.2f,%.2f]\n",
-					(double)frame->debug_raw_m[0],
-					(double)frame->debug_raw_m[1],
-					(double)frame->debug_raw_m[2],
-					(double)frame->debug_cal_m[0],
-					(double)frame->debug_cal_m[1],
-					(double)frame->debug_cal_m[2]
-				);
-			}
-
-#if CONFIG_SENSOR_USE_VQF
-			printk(
-				"     VQF: Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
-				(double)q[0],
-				(double)q[1],
-				(double)q[2],
-				(double)q[3],
-				(double)lin_a[0],
-				(double)lin_a[1],
-				(double)lin_a[2]
-			);
-#if SENSOR_DEBUG_QDEV_QOUT
-			float debug_device_quat[4];
-			float debug_reported_quat[4];
-			sensor_compute_device_and_reported_quat(q, debug_device_quat, debug_reported_quat);
-			printk(
-				"     Qdev[%.3f,%.3f,%.3f,%.3f] Qout[%.3f,%.3f,%.3f,%.3f]\n",
-				(double)debug_device_quat[0],
-				(double)debug_device_quat[1],
-				(double)debug_device_quat[2],
-				(double)debug_device_quat[3],
-				(double)debug_reported_quat[0],
-				(double)debug_reported_quat[1],
-				(double)debug_reported_quat[2],
-				(double)debug_reported_quat[3]
-			);
-#endif
-			printk(
-				"     Rest:%c RestDev[G:%.3f,A:%.3f] Bias[%.3f,%.3f,%.3f]°/s Sigma:%.3f°/s Delta:%.2f°\n",
-				vqf_info.rest_detected ? 'Y' : 'N',
-				(double)vqf_info.rest_deviations[0],
-				(double)vqf_info.rest_deviations[1],
-				(double)vqf_info.bias[0],
-				(double)vqf_info.bias[1],
-				(double)vqf_info.bias[2],
-				(double)vqf_info.bias_sigma,
-				(double)vqf_info.delta
-			);
-#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-			printk(
-				"     Adapt: tauAcc:%.2fs motInt:%.3f\n",
-				(double)vqf_info.tau_acc,
-				(double)vqf_info.motion_intensity
-			);
-#endif
-			printk(
-				"     RestDiag: enter:%u exit:%u total:%.1fs last:%.1fs up:%.0fs rest%%:%.1f\n",
-				vqf_info.rest_enter_count,
-				vqf_info.rest_exit_count,
-				(double)vqf_info.rest_total_s,
-				(double)vqf_info.rest_last_duration_s,
-				(double)vqf_info.uptime_s,
-				(double)(vqf_info.uptime_s > 0 ? 100.0f * vqf_info.rest_total_s / vqf_info.uptime_s : 0)
-			);
-			printk(
-				"     BiasP[%.1f,%.1f,%.1f]\n",
-				(double)vqf_info.biasP[0],
-				(double)vqf_info.biasP[1],
-				(double)vqf_info.biasP[2]
-			);
-			{
-				uint8_t n = vqf_info.rest_event_count;
-				if (n > 8) {
-					n = 8;
-				}
-				if (n > 0) {
-					printk("     RestLog(%u events):", vqf_info.rest_event_count);
-					for (uint8_t ri = 0; ri < n; ri++) {
-						printk(
-							" %s@%.0fs",
-							vqf_info.rest_events[ri].entered ? "EN" : "EX",
-							(double)vqf_info.rest_events[ri].time_s
-						);
-					}
-					printk("\n");
-				}
-			}
-			if (mag_enabled) {
-				printk(
-					"     Mag: DisAng:%.2f° CorrRate:%.2f°/s\n",
-					(double)vqf_info.mag_dis_angle,
-					(double)vqf_info.mag_corr_rate
-				);
-				printk(
-					"     MagDist:%c MagRefNorm:%.3f MagRefDip:%.2f° MagNorm:%.3f MagDip:%.2f°\n",
-					vqf_info.mag_dist_detected ? 'Y' : 'N',
-					(double)vqf_info.mag_ref_norm,
-					(double)vqf_info.mag_ref_dip,
-					(double)vqf_info.mag_norm,
-					(double)vqf_info.mag_dip
-				);
-				printk(
-					"     MagT: undist:%.2fs reject:%.2fs candT:%.2fs candNorm:%.3f candDip:%.2f°\n",
-					(double)vqf_info.mag_undisturbed_t,
-					(double)vqf_info.mag_reject_t,
-					(double)vqf_info.mag_candidate_t,
-					(double)vqf_info.mag_candidate_norm,
-					(double)vqf_info.mag_candidate_dip
-				);
-			}
-#else
-			printk(
-				"     Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",
-				(double)q[0],
-				(double)q[1],
-				(double)q[2],
-				(double)q[3],
-				(double)lin_a[0],
-				(double)lin_a[1],
-				(double)lin_a[2]
-			);
-#if SENSOR_DEBUG_QDEV_QOUT
-			float debug_device_quat[4];
-			float debug_reported_quat[4];
-			sensor_compute_device_and_reported_quat(q, debug_device_quat, debug_reported_quat);
-			printk(
-				"     Qdev[%.3f,%.3f,%.3f,%.3f] Qout[%.3f,%.3f,%.3f,%.3f]\n",
-				(double)debug_device_quat[0],
-				(double)debug_device_quat[1],
-				(double)debug_device_quat[2],
-				(double)debug_device_quat[3],
-				(double)debug_reported_quat[0],
-				(double)debug_reported_quat[1],
-				(double)debug_reported_quat[2],
-				(double)debug_reported_quat[3]
-			);
-#endif
-#endif
-		}
-	}
+	sensor_diagnostics_output(q, lin_a, sensor_loop_avg_a, temp, mag_enabled);
 
 	// Update orientation
 	bool send_quat_data = !q_epsilon(q, last_q, 0.001f);
@@ -3233,7 +2820,7 @@ static void sensor_loop_wait(int64_t time_begin)
 	}
 #endif
 
-	if (main_suspended) { // TODO:
+	if (atomic_get(&main_suspended)) {
 		k_thread_suspend(&sensor_thread_id);
 	}
 
@@ -3242,6 +2829,8 @@ static void sensor_loop_wait(int64_t time_begin)
 
 void sensor_loop(void)
 {
+	sensor_calibration_set_consumer_ready(false);
+	main_ok = false;
 	if (!sensor_sensor_init) {
 		return;
 	}
@@ -3258,19 +2847,21 @@ void sensor_loop(void)
 		set_status(SYS_STATUS_SENSOR_ERROR, true); // TODO: only handles general init error
 	} else {
 		main_ok = true;
+		sensor_calibration_set_consumer_ready(!atomic_get(&main_suspended));
 		sensor_startup_discard_until_ms = k_uptime_get() + CONFIG_SENSOR_STARTUP_DISCARD_MS;
 		sensor_startup_discard_logged = false;
 	}
 	while (1) {
 		int64_t time_begin = k_uptime_get();
 		sensor_window_iters++;
-		if (main_ok) {
+		if (main_ok && sensor_calibration_imu_ready()) {
 			int64_t proc_begin_ticks = k_uptime_ticks();
 			sensor_loop_frame_t frame = {0};
 #if DEBUG
 			frame.loop_begin = k_uptime_ticks();
 #endif
 
+			sensor_apply_calibration_frame();
 			sensor_loop_handle_data_collection(&frame.dc_active);
 			int64_t acq_begin_ticks = k_uptime_ticks();
 			sensor_loop_acquire(&frame);
@@ -3318,7 +2909,8 @@ void wait_for_threads(void)
 
 void main_imu_suspend(void)
 {
-	main_suspended = true;
+	sensor_calibration_set_consumer_ready(false);
+	atomic_set(&main_suspended, true);
 	/* Thread cannot feed once frozen or self-suspended; pause WDT in all paths. */
 	watchdog_pause(WDT_CHANNEL_SENSOR);
 	if (!main_running) { // don't suspend if already stopped (TODO: may be called from sensor thread)
@@ -3340,18 +2932,21 @@ void main_imu_suspend(void)
 
 void main_imu_resume(void)
 {
-	if (!main_suspended) { // not suspended
+	if (!atomic_get(&main_suspended)) { // not suspended
 		return;
 	}
 	watchdog_resume(WDT_CHANNEL_SENSOR);
+	sensor_calibration_set_consumer_ready(main_ok);
+	/* Resume may immediately preempt us with the higher-priority sensor thread.
+	 * Publish before waking it so the loop cannot self-suspend on stale intent. */
+	atomic_set(&main_suspended, false);
 	k_thread_resume(&sensor_thread_id);
-	main_suspended = false;
 	LOG_INF("Resumed sensor thread");
 }
 
 void main_imu_wakeup(void)
 {
-	if (!main_suspended) { // don't wake up if pending suspension
+	if (!atomic_get(&main_suspended)) { // don't wake up if pending suspension
 		k_wakeup(&sensor_thread_id);
 	}
 }
@@ -3450,183 +3045,3 @@ float sensor_get_loop_period_ms(void)
 	return loop_period_ema_ms;
 }
 
-// Debug mode control functions
-void sensor_debug_start(uint32_t duration_sec)
-{
-	if (duration_sec == 0 || duration_sec > 30) {
-		duration_sec = 10; // Default to 10 seconds
-	}
-
-	debug_state.enabled = true;
-	debug_state.start_time = k_uptime_get();
-	debug_state.duration_ms = duration_sec * 1000;
-	debug_state.accel_count = 0;
-	debug_state.output_count = 0;
-	// output_every_n is already set to 4 by default
-
-	float accel_odr = sensor_get_accel_odr();
-	LOG_INF(
-		"Debug mode started for %u seconds (accel ODR: %.1fHz, output every %u samples)",
-		duration_sec,
-		(double)accel_odr,
-		debug_state.output_every_n
-	);
-}
-
-void sensor_debug_stop(void)
-{
-	if (debug_state.enabled) {
-		debug_state.enabled = false;
-		LOG_INF("Debug mode stopped. %u outputs generated", debug_state.output_count);
-	}
-}
-
-bool sensor_debug_is_active(void)
-{
-	if (debug_state.enabled) {
-		int64_t elapsed = k_uptime_get() - debug_state.start_time;
-		if (elapsed >= debug_state.duration_ms) {
-			sensor_debug_stop();
-			return false;
-		}
-		return true;
-	}
-	return false;
-}
-
-#if CONFIG_SENSOR_RANGE_STATS
-// Sensor range tracking functions
-const sensor_range_stats_t *sensor_get_range_stats(void)
-{
-	return &range_stats;
-}
-
-void sensor_reset_range_stats(void)
-{
-	for (int i = 0; i < 3; i++) {
-		range_stats.gyro_max[i] = -INFINITY;
-		range_stats.gyro_min[i] = INFINITY;
-		range_stats.accel_max[i] = -INFINITY;
-		range_stats.accel_min[i] = INFINITY;
-	}
-	range_stats.sample_count = 0;
-	range_stats.initialized = false;
-	LOG_INF("Range statistics reset");
-}
-
-// Internal function to update range statistics with new gyro data
-static void sensor_update_range_stats_gyro(float g[3])
-{
-	if (!range_stats.initialized) {
-		range_stats.initialized = true;
-	}
-	for (int i = 0; i < 3; i++) {
-		if (g[i] > range_stats.gyro_max[i]) {
-			range_stats.gyro_max[i] = g[i];
-		}
-		if (g[i] < range_stats.gyro_min[i]) {
-			range_stats.gyro_min[i] = g[i];
-		}
-	}
-}
-
-// Internal function to update range statistics with new accel data
-static void sensor_update_range_stats_accel(float a[3])
-{
-	if (!range_stats.initialized) {
-		range_stats.initialized = true;
-	}
-	for (int i = 0; i < 3; i++) {
-		if (a[i] > range_stats.accel_max[i]) {
-			range_stats.accel_max[i] = a[i];
-		}
-		if (a[i] < range_stats.accel_min[i]) {
-			range_stats.accel_min[i] = a[i];
-		}
-	}
-	range_stats.sample_count++;
-}
-
-void sensor_print_range_stats(void)
-{
-	if (!range_stats.initialized) {
-		printk("Range statistics not initialized (no data collected yet)\n");
-		return;
-	}
-
-	printk("\n=== Sensor Range Statistics ===\n");
-	printk("Total samples: %llu\n", range_stats.sample_count);
-
-	printk("\nGyroscope (deg/s):\n");
-	printk(
-		"  X: min=%.2f, max=%.2f, peak=%.2f\n",
-		(double)range_stats.gyro_min[0],
-		(double)range_stats.gyro_max[0],
-		(double)fmaxf(fabsf(range_stats.gyro_min[0]), fabsf(range_stats.gyro_max[0]))
-	);
-	printk(
-		"  Y: min=%.2f, max=%.2f, peak=%.2f\n",
-		(double)range_stats.gyro_min[1],
-		(double)range_stats.gyro_max[1],
-		(double)fmaxf(fabsf(range_stats.gyro_min[1]), fabsf(range_stats.gyro_max[1]))
-	);
-	printk(
-		"  Z: min=%.2f, max=%.2f, peak=%.2f\n",
-		(double)range_stats.gyro_min[2],
-		(double)range_stats.gyro_max[2],
-		(double)fmaxf(fabsf(range_stats.gyro_min[2]), fabsf(range_stats.gyro_max[2]))
-	);
-
-	// Calculate overall peak gyro value
-	float gyro_peak = 0;
-	for (int i = 0; i < 3; i++) {
-		float axis_peak = fmaxf(fabsf(range_stats.gyro_min[i]), fabsf(range_stats.gyro_max[i]));
-		if (axis_peak > gyro_peak) {
-			gyro_peak = axis_peak;
-		}
-	}
-	// Use actual range if available, otherwise fall back to config value
-	float gyro_fs = (gyro_actual_range > 0) ? gyro_actual_range : (float)CONFIG_SENSOR_GYRO_FS;
-	printk("  Overall peak: %.2f deg/s (FS=%.0f)\n", (double)gyro_peak, (double)gyro_fs);
-	if (gyro_peak > gyro_fs * 0.9f) {
-		printk("  WARNING: Peak value exceeds 90%% of full scale!\n");
-	}
-
-	printk("\nAccelerometer (g):\n");
-	printk(
-		"  X: min=%.3f, max=%.3f, peak=%.3f\n",
-		(double)range_stats.accel_min[0],
-		(double)range_stats.accel_max[0],
-		(double)fmaxf(fabsf(range_stats.accel_min[0]), fabsf(range_stats.accel_max[0]))
-	);
-	printk(
-		"  Y: min=%.3f, max=%.3f, peak=%.3f\n",
-		(double)range_stats.accel_min[1],
-		(double)range_stats.accel_max[1],
-		(double)fmaxf(fabsf(range_stats.accel_min[1]), fabsf(range_stats.accel_max[1]))
-	);
-	printk(
-		"  Z: min=%.3f, max=%.3f, peak=%.3f\n",
-		(double)range_stats.accel_min[2],
-		(double)range_stats.accel_max[2],
-		(double)fmaxf(fabsf(range_stats.accel_min[2]), fabsf(range_stats.accel_max[2]))
-	);
-
-	// Calculate overall peak accel value
-	float accel_peak = 0;
-	for (int i = 0; i < 3; i++) {
-		float axis_peak = fmaxf(fabsf(range_stats.accel_min[i]), fabsf(range_stats.accel_max[i]));
-		if (axis_peak > accel_peak) {
-			accel_peak = axis_peak;
-		}
-	}
-	// Use actual range if available, otherwise fall back to config value
-	float accel_fs = (accel_actual_range > 0) ? accel_actual_range : (float)CONFIG_SENSOR_ACCEL_FS;
-	printk("  Overall peak: %.3f g (FS=%.0f)\n", (double)accel_peak, (double)accel_fs);
-	if (accel_peak > accel_fs * 0.9f) {
-		printk("  WARNING: Peak value exceeds 90%% of full scale!\n");
-	}
-
-	printk("================================\n");
-}
-#endif // CONFIG_SENSOR_RANGE_STATS

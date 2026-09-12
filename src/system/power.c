@@ -30,6 +30,7 @@
 #include <errno.h>
 
 #include "power.h"
+#include "power_request.h"
 #include "power_battery.h"
 #include "clock_control.h"
 
@@ -48,19 +49,12 @@ LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
 static bool sys_WOM(bool force);
 static bool sys_system_off(void);
-static void sys_system_reboot(void);
-
-enum sys_power_request {
-	SYS_POWER_REQ_NONE = 0,
-	SYS_POWER_REQ_WOM = 1,
-	SYS_POWER_REQ_WOM_FORCE = 2,
-	SYS_POWER_REQ_SYSTEM_OFF = 3,
-	SYS_POWER_REQ_REBOOT = 4,
-};
+static bool sys_system_reboot(void);
 
 static int sys_power_state_request(enum sys_power_request id);
-static enum sys_power_request sys_power_state_peek(void);
-static void sys_power_state_clear(void);
+
+static struct power_request_mailbox power_requests;
+static K_SEM_DEFINE(power_wake_sem, 0, 1);
 
 K_THREAD_DEFINE(disable_DFU_thread_id, 128, sys_skip_dfu, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // skip DFU if the system is running correctly
 
@@ -208,6 +202,7 @@ static void configure_system_off(void)
 	sensor_calibration_online_mag_prepare_power_down();
 	clock_pre_shutdown();
 	main_imu_suspend();
+	sensor_calibration_prepare_power_down();
 	sensor_shutdown();
 	set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
 	float actual_clock_rate;
@@ -332,38 +327,29 @@ static void wait_for_logging(void)
 static int64_t system_off_timeout = 0;
 #endif
 
-void sys_request_WOM(bool force, bool immediate)
+int sys_request_WOM(bool force)
 {
-	if (immediate)
-	{
-		sys_WOM(force);
-		return;
-	}
-	if (force) {
-		sys_power_state_request(SYS_POWER_REQ_WOM_FORCE);
-	} else {
-		sys_power_state_request(SYS_POWER_REQ_WOM);
-	}
+	return sys_power_state_request(force ? SYS_POWER_REQ_WOM_FORCE : SYS_POWER_REQ_WOM);
 }
 
-void sys_request_system_off(bool immediate)
+int sys_request_system_off(void)
 {
-	if (immediate)
-	{
-		sys_system_off();
-		return;
-	}
-	sys_power_state_request(SYS_POWER_REQ_SYSTEM_OFF);
+	return sys_power_state_request(SYS_POWER_REQ_SYSTEM_OFF);
 }
 
-void sys_request_system_reboot(bool immediate)
+int sys_request_system_reboot(void)
 {
-	if (immediate)
-	{
-		sys_system_reboot();
-		return;
-	}
-	sys_power_state_request(SYS_POWER_REQ_REBOOT);
+	return sys_power_state_request(SYS_POWER_REQ_REBOOT);
+}
+
+int sys_ota_reboot_reserve(void)
+{
+	return power_request_ota_reserve(&power_requests);
+}
+
+void sys_ota_reboot_resolve(bool prepared)
+{
+	power_request_ota_resolve(&power_requests, prepared, &power_wake_sem);
 }
 
 /* Returns true when the power request is consumed; false to keep it queued. */
@@ -389,6 +375,9 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 		LOG_INF("ESB/status ready timed out");
 	}
 #endif
+	if (!power_request_start_physical(&power_requests, false)) {
+		return false;
+	}
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
 	sensor_calibration_online_mag_retained_save();
@@ -404,7 +393,7 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	if (pin_config == 0xFF) {
 		/* Already past configure_system_off; cannot restore cleanly. */
 		LOG_ERR("IMU wake up setup failed after shutdown prep, rebooting");
-		sys_request_system_reboot(true);
+		sys_system_reboot(); /* owner-private emergency path after shutdown prep */
 		return true;
 	}
 	LOG_INF("Configured IMU wake up");
@@ -445,16 +434,18 @@ static bool sys_system_off(void) // TODO: add timeout
 		LOG_INF("System off blocked by OTA");
 		return false; /* keep queued until OTA finishes */
 	}
+	if (!power_request_start_physical(&power_requests, false)) {
+		return false;
+	}
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* persist warm cal before session clear / power loss */
 	sensor_calibration_online_mag_cold_start();
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
-	sensor_fusion_invalidate();
+	sensor_request_fusion_reset();
+	sensor_retained_write(); /* sensor is suspended: persist pending reset before power-off */
 #endif
-	// sensor_fusion_update_bias(NULL);
-	// sensor_retained_write();
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 	// Set system off
 #if IMU_INT_EXISTS
@@ -480,9 +471,12 @@ static bool sys_system_off(void) // TODO: add timeout
 	return true;
 }
 
-static void sys_system_reboot(void) // TODO: add timeout
+static bool sys_system_reboot(void) // TODO: add timeout
 {
 	LOG_INF("System reboot requested");
+	if (!power_request_start_physical(&power_requests, true)) {
+		return false;
+	}
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* persist warm cal before reboot (covers OTA reboot path) */
 	sensor_calibration_online_mag_cold_start();
@@ -500,33 +494,17 @@ static void sys_system_reboot(void) // TODO: add timeout
 	sys_skip_dfu();
 #endif
 	sys_reboot(SYS_REBOOT_COLD);
+	return true;
 }
 
-static enum sys_power_request power_request = SYS_POWER_REQ_NONE;
-static K_SEM_DEFINE(power_wake_sem, 0, 1);
 
 static int sys_power_state_request(enum sys_power_request id)
 {
-	if (id == SYS_POWER_REQ_NONE) {
-		return -1;
+	int err = power_request_submit(&power_requests, id, &power_wake_sem);
+	if (err) {
+		LOG_DBG("Power request %d rejected: %d", id, err);
 	}
-	if (power_request != SYS_POWER_REQ_NONE) {
-		LOG_ERR("System is already entering a new power state");
-		return -1;
-	}
-	power_request = id;
-	k_sem_give(&power_wake_sem);
-	return 0;
-}
-
-static enum sys_power_request sys_power_state_peek(void)
-{
-	return power_request;
-}
-
-static void sys_power_state_clear(void)
-{
-	power_request = SYS_POWER_REQ_NONE;
+	return err;
 }
 
 bool vin_read(void) // blocking
@@ -598,7 +576,7 @@ static void power_thread(void)
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 		pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
 #endif
-		enum sys_power_request requested = sys_power_state_peek();
+		enum sys_power_request requested = power_request_begin(&power_requests);
 		bool consumed = true;
 		switch (requested) {
 		case SYS_POWER_REQ_WOM:
@@ -611,15 +589,13 @@ static void power_thread(void)
 			consumed = sys_system_off();
 			break;
 		case SYS_POWER_REQ_REBOOT:
-			sys_system_reboot();
+			consumed = sys_system_reboot();
 			break;
 		case SYS_POWER_REQ_NONE:
 		default:
 			break;
 		}
-		if (consumed) {
-			sys_power_state_clear();
-		}
+		power_request_finish(&power_requests, requested, consumed);
 
 		bool docked = dock_read();
 		bool charging = chg_read();
@@ -683,7 +659,7 @@ static void power_thread(void)
 				LOG_WRN("Discharged battery");
 				sys_update_battery_tracker(0, device_plugged);
 			}
-			sys_request_system_off(true);
+			sys_system_off(); /* owner-private battery/dock shutdown */
 		}
 
 		power_battery_feed_and_track(battery_pptt_valid, plug_signal_settling, battery_pptt,

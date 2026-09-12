@@ -37,16 +37,35 @@ uint8_t *sensor_calibration_get_sensor_data();
 
 void sensor_calibration_read(void);
 
-int sensor_calibration_validate(float *a_bias, float *g_bias, bool write);
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-int sensor_calibration_validate_6_side(float a_inv[][3], bool write);
-#endif
+typedef struct {
+	float accel_bias[3];
+	float gyro_bias[3];
+	float accel_matrix[4][3];
+} sensor_imu_calibration_t;
+
+/* Coherent applied coefficients, never a writable view of owner storage. */
+void sensor_calibration_snapshot(sensor_imu_calibration_t *out);
+/* Nonblocking submission: -EAGAIN without a ready consumer, -EBUSY for an
+ * occupied transaction/reset-all barrier, -ESHUTDOWN once terminally closed.
+ * Accepted candidates survive suspend/failed rescan for recovery or power drain;
+ * reset-all cancels them. Application remains at a sensor frame boundary. */
+int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro);
+int sensor_calibration_commit_accel(const float matrix[4][3]);
+int sensor_calibration_reset_imu(void);
+int sensor_calibration_reset_accel(void);
+/* Power owner calls only after the sensor is quiescent. No live fusion mutation. */
+void sensor_calibration_prepare_power_down(void);
+/* System reset-all barrier: call before storage lock, end after releasing it.
+ * Waits for in-flight persistence and cancels all pre-clear IMU transactions. */
+void sensor_calibration_clear_begin(void);
+void sensor_calibration_clear_end(void);
+
+int sensor_calibration_set_sensitivity(const float degrees[3]);
+int sensor_calibration_reset_sensitivity(void);
 int sensor_calibration_validate_mag(float m_inv[][3], bool write);
 
-void sensor_calibration_clear(float *a_bias, float *g_bias, bool write);
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-void sensor_calibration_clear_6_side(float a_inv[][3], bool write);
-#endif
+/* Candidate initialization only; live coefficients change through commits. */
+void sensor_calibration_identity_accel(float matrix[4][3]);
 void sensor_calibration_clear_mag(float m_inv[][3], bool write); // "request" mag cal
 
 void sensor_request_calibration(void);

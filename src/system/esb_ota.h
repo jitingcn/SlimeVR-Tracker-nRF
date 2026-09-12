@@ -60,7 +60,7 @@
 #define OTA_STATUS_COMPLETE         0x06  /* Activation complete, rebooting */
 #define OTA_STATUS_ERROR            0x10  /* Generic error */
 #define OTA_STATUS_BOARD_MISMATCH   0x11  /* Board target string mismatch */
-#define OTA_STATUS_FLASH_ERROR      0x12  /* Flash erase/write error */
+#define OTA_STATUS_FLASH_ERROR      0x12  /* Flash read/erase/write error */
 #define OTA_STATUS_SIZE_ERROR       0x13  /* Firmware too large for flash */
 #define OTA_STATUS_SEQ_ERROR        0x14  /* Sequence number error */
 #define OTA_STATUS_TIMEOUT          0x15  /* OTA timed out */

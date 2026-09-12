@@ -455,7 +455,7 @@ static void usb_ctrl_service_step(
 	k_mutex_unlock(&usb_serial_transition_lock);
 
 	if (request_reboot) {
-		sys_request_system_reboot(false);
+		sys_request_system_reboot();
 	}
 }
 
