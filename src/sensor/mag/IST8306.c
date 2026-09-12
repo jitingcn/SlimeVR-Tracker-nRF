@@ -96,14 +96,17 @@ int ist8306_update_odr(float period_s, float *actual_period_s)
 	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL1, noise_filter_code << 5);
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL2, mode_code);
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_OSRCNTL, oversampling_code);
-	if (err)
+	if (err) {
 		goto error;
+	}
 
 	last_mode_code = requested_mode_code;
 	oneshot_pending = false;
@@ -123,8 +126,9 @@ void ist8306_mag_oneshot(void)
 	oneshot_trigger_ms = k_uptime_get();
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 bool ist8306_mag_read(float m[3])
@@ -145,8 +149,9 @@ bool ist8306_mag_read(float m[3])
 				oneshot_pending = false;
 				return false;
 			}
-			if (frame[0] & 0x01)
+			if (frame[0] & 0x01) {
 				break;
+			}
 			if (k_uptime_get() >= deadline_ms) {
 				LOG_ERR("Read timeout");
 				oneshot_pending = false;
@@ -160,8 +165,9 @@ bool ist8306_mag_read(float m[3])
 			LOG_ERR("Communication error");
 			return false;
 		}
-		if (!(frame[0] & 0x01))
+		if (!(frame[0] & 0x01)) {
 			return false;
+		}
 	}
 	ist8306_mag_process(&frame[1], m);
 	return true;
@@ -172,21 +178,21 @@ void ist8306_mag_process(uint8_t *raw_m, float m[3])
 	for (int i = 0; i < 3; i++) // x, y, z
 	{
 		m[i] = (int16_t)((((uint16_t)raw_m[(i * 2) + 1]) << 8) | raw_m[i * 2]);
-		m[i] *= sensitivity; //LSB to uT
-		m[i] /= 100; // uT to gauss
+		m[i] *= sensitivity; // LSB to uT
+		m[i] /= 100;         // uT to gauss
 	}
 }
 
-const sensor_mag_t sensor_mag_ist8306 = {
-	*ist8306_init,
-	*ist8306_shutdown,
+const sensor_mag_t sensor_mag_ist8306
+	= {*ist8306_init,
+	   *ist8306_shutdown,
 
-	*ist8306_update_odr,
+	   *ist8306_update_odr,
 
-	*ist8306_mag_oneshot,
-	*ist8306_mag_read,
-	*mag_none_temp_read,
+	   *ist8306_mag_oneshot,
+	   *ist8306_mag_read,
+	   *mag_none_temp_read,
 
-	*ist8306_mag_process,
-	7, 7
-};
+	   *ist8306_mag_process,
+	   7,
+	   7};

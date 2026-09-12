@@ -4,14 +4,14 @@
 #include "sensor/sensor.h"
 
 // https://www.memsic.com/Public/Uploads/uploadfile/files/20220119/MMC5603NJDatasheetRev.B.pdf
-#define MMC5603NJ_XOUT_0     0x00
-#define MMC5603NJ_TOUT       0x09
+#define MMC5603NJ_XOUT_0 0x00
+#define MMC5603NJ_TOUT 0x09
 
-#define MMC5603NJ_STATUS     0x18
-#define MMC5603NJ_ODR        0x1A
-#define MMC5603NJ_CONTROL_0  0x1B
-#define MMC5603NJ_CONTROL_1  0x1C
-#define MMC5603NJ_CONTROL_2  0x1D
+#define MMC5603NJ_STATUS 0x18
+#define MMC5603NJ_ODR 0x1A
+#define MMC5603NJ_CONTROL_0 0x1B
+#define MMC5603NJ_CONTROL_1 0x1C
+#define MMC5603NJ_CONTROL_2 0x1D
 #define MMC5603NJ_PRODUCT_ID 0x39
 
 // Status1 bits
@@ -19,12 +19,12 @@
 #define MSTAT_MEAS_T_DONE 0x80
 
 // Control 0 bits
-#define MCTRL0_TAKE_MEAS_M  0x01
-#define MCTRL0_TAKE_MEAS_T  0x02
-#define MCTRL0_DO_SET       0x08
-#define MCTRL0_DO_RESET     0x10
-#define MCTRL0_AUTO_SR_EN   0x20
-#define MCTRL0_CMM_FREQ_EN  0x80
+#define MCTRL0_TAKE_MEAS_M 0x01
+#define MCTRL0_TAKE_MEAS_T 0x02
+#define MCTRL0_DO_SET 0x08
+#define MCTRL0_DO_RESET 0x10
+#define MCTRL0_AUTO_SR_EN 0x20
+#define MCTRL0_CMM_FREQ_EN 0x80
 
 // Control 1 bits
 #define MCTRL1_SW_RESET 0x80
@@ -37,18 +37,18 @@
 
 // Control 2 bits
 #define MCTRL2_EN_PRD_SET 0x08
-#define MCTRL2_CMM_EN     0x10
-#define MCTRL2_HPOWER     0x80
+#define MCTRL2_CMM_EN 0x10
+#define MCTRL2_HPOWER 0x80
 
 // Periodic SET interval in measurements (not periodic RESET).
-#define MSET_1 0x00     // SET each data measurement
-#define MSET_25    0x01 // each 25 data measurements
-#define MSET_75    0x02
-#define MSET_100   0x03
-#define MSET_250   0x04
-#define MSET_500   0x05
-#define MSET_1000  0x06
-#define MSET_2000  0x07
+#define MSET_1 0x00  // SET each data measurement
+#define MSET_25 0x01 // each 25 data measurements
+#define MSET_75 0x02
+#define MSET_100 0x03
+#define MSET_250 0x04
+#define MSET_500 0x05
+#define MSET_1000 0x06
+#define MSET_2000 0x07
 
 int mmc5603_init(float period_s, float *actual_period_s);
 void mmc5603_shutdown(void);

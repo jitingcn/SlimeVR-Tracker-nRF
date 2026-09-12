@@ -4,32 +4,32 @@
 #include "sensor/sensor.h"
 
 // https://www.akm.com/content/dam/documents/products/tri-axis-magnetic-sensor/ak09940a/ak09940a-en-datasheet-myakm.pdf
-#define AK09940_ST   0x0F
+#define AK09940_ST 0x0F
 
-#define AK09940_ST1  0x10
+#define AK09940_ST1 0x10
 #define AK09940_ST1_DRDY 0x01
 
-#define AK09940_HXL  0x11
+#define AK09940_HXL 0x11
 
 #define AK09940_TMPS 0x1A
 
-#define AK09940_ST2  0x1B
+#define AK09940_ST2 0x1B
 #define AK09940_ST2_DOR 0x01
 #define AK09940_ST2_INV 0x02
 
-#define AK09940_CNTL1  0x30
-#define AK09940_CNTL3  0x32
-#define AK09940_CNTL4  0x33
+#define AK09940_CNTL1 0x30
+#define AK09940_CNTL3 0x32
+#define AK09940_CNTL4 0x33
 
-#define MODE_PDM         0b00000 // Power-down mode
-#define MODE_SMM         0b00001 // Single measurement mode
-#define MODE_CMM1_10Hz   0b00010 // Continuous measurement modes
-#define MODE_CMM2_20Hz   0b00100
-#define MODE_CMM3_50Hz   0b00110
-#define MODE_CMM4_100Hz  0b01000
-#define MODE_CMM5_200Hz  0b01010
+#define MODE_PDM 0b00000       // Power-down mode
+#define MODE_SMM 0b00001       // Single measurement mode
+#define MODE_CMM1_10Hz 0b00010 // Continuous measurement modes
+#define MODE_CMM2_20Hz 0b00100
+#define MODE_CMM3_50Hz 0b00110
+#define MODE_CMM4_100Hz 0b01000
+#define MODE_CMM5_200Hz 0b01010
 // Low power drive 1, 2, or Ultra low power drive
-#define MODE_CMM6_400Hz  0b01100
+#define MODE_CMM6_400Hz 0b01100
 // Low power drive 1, or Ultra low power drive
 #define MODE_CMM7_1000Hz 0b01110
 // Ultra low power drive

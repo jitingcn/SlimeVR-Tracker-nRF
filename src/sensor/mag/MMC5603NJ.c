@@ -7,7 +7,7 @@
 #include "MMC5603NJ.h"
 
 static const float sensitivity = (1.0f / 16384.0f); // mag sensitivity if using 20 bit data (16384 Counts/G)
-static const float offset = 524288.0f; // mag range unsigned to signed
+static const float offset = 524288.0f;              // mag range unsigned to signed
 
 static uint16_t last_state = 0xffff;
 static float last_continuous_period_s = 0;
@@ -25,8 +25,9 @@ static int mmc5603_RESET(void);
 int mmc5603_init(float period_s, float *actual_period_s)
 {
 	int err = mmc5603_SET();
-	if (err)
+	if (err) {
 		return err;
+	}
 
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_CONTROL_0, MCTRL0_AUTO_SR_EN);
 	if (err) {
@@ -56,8 +57,9 @@ void mmc5603_shutdown(void)
 		MMC5603NJ_CONTROL_1,
 		MCTRL1_SW_RESET
 	); // Reset completion is not polled here.
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 int mmc5603_update_odr(float period_s, float *actual_period_s)
@@ -70,8 +72,9 @@ int mmc5603_update_odr(float period_s, float *actual_period_s)
 
 	if (period_s <= 0 || period_s == INFINITY) { // off interpreted as oneshot
 		requested_odr_hz = 0;
-	} else
+	} else {
 		requested_odr_hz = 1 / period_s;
+	}
 
 	if (requested_odr_hz > 255) { // 1000Hz*1.2ms/1000ms = 120% active, hpower required
 		odr_code = 255;
@@ -121,25 +124,29 @@ int mmc5603_update_odr(float period_s, float *actual_period_s)
 
 	// Set bandwidth, then ODR -> Cmm_freq_en -> Cmm_en (Rev. B, p. 13).
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_CONTROL_1, bandwidth_code);
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_ODR, odr_code);
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_MAG,
 		MMC5603NJ_CONTROL_0,
 		MCTRL0_AUTO_SR_EN | (odr_code ? MCTRL0_CMM_FREQ_EN : 0)
 	);
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_MAG,
 		MMC5603NJ_CONTROL_2,
 		high_power_bit | (odr_code ? (MCTRL2_CMM_EN | MCTRL2_EN_PRD_SET | set_interval_code) : 0)
 	);
-	if (err)
+	if (err) {
 		goto error;
+	}
 
 	last_state = state;
 	oneshot_trigger_ms = 0;
@@ -163,12 +170,17 @@ void mmc5603_mag_oneshot(void)
 	 * self-clears after calculating the period (Rev. B, Internal Control 0). */
 	last_state = 0xffff;
 	// enable auto set/reset and trigger oneshot
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_CONTROL_0, (auto_set_reset ? MCTRL0_AUTO_SR_EN : 0) | MCTRL0_TAKE_MEAS_M);
+	int err = ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_MAG,
+		MMC5603NJ_CONTROL_0,
+		(auto_set_reset ? MCTRL0_AUTO_SR_EN : 0) | MCTRL0_TAKE_MEAS_M
+	);
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_trigger_ms = k_uptime_get();
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 bool mmc5603_mag_read(float m[3])
@@ -199,9 +211,13 @@ bool mmc5603_mag_read(float m[3])
 	}
 
 	uint8_t rawData[9]; // x/y/z mag register data stored here
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_XOUT_0, &rawData[0], 9); // Read the 9 raw data registers into data array
-	if (err)
-	{
+	int err = ssi_burst_read(
+		SENSOR_INTERFACE_DEV_MAG,
+		MMC5603NJ_XOUT_0,
+		&rawData[0],
+		9
+	); // Read the 9 raw data registers into data array
+	if (err) {
 		LOG_ERR("Communication error");
 		return false;
 	}
@@ -234,21 +250,24 @@ float mmc5603_temp_read(float bias[3])
 
 		err = mmc5603_update_odr(INFINITY, &actual_period_s);
 		auto_set_reset = false;
-		if (!err)
+		if (!err) {
 			err = mmc5603_RESET();
+		}
 		if (!err) {
 			mmc5603_mag_oneshot();
 			err = mmc5603_mag_read(reset_sample) ? 0 : -EIO;
 		}
-		if (!err)
+		if (!err) {
 			err = mmc5603_SET();
+		}
 		if (!err) {
 			mmc5603_mag_oneshot();
 			err = mmc5603_mag_read(set_sample) ? 0 : -EIO;
 		}
 		if (!err) {
-			for (int i = 0; i < 3; i++)
+			for (int i = 0; i < 3; i++) {
 				new_bias[i] = (set_sample[i] + reset_sample[i]) / 2;
+			}
 		}
 
 		auto_set_reset = true;
@@ -273,11 +292,15 @@ float mmc5603_temp_read(float bias[3])
 void mmc5603_mag_process(uint8_t *raw_m, float m[3])
 {
 	uint32_t rawMag[3];
-	rawMag[0] = (uint32_t)(raw_m[0] << 12 | raw_m[1] << 4 | (raw_m[6] & 0xF0) >> 4); // Turn the 20 bits into a unsigned 32-bit value
-	rawMag[1] = (uint32_t)(raw_m[2] << 12 | raw_m[3] << 4 | (raw_m[7] & 0xF0) >> 4); // Turn the 20 bits into a unsigned 32-bit value
-	rawMag[2] = (uint32_t)(raw_m[4] << 12 | raw_m[5] << 4 | (raw_m[8] & 0xF0) >> 4); // Turn the 20 bits into a unsigned 32-bit value
-	for (int i = 0; i < 3; i++) // x, y, z
+	rawMag[0] = (uint32_t)(raw_m[0] << 12 | raw_m[1] << 4
+						   | (raw_m[6] & 0xF0) >> 4); // Turn the 20 bits into a unsigned 32-bit value
+	rawMag[1] = (uint32_t)(raw_m[2] << 12 | raw_m[3] << 4
+						   | (raw_m[7] & 0xF0) >> 4); // Turn the 20 bits into a unsigned 32-bit value
+	rawMag[2] = (uint32_t)(raw_m[4] << 12 | raw_m[5] << 4
+						   | (raw_m[8] & 0xF0) >> 4); // Turn the 20 bits into a unsigned 32-bit value
+	for (int i = 0; i < 3; i++) {                     // x, y, z
 		m[i] = ((float)rawMag[i] - offset) * sensitivity;
+	}
 }
 
 static int mmc5603_SET(void)
@@ -313,5 +336,6 @@ const sensor_mag_t sensor_mag_mmc5603nj = {
 	*mmc5603_temp_read,
 
 	*mmc5603_mag_process,
-	6, 9 // if only reading 6 bytes, the data will be lower precision
+	6,
+	9 // if only reading 6 bytes, the data will be lower precision
 };

@@ -19,16 +19,18 @@ LOG_MODULE_REGISTER(LIS2MDL, LOG_LEVEL_DBG);
 static uint8_t lis2_cfg_c(void)
 {
 	uint8_t cfg_c = CFG_C_BDU;
-	if (sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) == SENSOR_INTERFACE_SPEC_SPI)
+	if (sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) == SENSOR_INTERFACE_SPEC_SPI) {
 		cfg_c |= CFG_C_4WSPI | CFG_C_I2C_DIS;
+	}
 	return cfg_c;
 }
 
 static int lis2_soft_reset(void)
 {
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, CFG_A_SOFT_RST);
-	if (err)
+	if (err) {
 		return err;
+	}
 
 	/* Datasheet: SOFT_RST self-clears after ~5 µs. */
 	k_busy_wait(10);
@@ -36,10 +38,12 @@ static int lis2_soft_reset(void)
 	for (int i = 0; i < 20; i++) {
 		uint8_t cfg_a = 0;
 		err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, &cfg_a);
-		if (err)
+		if (err) {
 			return err;
-		if (!(cfg_a & CFG_A_SOFT_RST))
+		}
+		if (!(cfg_a & CFG_A_SOFT_RST)) {
 			return 0;
+		}
 		k_busy_wait(10);
 	}
 
@@ -78,8 +82,9 @@ void lis2_shutdown(void)
 {
 	last_cfg_a = 0xff;
 	int err = lis2_soft_reset();
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 int lis2_update_odr(float period_s, float *actual_period_s)
@@ -125,8 +130,9 @@ int lis2_update_odr(float period_s, float *actual_period_s)
 	uint8_t cfg_a;
 	if (mode_code == MD_IDLE) {
 		cfg_a = MD_IDLE;
-	} else
+	} else {
 		cfg_a = CFG_A_COMP_TEMP_EN | (odr_code << 2) | MD_CONTINUOUS;
+	}
 
 	if (last_cfg_a == cfg_a) {
 		*actual_period_s = period_s;
@@ -138,13 +144,15 @@ int lis2_update_odr(float period_s, float *actual_period_s)
 
 	if (mode_code == MD_CONTINUOUS) {
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, lis2_cfg_c());
-		if (err)
+		if (err) {
 			goto error;
+		}
 	}
 
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_A, cfg_a);
-	if (err)
+	if (err) {
 		goto error;
+	}
 
 	/* First sample after continuous enable needs turn-on delay. */
 	if (mode_code == MD_CONTINUOUS && was_idle) {
@@ -173,8 +181,9 @@ bool lis2_mag_read(float m[3])
 		LOG_ERR("Communication error");
 		return false;
 	}
-	if (!(frame[0] & STATUS_ZYXDA))
+	if (!(frame[0] & STATUS_ZYXDA)) {
 		return false;
+	}
 	lis2_mag_process(&frame[1], m);
 	return true;
 }
@@ -204,16 +213,16 @@ void lis2_mag_process(uint8_t *raw_m, float m[3])
 	}
 }
 
-const sensor_mag_t sensor_mag_lis2mdl = {
-	*lis2_init,
-	*lis2_shutdown,
+const sensor_mag_t sensor_mag_lis2mdl
+	= {*lis2_init,
+	   *lis2_shutdown,
 
-	*lis2_update_odr,
+	   *lis2_update_odr,
 
-	*lis2_mag_oneshot,
-	*lis2_mag_read,
-	*lis2_temp_read,
+	   *lis2_mag_oneshot,
+	   *lis2_mag_read,
+	   *lis2_temp_read,
 
-	*lis2_mag_process,
-	7, 7
-};
+	   *lis2_mag_process,
+	   7,
+	   7};

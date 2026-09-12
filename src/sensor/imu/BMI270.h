@@ -5,7 +5,7 @@
 
 #define BMI270_INTERNAL_STATUS 0x21
 
-#define BMI270_DATA_8  0x0C // accel
+#define BMI270_DATA_8 0x0C  // accel
 #define BMI270_DATA_14 0x12 // gyro
 #define BMI270_TEMPERATURE_0 0x22
 
@@ -21,9 +21,9 @@
 #define BMI270_ANYMO_1 0x3C
 #define BMI270_ANYMO_2 0x3E
 
-#define BMI270_ACC_CONF  0x40
+#define BMI270_ACC_CONF 0x40
 #define BMI270_ACC_RANGE 0x41
-#define BMI270_GYR_CONF  0x42
+#define BMI270_GYR_CONF 0x42
 #define BMI270_GYR_RANGE 0x43
 
 #define BMI270_FIFO_WTM_0 0x46
@@ -40,40 +40,40 @@
 #define BMI270_INIT_DATA 0x5E
 
 #define BMI270_GYR_CRT_CONF 0x69
-#define BMI270_OFFSET_6  0x77
+#define BMI270_OFFSET_6 0x77
 #define BMI270_GYR_USR_GAIN 0x78
 
-#define BMI270_PWR_CONF  0x7C
-#define BMI270_PWR_CTRL  0x7D
-#define BMI270_CMD       0x7E
+#define BMI270_PWR_CONF 0x7C
+#define BMI270_PWR_CTRL 0x7D
+#define BMI270_CMD 0x7E
 
 // accel only
 #define ODR_0p78 0x01
-#define ODR_1p5  0x02
-#define ODR_3p1  0x03
+#define ODR_1p5 0x02
+#define ODR_3p1 0x03
 #define ODR_6p25 0x04
 #define ODR_12p5 0x05
 // accel and gyro
-#define ODR_25   0x06
-#define ODR_50   0x07
-#define ODR_100  0x08
-#define ODR_200  0x09
-#define ODR_400  0x0a
-#define ODR_800  0x0b
-#define ODR_1k6  0x0c
+#define ODR_25 0x06
+#define ODR_50 0x07
+#define ODR_100 0x08
+#define ODR_200 0x09
+#define ODR_400 0x0a
+#define ODR_800 0x0b
+#define ODR_1k6 0x0c
 // gyro only
-#define ODR_3k2  0x0d
+#define ODR_3k2 0x0d
 
-#define RANGE_2G  0x00
-#define RANGE_4G  0x01
-#define RANGE_8G  0x02
+#define RANGE_2G 0x00
+#define RANGE_4G 0x01
+#define RANGE_8G 0x02
 #define RANGE_16G 0x03
 
 #define RANGE_2000 0x00
 #define RANGE_1000 0x01
-#define RANGE_500  0x02
-#define RANGE_250  0x03
-#define RANGE_125  0x04
+#define RANGE_500 0x02
+#define RANGE_250 0x03
+#define RANGE_125 0x04
 
 int bmi_init(
 	float clock_rate,

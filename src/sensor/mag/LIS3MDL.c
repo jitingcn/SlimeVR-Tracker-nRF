@@ -20,11 +20,13 @@ int lis3_init(float period_s, float *actual_period_s)
 	oneshot_failed = false;
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG1, 0x80); // enable temp sensor
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG2, FS_8G << 5);
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = lis3_update_odr(period_s, actual_period_s);
 	return (err < 0 ? err : 0);
 
@@ -40,8 +42,9 @@ void lis3_shutdown(void)
 	oneshot_pending = false;
 	oneshot_failed = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG2, 0x04);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 int lis3_update_odr(float period_s, float *actual_period_s)
@@ -118,22 +121,30 @@ int lis3_update_odr(float period_s, float *actual_period_s)
 		return 0; /* already configured */
 	}
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG1, 0x80 | ctrl); // temp, X/Y operating mode, and ODR
-	if (err)
+	int err = ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_MAG,
+		LIS3MDL_CTRL_REG1,
+		0x80 | ctrl
+	); // temp, X/Y operating mode, and ODR
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, mode_code); // set measurement mode
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_MAG,
 		LIS3MDL_CTRL_REG4,
 		performance_code << 2
 	); // set Z-axis operating mode
-	if (err)
+	if (err) {
 		goto error;
+	}
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG5, LIS3MDL_CTRL_REG5_BDU);
-	if (err)
+	if (err) {
 		goto error;
+	}
 
 	last_state = state;
 	oneshot_pending = false;
@@ -154,8 +165,9 @@ void lis3_mag_oneshot(void)
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_deadline_ms = k_uptime_get() + 20;
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 bool lis3_mag_read(float m[3])
@@ -192,8 +204,9 @@ bool lis3_mag_read(float m[3])
 		LOG_ERR("Communication error");
 		return false;
 	}
-	if (!(frame[0] & LIS3MDL_STATUS_ZYXDA))
+	if (!(frame[0] & LIS3MDL_STATUS_ZYXDA)) {
 		return false;
+	}
 	lis3_mag_process(&frame[1], m);
 	return true;
 }
@@ -223,16 +236,16 @@ void lis3_mag_process(uint8_t *raw_m, float m[3])
 	}
 }
 
-const sensor_mag_t sensor_mag_lis3mdl = {
-	*lis3_init,
-	*lis3_shutdown,
+const sensor_mag_t sensor_mag_lis3mdl
+	= {*lis3_init,
+	   *lis3_shutdown,
 
-	*lis3_update_odr,
+	   *lis3_update_odr,
 
-	*lis3_mag_oneshot,
-	*lis3_mag_read,
-	*lis3_temp_read,
+	   *lis3_mag_oneshot,
+	   *lis3_mag_read,
+	   *lis3_temp_read,
 
-	*lis3_mag_process,
-	7, 7
-};
+	   *lis3_mag_process,
+	   7,
+	   7};

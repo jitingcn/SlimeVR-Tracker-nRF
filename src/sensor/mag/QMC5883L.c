@@ -13,26 +13,26 @@
 
 #define QMC5883L_STATUS 0x06
 #define QMC5883L_STATUS_DRDY 0x01
-#define QMC5883L_STATUS_OVL  0x02
-#define QMC5883L_STATUS_DOR  0x04
+#define QMC5883L_STATUS_OVL 0x02
+#define QMC5883L_STATUS_DOR 0x04
 
 #define QMC5883L_TOUT_L 0x07
 
-#define QMC5883L_CTRL_1  0x09
-#define QMC5883L_CTRL_2  0x0A
+#define QMC5883L_CTRL_1 0x09
+#define QMC5883L_CTRL_2 0x0A
 #define QMC5883L_SET_RST 0x0B
 #define QMC5883L_CHIP_ID 0x0D
 
-#define QMC5883L_MODE_STANDBY    0x00
+#define QMC5883L_MODE_STANDBY 0x00
 #define QMC5883L_MODE_CONTINUOUS 0x01
 
-#define QMC5883L_ODR_10HZ  0x00
-#define QMC5883L_ODR_50HZ  0x01
+#define QMC5883L_ODR_10HZ 0x00
+#define QMC5883L_ODR_50HZ 0x01
 #define QMC5883L_ODR_100HZ 0x02
 #define QMC5883L_ODR_200HZ 0x03
 
-#define QMC5883L_ODR_10Hz  QMC5883L_ODR_10HZ
-#define QMC5883L_ODR_50Hz  QMC5883L_ODR_50HZ
+#define QMC5883L_ODR_10Hz QMC5883L_ODR_10HZ
+#define QMC5883L_ODR_50Hz QMC5883L_ODR_50HZ
 #define QMC5883L_ODR_100Hz QMC5883L_ODR_100HZ
 #define QMC5883L_ODR_200Hz QMC5883L_ODR_200HZ
 
@@ -42,11 +42,11 @@
 #define QMC5883L_OSR_512 0x00
 #define QMC5883L_OSR_256 0x01
 #define QMC5883L_OSR_128 0x02
-#define QMC5883L_OSR_64  0x03
+#define QMC5883L_OSR_64 0x03
 
 #define QMC5883L_SOFT_RST 0x80
-#define QMC5883L_ROL_PNT  0x40
-#define QMC5883L_INT_ENB  0x01
+#define QMC5883L_ROL_PNT 0x40
+#define QMC5883L_INT_ENB 0x01
 
 static const float sensitivity = 1.0f / 3000.0f; // 3000 LSB/G at ±8G range
 
@@ -95,8 +95,9 @@ void qmc5883l_shutdown(void)
 	oneshot_failed = false;
 	last_raw_sample_valid = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, QMC5883L_MODE_STANDBY);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 int qmc5883l_update_odr(float period_s, float *actual_period_s)
@@ -139,8 +140,9 @@ int qmc5883l_update_odr(float period_s, float *actual_period_s)
 	int err;
 	if (mode_code == QMC5883L_MODE_STANDBY) {
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, QMC5883L_MODE_STANDBY);
-	} else
+	} else {
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, config_code);
+	}
 	if (err) {
 		LOG_ERR("Communication error");
 		last_config_code = 0xff;
@@ -163,20 +165,24 @@ int qmc5883l_update_odr(float period_s, float *actual_period_s)
 
 void qmc5883l_mag_oneshot(void)
 {
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, (QMC5883L_OSR_512 << 6) | (QMC5883L_RNG_8G << 4) | (QMC5883L_ODR_200Hz << 2) | QMC5883L_MODE_CONTINUOUS);
+	int err = ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_MAG,
+		QMC5883L_CTRL_1,
+		(QMC5883L_OSR_512 << 6) | (QMC5883L_RNG_8G << 4) | (QMC5883L_ODR_200Hz << 2) | QMC5883L_MODE_CONTINUOUS
+	);
 	last_config_code = 0xff;
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_trigger_ms = k_uptime_get();
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 bool qmc5883l_mag_read(float m[3])
 {
 	bool was_oneshot = oneshot_pending;
-	if (oneshot_pending)
-	{
+	if (oneshot_pending) {
 		if (oneshot_failed) {
 			oneshot_pending = false;
 			oneshot_failed = false;
@@ -185,8 +191,7 @@ bool qmc5883l_mag_read(float m[3])
 
 		uint8_t status = 0;
 		int64_t deadline_ms = oneshot_trigger_ms + 10;
-		while ((status & QMC5883L_STATUS_DRDY) == 0)
-		{
+		while ((status & QMC5883L_STATUS_DRDY) == 0) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_STATUS, &status);
 			if (err) {
 				LOG_ERR("Communication error");
@@ -217,8 +222,9 @@ bool qmc5883l_mag_read(float m[3])
 			LOG_ERR("Communication error");
 			return false;
 		}
-		if (!(status & QMC5883L_STATUS_DRDY) || (status & QMC5883L_STATUS_OVL))
+		if (!(status & QMC5883L_STATUS_DRDY) || (status & QMC5883L_STATUS_OVL)) {
 			return false;
+		}
 	}
 	uint8_t rawData[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, rawData, 6);
@@ -229,11 +235,13 @@ bool qmc5883l_mag_read(float m[3])
 
 	int64_t now = k_uptime_get();
 	if (last_raw_sample_valid && memcmp(rawData, last_raw_sample, 6) == 0) {
-		if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10))
+		if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10)) {
 			return false;
+		}
 		last_mag_time_ms += mag_period_ms;
-		if (now - last_mag_time_ms > mag_period_ms * 2)
+		if (now - last_mag_time_ms > mag_period_ms * 2) {
 			last_mag_time_ms = now;
+		}
 	} else {
 		last_mag_time_ms = now;
 	}
@@ -245,24 +253,23 @@ bool qmc5883l_mag_read(float m[3])
 
 void qmc5883l_mag_process(uint8_t *raw_m, float m[3])
 {
-	for (int i = 0; i < 3; i++)
-	{
+	for (int i = 0; i < 3; i++) {
 		uint16_t raw = ((uint16_t)raw_m[i * 2 + 1] << 8) | raw_m[i * 2];
 		m[i] = (int16_t)raw;
 		m[i] *= sensitivity;
 	}
 }
 
-const sensor_mag_t sensor_mag_qmc5883l = {
-	qmc5883l_init,
-	qmc5883l_shutdown,
+const sensor_mag_t sensor_mag_qmc5883l
+	= {qmc5883l_init,
+	   qmc5883l_shutdown,
 
-	qmc5883l_update_odr,
+	   qmc5883l_update_odr,
 
-	qmc5883l_mag_oneshot,
-	qmc5883l_mag_read,
-	mag_none_temp_read,
+	   qmc5883l_mag_oneshot,
+	   qmc5883l_mag_read,
+	   mag_none_temp_read,
 
-	qmc5883l_mag_process,
-	6, 6
-};
+	   qmc5883l_mag_process,
+	   6,
+	   6};

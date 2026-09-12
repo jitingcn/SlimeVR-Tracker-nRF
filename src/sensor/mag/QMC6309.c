@@ -21,8 +21,8 @@
 #define QMC6309_CTRL_REG_1 0x0A
 
 #define MD_SUSPEND 0b00
-#define MD_NORMAL  0b01
-#define MD_SINGLE  0b10
+#define MD_NORMAL 0b01
+#define MD_SINGLE 0b10
 #define MD_CONTINUOUS 0b11
 #define MD_MASK 0b11
 
@@ -50,9 +50,9 @@
 #define RNG_16G 0b01
 #define RNG_8G 0b10
 #define RNG_MASK(rng) ((rng) << 2)
-#define ODR_1Hz  0b000 // QMC6309 only; unsupported on QMC6309H
-#define ODR_10Hz  0b001 // QMC6309 only; unsupported on QMC6309H
-#define ODR_50Hz  0b010
+#define ODR_1Hz 0b000  // QMC6309 only; unsupported on QMC6309H
+#define ODR_10Hz 0b001 // QMC6309 only; unsupported on QMC6309H
+#define ODR_50Hz 0b010
 #define ODR_100Hz 0b011
 #define ODR_200Hz 0b100
 #define ODR_MASK(odr) ((odr) << 4)
@@ -106,8 +106,9 @@ void qmc_shutdown(void)
 	last_raw_sample_valid = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_MASK);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_CLEAR);
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 int qmc_update_odr(float period_s, float *actual_period_s)
@@ -157,12 +158,13 @@ int qmc_update_odr(float period_s, float *actual_period_s)
 		QMC6309_CTRL_REG_2,
 		ODR_MASK(odr_code) | RNG_MASK(RNG_8G) | SET_RESET_ON
 	);
-	if (!err)
+	if (!err) {
 		err = ssi_reg_write_byte(
 			SENSOR_INTERFACE_DEV_MAG,
 			QMC6309_CTRL_REG_1,
 			LPF_MASK(LPF_4) | OSR_MASK(OSR_8) | mode_code
 		);
+	}
 	if (err) {
 		LOG_ERR("Communication error");
 		last_state = 0xff;
@@ -185,20 +187,24 @@ int qmc_update_odr(float period_s, float *actual_period_s)
 
 void qmc_mag_oneshot(void)
 {
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_1, LPF_MASK(LPF_4) | OSR_MASK(OSR_8) | MD_SINGLE);
+	int err = ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_MAG,
+		QMC6309_CTRL_REG_1,
+		LPF_MASK(LPF_4) | OSR_MASK(OSR_8) | MD_SINGLE
+	);
 	last_state = 0xff;
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_trigger_ms = k_uptime_get();
-	if (err)
+	if (err) {
 		LOG_ERR("Communication error");
+	}
 }
 
 bool qmc_mag_read(float m[3])
 {
 	bool was_oneshot = oneshot_pending;
-	if (oneshot_pending)
-	{
+	if (oneshot_pending) {
 		if (oneshot_failed) {
 			oneshot_pending = false;
 			oneshot_failed = false;
@@ -208,8 +214,7 @@ bool qmc_mag_read(float m[3])
 		// Oneshot mode: wait for DRDY with timeout
 		uint8_t status = 0;
 		int64_t deadline_ms = oneshot_trigger_ms + 10; // 10ms timeout
-		while ((status & STAT_DATA_RDY_MASK) == 0)
-		{
+		while ((status & STAT_DATA_RDY_MASK) == 0) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
 			if (err) {
 				LOG_ERR("Communication error");
@@ -240,13 +245,13 @@ bool qmc_mag_read(float m[3])
 			LOG_ERR("Communication error");
 			return false;
 		}
-		if (!(status & STAT_DATA_RDY_MASK) || (status & STAT_OVERFLOW_MASK))
+		if (!(status & STAT_DATA_RDY_MASK) || (status & STAT_OVERFLOW_MASK)) {
 			return false;
+		}
 	}
 	uint8_t rawData[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
-	if (err)
-	{
+	if (err) {
 		LOG_ERR("Communication error");
 		return false;
 	}
@@ -255,12 +260,14 @@ bool qmc_mag_read(float m[3])
 	// heuristic trades exact freshness detection for bounded duplicate suppression.
 	int64_t now = k_uptime_get();
 	if (last_raw_sample_valid && memcmp(rawData, last_raw_sample, 6) == 0) {
-		if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10))
+		if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10)) {
 			return false;
+		}
 		// Advance one cached period; resynchronize to now only when far behind.
 		last_mag_time_ms += mag_period_ms;
-		if (now - last_mag_time_ms > mag_period_ms * 2)
+		if (now - last_mag_time_ms > mag_period_ms * 2) {
 			last_mag_time_ms = now;
+		}
 	} else {
 		last_mag_time_ms = now;
 	}
@@ -280,16 +287,16 @@ void qmc_mag_process(uint8_t *raw_m, float m[3])
 	}
 }
 
-const sensor_mag_t sensor_mag_qmc6309 = {
-	qmc_init,
-	qmc_shutdown,
+const sensor_mag_t sensor_mag_qmc6309
+	= {qmc_init,
+	   qmc_shutdown,
 
-	qmc_update_odr,
+	   qmc_update_odr,
 
-	qmc_mag_oneshot,
-	qmc_mag_read,
-	mag_none_temp_read,
+	   qmc_mag_oneshot,
+	   qmc_mag_read,
+	   mag_none_temp_read,
 
-	qmc_mag_process,
-	6, 6
-};
+	   qmc_mag_process,
+	   6,
+	   6};
