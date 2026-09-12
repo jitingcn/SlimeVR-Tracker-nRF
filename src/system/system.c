@@ -32,6 +32,30 @@ static K_MUTEX_DEFINE(sys_storage_lock);
 
 LOG_MODULE_REGISTER(system, LOG_LEVEL_INF);
 
+/* Sole owner of RESETREAS: preserve every cause before clearing the W1C
+ * register. All APPLICATION init and main consumers use this boot snapshot,
+ * independently of whether task watchdog support is enabled. */
+static uint32_t boot_reset_reason;
+
+static int sys_reset_reason_init(void)
+{
+#ifdef NRF_RESET
+	boot_reset_reason = NRF_RESET->RESETREAS;
+	NRF_RESET->RESETREAS = boot_reset_reason;
+#else
+	boot_reset_reason = NRF_POWER->RESETREAS;
+	NRF_POWER->RESETREAS = boot_reset_reason;
+#endif
+	return 0;
+}
+
+SYS_INIT(sys_reset_reason_init, PRE_KERNEL_1, 0);
+
+uint32_t sys_get_reset_reason(void)
+{
+	return boot_reset_reason;
+}
+
 #if DT_NODE_HAS_PROP(DT_ALIAS(sw0), gpios) // Alternate button if available to use as "reset key"
 #define BUTTON_EXISTS true
 static void button_thread(void);
@@ -171,9 +195,9 @@ static bool ram_retention_valid = false;
 static int sys_retained_init(void)
 {
 #ifdef NRF_RESET
-	bool reset_pin_reset = NRF_RESET->RESETREAS & 0x01;
+	bool reset_pin_reset = sys_get_reset_reason() & RESET_RESETREAS_RESETPIN_Msk;
 #else
-	bool reset_pin_reset = NRF_POWER->RESETREAS & 0x01;
+	bool reset_pin_reset = sys_get_reset_reason() & POWER_RESETREAS_RESETPIN_Msk;
 #endif
 	// on most nrf, reset by pin reset will clear retained
 	if (!reset_pin_reset) { // if reset reason is not by pin reset, system automatically trusts retained state
@@ -576,13 +600,13 @@ static int sys_button_init(void)
 {
 #ifdef NRF_RESET
 #ifdef RESET_RESETREAS_VBUS_Msk
-	bool reset_vbus_reset = NRF_RESET->RESETREAS & RESET_RESETREAS_VBUS_Msk;
+	bool reset_vbus_reset = sys_get_reset_reason() & RESET_RESETREAS_VBUS_Msk;
 #else
 	/* SoCs without USB (e.g. nRF54L15) have no VBUS reset reason. */
 	bool reset_vbus_reset = false;
 #endif
 #else
-	bool reset_vbus_reset = NRF_POWER->RESETREAS & POWER_RESETREAS_VBUS_Msk;
+	bool reset_vbus_reset = sys_get_reset_reason() & POWER_RESETREAS_VBUS_Msk;
 #endif
 	gpio_pin_configure_dt(&button0, GPIO_INPUT);
 	gpio_pin_interrupt_configure_dt(&button0, GPIO_INT_EDGE_BOTH);

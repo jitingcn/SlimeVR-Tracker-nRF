@@ -38,6 +38,13 @@ typedef enum {
 	WDT_CHANNEL_COUNT
 } wdt_channel_id_t;
 
+/**
+ * @brief Check if last reset was caused by watchdog
+ *
+ * @return true if WDT caused the reset
+ */
+bool watchdog_caused_reset(void);
+
 #if defined(CONFIG_TASK_WDT)
 /*
  * Full implementation when Task WDT is enabled
@@ -85,13 +92,6 @@ void watchdog_pause(wdt_channel_id_t channel);
  * @param channel Channel ID to resume
  */
 void watchdog_resume(wdt_channel_id_t channel);
-
-/**
- * @brief Check if last reset was caused by watchdog
- *
- * @return true if WDT caused the reset
- */
-bool watchdog_caused_reset(void);
 
 /**
  * @brief Get the current watchdog reset count
@@ -152,7 +152,6 @@ static inline int watchdog_register_thread(wdt_channel_id_t channel, uint32_t ti
 static inline void watchdog_feed(wdt_channel_id_t channel) { (void)channel; }
 static inline void watchdog_pause(wdt_channel_id_t channel) { (void)channel; }
 static inline void watchdog_resume(wdt_channel_id_t channel) { (void)channel; }
-static inline bool watchdog_caused_reset(void) { return false; }
 static inline uint8_t watchdog_get_reset_count(void) { return 0; }
 static inline void watchdog_clear_reset_count(void) {}
 static inline void watchdog_mark_boot_success(void) {}

@@ -5,20 +5,20 @@
  */
 
 #include <zephyr/kernel.h>
+#include "watchdog.h"
+#include "system/system.h"
 
+#include <hal/nrf_power.h>
 /* Only compile when Task WDT is enabled */
 #if defined(CONFIG_TASK_WDT)
 
-#include "watchdog.h"
 #include "globals.h"
-#include "system/system.h"
 #include <zephyr/task_wdt/task_wdt.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/device.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/reboot.h>
-#include <hal/nrf_power.h>
 
 LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_INF);
 
@@ -61,9 +61,6 @@ static const char *channel_names[] = {
 	"calibration",
 	"scan"
 };
-
-/* Store WDT reset status before RESETREAS is cleared by early_check */
-static bool last_reset_was_wdt = false;
 
 /* Default timeout values in milliseconds */
 static const uint32_t default_timeouts[] = {
@@ -141,8 +138,8 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
  */
 static bool should_enter_dfu(void)
 {
-	/* Use saved WDT reset status (RESETREAS was cleared in early_check) */
-	if (!last_reset_was_wdt) {
+	/* Reset causes remain available after the boot snapshot clears hardware. */
+	if (!watchdog_caused_reset()) {
 		return false;
 	}
 
@@ -197,26 +194,16 @@ static void enter_dfu_mode(void)
 }
 
 /**
- * @brief Early check for WDT reset (must be called before RESETREAS is cleared)
+ * @brief Save OTA diagnostics before later startup code changes GPREGRET
  */
 static int watchdog_early_check(void)
 {
-	/* Check if last reset was caused by watchdog - save for later use */
-	last_reset_was_wdt = watchdog_caused_reset();
-
 	/* Save GPREGRET for OTA RAM engine debug (survives system reset) */
 	saved_gpregret = nrf_power_gpregret_get(NRF_POWER, 0) & 0xFF;
 	if (saved_gpregret >= 0xD0 && saved_gpregret <= 0xDE) {
 		/* Clear it so bootloader doesn't see it on next reset */
 		nrf_power_gpregret_set(NRF_POWER, 0, 0);
 	}
-
-	/* Clear reset reason flags early to prevent other code from seeing stale values */
-#ifdef NRF_RESET
-	NRF_RESET->RESETREAS = NRF_RESET->RESETREAS;
-#else
-	NRF_POWER->RESETREAS = NRF_POWER->RESETREAS;
-#endif
 
 	return 0;
 }
@@ -237,7 +224,7 @@ int watchdog_init(void)
 	}
 
 	/* Process WDT reset state */
-	if (last_reset_was_wdt && retained) {
+	if (watchdog_caused_reset() && retained) {
 		LOG_WRN("System was reset by watchdog!");
 
 		/* Check if watchdog_state is valid (magic number matches) */
@@ -389,27 +376,6 @@ void watchdog_resume(wdt_channel_id_t channel)
 	}
 }
 
-bool watchdog_caused_reset(void)
-{
-#ifdef NRF_RESET
-	uint32_t reset_reason = NRF_RESET->RESETREAS;
-	uint32_t watchdog_mask = 0;
-
-#ifdef RESET_RESETREAS_DOG_Msk
-	watchdog_mask |= RESET_RESETREAS_DOG_Msk;
-#endif
-#ifdef RESET_RESETREAS_DOG0_Msk
-	watchdog_mask |= RESET_RESETREAS_DOG0_Msk;
-#endif
-#ifdef RESET_RESETREAS_DOG1_Msk
-	watchdog_mask |= RESET_RESETREAS_DOG1_Msk;
-#endif
-	return (reset_reason & watchdog_mask) != 0;
-#else
-	uint32_t reset_reason = NRF_POWER->RESETREAS;
-	return (reset_reason & POWER_RESETREAS_DOG_Msk) != 0;
-#endif
-}
 
 uint8_t watchdog_get_reset_count(void)
 {
@@ -463,3 +429,25 @@ const char *watchdog_get_channel_name(wdt_channel_id_t channel)
 }
 
 #endif /* CONFIG_TASK_WDT */
+
+bool watchdog_caused_reset(void)
+{
+#ifdef NRF_RESET
+	uint32_t reset_reason = sys_get_reset_reason();
+	uint32_t watchdog_mask = 0;
+
+#ifdef RESET_RESETREAS_DOG_Msk
+	watchdog_mask |= RESET_RESETREAS_DOG_Msk;
+#endif
+#ifdef RESET_RESETREAS_DOG0_Msk
+	watchdog_mask |= RESET_RESETREAS_DOG0_Msk;
+#endif
+#ifdef RESET_RESETREAS_DOG1_Msk
+	watchdog_mask |= RESET_RESETREAS_DOG1_Msk;
+#endif
+	return (reset_reason & watchdog_mask) != 0;
+#else
+	uint32_t reset_reason = sys_get_reset_reason();
+	return (reset_reason & POWER_RESETREAS_DOG_Msk) != 0;
+#endif
+}
