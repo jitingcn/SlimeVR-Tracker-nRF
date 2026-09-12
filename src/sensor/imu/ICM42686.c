@@ -16,9 +16,10 @@
 #include <hal/nrf_gpio.h>
 
 #include "ICM42686.h"
+#include "icm426xx_hires.h"
 #include "sensor/sensor_none.h"
 
-#define PACKET_SIZE 20
+#define PACKET_SIZE ICM426XX_HIRES_PACKET_SIZE
 
 static const float accel_sensitivity = 16.0f / 32768.0f;  // Always 16G
 static const float gyro_sensitivity = 2000.0f / 32768.0f; // Always 2000dps
@@ -342,50 +343,10 @@ uint16_t icm42686_fifo_read(uint8_t *data, uint16_t len)
 	return total;
 }
 
-static const uint8_t invalid[6] = {0x80, 0x00, 0x80, 0x00, 0x80, 0x00};
-
 int icm42686_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
 	index *= PACKET_SIZE;
-
-	if ((data[index] & 0x80) == 0x80) {
-		return 1; // Skip empty packets
-	}
-
-	if ((data[index] & 0x7F) == 0x7F) {
-		return 1; // Skip empty packets
-	}
-
-	float a_raw[3] = {0};
-	float g_raw[3] = {0};
-
-	if (memcmp(&data[index + 1], invalid, sizeof(invalid))) {
-		for (int i = 0; i < 3; i++) {
-			a_raw[i] = (int32_t)((((uint32_t)data[index + 1 + (i * 2)]) << 24)
-								 | (((uint32_t)data[index + 2 + (i * 2)]) << 16)
-								 | (((uint32_t)data[index + 17 + i] & 0xF0) << 8));
-		}
-	}
-
-	if (memcmp(&data[index + 7], invalid, sizeof(invalid))) {
-		for (int i = 0; i < 3; i++) {
-			g_raw[i] = (int32_t)((((uint32_t)data[index + 7 + (i * 2)]) << 24)
-								 | (((uint32_t)data[index + 8 + (i * 2)]) << 16)
-								 | (((uint32_t)data[index + 17 + i] & 0x0F) << 12));
-		}
-	} else if (!memcmp(&data[index + 1], invalid, sizeof(invalid))) {
-		return 1;
-	}
-
-	for (int i = 0; i < 3; i++) {
-		a_raw[i] *= accel_sensitivity_32;
-		g_raw[i] *= gyro_sensitivity_32;
-	}
-
-	memcpy(a, a_raw, sizeof(a_raw));
-	memcpy(g, g_raw, sizeof(g_raw));
-
-	return 0;
+	return icm426xx_hires_decode(&data[index], accel_sensitivity_32, gyro_sensitivity_32, a, g);
 }
 
 void icm42686_accel_read(float a[3])

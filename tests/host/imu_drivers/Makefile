@@ -10,12 +10,18 @@ IMU_SOURCES := \
 	../../../src/sensor/imu/ICM42688.c \
 	../../../src/sensor/imu/ICM45686.c
 
+IMU_HEADERS := $(IMU_SOURCES:.c=.h) ../../../src/sensor/imu/BMI270_firmware.h \
+	../../../src/sensor/imu/icm426xx_hires.h
+COMMON_HEADERS := ../../../src/sensor/sensor.h ../../../src/sensor/sensor_none.h \
+	../../../src/sensor/interface.h ../../../src/sensor/diagnostics.h
+HOST_HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h hal/*.h)
+
 .PHONY: check clean
 
 check: test_imu_odr
 	./test_imu_odr
 
-test_imu_odr: test_imu_odr.c host_stubs.c $(IMU_SOURCES)
+test_imu_odr: test_imu_odr.c host_stubs.c $(IMU_SOURCES) $(IMU_HEADERS) $(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ test_imu_odr.c host_stubs.c $(IMU_SOURCES) $(LDLIBS)
 
 clean:
