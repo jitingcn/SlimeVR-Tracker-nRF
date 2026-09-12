@@ -400,6 +400,14 @@ enum tdma_ping_admission tdma_wait_for_ping_window(void)
 	if (!in_current_window) {
 		if (target - server_ticks > frame_ticks) {
 			tdma_ping_deferred_frame++;
+			uint64_t wake_ticks = target - server_ticks - frame_ticks;
+			/* The coarse millisecond wake can arrive less than 1 ms before
+			 * preparation is allowed. Yield only that rounding remainder.
+			 * A changed schedule farther away must return to serving data,
+			 * not block here until its new PING window. */
+			if (wake_ticks <= 32768U / 1000U) {
+				tdma_sleep_network_ticks(wake_ticks);
+			}
 			return TDMA_PING_DEFERRED;
 		}
 		tdma_wait_until_network_tick(target);

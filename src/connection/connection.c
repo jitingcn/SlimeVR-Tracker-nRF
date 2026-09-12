@@ -1755,10 +1755,10 @@ void connection_thread(void)
 		/* In test mode all low-frequency data rides the next target-rate
 		 * packet. Standalone sends would violate the configured ceiling. */
 		bool mag_due = !in_test_mode && sensor_data_snapshot_m_pending(&sensor_data_snapshot)
-			&& (now - last_mag_time > 100);
-		bool info_due = !in_test_mode && sensor_ids_set && (now - last_info_time > 100);
-		bool status_due = !in_test_mode && (now - last_status_time > 1000);
-		bool runtime_due = !in_test_mode && (now - last_runtime_time > 1000);
+			&& (now - last_mag_time >= 100);
+		bool info_due = !in_test_mode && sensor_ids_set && (now - last_info_time >= 100);
+		bool status_due = !in_test_mode && (now - last_status_time >= 1000);
+		bool runtime_due = !in_test_mode && (now - last_runtime_time >= 1000);
 
 		/* Low-frequency fields may always piggyback on a quat/test packet. */
 		bool info_soon = sensor_ids_set && (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
