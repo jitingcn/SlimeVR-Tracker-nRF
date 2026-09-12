@@ -214,16 +214,22 @@ static int usbd_setup(usbd_msg_cb_t msg_cb)
 	return ret;
 }
 
-static void usb_serial_stop_locked(void)
+static void usb_serial_stop_locked(bool invalidate)
 {
 #if USB_CONSOLE_IS_CDC
 	const struct log_backend *const backend = log_backend_get_by_name("log_backend_uart");
 
-	console_serial_stop();
+	if (invalidate) {
+		console_serial_stop();
+	} else {
+		console_serial_close();
+	}
 	log_backend_disable(backend);
 	if (get_status(SYS_STATUS_SERIAL_ACTIVE)) {
 		set_status(SYS_STATUS_SERIAL_ACTIVE, false);
 	}
+#else
+	(void)invalidate;
 #endif
 }
 
@@ -256,7 +262,7 @@ static void usb_configure(bool new_configured)
 		}
 		/* Close serial even when an earlier notification already cleared
 		 * the configuration state. */
-		usb_serial_stop_locked();
+		usb_serial_stop_locked(true);
 		if (was_configured) {
 #if CONFIG_CONNECTION_OVER_HID
 			hid_thread_abort();
@@ -450,7 +456,9 @@ static void usb_ctrl_service_step(
 			request_reboot = true;
 		}
 #endif
-		usb_serial_stop_locked();
+		/* Ordinary close preserves accepted lines; 1200-touch retires them
+		 * before requesting the deliberate reboot. */
+		usb_serial_stop_locked(request_reboot);
 	}
 	k_mutex_unlock(&usb_serial_transition_lock);
 
