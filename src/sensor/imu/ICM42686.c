@@ -57,6 +57,9 @@ static float clock_scale = 1; // ODR is scaled by clock_rate/clock_reference
 static float fifo_multiplier_factor = FIFO_MULT;
 static float fifo_multiplier = 0;
 
+static float fifo_temp;
+static bool fifo_temp_valid;
+
 LOG_MODULE_REGISTER(ICM42686, LOG_LEVEL_DBG);
 
 int icm42686_init(
@@ -67,6 +70,7 @@ int icm42686_init(
 	float *gyro_actual_time
 )
 {
+	fifo_temp_valid = false;
 	// setup interface for SPI
 	if (!sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0)) {
 		fifo_multiplier_factor = FIFO_MULT_SPI; // SPI mode
@@ -118,8 +122,8 @@ int icm42686_init(
 	err |= ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		ICM42686_FIFO_CONFIG1,
-		0x13
-	); // enable FIFO hires (A+G packet format matches parser)
+		0x17
+	); // enable FIFO hires A+G and full-resolution temperature
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_FIFO_CONFIG,
 							  1 << 6); // begin FIFO stream
@@ -166,6 +170,7 @@ int icm42686_init(
 
 void icm42686_shutdown(void)
 {
+	fifo_temp_valid = false;
 	last_accel_odr = 0xff;
 	last_gyro_odr = 0xff;
 	last_accel_mode = 0xff;
@@ -297,6 +302,7 @@ int icm42686_update_odr(float accel_time, float gyro_time, float *accel_actual_t
 
 uint16_t icm42686_fifo_read(uint8_t *data, uint16_t len)
 {
+	fifo_temp_valid = false;
 	uint16_t total = 0;
 	uint16_t packets = UINT16_MAX;
 
@@ -305,6 +311,7 @@ uint16_t icm42686_fifo_read(uint8_t *data, uint16_t len)
 
 		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42686_FIFO_COUNTH, &rawCount[0], 2);
 		if (err) {
+			fifo_temp_valid = false;
 			LOG_ERR("Failed to read FIFO count");
 			return total;
 		}
@@ -331,8 +338,12 @@ uint16_t icm42686_fifo_read(uint8_t *data, uint16_t len)
 		err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM42686_FIFO_DATA, data, count, PACKET_SIZE);
 
 		if (err) {
+			fifo_temp_valid = false;
 			LOG_ERR("Communication error");
 			return total;
+		}
+		if (!icm426xx_hires_temperature(data, packets, &fifo_temp)) {
+			fifo_temp_valid = true;
 		}
 
 		data += packets * PACKET_SIZE;
@@ -389,6 +400,10 @@ void icm42686_gyro_read(float g[3])
 
 float icm42686_temp_read(void)
 {
+	if (fifo_temp_valid) {
+		return fifo_temp;
+	}
+
 	uint8_t rawTemp[2];
 
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42686_TEMP_DATA1, &rawTemp[0], 2);

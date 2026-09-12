@@ -57,4 +57,24 @@ static inline int icm426xx_hires_decode(
 	return 0;
 }
 
+/* DS-000347/DS-000639 packet 4 carries the full 16-bit temperature at 13:14.
+ * Use the newest valid sample, not a batch average, to preserve thermal response.
+ * The caller invalidates its cache before each acquisition. */
+static inline int icm426xx_hires_temperature(const uint8_t *data, uint16_t packets, float *temperature)
+{
+	while (packets > 0) {
+		const uint8_t *packet = &data[--packets * ICM426XX_HIRES_PACKET_SIZE];
+		if ((packet[0] & 0xF0) != 0x70 || (packet[0] & 0x7F) == 0x7F) {
+			continue;
+		}
+		int16_t raw = (int16_t)(((uint16_t)packet[13] << 8) | packet[14]);
+		if (raw == INT16_MIN) {
+			continue;
+		}
+		*temperature = (float)raw / 132.48f + 25.0f;
+		return 0;
+	}
+	return 1;
+}
+
 #endif

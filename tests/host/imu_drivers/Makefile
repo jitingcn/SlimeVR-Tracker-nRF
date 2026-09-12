@@ -20,6 +20,7 @@ HOST_HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h hal/*.h)
 
 check: test_imu_odr
 	./test_imu_odr
+	python3 run_fifo_temperature.py
 
 test_imu_odr: test_imu_odr.c host_stubs.c $(IMU_SOURCES) $(IMU_HEADERS) $(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ test_imu_odr.c host_stubs.c $(IMU_SOURCES) $(LDLIBS)

@@ -55,10 +55,14 @@ static float clock_scale = 1; // ODR is scaled by clock_rate/clock_reference
 static float fifo_multiplier_factor = FIFO_MULT;
 static float fifo_multiplier = 0;
 
+static float fifo_temp;
+static bool fifo_temp_valid;
+
 LOG_MODULE_REGISTER(ICM42688, LOG_LEVEL_DBG);
 
 int icm_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
+	fifo_temp_valid = false;
 	// setup interface for SPI
 	if (!sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0)) {
 		fifo_multiplier_factor = FIFO_MULT_SPI; // SPI mode
@@ -102,7 +106,7 @@ int icm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 	//	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_GYRO_ACCEL_CONFIG0, 0x44); // set gyro and accel bandwidth
 	//to ODR/10 	k_msleep(50); // 10ms Accel, 30ms Gyro startup
 	k_msleep(1); // fuck i dont wanna wait that long
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_CONFIG1, 0x10);  // enable FIFO hires, a+g
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_CONFIG1, 0x14); // hires + 16-bit temperature
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_CONFIG, 1 << 6); // begin FIFO stream
 
 	// Verify external CLKIN is actually working by checking FIFO output
@@ -138,6 +142,7 @@ int icm_init(float clock_rate, float accel_time, float gyro_time, float *accel_a
 
 void icm_shutdown(void)
 {
+	fifo_temp_valid = false;
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff;  // reset last odr
 	last_accel_mode = 0xff;
@@ -275,12 +280,14 @@ int icm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 
 uint16_t icm_fifo_read(uint8_t *data, uint16_t len)
 {
+	fifo_temp_valid = false;
 	uint16_t total = 0;
 	uint16_t packets = UINT16_MAX;
 	while (packets > 0 && len >= PACKET_SIZE) {
 		uint8_t rawCount[2];
 		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_COUNTH, &rawCount[0], 2);
 		if (err) {
+			fifo_temp_valid = false;
 			LOG_ERR("Failed to read FIFO count");
 			return total;
 		}
@@ -299,8 +306,12 @@ uint16_t icm_fifo_read(uint8_t *data, uint16_t len)
 		}
 		err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_DATA, data, count, PACKET_SIZE);
 		if (err) {
+			fifo_temp_valid = false;
 			LOG_ERR("Communication error");
 			return total;
+		}
+		if (!icm426xx_hires_temperature(data, packets, &fifo_temp)) {
+			fifo_temp_valid = true;
 		}
 		data += packets * PACKET_SIZE;
 		len -= packets * PACKET_SIZE;
@@ -349,6 +360,10 @@ void icm_gyro_read(float g[3])
 
 float icm_temp_read(void)
 {
+	if (fifo_temp_valid) {
+		return fifo_temp;
+	}
+
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_TEMP_DATA1, &rawTemp[0], 2);
 	if (err) {
