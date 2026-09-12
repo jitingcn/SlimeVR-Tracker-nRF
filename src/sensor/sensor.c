@@ -1905,7 +1905,6 @@ typedef struct {
 /* Persistent per-frame average accel (kept when a_count == 0). */
 static float sensor_loop_avg_a[3] = {0};
 
-#if CONFIG_SENSOR_GYRO_OVERSAMPLING <= 1
 static void feed_calibrated_gyro(float *g, float dt, int *g_count)
 {
 	sensor_diagnostics_on_cal_gyro(g);
@@ -1916,7 +1915,6 @@ static void feed_calibrated_gyro(float *g, float dt, int *g_count)
 	sensor_fusion->update_gyro(g, dt);
 	(*g_count)++;
 }
-#endif /* CONFIG_SENSOR_GYRO_OVERSAMPLING <= 1 */
 
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
 /* Accel oversampling: average samples (noise reduction; not orientation strapdown). */
@@ -2084,6 +2082,12 @@ static void feed_gyro_sample(
 #endif
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	/* I2C runs at the fusion ODR: match the non-oversampled feed exactly. */
+	if (gyro_oversample_n == 1) {
+		feed_calibrated_gyro(g, gyro_actual_time, g_count);
+		return;
+	}
+
 	/* Per-sample stats on firmware-compensated g; Δq merge; one fusion step. */
 	sensor_diagnostics_on_cal_gyro(g);
 	sensor_record_rest_gyro_motion(g);
@@ -2158,7 +2162,7 @@ static void feed_accel_sample(
 		return;
 	}
 
-	/* Always process_accel so cal wait_for_motion buffers update even without 6-side. */
+	/* Keep the live accel snapshot and any active calibration FIFO up to date. */
 	sensor_calibration_process_accel(a_avg);
 	float a[] = {a_avg[0], a_avg[1], a_avg[2]};
 	feed_calibrated_accel(a, accel_effective_time, a_sum, a_count);
