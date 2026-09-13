@@ -45,17 +45,19 @@ struct tracker_report {
 	uint8_t data[16];
 } __packed;
 
-#define REPORT_SIZE sizeof(struct tracker_report)
-#define REPORT_COUNT (3 * 4)
+#define PACKET_SIZE_BYTES sizeof(struct tracker_report)
+#define PACKETS_PER_USB_REPORT 4
+#define USB_REPORT_SIZE_BYTES (PACKET_SIZE_BYTES * PACKETS_PER_USB_REPORT)
+#define RING_PACKET_CAPACITY (3 * PACKETS_PER_USB_REPORT)
 
 /*
  * SPSC packet ring: connection thread produces, HID thread consumes.
  * No irq_lock — only these two threads touch the indices.
  */
-static uint8_t reports[REPORT_COUNT * REPORT_SIZE] __aligned(sizeof(void *));
+static uint8_t reports[RING_PACKET_CAPACITY * PACKET_SIZE_BYTES] __aligned(sizeof(void *));
 static atomic_t hid_prod; /* next write index (monotonic) */
 static atomic_t hid_cons; /* next consume index (monotonic) */
-static uint8_t submit_stage[REPORT_SIZE * 4] __aligned(sizeof(void *));
+static uint8_t submit_stage[USB_REPORT_SIZE_BYTES] __aligned(sizeof(void *));
 
 static const struct device *hdev;
 static ATOMIC_DEFINE(hid_ep_in_busy, 1);
@@ -111,7 +113,7 @@ static const uint8_t hid_report_desc[] = {
 	HID_COLLECTION(HID_COLLECTION_APPLICATION),
 	HID_USAGE(HID_USAGE_GEN_DESKTOP_UNDEFINED),
 	HID_REPORT_SIZE(8),
-	HID_REPORT_COUNT(64),
+	HID_REPORT_COUNT(USB_REPORT_SIZE_BYTES),
 	HID_INPUT(0x02),
 	HID_END_COLLECTION,
 };
@@ -182,19 +184,19 @@ static void send_report(void)
 		return;
 	}
 
-	for (uint32_t i = 0; i < 4; i++) {
-		uint8_t *dst = &submit_stage[REPORT_SIZE * i];
+	for (uint32_t i = 0; i < PACKETS_PER_USB_REPORT; i++) {
+		uint8_t *dst = &submit_stage[PACKET_SIZE_BYTES * i];
 		if (i < pending) {
-			uint32_t idx = (cons + i) % REPORT_COUNT;
-			memcpy(dst, &reports[REPORT_SIZE * idx], REPORT_SIZE);
+			uint32_t idx = (cons + i) % RING_PACKET_CAPACITY;
+			memcpy(dst, &reports[PACKET_SIZE_BYTES * idx], PACKET_SIZE_BYTES);
 		} else {
 			packet_device_addr(dst);
 		}
 	}
 
 	/* Drop anything beyond one USB frame; publish consume before submit. */
-	if (pending > 4) {
-		dropped_reports += pending - 4;
+	if (pending > PACKETS_PER_USB_REPORT) {
+		dropped_reports += pending - PACKETS_PER_USB_REPORT;
 		if (dropped_reports > max_dropped_reports) {
 			max_dropped_reports = dropped_reports;
 		}
@@ -202,7 +204,7 @@ static void send_report(void)
 	atomic_set(&hid_cons, (atomic_val_t)prod);
 
 	submitted_report = submit_stage;
-	int ret = hid_device_submit_report(hdev, REPORT_SIZE * 4, submitted_report);
+	int ret = hid_device_submit_report(hdev, USB_REPORT_SIZE_BYTES, submitted_report);
 
 	if (ret != 0) {
 		submitted_report = NULL;
@@ -286,16 +288,16 @@ get_report_cb(const struct device *dev, const uint8_t type, const uint8_t id, co
 		return -ENOTSUP;
 	}
 
-	if (len < REPORT_SIZE * 4 || buf == NULL) {
+	if (len < USB_REPORT_SIZE_BYTES || buf == NULL) {
 		return -EINVAL;
 	}
 
-	memset(buf, 0, REPORT_SIZE * 4);
-	for (int i = 0; i < 4; i++) {
-		packet_device_addr(&buf[REPORT_SIZE * i]);
+	memset(buf, 0, USB_REPORT_SIZE_BYTES);
+	for (int i = 0; i < PACKETS_PER_USB_REPORT; i++) {
+		packet_device_addr(&buf[PACKET_SIZE_BYTES * i]);
 	}
 
-	return REPORT_SIZE * 4;
+	return USB_REPORT_SIZE_BYTES;
 }
 
 static const struct hid_device_ops ops = {
@@ -330,13 +332,13 @@ bool hid_write_packet_n(const uint8_t *data)
 	uint32_t prod = (uint32_t)atomic_get(&hid_prod);
 	uint32_t cons = (uint32_t)atomic_get(&hid_cons);
 
-	if ((prod - cons) >= REPORT_COUNT) {
+	if ((prod - cons) >= RING_PACKET_CAPACITY) {
 		return false;
 	}
 
-	uint8_t *report = &reports[REPORT_SIZE * (prod % REPORT_COUNT)];
+	uint8_t *report = &reports[PACKET_SIZE_BYTES * (prod % RING_PACKET_CAPACITY)];
 
-	memcpy(report, data, REPORT_SIZE);
+	memcpy(report, data, PACKET_SIZE_BYTES);
 	if (data[0] != 1 && data[0] != 4) {
 		report[15] = 0;
 	}
