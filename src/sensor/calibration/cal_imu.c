@@ -154,8 +154,6 @@ void sensor_calibrate_imu(void)
 			float closest_distance = INFINITY;
 			bool has_lower_bound = false; // Point below current temp
 			bool has_upper_bound = false; // Point above current temp
-			float lower_distance = INFINITY;
-			float upper_distance = INFINITY;
 			float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
 
 			for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
@@ -170,22 +168,13 @@ void sensor_calibrate_imu(void)
 					// Check if this point is below or above current temp
 					if (point_temp < avg_temp) {
 						has_lower_bound = true;
-						if (distance < lower_distance) {
-							lower_distance = distance;
-						}
 					} else if (point_temp > avg_temp) {
 						has_upper_bound = true;
-						if (distance < upper_distance) {
-							upper_distance = distance;
-						}
 					}
 				}
 			}
 
-			// Coverage is good if:
-			// 1. Closest point is within sampling interval (very close match)
-			// OR
-			// 2. Has both upper and lower bounds AND closest is within 1x sampling interval
+			// Coverage is good when the closest point is within the sampling interval.
 			if (closest_distance <= sampling_interval) {
 				// Very close to existing point - definitely good coverage
 				has_good_coverage = true;
@@ -193,15 +182,6 @@ void sensor_calibrate_imu(void)
 					"T-Cal: Excellent coverage at %.2fC (closest: %.2fC away, within sampling interval)",
 					(double)avg_temp,
 					(double)closest_distance
-				);
-			} else if (has_lower_bound && has_upper_bound && closest_distance <= sampling_interval * 1.0f) {
-				// Bounded interpolation with reasonable distance
-				has_good_coverage = true;
-				LOG_INF(
-					"T-Cal: Good coverage at %.2fC (bounded: lower %.2fC, upper %.2fC)",
-					(double)avg_temp,
-					(double)lower_distance,
-					(double)upper_distance
 				);
 			} else {
 				// Log why coverage is insufficient
