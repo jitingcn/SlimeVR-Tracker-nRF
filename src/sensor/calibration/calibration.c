@@ -60,9 +60,6 @@ K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
 static K_SEM_DEFINE(calibration_wake_sem, 0, 1);
 
-/* Also occupies request slot so IMU/TCal/sens cannot overlap magneto_progress collection. */
-#define CAL_REQUEST_MAG 6
-
 /* Identify LED on cal thread — never k_msleep on ESB/connection. */
 static bool mag_cal_led_pending;
 
@@ -92,8 +89,6 @@ LOG_MODULE_REGISTER(calibration, LOG_LEVEL_INF);
 #if CONFIG_SENSOR_USE_TCAL
 static float last_gyro_tcal_offset[3] = {0.0f, 0.0f, 0.0f};
 #endif
-
-int sensor_calibration_request(int id);
 
 static void calibration_thread(void);
 // Keep background calibration below the sensor loop so trial Magneto solves do
@@ -289,13 +284,13 @@ void sensor_calibration_clear_mag(float m_inv[][3], bool write)
 
 void sensor_request_calibration(void)
 {
-	sensor_calibration_request(1);
+	sensor_calibration_request(CAL_REQUEST_IMU);
 }
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 void sensor_request_calibration_6_side(void)
 {
-	sensor_calibration_request(2);
+	sensor_calibration_request(CAL_REQUEST_ACCEL_6_SIDE);
 }
 #endif
 
@@ -318,7 +313,7 @@ int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions)
 
 	sens_cal_axis = axis;
 	sens_cal_revolutions = revolutions;
-	requested_calibration = 5;
+	requested_calibration = CAL_REQUEST_GYRO_SENS;
 	k_mutex_unlock(&calibration_request_lock);
 	calibration_signal_wake();
 	return 0;
@@ -359,7 +354,7 @@ int sensor_calibration_request(int id)
 
 	k_mutex_lock(&calibration_request_lock, K_FOREVER);
 	switch (id) {
-	case -1:
+	case CAL_REQUEST_CLEAR:
 		/* The calibration owner clears every synchronous failure/exit here;
 		 * manual mag retains admission only while collection is in progress. */
 		sensor_calibration_samples_end();
@@ -367,7 +362,7 @@ int sensor_calibration_request(int id)
 		mag_cal_led_pending = false;
 		result = 0;
 		break;
-	case 0:
+	case CAL_REQUEST_QUERY:
 		result = requested_calibration;
 		break;
 	default:
@@ -381,7 +376,7 @@ int sensor_calibration_request(int id)
 		break;
 	}
 	k_mutex_unlock(&calibration_request_lock);
-	if (result == 0 && id > 0) {
+	if (result == 0 && id > CAL_REQUEST_QUERY) {
 		calibration_signal_wake();
 	}
 	return result;
@@ -453,46 +448,46 @@ static void calibration_thread(void)
 	// requested calibrations run here
 	while (1) {
 		sensor_calibration_persist_pending();
-		int requested = sensor_calibration_request(0);
+		int requested = sensor_calibration_request(CAL_REQUEST_QUERY);
 		switch (requested) {
-		case 1:
+		case CAL_REQUEST_IMU:
 			sensor_calibration_samples_begin(CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 			sensor_calibrate_imu();
-			sensor_calibration_request(-1); // clear request
+			sensor_calibration_request(CAL_REQUEST_CLEAR);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		case 2:
+		case CAL_REQUEST_ACCEL_6_SIDE:
 			sensor_calibration_samples_begin(CAL_SAMPLE_ACCEL);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 			sensor_calibrate_6_side();
-			sensor_calibration_request(-1); // clear request
+			sensor_calibration_request(CAL_REQUEST_CLEAR);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #endif
 #if CONFIG_SENSOR_USE_TCAL
-		case 3: // Boot calibration
+		case CAL_REQUEST_TCAL_BOOT:
 			sensor_calibration_samples_begin(CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 			sensor_perform_boot_calibration();
-			sensor_calibration_request(-1); // clear request
+			sensor_calibration_request(CAL_REQUEST_CLEAR);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
-		case 4: // Runtime periodic calibration
+		case CAL_REQUEST_TCAL_RUNTIME:
 			sensor_calibration_samples_begin(CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 			sensor_perform_runtime_calibration();
-			sensor_calibration_request(-1); // clear request
+			sensor_calibration_request(CAL_REQUEST_CLEAR);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-		case 5: // Gyro sensitivity calibration
+		case CAL_REQUEST_GYRO_SENS:
 			sensor_calibration_samples_begin(CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 			sensor_calibrate_sens();
-			sensor_calibration_request(-1); // clear request
+			sensor_calibration_request(CAL_REQUEST_CLEAR);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #endif
@@ -518,10 +513,10 @@ static void calibration_thread(void)
 				requested = sensor_calibrate_mag();
 				/* 1 = still collecting; 0/-1 = finished or aborted */
 				if (requested != 1) {
-					sensor_calibration_request(-1);
+					sensor_calibration_request(CAL_REQUEST_CLEAR);
 				}
 			} else {
-				sensor_calibration_request(-1);
+				sensor_calibration_request(CAL_REQUEST_CLEAR);
 			}
 			break;
 		default:
@@ -691,7 +686,7 @@ void sensor_tcal_status(void)
 // Public function for 'tcal clear' and 'reset tcal'
 void sensor_tcal_clear(void)
 {
-	if (sensor_calibration_request(0) != 0) {
+	if (sensor_calibration_request(CAL_REQUEST_QUERY) != 0) {
 		LOG_ERR("Another calibration is running. Cannot clear T-Cal data.");
 		printk("Error: Another calibration is running.\n");
 		return;
@@ -749,7 +744,7 @@ void sensor_tcal_clear(void)
 // Public function for 'tcal remove <index>'
 void sensor_tcal_remove_point(int index_to_remove)
 {
-	if (sensor_calibration_request(0) != 0) {
+	if (sensor_calibration_request(CAL_REQUEST_QUERY) != 0) {
 		LOG_ERR("Another calibration is running. Cannot remove T-Cal point.");
 		printk("Error: Another calibration is running.\n");
 		return;

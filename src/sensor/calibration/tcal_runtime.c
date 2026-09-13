@@ -632,7 +632,7 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 
 	LOG_INF("T-Cal Auto: No calibration data exists, requesting initial calibration at %.2fC", (double)current_temp);
 
-	int request_result = sensor_calibration_request(1);
+	int request_result = sensor_calibration_request(CAL_REQUEST_IMU);
 	if (request_result == 0) {
 		last_calibration_time = now;
 	}
@@ -962,7 +962,7 @@ void sensor_tcal_boot_calibration_check(void)
 	}
 
 	// Check if another calibration is running
-	if (sensor_calibration_request(0) != 0) {
+	if (sensor_calibration_request(CAL_REQUEST_QUERY) != 0) {
 		return; // Calibration in progress, wait
 	}
 
@@ -1017,7 +1017,7 @@ void sensor_tcal_boot_calibration_check(void)
 
 	// Request boot calibration through calibration request system
 	// This will be executed by the calibration thread, avoiding deadlock
-	int request_result = sensor_calibration_request(3); // Use ID 3 for boot calibration
+	int request_result = sensor_calibration_request(CAL_REQUEST_TCAL_BOOT);
 	if (request_result == 0) {
 		LOG_INF("Boot Cal: Requested calibration through calibration thread");
 	}
@@ -1260,7 +1260,7 @@ void sensor_runtime_calibration_check(bool is_resting)
 	}
 
 	// Check if another calibration is running
-	if (sensor_calibration_request(0) != 0) {
+	if (sensor_calibration_request(CAL_REQUEST_QUERY) != 0) {
 		runtime_cal_rest_tracking = false;
 		runtime_cal_rest_start = 0;
 		return;
@@ -1303,8 +1303,7 @@ void sensor_runtime_calibration_check(bool is_resting)
 					isnan(runtime_cal_last_temp) ? 0.0 : (double)runtime_cal_last_temp
 				);
 
-				// Request runtime calibration (uses calibration request ID 4)
-				int request_result = sensor_calibration_request(4);
+				int request_result = sensor_calibration_request(CAL_REQUEST_TCAL_RUNTIME);
 				if (request_result == 0) {
 					LOG_INF("Runtime Cal: Calibration requested");
 					runtime_cal_rest_tracking = false;

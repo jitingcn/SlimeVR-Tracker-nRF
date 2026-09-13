@@ -68,6 +68,22 @@ int sensor_calibration_validate_mag(float m_inv[][3], bool write);
 void sensor_calibration_identity_accel(float matrix[4][3]);
 void sensor_calibration_clear_mag(float m_inv[][3], bool write); // "request" mag cal
 
+enum sensor_calibration_request_id {
+	CAL_REQUEST_CLEAR = -1,
+	CAL_REQUEST_QUERY = 0,
+	CAL_REQUEST_IMU = 1,
+	CAL_REQUEST_ACCEL_6_SIDE = 2,
+	CAL_REQUEST_TCAL_BOOT = 3,
+	CAL_REQUEST_TCAL_RUNTIME = 4,
+	CAL_REQUEST_GYRO_SENS = 5,
+	/* Occupies the shared request slot throughout manual mag collection. */
+	CAL_REQUEST_MAG = 6,
+};
+
+/* QUERY returns the pending request ID, or 0 when idle. CLEAR ends sample
+ * admission and clears the slot. Other requests return 0 if accepted, -1 if busy. */
+int sensor_calibration_request(int id);
+
 void sensor_request_calibration(void);
 void sensor_request_calibration_6_side(void);
 void sensor_request_calibration_mag(void);

@@ -81,9 +81,6 @@ int sensor_perform_runtime_calibration(void);
  * in tcal_runtime.c.
  */
 
-/* Request latch owned by calibration.c */
-int sensor_calibration_request(int id);
-
 #endif /* CONFIG_SENSOR_USE_TCAL */
 
 #endif /* SLIMENRF_CAL_TCAL_RUNTIME_H */
