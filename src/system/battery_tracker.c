@@ -6,7 +6,16 @@
 
 #include "battery_tracker.h"
 
-static uint8_t valid_result = 0; // track when data should be recalculated
+enum battery_cache_valid {
+	BATTERY_CACHE_RUNTIME_ESTIMATE = 1,
+	BATTERY_CACHE_RUNTIME_MIN_ESTIMATE = 2,
+	BATTERY_CACHE_RUNTIME_MAX_ESTIMATE = 4,
+	BATTERY_CACHE_REMAINING_TIME_ESTIMATE = 8,
+	BATTERY_CACHE_CYCLES = 16,
+	BATTERY_CACHE_CALIBRATION_COVERAGE = 32,
+};
+
+static uint8_t valid_cache_mask = 0; // track when data should be recalculated
 
 // #define DEBUG true
 
@@ -225,7 +234,7 @@ static void update_interval(int16_t pptt)
 	if (runtime > interval.runtime_max)
 		interval.runtime_max = runtime;
 	sys_write(BATT_STATS_INTERVAL_0 + interval_id, NULL, &interval, sizeof(interval));
-	valid_result = 0; // invalidate all
+	valid_cache_mask = 0; // invalidate all
 	LOG_INF("Interval %u saved: %u cycles, %llu us total (current: %llu us, min: %llu us, max: %llu us)",
 		interval_id, interval.cycles, k_ticks_to_us_floor64(interval.runtime),
 		k_ticks_to_us_floor64(runtime), k_ticks_to_us_floor64(interval.runtime_min), k_ticks_to_us_floor64(interval.runtime_max));
@@ -299,7 +308,7 @@ bool sys_migrate_battery_curve(void)
 	sys_write(BATT_STATS_CURVE_ID, NULL, retained->battery_pptt_curve,
 		sizeof(retained->battery_pptt_curve));
 	retained_update();
-	valid_result = 0;
+	valid_cache_mask = 0;
 	return true;
 }
 
@@ -376,7 +385,7 @@ static void update_curve(void)
 
 	sys_write(BATT_STATS_CURVE_ID, retained->battery_pptt_curve, curve, sizeof(int16_t) * 18);
 	k_free(curve);
-	valid_result &= (uint8_t)~8; // invalidate remaining runtime (curve changed)
+	valid_cache_mask &= (uint8_t)~BATTERY_CACHE_REMAINING_TIME_ESTIMATE; // invalidate remaining runtime (curve changed)
 }
 
 static int16_t apply_curve(int16_t pptt)
@@ -444,7 +453,7 @@ void sys_update_battery_tracker(int16_t pptt, bool plugged)
 	if (!plugged)
 	{
 		if (last_unplugged_pptt != pptt)
-			valid_result &= (uint8_t)~8; // invalidate remaining runtime (pptt changed)
+			valid_cache_mask &= (uint8_t)~BATTERY_CACHE_REMAINING_TIME_ESTIMATE; // invalidate remaining runtime (pptt changed)
 		last_unplugged_pptt = pptt;
 		last_unplugged_time = k_uptime_ticks();
 		last_unplugged_runtime = retained->battery_runtime_sum;
@@ -557,14 +566,14 @@ uint64_t sys_get_battery_runtime_estimate(void)
 {
 	static uint64_t runtime = 0;
 
-	if (valid_result & 1)
+	if (valid_cache_mask & BATTERY_CACHE_RUNTIME_ESTIMATE)
 		return runtime;
 
 	runtime = extrapolate_runtime(cb_runtime_avg, 0);
 	if (runtime > 0)
 		LOG_DBG("Estimated runtime %llu us", k_ticks_to_us_floor64(runtime));
 
-	valid_result |= 1;
+	valid_cache_mask |= BATTERY_CACHE_RUNTIME_ESTIMATE;
 	return runtime;
 }
 
@@ -572,14 +581,14 @@ uint64_t sys_get_battery_runtime_min_estimate(void)
 {
 	static uint64_t runtime = 0;
 
-	if (valid_result & 2)
+	if (valid_cache_mask & BATTERY_CACHE_RUNTIME_MIN_ESTIMATE)
 		return runtime;
 
 	runtime = extrapolate_runtime(cb_runtime_min, 0);
 	if (runtime > 0)
 		LOG_DBG("Estimated runtime min %llu us", k_ticks_to_us_floor64(runtime));
 
-	valid_result |= 2;
+	valid_cache_mask |= BATTERY_CACHE_RUNTIME_MIN_ESTIMATE;
 	return runtime;
 }
 
@@ -587,14 +596,14 @@ uint64_t sys_get_battery_runtime_max_estimate(void)
 {
 	static uint64_t runtime = 0;
 
-	if (valid_result & 4)
+	if (valid_cache_mask & BATTERY_CACHE_RUNTIME_MAX_ESTIMATE)
 		return runtime;
 
 	runtime = extrapolate_runtime(cb_runtime_max, 0);
 	if (runtime > 0)
 		LOG_DBG("Estimated runtime max %llu us", k_ticks_to_us_floor64(runtime));
 
-	valid_result |= 4;
+	valid_cache_mask |= BATTERY_CACHE_RUNTIME_MAX_ESTIMATE;
 	return runtime;
 }
 
@@ -602,7 +611,7 @@ uint64_t sys_get_battery_remaining_time_estimate(void)
 {
 	static uint64_t result = 0;
 
-	if (valid_result & 8)
+	if (valid_cache_mask & BATTERY_CACHE_REMAINING_TIME_ESTIMATE)
 		return result;
 
 	if (last_unplugged_runtime <= CONFIG_SYS_CLOCK_TICKS_PER_SEC * 60) // pptt may not be valid yet
@@ -633,7 +642,7 @@ uint64_t sys_get_battery_remaining_time_estimate(void)
 		(double)pptt / 100.0, full_intervals,
 		k_ticks_to_us_floor64(result));
 
-	valid_result |= 8;
+	valid_cache_mask |= BATTERY_CACHE_REMAINING_TIME_ESTIMATE;
 	return result;
 }
 
@@ -642,7 +651,7 @@ uint32_t sys_get_battery_cycles(void)
 {
 	static uint32_t cycles = 0;
 
-	if (valid_result & 16)
+	if (valid_cache_mask & BATTERY_CACHE_CYCLES)
 		return cycles;
 	cycles = 0;
 
@@ -656,7 +665,7 @@ uint32_t sys_get_battery_cycles(void)
 		cycles += interval.cycles;
 	}
 
-	valid_result |= 16;
+	valid_cache_mask |= BATTERY_CACHE_CYCLES;
 	return cycles;
 }
 
@@ -665,7 +674,7 @@ uint8_t sys_get_battery_calibration_coverage(void)
 {
 	static uint8_t valid_intervals = 0;
 
-	if (valid_result & 32)
+	if (valid_cache_mask & BATTERY_CACHE_CALIBRATION_COVERAGE)
 		return valid_intervals;
 	valid_intervals = 0;
 
@@ -677,7 +686,7 @@ uint8_t sys_get_battery_calibration_coverage(void)
 			valid_intervals++;
 	}
 
-	valid_result |= 32;
+	valid_cache_mask |= BATTERY_CACHE_CALIBRATION_COVERAGE;
 	return valid_intervals; // maximum coverage is 95%
 }
 
@@ -751,7 +760,7 @@ void sys_reset_battery_tracker(void)
 	memset(curve, 0, sizeof(int16_t) * 18);
 	sys_write(BATT_STATS_CURVE_ID, retained->battery_pptt_curve, curve, sizeof(int16_t) * 18); // updates retained
 	k_free(curve);
-	valid_result = 0; // invalidate all
+	valid_cache_mask = 0; // invalidate all
 	reset_confirm = false;
 	LOG_INF("Battery tracker reset");
 }
