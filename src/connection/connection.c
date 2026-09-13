@@ -237,6 +237,15 @@ uint8_t connection_get_packet_sequence(void)
 	return packet_sequence;
 }
 
+enum sub_packet_type {
+	SUB_PACKET_INFO = 0,
+	SUB_PACKET_QUAT_ACCEL = 1,
+	SUB_PACKET_COMPACT_QUAT = 2,
+	SUB_PACKET_STATUS = 3,
+	SUB_PACKET_QUAT_MAG = 4,
+	SUB_PACKET_RUNTIME = 5,
+};
+
 /*
  * Sub-packet data sizes (payload only, excluding type byte).
  * These define how much data each sub-packet type contributes
@@ -353,12 +362,12 @@ struct sub_packet_desc {
 
 /* Indexed by sub-packet type. One source for len + fill used by normal + composite. */
 static const struct sub_packet_desc sub_packet_table[] = {
-	[0] = {SUB_DATA_LEN_INFO, true, fill_sub_info},
-	[1] = {SUB_DATA_LEN_QUAT, false, fill_sub_quat_accel},
-	[2] = {SUB_DATA_LEN_COMPACT, true, fill_sub_compact_quat},
-	[3] = {SUB_DATA_LEN_STATUS, true, fill_sub_status},
-	[4] = {SUB_DATA_LEN_MAG, false, fill_sub_mag},
-	[5] = {SUB_DATA_LEN_RUNTIME, true, fill_sub_runtime},
+	[SUB_PACKET_INFO] = {SUB_DATA_LEN_INFO, true, fill_sub_info},
+	[SUB_PACKET_QUAT_ACCEL] = {SUB_DATA_LEN_QUAT, false, fill_sub_quat_accel},
+	[SUB_PACKET_COMPACT_QUAT] = {SUB_DATA_LEN_COMPACT, true, fill_sub_compact_quat},
+	[SUB_PACKET_STATUS] = {SUB_DATA_LEN_STATUS, true, fill_sub_status},
+	[SUB_PACKET_QUAT_MAG] = {SUB_DATA_LEN_MAG, false, fill_sub_mag},
+	[SUB_PACKET_RUNTIME] = {SUB_DATA_LEN_RUNTIME, true, fill_sub_runtime},
 };
 
 static const struct sub_packet_desc *sub_packet_get(uint8_t type)
@@ -389,8 +398,8 @@ static void fill_normal_packet(uint8_t type, uint8_t data[16])
 	memset(data, 0, 16);
 	const struct sub_packet_desc *d = sub_packet_get(type);
 	if (!d) {
-		type = 1;
-		d = sub_packet_get(1);
+		type = SUB_PACKET_QUAT_ACCEL;
+		d = sub_packet_get(SUB_PACKET_QUAT_ACCEL);
 	}
 	data[0] = type;
 	data[1] = tracker_id;
@@ -576,7 +585,7 @@ bool connection_write_packet_0() // device info
 {
 	uint8_t data[16];
 
-	fill_normal_packet(0, data);
+	fill_normal_packet(SUB_PACKET_INFO, data);
 	return write_normal_packet(data);
 }
 
@@ -584,7 +593,7 @@ bool connection_write_packet_1() // full precision quat and accel
 {
 	uint8_t data[16];
 
-	fill_normal_packet(1, data);
+	fill_normal_packet(SUB_PACKET_QUAT_ACCEL, data);
 	return write_normal_packet(data);
 }
 
@@ -593,7 +602,7 @@ bool connection_write_packet_2() // reduced precision quat and accel with batter
 {
 	uint8_t data[16];
 
-	fill_normal_packet(2, data);
+	fill_normal_packet(SUB_PACKET_COMPACT_QUAT, data);
 	return write_normal_packet(data);
 }
 
@@ -601,7 +610,7 @@ bool connection_write_packet_3() // status
 {
 	uint8_t data[16];
 
-	fill_normal_packet(3, data);
+	fill_normal_packet(SUB_PACKET_STATUS, data);
 	return write_normal_packet(data);
 }
 
@@ -609,7 +618,7 @@ bool connection_write_packet_4() // full precision quat and magnetometer
 {
 	uint8_t data[16];
 
-	fill_normal_packet(4, data);
+	fill_normal_packet(SUB_PACKET_QUAT_MAG, data);
 	return write_normal_packet(data);
 }
 
@@ -617,7 +626,7 @@ bool connection_write_packet_5() // runtime estimate
 {
 	uint8_t data[16];
 
-	fill_normal_packet(5, data);
+	fill_normal_packet(SUB_PACKET_RUNTIME, data);
 	return write_normal_packet(data);
 }
 
@@ -1773,28 +1782,28 @@ void connection_thread(void)
 
 		if (quat_ready) {
 			struct composite_builder builder;
-			uint8_t fallback_type = 1;
+			uint8_t fallback_type = SUB_PACKET_QUAT_ACCEL;
 			composite_builder_reset(&builder);
 
 			/* Primary: quat sub-packet */
 			if (mag_wanted) {
 				/* mag includes full quat, use type 4 instead of separate quat+mag */
-				composite_try_add_due(&builder, 4, true, &last_mag_time, now);
-				fallback_type = 4;
+				composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
+				fallback_type = SUB_PACKET_QUAT_MAG;
 			} else if (!connection_sensor_get_precise_quat() && info_wanted) {
 				/* compact quat (type 2) contains batt/temp but NOT imu_id/mag_id.
 				 * Don't update last_info_time here so that a real type 0 info
 				 * sub-packet is still piggybacked to keep IMU model visible. */
-				composite_try_add(&builder, 2);
-				fallback_type = 2;
+				composite_try_add(&builder, SUB_PACKET_COMPACT_QUAT);
+				fallback_type = SUB_PACKET_COMPACT_QUAT;
 			} else {
-				composite_try_add(&builder, 1);
+				composite_try_add(&builder, SUB_PACKET_QUAT_ACCEL);
 			}
 
 			/* Piggyback low-freq sub-packets if they fit */
-			composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
-			composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
-			composite_try_add_due(&builder, 0, info_wanted, &last_info_time, now);
+			composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
+			composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
+			composite_try_add_due(&builder, SUB_PACKET_INFO, info_wanted, &last_info_time, now);
 
 			if (send_composite_or_single(&builder, fallback_type)) {
 				/* Only a successfully queued packet consumes the test-rate
@@ -1816,10 +1825,10 @@ void connection_thread(void)
 			if (status_wanted || runtime_wanted) {
 				struct composite_builder builder;
 				composite_builder_reset(&builder);
-				composite_try_add_due(&builder, 4, true, &last_mag_time, now);
-				composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
-				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
-				if (send_composite_or_single(&builder, 4)) {
+				composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
+				if (send_composite_or_single(&builder, SUB_PACKET_QUAT_MAG)) {
 					composite_commit_timestamps(&builder);
 				} else {
 					k_msleep(1);
@@ -1837,10 +1846,10 @@ void connection_thread(void)
 			if (status_wanted || runtime_wanted) {
 				struct composite_builder builder;
 				composite_builder_reset(&builder);
-				composite_try_add_due(&builder, 0, true, &last_info_time, now);
-				composite_try_add_due(&builder, 3, status_wanted, &last_status_time, now);
-				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
-				if (send_composite_or_single(&builder, 0)) {
+				composite_try_add_due(&builder, SUB_PACKET_INFO, true, &last_info_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
+				if (send_composite_or_single(&builder, SUB_PACKET_INFO)) {
 					composite_commit_timestamps(&builder);
 				} else {
 					k_msleep(1);
@@ -1857,9 +1866,9 @@ void connection_thread(void)
 			if (runtime_wanted) {
 				struct composite_builder builder;
 				composite_builder_reset(&builder);
-				composite_try_add_due(&builder, 3, true, &last_status_time, now);
-				composite_try_add_due(&builder, 5, runtime_wanted, &last_runtime_time, now);
-				if (send_composite_or_single(&builder, 3)) {
+				composite_try_add_due(&builder, SUB_PACKET_STATUS, true, &last_status_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
+				if (send_composite_or_single(&builder, SUB_PACKET_STATUS)) {
 					composite_commit_timestamps(&builder);
 				} else {
 					k_msleep(1);
