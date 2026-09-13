@@ -1779,7 +1779,7 @@ int sensor_init(void)
 
 static int64_t last_status_time = 0;
 static int64_t max_loop_time = 0;
-static float loop_period_ema_ms; /* ~actual publish/loop period */
+static float processing_work_time_ema_ms; /* elapsed processing work before the loop wait */
 
 
 static void sensor_send_raw_metadata(void)
@@ -2692,10 +2692,10 @@ static void sensor_loop_wait(int64_t time_begin)
 
 	if (time_delta > 0) {
 		float delta_ms = (float)time_delta;
-		if (loop_period_ema_ms <= 0.0f) {
-			loop_period_ema_ms = delta_ms;
+		if (processing_work_time_ema_ms <= 0.0f) {
+			processing_work_time_ema_ms = delta_ms;
 		} else {
-			loop_period_ema_ms = 0.9f * loop_period_ema_ms + 0.1f * delta_ms;
+			processing_work_time_ema_ms = 0.9f * processing_work_time_ema_ms + 0.1f * delta_ms;
 		}
 	}
 
@@ -2709,10 +2709,10 @@ static void sensor_loop_wait(int64_t time_begin)
 			/* Only warn when the processing EMA shows the loop is
 			 * genuinely falling behind; single preempted iterations are
 			 * absorbed by the FIFO/catch-up. */
-			if (loop_period_ema_ms > (float)sensor_update_time_ms * 1.5f) {
+			if (processing_work_time_ema_ms > (float)sensor_update_time_ms * 1.5f) {
 				LOG_WRN("Last update steps took up to %lld ms", max_loop_time);
 			} else {
-				LOG_DBG("Slow loop step %lld ms ignored (EMA %.2f ms)", max_loop_time, (double)loop_period_ema_ms);
+				LOG_DBG("Slow loop step %lld ms ignored (EMA %.2f ms)", max_loop_time, (double)processing_work_time_ema_ms);
 			}
 			max_loop_time = 0;
 		}
@@ -3044,8 +3044,8 @@ float sensor_get_fusion_rate(void)
 	return sensor_get_gyro_odr();
 }
 
-float sensor_get_loop_period_ms(void)
+float sensor_get_processing_work_time_ms(void)
 {
-	return loop_period_ema_ms;
+	return processing_work_time_ema_ms;
 }
 

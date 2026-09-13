@@ -30,7 +30,7 @@ static bool consumer_ready, watchdog_running, prerequisites_ready;
 static int progress_result;
 
 /* State used by the unmodified wait function, including its diagnostic branch. */
-static float loop_period_ema_ms, sensor_window_fused_angle_rad, mag_feed_hz;
+static float processing_work_time_ema_ms, sensor_window_fused_angle_rad, mag_feed_hz;
 static int64_t max_loop_time, last_status_time, sensor_data_time;
 static uint32_t sensor_update_time_ms = 5, sensor_int_timeouts;
 static uint32_t sensor_window_iters, sensor_window_publishes, sensor_window_packets;

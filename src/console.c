@@ -828,7 +828,7 @@ static void print_sensor_detail(void)
 
 	float mag_hz = sensor_get_mag_odr();
 	float mag_feed_hz = sensor_get_mag_feed_hz();
-	float loop_ms = sensor_get_loop_period_ms();
+	float work_time_ms = sensor_get_processing_work_time_ms();
 	printk("\nRates:\n");
 	printk("  Gyro ODR:    %.2f Hz\n", (double)sensor_get_gyro_odr());
 	printk("  Accel ODR:   %.2f Hz\n", (double)sensor_get_accel_odr());
@@ -850,8 +850,8 @@ static void print_sensor_detail(void)
 		CONFIG_SENSOR_ACCEL_OVERSAMPLING
 	);
 #endif
-	if (loop_ms > 0.0f) {
-		printk("  Work time:   ~%.1f ms/loop\n", (double)loop_ms);
+	if (work_time_ms > 0.0f) {
+		printk("  Work time:   ~%.1f ms/loop\n", (double)work_time_ms);
 	} else {
 		printk("  Work time:   n/a\n");
 	}
