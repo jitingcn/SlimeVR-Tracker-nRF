@@ -1646,12 +1646,12 @@ static void console_cmd_tcal(size_t argc, char **argv)
 			if (isnan(current_temp)) {
 				printk("Error: Cannot read current temperature.\n");
 			} else {
-				float closest_temp, distance;
-				bool needs_cal = sensor_tcal_is_temp_outside_range(current_temp, &closest_temp, &distance);
+				float closest_temp, distance_c;
+				bool needs_cal = sensor_tcal_needs_nearby_point(current_temp, &closest_temp, &distance_c);
 				printk("Current temperature: %.2fC\n", (double)current_temp);
 				if (!isnan(closest_temp)) {
 					printk("Closest calibration point: %.2fC (distance: %.2fC)\n",
-						(double)closest_temp, (double)distance);
+						(double)closest_temp, (double)distance_c);
 					float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
 					printk("Configured sampling interval: %.2fC\n", (double)sampling_interval);
 					if (needs_cal) {

@@ -790,14 +790,14 @@ void sensor_tcal_remove_point(int index_to_remove)
 }
 
 // Check if current temperature needs calibration (missing nearby calibration point)
-bool sensor_tcal_is_temp_outside_range(float temp, float *min_temp, float *max_temp)
+bool sensor_tcal_needs_nearby_point(float temp, float *closest_temp, float *distance_c)
 {
 	if (retained->tempCalState.count < 1) {
-		if (min_temp) {
-			*min_temp = NAN;
+		if (closest_temp) {
+			*closest_temp = NAN;
 		}
-		if (max_temp) {
-			*max_temp = NAN;
+		if (distance_c) {
+			*distance_c = NAN;
 		}
 		return true; // No calibration data, need calibration
 	}
@@ -808,24 +808,24 @@ bool sensor_tcal_is_temp_outside_range(float temp, float *min_temp, float *max_t
 
 	// Find the closest calibration point
 	float closest_distance = INFINITY;
-	float closest_temp = NAN;
+	float nearest_temp = NAN;
 
 	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
 		if (retained->tempCalPoints[i].temp != 0.0f) {
 			float distance = fabsf(retained->tempCalPoints[i].temp - temp);
 			if (distance < closest_distance) {
 				closest_distance = distance;
-				closest_temp = retained->tempCalPoints[i].temp;
+				nearest_temp = retained->tempCalPoints[i].temp;
 			}
 		}
 	}
 
 	// Return the closest point info if requested
-	if (min_temp) {
-		*min_temp = closest_temp;
+	if (closest_temp) {
+		*closest_temp = nearest_temp;
 	}
-	if (max_temp) {
-		*max_temp = closest_distance;
+	if (distance_c) {
+		*distance_c = closest_distance;
 	}
 
 	// Need calibration if closest point is farther than sampling interval
