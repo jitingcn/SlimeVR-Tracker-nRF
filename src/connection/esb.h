@@ -149,7 +149,9 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 // Kept for wire-format docs / receiver + analyzer compatibility.
 #define ESB_RAW_IMU_TYPE    0x10  // DEPRECATED: legacy raw IMU (float)
 #define ESB_RAW_MAG_TYPE    0x11  // DEPRECATED: reserved raw mag
-#define ESB_RAW_META_TYPE   0x12  // Metadata (ODR, range, sensor IDs - sent once)
+// Metadata (ODR, range, sensor IDs): captured once per collection session,
+// sent at session start, and replayed on explicit requests.
+#define ESB_RAW_META_TYPE   0x12
 #define ESB_RAW_IMU_QUAT_TYPE 0x13  // Raw IMU with gyrQuat (packet-loss resistant)
 #define ESB_RAW_CAL_TYPE    0x14  // Extended calibration metadata (sub-typed)
 
