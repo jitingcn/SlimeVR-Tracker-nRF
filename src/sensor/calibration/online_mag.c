@@ -529,16 +529,31 @@ static double magneto_online_collect_recent(double ata_out[100], double *norm_su
 
 static int magneto_online_recent_sample_count(void)
 {
-	k_mutex_lock(&quad_buf_snap_lock, K_FOREVER);
-	uint32_t total = magneto_online_quad_buf_snapshot_locked().total;
-	int count = 0;
-	for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
-		if (!magneto_online_quadrant_is_recent_at(&quad_buf_snap[q], total)) {
-			continue;
-		}
-		count += quad_buf_snap[q].count;
+	unsigned gen = (unsigned)atomic_get(&quad_buf_gen);
+	if (gen != (unsigned)atomic_get(&quad_buf_gen_served)) {
+		return 0;
 	}
-	k_mutex_unlock(&quad_buf_snap_lock);
+
+	/* Only metadata is needed. Hold the producer lock so counts, last_seq and
+	 * total describe the same instant, without copying the sample arrays. */
+	k_mutex_lock(&quad_buf_lock, K_FOREVER);
+	gen = (unsigned)atomic_get(&quad_buf_gen);
+	unsigned served = (unsigned)atomic_get(&quad_buf_gen_served);
+	uint32_t total = (uint32_t)atomic_get(&online_total_sample_count);
+	int count = 0;
+	if (gen == served) {
+		for (int q = 0; q < ONLINE_QUADRANT_COUNT; q++) {
+			if (magneto_online_quadrant_is_recent_at(&quad_buf[q], total)) {
+				count += quad_buf[q].count;
+			}
+		}
+		/* Clear requests do not take quad_buf_lock; discard a count whose
+		 * history was invalidated while the metadata was being read. */
+		if ((unsigned)atomic_get(&quad_buf_gen) != gen) {
+			count = 0;
+		}
+	}
+	k_mutex_unlock(&quad_buf_lock);
 	return count;
 }
 
@@ -905,12 +920,8 @@ bool sensor_calibration_online_mag_check(void)
 	int online_update_count = runtime_state.update_count;
 	float online_last_buf_avg_norm = runtime_state.last_buf_avg_norm;
 
-	int recent_sample_count_now = magneto_online_recent_sample_count();
 	uint32_t now = k_uptime_get_32();
 
-	if (recent_sample_count_now < MAG_CAL_MIN_SAMPLES) {
-		return false;
-	}
 	/*
 	 * Change detector only: the counter is a single atomic word, so this read is
 	 * well-defined even though the sensor thread advances it concurrently. It is
@@ -923,6 +934,11 @@ bool sensor_calibration_online_mag_check(void)
 	}
 	uint32_t last_check = (uint32_t)atomic_get(&online_last_check_time);
 	if (last_check != 0 && ONLINE_ELAPSED(now, last_check) < ONLINE_MIN_CHECK_INTERVAL_MS) {
+		return false;
+	}
+
+	int recent_sample_count_now = magneto_online_recent_sample_count();
+	if (recent_sample_count_now < MAG_CAL_MIN_SAMPLES) {
 		return false;
 	}
 
