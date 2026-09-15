@@ -294,10 +294,8 @@ void sensor_calibrate_6_side(void)
 				// We have enough samples, try to calculate calibration from partial data
 				LOG_INF("Attempting partial calibration with %d poses...", captured_count);
 				wait_for_threads();
-				magneto_current_calibration(a_inv, ata, norm_sum, sample_count);
+				err = magneto_current_calibration(a_inv, ata, norm_sum, sample_count);
 				magneto_reset();
-				// Continue to validation below - err will be handled by validate function
-				err = 0; // Clear error to allow validation
 			} else {
 				// Not enough samples - discard and restore previous calibration
 				LOG_ERR("Insufficient poses for calibration, discarding data");
@@ -310,8 +308,12 @@ void sensor_calibrate_6_side(void)
 			if (err == -1) {
 				LOG_INF("Motion detected");
 			}
-			a_inv[0][0] = NAN; // invalidate calibration
 		}
+	}
+	if (err) {
+		LOG_WRN("Accelerometer calibration failed: %d; previous calibration unchanged", err);
+		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
+		return;
 	}
 
 	if (!err) {

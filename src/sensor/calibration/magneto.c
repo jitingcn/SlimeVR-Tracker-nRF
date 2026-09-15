@@ -153,8 +153,8 @@ bool magneto_centered_direction(const mag_center_estimator_t *estimator, const f
 
 bool mag_bainv_structurally_ok(const float m_inv[4][3], float bias_limit)
 {
-	/* NaN/±inf must never pass: the fit (magneto1_4) emits them under
-	 * degenerate data, and v_epsilon()'s CMSIS path treats NaN as in-range. */
+	/* Retain structural validation for every candidate, including imported
+	 * matrices: v_epsilon()'s CMSIS path treats NaN as in-range. */
 	if (!v_finite(&m_inv[0][0], 12)) {
 		return false;
 	}
@@ -189,7 +189,9 @@ bool magneto_quality_check(double *ata_buf, double norm_sum_val, double sample_c
 
 	// Run trial calibration
 	float m_inv[4][3];
-	magneto_current_calibration(m_inv, ata_buf, norm_sum_val, sample_count_val);
+	if (magneto_current_calibration(m_inv, ata_buf, norm_sum_val, sample_count_val) < 0) {
+		return false;
+	}
 
 	float hm = (float)(norm_sum_val / sample_count_val);
 	if (!mag_bainv_structurally_ok(m_inv, hm * 2.0f)) {

@@ -2,7 +2,6 @@
 #include "mymathlib_matrix.h"
 
 #include <math.h>
-#include <zephyr/kernel.h>
 #include <string.h>
 #include <float.h>
 
@@ -479,7 +478,7 @@ void Identity_Matrix(double *A, int n)
 ////////////////////////////////////////////////////////////////////////////////
 
 ////////////////////////////////////////////////////////////////////////////////
-//  int Hessenberg_Form_Elementary(double *A, double *S, int n)               //
+//  int Hessenberg_Form_Elementary(double *A, double *S, int n, int perm[])    //
 //                                                                            //
 //  Description:                                                              //
 //     This program transforms the square matrix A to a similar matrix in     //
@@ -507,30 +506,33 @@ void Identity_Matrix(double *A, int n)
 //                   The matrix S should be dimensioned at least n x n in the //
 //                   calling routine.                                         //
 //     int    n      The number of rows or columns of the matrix A.           //
+//     int perm[]    Caller-owned workspace with at least n elements.         //
 //                                                                            //
 //  Return Values:                                                            //
 //      0  Success                                                            //
-//     -1  Failure - Not enough memory                                        //
+//     -1  Failure - Invalid arguments or non-finite elimination factor        //
 //                                                                            //
 //  Example:                                                                  //
 //     #define N                                                              //
-//     double A[N][N], S[N][N];                                               //
+//     double A[N][N], S[N][N]; int perm[N];                                  //
 //                                                                            //
 //     (your code to create the matrix A)                                     //
-//     if (Hessenberg_Form_Elementary(&A[0][0], (double*)S, N ) < 0) {        //
-//        printf("Not enough memory\n"); exit(0);                             //
+//     if (Hessenberg_Form_Elementary(&A[0][0], (double*)S, N, perm) < 0) {    //
+//        printf("Hessenberg reduction failed\n"); exit(0);                    //
 //     }                                                                      //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-int Hessenberg_Form_Elementary(double *A, double *S, int n)
+int Hessenberg_Form_Elementary(double *A, double *S, int n, int perm[])
 {
    int i, j, col, row;
-   int *perm;
    double *p_row, *pS_row;
    double max;
    double s;
    double *pA, *pB, *pC, *pS;
+
+   if (A == NULL || S == NULL || perm == NULL || n < 1)
+      return -1;
 
    // n x n matrices for which n <= 2 are already in Hessenberg form
 
@@ -547,12 +549,6 @@ int Hessenberg_Form_Elementary(double *A, double *S, int n)
       *S = 0.0;
       return 0;
    }
-
-   // Allocate working memory
-
-   perm = (int *)k_malloc(n * sizeof(int));
-   if (perm == NULL)
-      return -1; // not enough memory
 
    // For each column use Elementary transformations
    //   to zero the entries below the subdiagonal.
@@ -589,7 +585,10 @@ int Hessenberg_Form_Elementary(double *A, double *S, int n)
       pS = pS_row + n;
       for (i = col + 2; i < n; pA += n, pS += n, i++)
       {
-         s = *(pA + col) / *(p_row + col);
+         // A zero pivot means the entire remaining column is already zero.
+         s = max == 0.0 ? 0.0 : *(pA + col) / *(p_row + col);
+         if (!isfinite(s))
+            return -1;
          for (j = 0; j < n; j++)
             *(pA + j) -= *(p_row + j) * s;
          *(pS + col) = s;
@@ -604,7 +603,6 @@ int Hessenberg_Form_Elementary(double *A, double *S, int n)
 
    Hessenberg_Elementary_Transform(A, S, perm, n);
 
-   k_free(perm);
    return 0;
 }
 

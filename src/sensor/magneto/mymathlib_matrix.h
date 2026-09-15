@@ -5,7 +5,7 @@ int Choleski_LU_Inverse(double *, int);
 void Multiply_Matrices(double *, double *, int, int, double *, int);
 void Identity_Matrix(double *, int);
 
-int Hessenberg_Form_Elementary(double *, double *, int);
+int Hessenberg_Form_Elementary(double *, double *, int, int[]);
 void Hessenberg_Elementary_Transform(double *, double *, int[], int);
 
 void Copy_Vector(double *, double *, int);

@@ -106,7 +106,6 @@ int sensor_calibrate_mag(void)
 	float m_inv[4][3];
 	LOG_INF("Calibrating magnetometer hard/soft iron offset");
 
-	// max allocated 1072 bytes
 #if DEBUG
 	printk("ata:\n");
 	for (int i = 0; i < 10; i++) {
@@ -119,8 +118,14 @@ int sensor_calibrate_mag(void)
 	printk("norm_sum: %.2f, sample_count: %.0f\n", norm_sum, sample_count);
 #endif
 	wait_for_threads();
-	magneto_current_calibration(m_inv, ata, norm_sum, sample_count); // 25ms
+	int err = magneto_current_calibration(m_inv, ata, norm_sum, sample_count);
 	magneto_reset();
+	if (err) {
+		LOG_WRN("Magnetometer calibration failed: %d; previous calibration unchanged", err);
+		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
+		set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+		return err;
+	}
 
 	LOG_INF("Magnetometer matrix:");
 	for (int i = 0; i < 3; i++) {
@@ -393,9 +398,12 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 	LOG_INF("Calculating calibration matrix...");
 
 	wait_for_threads();
-	magneto_current_calibration(a_inv, ata, norm_sum, sample_count);
+	int err = magneto_current_calibration(a_inv, ata, norm_sum, sample_count);
 
 	magneto_reset();
+	if (err) {
+		return err;
+	}
 
 	LOG_INF("Calibration calculation complete.");
 	return 0;
