@@ -37,7 +37,41 @@ connection = (SOURCE / "connection/connection.c").read_text()
 header = (SRC / "connection/esb.h").read_text()
 constants = "\n".join(re.findall(r"^#define (?:ESB_|PING_INTERVAL_MS)[^\n]*", header, re.MULTILINE))
 payload = constants + "\n" + "\n".join(re.findall(r"^static struct esb_payload tx_payload = .*;", esb, re.MULTILINE))
+clocked_writer = re.search(r"^static int esb_write_clocked\(", esb, re.MULTILINE)
+if clocked_writer:
+    payload += "\nstatic atomic_t tx_clock_users;\n"
+payload += "\n" + function(esb, "clocks_stop")
+if clocked_writer:
+    payload += "\n" + function(esb, "esb_release_tx_clock")
+    payload += "\n" + function(esb, "esb_write_clocked")
 payload += "\n" + function(esb, "esb_write")
+if re.search(r"^int esb_write_ping\(", esb, re.MULTILINE):
+    payload += "\n" + function(esb, "esb_write_ping")
+    payload += """
+static int host_send_ping(uint8_t *data, bool force)
+{
+    return esb_write_ping(data, force);
+}
+"""
+else:
+    payload += """
+static int host_send_ping(uint8_t *data, bool force)
+{
+    if (!force && tdma_wait_for_ping_window() == TDMA_PING_DEFERRED) {
+        return -EAGAIN;
+    }
+    return esb_write(data, false, ESB_PING_LEN);
+}
+"""
+# Run the actual TX_SUCCESS case, not a stub for its clock release decision.
+start = esb.index("\tcase ESB_EVENT_TX_SUCCESS:") + len("\tcase ESB_EVENT_TX_SUCCESS:")
+end = esb.index("\n\t\tbreak;", start)
+payload += """
+static void host_tx_success(void)
+{
+""" + esb[start:end] + """
+}
+"""
 commands = [constants, block(esb, r"^struct esb_remote_cmd \{", True)]
 commands.extend(re.findall(r"^static (?:bool remote_command_rejected|uint32_t remote_command_generation);", esb, re.MULTILINE))
 registry = block(esb, r"^static const struct esb_remote_cmd esb_remote_cmds\[\] = \{", True)

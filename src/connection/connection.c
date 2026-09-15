@@ -1636,25 +1636,6 @@ void connection_thread(void)
 				|| (guarded_schedule ? ping_window_delay_ms == 0
 					: (int32_t)((uint32_t)now - ping_deadline) >= 0);
 			if (ping_due) {
-				enum tdma_ping_admission admission = force_resync
-					? TDMA_PING_UNAVAILABLE : tdma_wait_for_ping_window();
-				if (!force_resync && admission == TDMA_PING_DEFERRED) {
-					uint32_t retry_delay_ms = 0;
-					if (tdma_ping_wake_delay_ms(&retry_delay_ms)) {
-						atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
-					}
-					continue;
-				}
-				atomic_inc(&ping_sched_stats.due);
-				atomic_inc(&ping_sched_stats.attempts);
-				ping_stats_attempt((uint32_t)now);
-				if (!guarded_schedule) {
-					ping_deadline = ping_next_periodic_deadline(
-						ping_deadline, (uint32_t)now, effective_ping_interval_ms
-					);
-					atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
-				}
-
 				uint8_t ping[ESB_PING_LEN] = {0};
 				ping[0] = ESB_PING_TYPE;
 				ping[1] = connection_get_id();
@@ -1671,7 +1652,23 @@ void connection_thread(void)
 					esb_get_ping_request_data(request);
 					memcpy(&ping[8], request, sizeof(request));
 				}
-				int err = esb_write(ping, false, ESB_PING_LEN);
+				int err = esb_write_ping(ping, force_resync);
+				if (err == -EAGAIN) {
+					uint32_t retry_delay_ms = 0;
+					if (tdma_ping_wake_delay_ms(&retry_delay_ms)) {
+						atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
+					}
+					continue;
+				}
+				atomic_inc(&ping_sched_stats.due);
+				atomic_inc(&ping_sched_stats.attempts);
+				ping_stats_attempt((uint32_t)now);
+				if (!guarded_schedule) {
+					ping_deadline = ping_next_periodic_deadline(
+						ping_deadline, (uint32_t)now, effective_ping_interval_ms
+					);
+					atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
+				}
 				if (err == 0) {
 					atomic_inc(&ping_sched_stats.queue_ok);
 				} else {

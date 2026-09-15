@@ -83,6 +83,9 @@ void esb_clear_pair(void);
 
 void esb_process_ota_rx_queue(void);
 int esb_write(uint8_t *data, bool no_ack, size_t data_length);
+/* Start the clock before guarded admission; -EAGAIN defers with HFXO warm.
+ * force_resync bypasses admission for unslotted startup recovery. */
+int esb_write_ping(uint8_t *data, bool force_resync);
 
 #define PING_INTERVAL_MS 997
 // Ping/Pong types for ACK payload validation

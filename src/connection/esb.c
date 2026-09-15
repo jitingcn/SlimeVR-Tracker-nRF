@@ -849,6 +849,22 @@ uint32_t esb_get_ping_backoff_ms(void)
 }
 
 bool clock_status = false;
+/* Each preparation owns a reference through admission and queueing, so an
+ * earlier TX completion cannot stop the clock beneath a waiting successor. */
+static atomic_t tx_clock_users;
+
+static void esb_release_tx_clock(bool keep_clock_warm)
+{
+	atomic_dec(&tx_clock_users);
+	if (keep_clock_warm) {
+		return;
+	}
+#if !defined(CONFIG_SOC_SERIES_NRF54L)
+	if (esb_is_idle() && esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection()) {
+		clocks_stop();
+	}
+#endif
+}
 
 #if defined(CONFIG_CLOCK_CONTROL_NRF)
 static struct onoff_manager *clk_mgr;
@@ -927,7 +943,9 @@ int clocks_start(void)
 
 void clocks_stop(void)
 {
-	if (!clock_status) {
+	unsigned key = irq_lock();
+	if (atomic_get(&tx_clock_users) != 0 || !clock_status) {
+		irq_unlock(key);
 		return;
 	}
 
@@ -935,6 +953,7 @@ void clocks_stop(void)
 	 * for the LF clock. Don't stop HFXO in this case. */
 	if (IS_ENABLED(CONFIG_CLOCK_USE_LF_SYNTH)) {
 		LOG_DBG("HF clock kept running for LF_SYNTH");
+		irq_unlock(key);
 		return;
 	}
 
@@ -945,6 +964,7 @@ void clocks_stop(void)
 #if defined(CONFIG_SOC_SERIES_NRF54L)
 	nrfx_power_constlat_mode_free();
 #endif
+	irq_unlock(key);
 
 	LOG_DBG("HF clock stop request");
 }
@@ -1856,13 +1876,10 @@ void esb_process_ota_rx_queue(void)
 	}
 }
 
-int esb_write(uint8_t *data, bool no_ack, size_t data_length)
+static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 {
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
 		return -EACCES;
-	}
-	if (!clock_status) {
-		clocks_start();
 	}
 	drop_failed_tx_payload_if_pending();
 	if (data_length < 1) {
@@ -2129,6 +2146,42 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		esb_start_queued_tx();
 	}
 	return queue_status;
+}
+
+int esb_write(uint8_t *data, bool no_ack, size_t data_length)
+{
+	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
+		return -EACCES;
+	}
+	atomic_inc(&tx_clock_users);
+	int err = clocks_start();
+	if (err == 0) {
+		err = esb_write_clocked(data, no_ack, data_length);
+	}
+	esb_release_tx_clock(false);
+	return err;
+}
+
+int esb_write_ping(uint8_t *data, bool force_resync)
+{
+	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
+		return -EACCES;
+	}
+	atomic_inc(&tx_clock_users);
+	int err = clocks_start();
+	if (err == 0) {
+		/* Clock startup must finish before guarded admission. */
+		if (!force_resync && tdma_wait_for_ping_window() == TDMA_PING_DEFERRED) {
+			err = -EAGAIN;
+		} else {
+			err = esb_write_clocked(data, false, ESB_PING_LEN);
+		}
+	}
+	/* Deferred PINGs keep HFXO warm for the next window without retaining
+	 * ownership; TX completion or an explicit lifecycle stop can release it. */
+	bool keep_clock_warm = err == -EAGAIN;
+	esb_release_tx_clock(keep_clock_warm);
+	return err;
 }
 
 bool esb_ready(void)
