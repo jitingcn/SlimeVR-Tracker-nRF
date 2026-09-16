@@ -782,7 +782,7 @@ int QR_Hessenberg_Matrix(double *H, double *S, double eigen_real[],
    }
 
    BackSubstitution(H, eigen_real, eigen_imag, n);
-   Calculate_Eigenvectors(H, S, eigen_real, eigen_imag, n);
+   Calculate_Eigenvectors(H, S, eigen_imag, n);
 
    return 0;
 }
@@ -1222,6 +1222,9 @@ void Double_QR_Step(double *H, int min_row, int max_row, int min_col,
    a /= s;
    b /= s;
    c /= s;
+   s = sqrt(a * a + b * b + c * c);
+   if (a < 0.0)
+      s = -s;
 
    for (; k <= last_test_row_col; k++, pH += n)
    {
@@ -1234,12 +1237,11 @@ void Double_QR_Step(double *H, int min_row, int max_row, int min_col,
          a = pH[k - 1] / x;
          b = pH[n + k - 1] / x;
          c /= x;
-      }
-      s = sqrt(a * a + b * b + c * c);
-      if (a < 0.0)
-         s = -s;
-      if (k > min_col)
+         s = sqrt(a * a + b * b + c * c);
+         if (a < 0.0)
+            s = -s;
          pH[k - 1] = -s * x;
+      }
       else if (min_row != min_col)
          pH[k - 1] = -pH[k - 1];
       a += s;
@@ -1509,8 +1511,8 @@ void BackSubstitute_Complex_Vector(double *H, double eigen_real[],
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//  void Calculate_Eigenvectors(double *H, double *S,                  //
-//                          double eigen_real[], double eigen_imag[], int n)  //
+//  void Calculate_Eigenvectors(double *H, double *S,                          //
+//                             double eigen_imag[], int n)                    //
 //                                                                            //
 //  Description:                                                              //
 //     Multiply by transformation matrix.                                     //
@@ -1520,15 +1522,13 @@ void BackSubstitute_Complex_Vector(double *H, double eigen_real[],
 //            Pointer to the first element of the matrix in Hessenberg form.  //
 //     double *S                                                              //
 //            Pointer to the first element of the transformation matrix.      //
-//     double eigen_real[]                                                    //
-//            The real part of an eigenvalue.                                 //
 //     double eigen_imag[]                                                    //
 //            The imaginary part of an eigenvalue.                            //
 //     int    n                                                               //
-//            The dimension of H, S, eigen_real, and eigen_imag.              //
+//            The dimension of H, S, and eigen_imag.                          //
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-void Calculate_Eigenvectors(double *H, double *S, double eigen_real[],
+void Calculate_Eigenvectors(double *H, double *S,
                             double eigen_imag[], int n)
 {
    double *pH;

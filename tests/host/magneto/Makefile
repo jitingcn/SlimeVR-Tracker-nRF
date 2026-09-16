@@ -19,7 +19,7 @@ check: test_magneto
 test_magneto: $(SOURCES) $(HEADERS)
 	$(CC) $(CFLAGS) -c -o test_magneto.o test_magneto.c
 	$(CC) $(CFLAGS) -c -o magneto1_4.o $(SOURCE_ROOT)/src/sensor/magneto/magneto1_4.c
-	$(CC) $(CFLAGS) -Wno-error -c -o mymathlib_matrix.o $(SOURCE_ROOT)/src/sensor/magneto/mymathlib_matrix.c
+	$(CC) $(CFLAGS) -c -o mymathlib_matrix.o $(SOURCE_ROOT)/src/sensor/magneto/mymathlib_matrix.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ test_magneto.o magneto1_4.o mymathlib_matrix.o $(LDLIBS)
 
 clean:

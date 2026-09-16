@@ -23,7 +23,7 @@ void Double_QR_Step(double *, int, int, int, double, double, double *, int);
 void BackSubstitution(double *, double[], double[], int);
 void BackSubstitute_Real_Vector(double *, double[], double[], int, double, int);
 void BackSubstitute_Complex_Vector(double *, double[], double[], int, double, int);
-void Calculate_Eigenvectors(double *, double *, double[], double[], int);
+void Calculate_Eigenvectors(double *, double *, double[], int);
 void Complex_Division(double, double, double, double, double *, double *);
 
 void Transpose_Square_Matrix(double *, int);
@@ -52,4 +52,4 @@ void Complex_Division(double x, double y, double u, double v, double* a, double*
 void BackSubstitution(double* H, double eigen_real[], double eigen_imag[], int n);
 void BackSubstitute_Real_Vector(double* H, double eigen_real[], double eigen_imag[], int row, double zero_tolerance, int n);
 void BackSubstitute_Complex_Vector(double* H, double eigen_real[], double eigen_imag[], int row, double zero_tolerance, int n);
-void Calculate_Eigenvectors(double* H, double* S, double eigen_real[], double eigen_imag[], int n);
+void Calculate_Eigenvectors(double* H, double* S, double eigen_imag[], int n);
