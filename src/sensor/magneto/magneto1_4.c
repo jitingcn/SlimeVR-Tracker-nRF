@@ -347,13 +347,13 @@ int magneto_current_calibration(float BAinv[4][3], double *ata, double norm_sum,
     // Check the entire candidate before the first caller-visible write. A
     // finite double can still overflow or lose its positive diagonal in float.
     for (int i = 0; i < 3; i++) {
-        if (!isfinite(B[i]) || fabs(B[i]) > FLT_MAX) {
+        if (!isfinite(B[i]) || fabs(B[i]) > (double)FLT_MAX) {
             err = -ERANGE;
             goto cleanup;
         }
     }
     for (int i = 0; i < 9; i++) {
-        if (!isfinite(A_1[i]) || fabs(A_1[i]) > FLT_MAX) {
+        if (!isfinite(A_1[i]) || fabs(A_1[i]) > (double)FLT_MAX) {
             err = -ERANGE;
             goto cleanup;
         }

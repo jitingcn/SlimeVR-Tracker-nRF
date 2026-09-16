@@ -92,7 +92,7 @@ static bool constrained(const float p[9], const float *initial)
 	a[1] = a[3] = p[6];
 	a[2] = a[6] = p[7];
 	a[5] = a[7] = p[8];
-	if (!eigen(a, 3, NULL, NULL, &lo, &hi) || lo < .25f || hi > 4 || hi / lo > 8) {
+	if (!eigen(a, 3, NULL, NULL, &lo, &hi) || lo < .25 || hi > 4 || hi / lo > 8) {
 		return false;
 	}
 	if (initial) {
@@ -191,20 +191,20 @@ static int accumulate(
 		double w = 1.0 / (W.cells[ab] * (double)leverage);
 		float e = fabsf(r);
 		total += w;
-		cost += w * (e <= HUBER ? .5f * r * r : HUBER * (e - .5f * HUBER));
+		cost += w * (double)(e <= HUBER ? .5f * r * r : HUBER * (e - .5f * HUBER));
 		float clipped = fminf(e, .18f);
-		squares += w * clipped * clipped;
+		squares += w * (double)clipped * (double)clipped;
 		if (e <= .18f) {
 			good += w;
 		}
 		if (!normal) {
 			continue;
 		}
-		w *= e > HUBER ? HUBER / e : 1;
+		w *= (double)(e > HUBER ? HUBER / e : 1);
 		for (unsigned a = 0; a < 9; a++) {
-			W.step[a] += w * j[a] * r;
+			W.step[a] += w * (double)j[a] * (double)r;
 			for (unsigned b = 0; b < 9; b++) {
-				W.information[a * 9 + b] += w * j[a] * j[b];
+				W.information[a * 9 + b] += w * (double)j[a] * (double)j[b];
 			}
 		}
 	}
@@ -363,7 +363,7 @@ static int bootstrap(unsigned slots, mag_fit_read_fn read, mag_fit_poll_fn poll,
 	for (unsigned i = 0; i < 3; i++) {
 		out[0][i] *= scale;
 		for (unsigned j = 0; j < 3; j++) {
-			out[i + 1][j] *= (float)(.5 / ((sum / used) * scale));
+			out[i + 1][j] *= (float)(.5 / ((sum / used) * (double)scale));
 		}
 	}
 	return 0;
@@ -436,7 +436,7 @@ int magneto_robust_fit(
 			return -ECANCELED;
 		}
 		condition = hi / lo;
-		if (lo < .002f || !isfinite(condition) || condition > 1000) {
+		if (lo < .002 || !isfinite(condition) || condition > 1000) {
 			return -EDOM;
 		}
 		if (iteration == 4) {
@@ -455,7 +455,7 @@ int magneto_robust_fit(
 		for (unsigned backtrack = 0; backtrack < 4; backtrack++) {
 			float factor = 1.0f / (1u << backtrack);
 			for (unsigned i = 0; i < 9; i++) {
-				trial[i] = p[i] + factor * W.step[i];
+				trial[i] = p[i] + factor * (float)W.step[i];
 			}
 			if (!constrained(trial, p) || (previous && !constrained(trial, initial))) {
 				continue;
@@ -476,7 +476,7 @@ int magneto_robust_fit(
 			for (unsigned i = 0; i < 9; i++) {
 				step2 += W.step[i] * W.step[i];
 			}
-			if (step2 > 1e-8f) {
+			if (step2 > 1e-8) {
 				return -EAGAIN;
 			}
 			break;
