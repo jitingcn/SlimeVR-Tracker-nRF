@@ -31,6 +31,7 @@
 #include "calibration/calibration.h"
 #include "calibration/imu_calibration.h"
 #include "calibration/mag_common.h"
+#include "calibration/online_mag.h"
 #include "motion_state.h"
 #include "zephyr/logging/log.h"
 
@@ -326,17 +327,43 @@ bool sensor_fusion_get_mag_dist_detected(void)
 	return sensor_fusion->get_mag_dist_detected();
 }
 
-void sensor_fusion_reset_mag_ref(void)
-{
-	if (sensor_fusion && sensor_fusion->reset_mag_ref) {
-		sensor_fusion->reset_mag_ref();
-	}
-}
+/* Cross-thread callers request a handoff; only the sensor thread touches fusion. */
+static struct k_spinlock mag_ref_request_lock;
+static bool mag_ref_request_pending;
+static float mag_ref_request_norm;
+static float mag_ref_request_dip;
 
 void sensor_fusion_set_mag_ref(float norm, float dip)
 {
-	if (sensor_fusion && sensor_fusion->set_mag_ref) {
-		sensor_fusion->set_mag_ref(norm, dip);
+	k_spinlock_key_t key = k_spin_lock(&mag_ref_request_lock);
+	mag_ref_request_norm = norm;
+	mag_ref_request_dip = dip;
+	mag_ref_request_pending = true;
+	k_spin_unlock(&mag_ref_request_lock, key);
+}
+
+void sensor_fusion_reset_mag_ref(void)
+{
+	sensor_fusion_set_mag_ref(0.0f, 0.0f);
+}
+
+static void sensor_service_mag_ref(void)
+{
+	float norm, dip;
+	k_spinlock_key_t key = k_spin_lock(&mag_ref_request_lock);
+	bool pending = mag_ref_request_pending;
+	norm = mag_ref_request_norm;
+	dip = mag_ref_request_dip;
+	mag_ref_request_pending = false;
+	k_spin_unlock(&mag_ref_request_lock, key);
+	/* Matrix publication in this sample takes precedence over an older request. */
+	pending = magneto_online_take_mag_ref(&norm, &dip) || pending;
+	if (pending && sensor_fusion->rebase_mag) {
+		if (!isfinite(norm) || !isfinite(dip) || norm <= 0.0f || fabsf(dip) > (float)M_PI / 2.0f) {
+			norm = dip = 0.0f;
+		}
+		sensor_fusion->rebase_mag(norm, dip);
+		last_mag_fusion_ticks = 0;
 	}
 }
 
@@ -1704,6 +1731,9 @@ int sensor_init(void)
 	if (retained->fusion_id == fusion_id) // Check if the retained fusion data is valid and matches the selected fusion
 	{                                     // Load state if the data is valid (fusion was initialized before)
 		sensor_fusion->load(retained->fusion_data);
+		/* Retained fusion may describe an unconfirmed trial matrix from before
+		 * sleep. Reacquire only its magnetic domain against confirmed storage. */
+		sensor_fusion_reset_mag_ref();
 		retained->fusion_id = 0; // Invalidate retained fusion data
 		retained_update();
 	} else {
@@ -1812,78 +1842,65 @@ static uint64_t total_loop_iterations = 0;
 static uint32_t mag_vqf_updates_since_status = 0;
 static float mag_feed_hz; /* last STATUS_INTERVAL window */
 
-/*
- * After a calibration change, fusion reset_mag_ref() zeros the backend magRef.
- * Rather than waiting for natural convergence, re-compute magRef directly from
- * the first calibrated mag samples.
- *
- *   norm = |m_cal|
- *   dip  = -asin(dot(m_cal, up_hat) / norm)    [rad]
- * where up_hat = accel / |accel| (accelerometer points up when stationary).
- *
- * Triggered by sensor_mag_ref_reset(); does NOT run on startup.
- */
-#define MAG_REF_RECOMPUTE_SAMPLES 100
-#define MAG_REF_ACCEL_TOL 0.3f
-
-static bool mag_ref_recompute_active;
-static float mag_ref_norm_sum;
-static float mag_ref_dip_sum;
-static int mag_ref_count;
-
-static void sensor_mag_ref_accumulate(const float m_cal[3], const float accel_sum[3], int accel_count)
-{
-	if (!mag_ref_recompute_active || accel_count == 0) {
-		return;
-	}
-
-	float ax = accel_sum[0] / accel_count;
-	float ay = accel_sum[1] / accel_count;
-	float az = accel_sum[2] / accel_count;
-	float a_norm = sqrtf(ax * ax + ay * ay + az * az);
-	if (fabsf(a_norm - 1.0f) > MAG_REF_ACCEL_TOL) {
-		return;
-	}
-
-	float m_norm = sqrtf(m_cal[0] * m_cal[0] + m_cal[1] * m_cal[1] + m_cal[2] * m_cal[2]);
-	if (m_norm < 0.01f) {
-		return;
-	}
-
-	float inv_a = 1.0f / a_norm;
-	float m_dot_up = (m_cal[0] * ax + m_cal[1] * ay + m_cal[2] * az) * inv_a;
-	float sin_dip = m_dot_up / m_norm;
-	if (sin_dip > 1.0f) {
-		sin_dip = 1.0f;
-	}
-	if (sin_dip < -1.0f) {
-		sin_dip = -1.0f;
-	}
-
-	mag_ref_norm_sum += m_norm;
-	mag_ref_dip_sum += -asinf(sin_dip);
-	mag_ref_count++;
-
-	if (mag_ref_count >= MAG_REF_RECOMPUTE_SAMPLES) {
-		float avg_norm = mag_ref_norm_sum / mag_ref_count;
-		float avg_dip = mag_ref_dip_sum / mag_ref_count;
-		sensor_fusion_set_mag_ref(avg_norm, avg_dip);
-		mag_ref_recompute_active = false;
-		LOG_INF(
-			"Mag ref recomputed from %d samples: norm=%.4f dip=%.1f deg",
-			mag_ref_count,
-			(double)avg_norm,
-			(double)(avg_dip * 180.0f / (float)M_PI)
-		);
-	}
-}
-
 void sensor_mag_ref_reset(void)
 {
-	mag_ref_recompute_active = true;
-	mag_ref_norm_sum = 0;
-	mag_ref_dip_sum = 0;
-	mag_ref_count = 0;
+	sensor_fusion_reset_mag_ref();
+}
+
+/* q maps fusion body to earth. Earth up in body is row 3 of R(q).
+ * Invert the configured signed permutation (including reflected mag axes)
+ * by applying its transpose, not a quaternion/device-frame correction. */
+static bool sensor_mag_gravity(const float accel_sum[3], int accel_count, float raw_up[3])
+{
+	if (accel_count <= 0) {
+		return false;
+	}
+	float up[3];
+	if (sensor_fusion->get_quat6) {
+		float q[4];
+		sensor_fusion->get_quat6(q);
+		up[0] = 2.0f * (q[1] * q[3] - q[0] * q[2]);
+		up[1] = 2.0f * (q[2] * q[3] + q[0] * q[1]);
+		up[2] = 1.0f - 2.0f * (q[1] * q[1] + q[2] * q[2]);
+	} else {
+		/* EqF has no independent q6. Its IMU-only rest detector requires
+		 * gyro/accel stability and dwell; accept held orientations only. */
+		if (!sensor_fusion->get_rest_detected || !sensor_fusion->get_rest_detected()) {
+			return false;
+		}
+		float a_sq = 0.0f;
+		for (unsigned i = 0; i < 3; i++) {
+			up[i] = accel_sum[i] / accel_count;
+			a_sq += up[i] * up[i];
+		}
+		if (!(a_sq >= 0.7225f && a_sq <= 1.3225f)) {
+			return false;
+		}
+		float inv = 1.0f / sqrtf(a_sq);
+		for (unsigned i = 0; i < 3; i++) {
+			up[i] *= inv;
+		}
+	}
+	float norm_sq = 0.0f, dot = 0.0f, up_sq = 0.0f;
+	for (unsigned i = 0; i < 3; i++) {
+		float a = accel_sum[i] / accel_count;
+		norm_sq += a * a;
+		dot += a * up[i];
+		up_sq += up[i] * up[i];
+	}
+	/* Fresh calibrated acceleration, 0.85..1.15g and within 15 degrees
+	 * of independent inclination; equal-norm lateral acceleration is rejected. */
+	if (!(norm_sq >= 0.7225f && norm_sq <= 1.3225f && up_sq > 0.99f && up_sq < 1.01f
+		  && dot > 0.9659258f * sqrtf(norm_sq * up_sq))) {
+		return false;
+	}
+	float inv_up = 1.0f / sqrtf(up_sq);
+	for (unsigned axis = 0; axis < 3; axis++) {
+		float mx = axis == 0, my = axis == 1, mz = axis == 2;
+		float column[3] = {SENSOR_MAGNETOMETER_AXES_ALIGNMENT};
+		raw_up[axis] = (column[0] * up[0] + column[1] * up[1] + column[2] * up[2]) * inv_up;
+	}
+	return true;
 }
 
 typedef struct {
@@ -2406,8 +2423,10 @@ static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 		float uncalibrated_m[3] = {0};
 		memcpy(uncalibrated_m, frame->raw_m, sizeof(uncalibrated_m)); // copy raw magnetometer data
 
-		// Feed raw mag to background online calibration accumulator
-		sensor_calibration_online_mag_sample(uncalibrated_m);
+		float gravity_raw[3] = {0};
+		bool gravity_valid = sensor_mag_gravity(frame->a_sum, frame->a_count, gravity_raw);
+		sensor_calibration_online_mag_sample(uncalibrated_m, gravity_raw, gravity_valid);
+		sensor_service_mag_ref();
 
 		sensor_calibration_process_mag(frame->raw_m);
 		float zero_m[3] = {0};
@@ -2443,7 +2462,6 @@ static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 			sensor_fusion->update_mag(m, mag_dt);
 			last_mag_fusion_ticks = now_ticks;
 			mag_vqf_updates_since_status++;
-			sensor_mag_ref_accumulate(m, frame->a_sum, frame->a_count);
 		}
 
 		float mag_device[3];

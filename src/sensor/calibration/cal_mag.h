@@ -33,7 +33,7 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out);
 #endif
 
 /* Magneto ATA accumulator shared with cal_imu partial-save on 6-side timeout. */
-extern double ata[100];
+#include "mag_fit.h"
 extern double norm_sum;
 extern double sample_count;
 

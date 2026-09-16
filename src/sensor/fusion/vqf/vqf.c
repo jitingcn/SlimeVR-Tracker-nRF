@@ -554,14 +554,28 @@ bool vqf_get_mag_dist_detected(void)
 	return getMagDistDetected(&state);
 }
 
-void vqf_reset_mag_ref(void)
-{
-	setMagRef(&state, 0, 0);
-}
-
-void vqf_set_mag_ref(float norm, float dip)
+static void vqf_rebase_mag(float norm, float dip)
 {
 	setMagRef(&state, norm, dip);
+	state.magDistDetected = true;
+	state.magUndisturbedT = 0.0f;
+	state.magRejectT = 0.0f;
+	state.magCandidateNorm = -1.0f;
+	state.magCandidateDip = 0.0f;
+	state.magCandidateT = 0.0f;
+	state.magNormDip[0] = state.magNormDip[1] = 0.0f;
+	for (unsigned i = 0; i < 4; i++) {
+		state.magNormDipLpState[i] = NAN;
+	}
+	state.kMagInit = 0.0f;
+	state.lastMagDisAngle = 0.0f;
+	state.lastMagCorrAngularRate = 0.0f;
+	state.lastMagTsUs = 0;
+}
+
+static void vqf_get_quat6(float *q)
+{
+	getQuat6D(&state, q);
 }
 
 float vqf_get_mag_ref_norm(void)
@@ -970,7 +984,7 @@ const sensor_fusion_t sensor_fusion_vqf = {
 	.get_rest_detected = vqf_get_rest_detected,
 	.get_relative_rest_deviations = vqf_get_relative_rest_deviations,
 	.get_mag_dist_detected = vqf_get_mag_dist_detected,
-	.reset_mag_ref = vqf_reset_mag_ref,
-	.set_mag_ref = vqf_set_mag_ref,
+	.get_quat6 = vqf_get_quat6,
+	.rebase_mag = vqf_rebase_mag,
 	.get_mag_ref = vqf_get_mag_ref,
 };

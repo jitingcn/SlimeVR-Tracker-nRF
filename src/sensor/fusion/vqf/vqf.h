@@ -49,8 +49,6 @@ void vqf_get_quat(float *q);
 
 bool vqf_get_rest_detected(void);
 bool vqf_get_mag_dist_detected(void);
-void vqf_reset_mag_ref(void);
-void vqf_set_mag_ref(float norm, float dip);
 float vqf_get_mag_ref_norm(void);
 void vqf_get_mag_ref(float *norm, float *dip);
 float vqf_get_delta(void);

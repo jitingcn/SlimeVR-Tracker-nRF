@@ -90,7 +90,9 @@ void sensor_request_calibration_mag(void);
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions);
 #endif
-void sensor_calibration_online_mag_sample(const float m[3]);
+/* Always service ownership, even when disabled. Gravity is reliable independent
+ * 6D up expressed in the raw magnetometer axis basis, never magnetic heading. */
+void sensor_calibration_online_mag_sample(const float raw[3], const float gravity_raw[3], bool gravity_valid);
 int sensor_calibration_online_mag_status(float *dir_bias);
 void sensor_calibration_track_mag_norm(float cal_norm);
 float sensor_calibration_get_mag_quality(void);

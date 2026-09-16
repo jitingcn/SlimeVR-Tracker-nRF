@@ -294,7 +294,7 @@ void sensor_calibrate_6_side(void)
 				// We have enough samples, try to calculate calibration from partial data
 				LOG_INF("Attempting partial calibration with %d poses...", captured_count);
 				wait_for_threads();
-				err = magneto_current_calibration(a_inv, ata, norm_sum, sample_count);
+				err = magneto_current_calibration(a_inv, mag_cal_workspace.ata, norm_sum, sample_count);
 				magneto_reset();
 			} else {
 				// Not enough samples - discard and restore previous calibration

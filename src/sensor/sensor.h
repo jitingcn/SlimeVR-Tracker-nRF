@@ -56,6 +56,7 @@ void sensor_mag_ref_reset(void);
 bool sensor_fusion_get_rest_detected(void);
 bool sensor_fusion_get_relative_rest_deviations(float out[2]);
 bool sensor_fusion_get_mag_dist_detected(void);
+/* Thread-safe requests, applied only by sensor before the next magnetic feed. */
 void sensor_fusion_reset_mag_ref(void);
 void sensor_fusion_set_mag_ref(float norm, float dip);
 bool sensor_fusion_get_mag_ref(float *norm, float *dip);
@@ -105,13 +106,15 @@ typedef struct sensor_fusion {
 
 	void (*get_lin_a)(float *);
 	void (*get_quat)(float *);
+	/* NULL when no magnetically independent inclination estimate is available. */
+	void (*get_quat6)(float *);
 
 	/* Rest / mag-quality policy (both VQF and EqF implement these). */
 	bool (*get_rest_detected)(void);
 	void (*get_relative_rest_deviations)(float out[2]); /* [gyr, acc] vs thresholds */
 	bool (*get_mag_dist_detected)(void);
-	void (*reset_mag_ref)(void);
-	void (*set_mag_ref)(float norm, float dip);
+	/* Sensor-thread only: replace magnetic domain, preserving attitude/bias. */
+	void (*rebase_mag)(float norm, float dip);
 	void (*get_mag_ref)(float *norm, float *dip);
 } sensor_fusion_t;
 

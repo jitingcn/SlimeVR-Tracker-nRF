@@ -4,6 +4,7 @@
 #include "system/test_mode.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
+#include "sensor/calibration/online_mag.h"
 #if CONFIG_VQF_BENCH
 #include "sensor/fusion/vqf/vqf.h"
 #endif
@@ -780,6 +781,95 @@ static void print_odr_summary_line(void)
 	}
 }
 
+static void print_mag_calibration_status(void)
+{
+	struct online_mag_diagnostics status;
+	sensor_calibration_online_mag_diagnostics(&status);
+	printk("Online mag debug: %s (runtime only)\n", sensor_calibration_get_online_mag_debug() ? "on" : "off");
+	printk(
+		"Calibration: %s (live, norm_cv=%.3f)\n",
+		status.trial ? "trial" : (status.has_model ? "active" : "none"),
+		(double)sensor_calibration_get_mag_quality()
+	);
+	if (!sensor_calibration_get_online_mag_enabled()) {
+		printk("Online: disabled\n");
+		return;
+	}
+	float dir_bias;
+	int samples = sensor_calibration_online_mag_status(&dir_bias);
+	static const char *const phases[] = {
+		[TRAINING] = "collecting",
+		[FREEZE_REQUESTED] = "freeze-requested",
+		[FROZEN] = "fitting",
+		[VALIDATION_READY] = "validation-ready",
+		[VALIDATING] = "validating",
+		[PROBATION] = "probation",
+		[CONFIRMATION_READY] = "confirmation-ready",
+	};
+	static const char *const outcomes[] = {
+		[ONLINE_MAG_NONE] = "pending",
+		[ONLINE_MAG_UNCHANGED] = "unchanged",
+		[ONLINE_MAG_ENVIRONMENT] = "environment-reference",
+		[ONLINE_MAG_UPDATED] = "calibration-updated",
+		[ONLINE_MAG_REJECTED] = "rejected",
+	};
+	static const char *const rejections[] = {
+		[ONLINE_MAG_REJECT_NONE] = "none",
+		[ONLINE_MAG_REJECT_FIT] = "fit",
+		[ONLINE_MAG_REJECT_RADIAL] = "radial",
+		[ONLINE_MAG_REJECT_DIP] = "dip",
+		[ONLINE_MAG_REJECT_COVERAGE] = "coverage",
+		[ONLINE_MAG_REJECT_TIMEOUT] = "timeout",
+		[ONLINE_MAG_REJECT_CANCELLED] = "cancelled",
+		[ONLINE_MAG_REJECT_MATRIX] = "matrix",
+		[ONLINE_MAG_REJECT_SAMPLE] = "sample",
+		[ONLINE_MAG_REJECT_OVERFLOW] = "overflow",
+		[ONLINE_MAG_REJECT_NO_BENEFIT] = "no-benefit",
+	};
+	printk("Online: enabled, %d training samples, dir_bias=%.2f\n", samples, (double)dir_bias);
+	printk(
+		"  Phase: %s; last result: %s; rejection: %s; fit_errno=%d\n",
+		status.phase < ARRAY_SIZE(phases) ? phases[status.phase] : "unknown",
+		status.outcome < ARRAY_SIZE(outcomes) ? outcomes[status.outcome] : "unknown",
+		status.rejection < ARRAY_SIZE(rejections) ? rejections[status.rejection] : "unknown",
+		status.fit_errno
+	);
+	printk("  Last gate: %s\n", status.last_gate < ARRAY_SIZE(rejections) ? rejections[status.last_gate] : "unknown");
+	if (status.score_valid) {
+		printk(
+			"  Evidence (%s, %u ms): radial samples=%u cells=%u; gravity samples=%u cells=%u; old_rms=%.4f "
+			"new_rms=%.4f\n",
+			status.score_phase < ARRAY_SIZE(phases) ? phases[status.score_phase] : "unknown",
+			(unsigned)status.phase_age_ms,
+			status.radial_count,
+			status.radial_cells,
+			status.dip_count,
+			status.dip_cells,
+			(double)status.old_rms,
+			(double)status.new_rms
+		);
+		printk(
+			"  Poles: radial=0x%02x gravity=0x%02x (all=0x3f); worst_cell_rms=%.4f max_error=%.4f\n",
+			status.radial_poles,
+			status.dip_poles,
+			(double)status.worst_cell_rms,
+			(double)status.max_radial_error
+		);
+		printk(
+			"  Dip: old_sd=%.2f deg new_sd=%.2f deg window_delta=%.2f deg\n",
+			(double)(status.old_dip_sd * 57.2957795f),
+			(double)(status.new_dip_sd * 57.2957795f),
+			(double)(status.dip_delta * 57.2957795f)
+		);
+	} else {
+		printk(
+			"  Evidence: no scored holdout; holdout_age=%u ms triggering_error=%.4f\n",
+			(unsigned)status.phase_age_ms,
+			(double)status.max_radial_error
+		);
+	}
+}
+
 static void print_sensor_summary(void)
 {
 	sensor_imu_calibration_t calibration;
@@ -893,7 +983,7 @@ static void print_sensor_detail(void)
 		(double)calibration.accel_bias[2]
 	);
 #endif
-	printk("Magnetometer matrix:\n");
+	printk("Magnetometer matrix (stored):\n");
 	for (int i = 0; i < 3; i++) {
 		printk(
 			"%.5f %.5f %.5f %.5f\n",
@@ -903,25 +993,7 @@ static void print_sensor_detail(void)
 			(double)retained->magBAinv[3][i]
 		);
 	}
-	{
-		bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
-		                 || retained->magBAinv[0][1] != 0.0f
-		                 || retained->magBAinv[0][2] != 0.0f);
-		if (sensor_calibration_get_online_mag_enabled()) {
-			float dir_bias = 0;
-			int online_samples = sensor_calibration_online_mag_status(&dir_bias);
-			float mag_cv = sensor_calibration_get_mag_quality();
-			printk(
-				"Mag cal: %s | norm_cv=%.3f | Online: enabled, %d samples, dir_bias=%.2f\n",
-				mag_has_cal ? "active" : "none",
-				(double)mag_cv,
-				online_samples,
-				(double)dir_bias
-			);
-		} else {
-			printk("Mag cal: %s | Online: disabled\n", mag_has_cal ? "active" : "none");
-		}
-	}
+	print_mag_calibration_status();
 
 #if CONFIG_SENSOR_RANGE_STATS
 	const sensor_range_stats_t *stats = sensor_get_range_stats();
@@ -1194,6 +1266,7 @@ static void print_help(void)
 	printk("  mag                        Show magnetometer status\n");
 	printk("  mag on|off                 Enable/disable magnetometer\n");
 	printk("  mag auto on|off     Enable/disable online magnetometer calibration\n");
+	printk("  mag debug on|off           Toggle online calibration logs (runtime only)\n");
 	printk("  mag clear                  Clear magnetometer calibration\n");
 	printk("  mag cal                    Start magnetometer calibration\n");
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -1714,33 +1787,21 @@ static void console_cmd_mag(size_t argc, char **argv)
 		// No argument: show status
 		printk("Magnetometer: %s\n", sensor_get_mag_enabled() ? "enabled" : "disabled");
 		printk("Hardware: %s\n", sensor_get_sensor_mag_name());
-		printk("Magnetometer matrix:\n");
+		printk("Magnetometer matrix (stored):\n");
 		for (int i = 0; i < 3; i++) {
-			printk("%.5f %.5f %.5f %.5f\n",
+			printk(
+				"%.5f %.5f %.5f %.5f\n",
 				(double)retained->magBAinv[0][i],
 				(double)retained->magBAinv[1][i],
 				(double)retained->magBAinv[2][i],
-				(double)retained->magBAinv[3][i]);
+				(double)retained->magBAinv[3][i]
+			);
 		}
-		bool mag_has_cal = (retained->magBAinv[0][0] != 0.0f
-		                 || retained->magBAinv[0][1] != 0.0f
-		                 || retained->magBAinv[0][2] != 0.0f);
-		if (sensor_calibration_get_online_mag_enabled()) {
-			float dir_bias = 0;
-			int online_samples = sensor_calibration_online_mag_status(&dir_bias);
-			float mag_cv = sensor_calibration_get_mag_quality();
-			printk("Calibration: %s (norm_cv=%.3f)\n",
-			       mag_has_cal ? "active" : "none", (double)mag_cv);
-			printk("Online: enabled, %d samples, dir_bias=%.2f\n",
-			       online_samples, (double)dir_bias);
-		} else {
-			printk("Calibration: %s\n", mag_has_cal ? "active" : "none");
-			printk("Online: disabled\n");
-		}
+		print_mag_calibration_status();
 	} else {
 		char *subcmd = arg;
 		if (subcmd == NULL) {
-			printk("Usage: mag [on|off|clear|cal|auto <on|off>]\n");
+			printk("Usage: mag [on|off|clear|cal|auto <on|off>|debug <on|off>]\n");
 		} else if (strcmp(subcmd, "on") == 0) {
 			printk("Enabling magnetometer\n");
 			sensor_set_mag_enabled(true);
@@ -1762,6 +1823,16 @@ static void console_cmd_mag(size_t argc, char **argv)
 			} else {
 				printk("Usage: mag %s <on|off>\n", subcmd);
 			}
+		} else if (strcmp(subcmd, "debug") == 0) {
+			if (argc != 3 || (strcmp(arg2, "on") != 0 && strcmp(arg2, "off") != 0)) {
+				printk("Usage: mag debug <on|off>\n");
+			} else {
+				sensor_calibration_set_online_mag_debug(strcmp(arg2, "on") == 0);
+				printk(
+					"Online mag debug: %s (runtime only)\n",
+					sensor_calibration_get_online_mag_debug() ? "on" : "off"
+				);
+			}
 		} else if (strcmp(subcmd, "clear") == 0) {
 			sensor_calibration_clear_mag(NULL, true);
 			printk("Magnetometer calibration cleared\n");
@@ -1770,7 +1841,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 			sensor_request_calibration_mag();
 			printk("Magnetometer calibration started\n");
 		} else {
-			printk("Usage: mag [on|off|clear|cal|auto <on|off>]\n");
+			printk("Usage: mag [on|off|clear|cal|auto <on|off>|debug <on|off>]\n");
 		}
 	}
 }

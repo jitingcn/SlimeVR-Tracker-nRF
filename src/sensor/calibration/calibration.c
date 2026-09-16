@@ -226,10 +226,9 @@ void sensor_calibration_read(void)
 	);
 	LOG_INF("Online mag calibration: %s", sensor_calibration_get_online_mag_enabled() ? "enabled" : "disabled");
 	if (sensor_calibration_get_online_mag_enabled()) {
-		float zero[3] = {0};
 		float live_snapshot[4][3];
 		magneto_online_snapshot_BAinv(live_snapshot);
-		if (v_diff_mag(live_snapshot[0], zero) != 0) {
+		if (mag_bainv_structurally_ok(live_snapshot, 0.0f)) {
 			magneto_online_runtime_load_retained();
 			if (cal_online_mag_update_count() > 0 || cal_online_mag_norm_count() > 0) {
 				LOG_INF(
