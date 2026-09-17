@@ -22,6 +22,7 @@
 #include "system.h"
 #include "battery_tracker.h"
 #include "build_defines.h"
+#include "connection/tracker_events.h"
 
 static struct nvs_fs fs;
 static K_MUTEX_DEFINE(sys_storage_lock);
@@ -681,6 +682,9 @@ static void button_thread(void)
 		if (last_press && k_uptime_get() - last_press > 1000) {
 			LOG_INF("Button was pressed %d times", num_presses);
 			last_press = 0;
+			tracker_event_notice(TRACKER_EVENT_KIND_BUTTON, BUTTON_CLICK_GROUP,
+				(uint8_t)(num_presses < 255 ? num_presses : 255));
+			tracker_events_notify();
 			if (ota_busy) {
 				LOG_INF("Button action blocked by OTA");
 				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);

@@ -13,6 +13,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "event_probe.h"
+void tracker_events_sensor_invalidate(uint8_t reason) { (void)reason; }
 static struct host_retained retained_storage;
 struct host_retained *retained = &retained_storage;
 static K_MUTEX_DEFINE(sys_storage_lock);
@@ -110,25 +112,32 @@ static void assert_no_old_writes(void)
 
 static void test_clear_queued_bias(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 51) == 0);
+	assert(event_count == 0);
 	sys_clear();
 	assert(clears == 0); // first call only asks for confirmation
 	assert(sensor_calibration_reset_imu() == -EBUSY);
 	sys_clear();
 	assert(clears == 1);
 	assert_no_old_writes();
-	assert(sensor_calibration_commit_bias(zero, zero, true) == 0);
+	assert(event_count == 1);
+	assert_event(0, 51, CAL_EVENT_END, CAL_OUTCOME_CANCELLED, CAL_PHASE_APPLY_PENDING, CAL_REASON_RESET);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == 0);
 }
 
 static void test_clear_applied_matrix(void)
 {
-	assert(sensor_calibration_commit_accel(matrix) == 0);
+	assert(sensor_calibration_commit_accel(matrix, 52) == 0);
+	assert(event_count == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_FRAME_CHANGED);
+	assert(event_count == 1);
+	assert_event(0, 52, CAL_EVENT_END, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	sensor_calibration_fusion_applied();
 	assert(writes == 0); // Finished, but existing worker has not persisted yet
 	sys_clear();
 	sys_clear();
 	assert_no_old_writes();
+	assert(event_count == 1); /* Already-applied success cannot become cancellation. */
 	/* Reset-all never replaces live coefficients mid-frame. */
 	sensor_imu_calibration_t view;
 	sensor_calibration_snapshot(&view);
@@ -152,7 +161,7 @@ static void *clear_thread(void *unused)
 
 static void test_clear_waits_for_persisting_transaction(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_calibration_fusion_applied();
 	sys_clear(); // confirmation, before starting both workers
@@ -184,7 +193,7 @@ static void test_failed_clear_reports_error_and_releases_barrier(void)
 {
 	clear_error = -EIO;
 	retained->gyroBias[0] = 8.0f;
-	assert(sensor_calibration_commit_bias(zero, gyro, true) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
 	sys_clear();
 	sys_clear();
 	assert(errors == 1 && clears == 0);
@@ -210,7 +219,7 @@ static void test_unavailable_consumer_and_recovery(void)
 	atomic_set(&main_suspended, true);
 	main_ok = true;
 	main_imu_resume();
-	assert(sensor_calibration_commit_bias(zero, gyro, true) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
 	/* Accepted before consumer loss: preserve until successful recovery/drain,
 	 * but report unavailable rather than indefinitely returning busy. */
 	sensor_calibration_set_consumer_ready(false);
@@ -227,7 +236,7 @@ static void test_unavailable_consumer_and_recovery(void)
 
 static void test_bmi_resume_cannot_reopen_terminal_gate(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
 	sensor_calibration_prepare_power_down();
 	assert(retained->gyroBias[0] == 4.0f);
 	assert(retained->fusion_id == 0);

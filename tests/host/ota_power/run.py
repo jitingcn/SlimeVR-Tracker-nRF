@@ -96,12 +96,14 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
     (void)key; assert(lock->locked); lock->locked = false;
 }
 """)
-    for mcuboot in (1, 0):
-        binary = temporary / f"ota-power-{mcuboot}"
+    for variant in range(4):
+        mcuboot, imu_int = variant // 2, variant % 2
+        binary = temporary / f"ota-power-{mcuboot}-{imu_int}"
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-g", "-O1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
             f"-DOTA_USE_MCUBOOT={mcuboot}", f"-DCONFIG_BOOTLOADER_MCUBOOT={mcuboot}",
+            f"-DIMU_INT_EXISTS={imu_int}",
             "-I", str(temporary), "-I", str(SRC), str(HERE / "test_ota_power.c"),
             "-o", str(binary),
         ]

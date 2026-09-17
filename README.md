@@ -24,6 +24,7 @@ Changes are driven by real playtesting, user needs, and normal software engineer
 - Configurable IMU/mag sensor driver whitelist
 - Resting state policy refinements, Different WoM policy
 - Raw sensor data collection and analysis
+- Best-effort calibration, rest, button-group, and power-intent events reports
 - Experimental EqF fusion backend
 - More community board vendors and Promicro variants
 
@@ -40,6 +41,20 @@ is not a drop-in replacement. UF2 generation uses `CONFIG_BUILD_OUTPUT_HEX=y`
 to read image addresses from HEX output. The SDK includes the
 [upstream HEX-first UF2 fix](https://github.com/zephyrproject-rtos/zephyr/pull/107944)
 required for mapped partitions.
+
+## Tracker events
+
+Matching receiver firmware can expose calibration lifecycle, tracker rest,
+fusion rest, completed button groups, and impending WOM/shutdown notifications
+through its `scripts/hid_cmd.py` client. See the
+[receiver event guide](https://github.com/jitingcn/SlimeVR-Tracker-nRF-Receiver#tracker-events)
+for subscriptions and calibration watches.
+
+This is a bounded, best-effort channel, not a reliable action log. Rest reports
+are current observations; button groups are distinct actions; power reports
+are intentions, not confirmation that sleep or shutdown completed. Radio
+admission and finite repetitions do not guarantee delivery. Notifications never
+delay shutdown.
 
 ## License
 

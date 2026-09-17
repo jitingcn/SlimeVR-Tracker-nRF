@@ -54,6 +54,9 @@
 #define BIAS_COLLECT_ACCEL_MOTION_THRESHOLD 0.06f // G (range method)
 #endif
 
+/* Distinct from timeout (-2): acquisition completed without enough samples. */
+#define BIAS_COLLECT_INSUFFICIENT_SAMPLES (-4)
+
 int sensor_offsetBias_internal(
 	float *dest1,
 	float *dest2,

@@ -21,6 +21,7 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
+#include "connection/tracker_events.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
 #include "system/uptime.h"
@@ -91,7 +92,7 @@ static void tcal_accum_flush(void);
 static void tcal_save_point(int idx, const float bias[3], float measured_temp);
 static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp);
 static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp);
-static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp);
+static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp, uint16_t operation);
 
 void sensor_tcal_refresh_apply_cache(void)
 {
@@ -632,7 +633,7 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 
 	LOG_INF("T-Cal Auto: No calibration data exists, requesting initial calibration at %.2fC", (double)current_temp);
 
-	int request_result = sensor_calibration_request(CAL_REQUEST_IMU);
+	int request_result = sensor_calibration_request(CAL_REQUEST_IMU, CAL_REQUEST_AUTO_SILENT);
 	if (request_result == 0) {
 		last_calibration_time = now;
 	}
@@ -824,7 +825,7 @@ static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp)
  * This prevents using unreliable bias estimates from incomplete calibration.
  * Requires more than 4 sampling points to ensure proper temperature coverage.
  */
-static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp)
+static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp, uint16_t operation)
 {
 	// Check temperature calibration quality first
 	tcal_quality_t quality;
@@ -856,6 +857,8 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 		retained->bootCalState.doffset[0] = 0.0f;
 		retained->bootCalState.doffset[1] = 0.0f;
 		retained->bootCalState.doffset[2] = 0.0f;
+		cal_event_end(operation, CAL_OUTCOME_SKIPPED, CAL_PHASE_VALIDATE, CAL_REASON_NO_TCAL_COVERAGE);
+		tracker_events_notify();
 		return 0; // Not an error, just skipped
 	}
 
@@ -877,6 +880,8 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 		retained->bootCalState.doffset[0] = 0.0f;
 		retained->bootCalState.doffset[1] = 0.0f;
 		retained->bootCalState.doffset[2] = 0.0f;
+		cal_event_end(operation, CAL_OUTCOME_FAILED, CAL_PHASE_VALIDATE, CAL_REASON_FIT_ERROR);
+		tracker_events_notify();
 		return -1;
 	}
 
@@ -910,6 +915,8 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 	}
 
 	retained->bootCalState.doffset_valid = true;
+	cal_event_end(operation, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
+	tracker_events_notify();
 
 	LOG_INF(
 		"D_offset: Calculated [%.5f, %.5f, %.5f] (stored in retained memory)",
@@ -919,6 +926,18 @@ static int sensor_tcal_calculate_doffset(const float measured_bias[3], float tem
 	);
 
 	return 0;
+}
+
+static void sensor_boot_cal_abandon(uint8_t reason)
+{
+	retained->bootCalState.completed = true;
+	/* An admitted attempt owns its own terminal event, including past 30s. */
+	if (sensor_calibration_request(CAL_REQUEST_QUERY, CAL_REQUEST_USER) == CAL_REQUEST_TCAL_BOOT) {
+		return;
+	}
+	uint16_t operation = cal_event_begin(CAL_KIND_TCAL_BOOT | CAL_EVENT_ORIGIN_AUTO, CAL_PHASE_WAIT_STILL, 0);
+	cal_event_end(operation, CAL_OUTCOME_SKIPPED, CAL_PHASE_WAIT_STILL, reason);
+	tracker_events_notify();
 }
 
 /**
@@ -956,13 +975,13 @@ void sensor_tcal_boot_calibration_check(void)
 	if (uptime >= BOOT_CAL_TIME_WINDOW_END_MS) {
 		if (!retained->bootCalState.completed) {
 			LOG_INF("Boot Cal: Time window expired (uptime: %lld ms), giving up", uptime);
-			retained->bootCalState.completed = true;
+			sensor_boot_cal_abandon(CAL_REASON_EXPIRED);
 		}
 		return;
 	}
 
 	// Check if another calibration is running
-	if (sensor_calibration_request(CAL_REQUEST_QUERY) != 0) {
+	if (sensor_calibration_request(CAL_REQUEST_QUERY, CAL_REQUEST_USER) != 0) {
 		return; // Calibration in progress, wait
 	}
 
@@ -989,11 +1008,11 @@ void sensor_tcal_boot_calibration_check(void)
 				quality.point_count,
 				BOOT_CAL_MIN_CURVE_POINTS
 			);
-			retained->bootCalState.completed = true; // Mark as completed to avoid repeated checks
+			sensor_boot_cal_abandon(CAL_REASON_NO_TCAL_COVERAGE);
 			return;                                  // Skip boot calibration
 		} else {
 			LOG_INF("Boot Cal: No T-Cal data, skipping boot calibration");
-			retained->bootCalState.completed = true; // Mark as completed to avoid repeated checks
+			sensor_boot_cal_abandon(CAL_REASON_NO_TCAL_COVERAGE);
 			return;                                  // Skip boot calibration
 		}
 		logged_entry = true;
@@ -1002,7 +1021,7 @@ void sensor_tcal_boot_calibration_check(void)
 		if (!has_tcal || quality.point_count <= BOOT_CAL_MIN_CURVE_POINTS) {
 			// Skip silently - already logged on first check
 			if (!retained->bootCalState.completed) {
-				retained->bootCalState.completed = true;
+				sensor_boot_cal_abandon(CAL_REASON_NO_TCAL_COVERAGE);
 			}
 			return;
 		}
@@ -1017,7 +1036,7 @@ void sensor_tcal_boot_calibration_check(void)
 
 	// Request boot calibration through calibration request system
 	// This will be executed by the calibration thread, avoiding deadlock
-	int request_result = sensor_calibration_request(CAL_REQUEST_TCAL_BOOT);
+	int request_result = sensor_calibration_request(CAL_REQUEST_TCAL_BOOT, CAL_REQUEST_AUTO);
 	if (request_result == 0) {
 		LOG_INF("Boot Cal: Requested calibration through calibration thread");
 	}
@@ -1032,6 +1051,7 @@ void sensor_tcal_boot_calibration_check(void)
  */
 int sensor_perform_boot_calibration(void)
 {
+	const uint16_t operation = sensor_calibration_current_operation();
 	LOG_INF("Boot Cal: Starting boot calibration");
 	/* Session D_offset only — never write measured bias into tempCalPoints. */
 	// Note: No LED changes for automatic boot calibration - keep it transparent
@@ -1040,6 +1060,8 @@ int sensor_perform_boot_calibration(void)
 	float current_temp = sensor_get_current_imu_temperature();
 	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
 		LOG_ERR("Boot Cal: Invalid temperature");
+		cal_event_end(operation, CAL_OUTCOME_FAILED, CAL_PHASE_WAIT_STILL, CAL_REASON_TEMPERATURE);
+		tracker_events_notify();
 		return -1;
 	}
 
@@ -1052,6 +1074,8 @@ int sensor_perform_boot_calibration(void)
 			LOG_WRN("Boot Cal: Maximum attempts (%d) reached, giving up", BOOT_CAL_MAX_ATTEMPTS);
 			retained->bootCalState.completed = true;
 		}
+		cal_event_end(operation, CAL_OUTCOME_FAILED, CAL_PHASE_WAIT_STILL, CAL_REASON_MOTION);
+		tracker_events_notify();
 		return -1;
 	}
 
@@ -1061,9 +1085,16 @@ int sensor_perform_boot_calibration(void)
 	float measured_bias[3];
 	float avg_temp;
 
+	cal_event_step(operation, CAL_PHASE_COLLECT, 0);
+	tracker_events_notify();
 	int err = sensor_boot_bias_collect(measured_bias, &avg_temp);
 
 	if (err) {
+		uint8_t reason = err == -1 ? CAL_REASON_MOTION :
+			err == -3 ? CAL_REASON_TEMPERATURE :
+			err == BIAS_COLLECT_INSUFFICIENT_SAMPLES ? CAL_REASON_INSUFFICIENT_SAMPLES : CAL_REASON_SAMPLE_TIMEOUT;
+		cal_event_end(operation, CAL_OUTCOME_FAILED, CAL_PHASE_COLLECT, reason);
+		tracker_events_notify();
 		// Collection failed - check if we should trigger a full calibration
 		retained->bootCalState.attempt_count++;
 
@@ -1073,12 +1104,12 @@ int sensor_perform_boot_calibration(void)
 			// Check if we should auto-trigger single-side calibration to collect data
 			tcal_quality_t quality;
 			if (!sensor_tcal_assess_quality(current_temp, &quality)) {
-				LOG_INF("Boot Cal: T-Cal quality insufficient, triggering single-side calibration");
+				LOG_INF("Boot Cal: T-Cal quality insufficient, requesting single-side calibration");
 				retained->bootCalState.completed = true; // Mark boot cal as complete to avoid re-entry
 
-				// Request standard calibration to collect tcal data
-				sensor_request_calibration();
-				return -2; // Special error code indicating auto-calibration triggered
+				/* This can remain busy until the worker releases its request slot. */
+				int request_result = sensor_calibration_request(CAL_REQUEST_IMU, CAL_REQUEST_AUTO_SILENT);
+				return request_result == 0 ? -2 : err;
 			}
 
 			retained->bootCalState.completed = true;
@@ -1087,7 +1118,9 @@ int sensor_perform_boot_calibration(void)
 	}
 
 	// Calculate D_offset
-	err = sensor_tcal_calculate_doffset(measured_bias, avg_temp);
+	cal_event_step(operation, CAL_PHASE_VALIDATE, 0);
+	tracker_events_notify();
+	err = sensor_tcal_calculate_doffset(measured_bias, avg_temp, operation);
 	if (err) {
 		LOG_ERR("Boot Cal: Failed to calculate D_offset");
 		retained->bootCalState.completed = true;
@@ -1183,6 +1216,7 @@ void sensor_boot_cal_reset(void)
  */
 int sensor_perform_runtime_calibration(void)
 {
+	const uint16_t operation = sensor_calibration_current_operation();
 	LOG_INF("Runtime Cal: Starting quick zero bias calibration (~3 seconds)");
 	/* Updates D_offset only — does not append/overwrite tempCalPoints. */
 	// Note: No LED changes for automatic runtime calibration - keep it transparent
@@ -1193,6 +1227,8 @@ int sensor_perform_runtime_calibration(void)
 		LOG_ERR("Runtime Cal: Invalid temperature");
 		// Apply failure cooldown to prevent immediate retry
 		runtime_cal_last_time = k_uptime_get() - RUNTIME_CAL_COOLDOWN_MS + RUNTIME_CAL_FAILURE_COOLDOWN_MS;
+		cal_event_end(operation, CAL_OUTCOME_FAILED, CAL_PHASE_WAIT_STILL, CAL_REASON_TEMPERATURE);
+		tracker_events_notify();
 		return -1;
 	}
 
@@ -1201,18 +1237,27 @@ int sensor_perform_runtime_calibration(void)
 	float measured_bias[3];
 	float avg_temp;
 
+	cal_event_step(operation, CAL_PHASE_COLLECT, 0);
+	tracker_events_notify();
 	int err = sensor_runtime_bias_collect(measured_bias, &avg_temp);
 
 	if (err) {
 		LOG_WRN("Runtime Cal: Bias collection failed (err: %d)", err);
 		// Apply failure cooldown to prevent immediate retry
 		runtime_cal_last_time = k_uptime_get() - RUNTIME_CAL_COOLDOWN_MS + RUNTIME_CAL_FAILURE_COOLDOWN_MS;
+		uint8_t reason = err == -1 ? CAL_REASON_MOTION :
+			err == -3 ? CAL_REASON_TEMPERATURE :
+			err == BIAS_COLLECT_INSUFFICIENT_SAMPLES ? CAL_REASON_INSUFFICIENT_SAMPLES : CAL_REASON_SAMPLE_TIMEOUT;
+		cal_event_end(operation, CAL_OUTCOME_FAILED, CAL_PHASE_COLLECT, reason);
+		tracker_events_notify();
 		return err;
 	}
 
 	// Calculate D_offset using the unified function
 	// This works regardless of whether T-Cal data exists
-	err = sensor_tcal_calculate_doffset(measured_bias, avg_temp);
+	cal_event_step(operation, CAL_PHASE_VALIDATE, 0);
+	tracker_events_notify();
+	err = sensor_tcal_calculate_doffset(measured_bias, avg_temp, operation);
 	if (err) {
 		LOG_ERR("Runtime Cal: Failed to calculate D_offset");
 		return err;
@@ -1260,7 +1305,7 @@ void sensor_runtime_calibration_check(bool is_resting)
 	}
 
 	// Check if another calibration is running
-	if (sensor_calibration_request(CAL_REQUEST_QUERY) != 0) {
+	if (sensor_calibration_request(CAL_REQUEST_QUERY, CAL_REQUEST_USER) != 0) {
 		runtime_cal_rest_tracking = false;
 		runtime_cal_rest_start = 0;
 		return;
@@ -1303,7 +1348,7 @@ void sensor_runtime_calibration_check(bool is_resting)
 					isnan(runtime_cal_last_temp) ? 0.0 : (double)runtime_cal_last_temp
 				);
 
-				int request_result = sensor_calibration_request(CAL_REQUEST_TCAL_RUNTIME);
+				int request_result = sensor_calibration_request(CAL_REQUEST_TCAL_RUNTIME, CAL_REQUEST_AUTO);
 				if (request_result == 0) {
 					LOG_INF("Runtime Cal: Calibration requested");
 					runtime_cal_rest_tracking = false;

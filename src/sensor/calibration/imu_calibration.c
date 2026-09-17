@@ -2,6 +2,7 @@
 #include "system/system.h"
 #include "util.h"
 #include "imu_calibration.h"
+#include "connection/tracker_events.h"
 
 #include <errno.h>
 #include <math.h>
@@ -22,12 +23,14 @@ static bool consumer_ready;
 static bool clearing;
 static bool fusion_stale;
 static bool fusion_save_pending;
+static bool clear_event_pending;
 
 /* One complete transaction: first accepted candidate cannot be overwritten.
  * No wait for the sensor thread (calibration can temporarily suspend it). */
 static struct {
 	sensor_imu_calibration_t coefficients;
 	enum sensor_calibration_effect effect;
+	uint16_t operation_id;
 	bool bias;
 	bool matrix;
 	bool persist_gyro;
@@ -133,7 +136,8 @@ static int reserve_candidate(void)
 	return clearing || pending.effect != SENSOR_CALIBRATION_UNCHANGED || pending.persist ? -EBUSY : 0;
 }
 
-static int submit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro, bool reset)
+static int submit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro, bool reset,
+		       uint16_t operation_id)
 {
 	float zero[3] = {0};
 	if (!a_bias || !g_bias || !v_finite(a_bias, 3) || !v_finite(g_bias, 3)
@@ -151,23 +155,26 @@ static int submit_bias(const float a_bias[3], const float g_bias[3], bool persis
 		pending.persist_gyro = persist_gyro;
 		pending.clear_boot_offset = reset;
 		pending.effect = reset ? SENSOR_CALIBRATION_FRAME_CHANGED : SENSOR_CALIBRATION_BIAS_CHANGED;
+		pending.operation_id = operation_id;
 	}
 	k_spin_unlock(&coefficient_lock, key);
 	return err;
 }
 
-int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro)
+int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro,
+				   uint16_t operation_id)
 {
-	return submit_bias(a_bias, g_bias, persist_gyro, false);
+	return submit_bias(a_bias, g_bias, persist_gyro, false, operation_id);
 }
 
 int sensor_calibration_reset_imu(void)
 {
 	float zero[3] = {0};
-	return submit_bias(zero, zero, true, true);
+	return submit_bias(zero, zero, true, true, 0);
 }
 
-static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect effect)
+static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect effect,
+			uint16_t operation_id)
 {
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	float zero[3] = {0};
@@ -189,26 +196,28 @@ static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect
 		pending.matrix = true;
 		pending.clear_boot_offset = false;
 		pending.effect = effect;
+		pending.operation_id = operation_id;
 	}
 	k_spin_unlock(&coefficient_lock, key);
 	return err;
 #else
 	(void)matrix;
 	(void)effect;
+	(void)operation_id;
 	return -ENOTSUP;
 #endif
 }
 
-int sensor_calibration_commit_accel(const float matrix[4][3])
+int sensor_calibration_commit_accel(const float matrix[4][3], uint16_t operation_id)
 {
-	return submit_accel(matrix, SENSOR_CALIBRATION_FRAME_CHANGED);
+	return submit_accel(matrix, SENSOR_CALIBRATION_FRAME_CHANGED, operation_id);
 }
 
 int sensor_calibration_reset_accel(void)
 {
 	float identity[4][3];
 	sensor_calibration_identity_accel(identity);
-	return submit_accel(identity, SENSOR_CALIBRATION_COEFFICIENTS_CHANGED);
+	return submit_accel(identity, SENSOR_CALIBRATION_COEFFICIENTS_CHANGED, 0);
 }
 
 /* Called by the sensor at a frame boundary, or by power after suspension.
@@ -245,7 +254,12 @@ enum sensor_calibration_effect sensor_calibration_apply_pending(void)
 	(void)clear_boot_offset;
 #endif
 	pending.persist = true;
+	uint16_t operation_id = pending.operation_id;
+	cal_event_end(operation_id, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	k_spin_unlock(&coefficient_lock, key);
+	if (operation_id) {
+		tracker_events_notify();
+	}
 	return effect;
 }
 
@@ -266,6 +280,7 @@ void sensor_calibration_persist_pending(void)
 	bool bias = pending.bias;
 	bool matrix = pending.matrix;
 	bool persist_gyro = pending.persist_gyro;
+	uint16_t operation_id = pending.operation_id;
 	k_spin_unlock(&coefficient_lock, key);
 	int err = 0;
 	if (bias) {
@@ -287,10 +302,17 @@ void sensor_calibration_persist_pending(void)
 		LOG_ERR("Calibration applied in RAM; persistence failed: %d", err);
 	}
 	key = k_spin_lock(&coefficient_lock);
+	if (err < 0) {
+		cal_event_step(operation_id, CAL_PHASE_STORAGE, CAL_REASON_STORAGE_ERROR);
+	}
 	pending.persist = false;
+	pending.operation_id = 0;
 	fusion_save_pending |= pending.fusion_changed;
 	k_spin_unlock(&coefficient_lock, key);
 	k_mutex_unlock(&persistence_lock);
+	if (err < 0 && operation_id) {
+		tracker_events_notify();
+	}
 }
 
 bool sensor_calibration_fusion_stale(void)
@@ -332,6 +354,10 @@ void sensor_calibration_clear_begin(void)
 	k_mutex_lock(&persistence_lock, K_FOREVER);
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
 	clearing = true;
+	if (pending.effect != SENSOR_CALIBRATION_UNCHANGED) {
+		cal_event_end(pending.operation_id, CAL_OUTCOME_CANCELLED, CAL_PHASE_APPLY_PENDING, CAL_REASON_RESET);
+		clear_event_pending = pending.operation_id != 0;
+	}
 	memset(&pending, 0, sizeof(pending));
 	fusion_save_pending = false;
 	k_spin_unlock(&coefficient_lock, key);
@@ -341,8 +367,13 @@ void sensor_calibration_clear_end(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
 	clearing = false;
+	bool notify = clear_event_pending;
+	clear_event_pending = false;
 	k_spin_unlock(&coefficient_lock, key);
 	k_mutex_unlock(&persistence_lock);
+	if (notify) {
+		tracker_events_notify();
+	}
 }
 
 /* Sample consumers and frame publication share the sensor owner, so no lock

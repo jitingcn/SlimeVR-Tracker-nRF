@@ -33,6 +33,7 @@
 #include "power_request.h"
 #include "power_battery.h"
 #include "clock_control.h"
+#include "connection/tracker_events.h"
 
 
 enum sys_regulator {
@@ -378,6 +379,9 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	if (!power_request_start_physical(&power_requests, false)) {
 		return false;
 	}
+	tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WILL_WOM,
+		force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
+	tracker_events_notify();
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
 	sensor_calibration_online_mag_retained_save();
@@ -437,6 +441,8 @@ static bool sys_system_off(void) // TODO: add timeout
 	if (!power_request_start_physical(&power_requests, false)) {
 		return false;
 	}
+	tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WILL_SHUTDOWN, POWER_REASON_UNKNOWN);
+	tracker_events_notify();
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* persist warm cal before session clear / power loss */
 	sensor_calibration_online_mag_cold_start();

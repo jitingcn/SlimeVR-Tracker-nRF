@@ -63,12 +63,16 @@ static void k_sleep(uint64_t us) {
 }
 static void k_busy_wait(uint32_t us) { virtual_us += us; }
 static int connection_wake_sem, sensor_data_snapshot;
-static bool sensor_ids_set, m_pending, test_enabled;
+static bool sensor_ids_set, m_pending, test_enabled, radio_ready, event_pending;
 static int64_t last_mag_time, last_info_time, last_status_time, last_runtime_time;
 static atomic_t next_ping_deadline_ms;
 static bool test_wake_delay_valid;
 static uint64_t test_wake_delay_us, test_delay_us, observed_wait_us;
-static bool esb_ready(void) { return false; }
+static bool esb_ready(void) { return radio_ready; }
+static bool esb_ota_is_active(void) { return false; }
+#define SYS_STATUS_CONNECTION_ERROR 1
+static bool get_status(int status) { (void)status; return false; }
+static uint32_t tracker_events_deadline(uint32_t now) { return event_pending ? now : UINT32_MAX; }
 static bool test_mode_get(void) { return test_enabled; }
 static bool sensor_data_snapshot_m_pending(const int *unused) { (void)unused; return m_pending; }
 static uint64_t k_uptime_ticks(void) { return virtual_us; }
@@ -115,6 +119,29 @@ static void deadlines(void) {
     assert(due_mask(2000) == 0);
     connection_idle_wait(2000);
     assert(observed_wait_us == 125);
+    /* A pending event between target poses must not turn the wait into a
+     * zero-time poll. Keep radio/PING active so the production gate is tested. */
+    radio_ready = event_pending = true;
+    next_ping_deadline_ms = 10000;
+    tdma_runtime_enabled = 0;
+    test_delay_us = 5000;
+    connection_idle_wait(2000);
+    assert(observed_wait_us == 5000);
+    test_delay_us = 3000;
+    connection_idle_wait(2002);
+    assert(observed_wait_us == 3000);
+    test_delay_us = 0;
+    connection_idle_wait(2005);
+    assert(observed_wait_us == 0); /* Only the scheduled pose is now due. */
+    /* Leaving test mode restores immediate independent event service. */
+    test_enabled = false;
+    m_pending = sensor_ids_set = false;
+    last_status_time = last_runtime_time = 2005;
+    connection_idle_wait(2005);
+    assert(observed_wait_us == 0);
+    event_pending = false;
+    connection_idle_wait(2005);
+    assert(observed_wait_us > 0);
     puts("PASS low-frequency exact boundaries and target-rate isolation");
 }
 static uint64_t set_ping_before(uint32_t excess) {

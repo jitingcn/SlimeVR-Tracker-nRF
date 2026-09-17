@@ -103,6 +103,45 @@ with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     (temporary / "connection/connection.h").write_text((SOURCE / "connection/connection.h").read_text())
     for name, parts in (("payload", payload), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection))):
         (temporary / f"{name}.inc").write_text(parts)
+    # Keep hardware leaves in the established fixture; exercise the new private
+    # packet through the same extracted production ESB dispatch.
+    event_payload = temporary / "test_event_payload.c"
+    event_payload.write_text(
+        '#define main radio_existing_main\n'
+        + f'#include "{HERE / "test_payload.c"}"\n'
+        + '#undef main\n#include "connection/tracker_event_protocol.h"\n'
+        + r'''
+int main(void) {
+    int result = radio_existing_main();
+    if (result || getenv("RADIO_SCENARIO")) return result;
+    uint8_t packet[TRACKER_EVENT_ESB_LEN];
+    struct tracker_event event = {
+        .nonce = 1, .event_seq = 9, .tracker_id = 2,
+        .kind = TRACKER_EVENT_KIND_TRACKER_REST,
+        .event = CAL_EVENT_STATE, .phase = TRACKER_REST_REST,
+    };
+    assert(tracker_event_encode(packet, &event));
+    reset();
+    tdma_enabled = true;
+    unsigned ping_index = ping_history_idx;
+    assert(esb_write(packet, true, sizeof(packet)) == 0);
+    assert(queued_count == 1 && queue_calls == 1);
+    assert_original(0, packet, sizeof(packet), true);
+    assert(ping_history_idx == ping_index);
+    reset();
+    tdma_enabled = true;
+    deny_admission = true;
+    assert(esb_write(packet, true, sizeof(packet)) == -EAGAIN);
+    assert(queued_count == 0);
+    deny_admission = false;
+    reset();
+    queue_failures = 1;
+    assert(esb_write(packet, true, sizeof(packet)) != 0);
+    assert(queue_calls == 1 && queued_count == 0);
+    puts("payload: private event uses TDMA/NoACK, no PING accounting or FIFO retry");
+    return 0;
+}
+''')
     for name in ("payload", "commands", "collection"):
         if os.environ.get("RADIO_CASE") not in (None, name):
             continue
@@ -111,7 +150,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-g", "-O1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
             "-I", str(temporary), "-I", str(SRC), "-I", str(HERE / "../raw_collection"),
-            str(HERE / f"test_{name}.c"), "-lm", "-o", str(binary),
+            str(event_payload if name == "payload" else HERE / f"test_{name}.c"), "-lm", "-o", str(binary),
         ]
         subprocess.run(command, check=True)
         subprocess.run([str(binary)], check=True)

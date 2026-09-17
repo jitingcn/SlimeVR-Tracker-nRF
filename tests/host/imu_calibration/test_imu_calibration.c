@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "event_probe.h"
 static struct host_retained retained_storage;
 struct host_retained *retained = &retained_storage;
 static int storage_result;
@@ -85,7 +86,7 @@ static void apply_and_ack(enum sensor_calibration_effect expected)
 	assert(sensor_calibration_fusion_stale());
 	sensor_calibration_fusion_applied();
 	assert(sensor_calibration_fusion_stale());
-	assert(sensor_calibration_commit_bias(zero, zero, true) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == -EBUSY);
 	sensor_calibration_persist_pending();
 	assert(!sensor_calibration_fusion_stale());
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_SAVE_FUSION);
@@ -96,6 +97,8 @@ static void baseline(void)
 {
 	storage_result = 0;
 	sensor_calibration_set_consumer_ready(true);
+	const unsigned events_before = event_count;
+	const unsigned notifications_before = event_notifications;
 	assert(sensor_calibration_reset_imu() == 0);
 	apply_and_ack(SENSOR_CALIBRATION_FRAME_CHANGED);
 	assert(sensor_calibration_reset_accel() == 0);
@@ -103,6 +106,10 @@ static void baseline(void)
 	assert(!sensor_calibration_fusion_stale());
 	sensor_calibration_persist_pending();
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
+	assert(event_count == events_before);
+	assert(event_notifications == notifications_before);
+	event_count = 0;
+	event_notifications = 0;
 	storage_writes = 0;
 	retained_updates = 0;
 	error_logs = 0;
@@ -113,8 +120,8 @@ static void test_startup_and_load_once(void)
 	float identity[4][3];
 	sensor_calibration_identity_accel(identity);
 	assert(!sensor_calibration_imu_ready());
-	assert(sensor_calibration_commit_bias(zero, zero, true) == -EAGAIN);
-	assert(sensor_calibration_commit_accel(identity) == -EAGAIN);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == -EAGAIN);
+	assert(sensor_calibration_commit_accel(identity, 0) == -EAGAIN);
 	assert(!sensor_calibration_fusion_stale());
 	assert(storage_writes == 0);
 
@@ -194,7 +201,8 @@ static void test_pending_bias_atomic_application_and_busy(void)
 	sensor_imu_calibration_t before = snapshot();
 	const float accel_bias[3] = {0.1f, 0.2f, 0.3f};
 	const float gyro_bias[3] = {1.0f, 2.0f, 3.0f};
-	assert(sensor_calibration_commit_bias(accel_bias, gyro_bias, false) == 0);
+	assert(sensor_calibration_commit_bias(accel_bias, gyro_bias, false, 41) == 0);
+	assert(event_count == 0);
 	assert(sensor_calibration_fusion_stale());
 	sensor_imu_calibration_t pending = snapshot();
 	snapshot_equal(&pending, &before);
@@ -202,11 +210,13 @@ static void test_pending_bias_atomic_application_and_busy(void)
 	const float original_gyro[3] = {10.0f, 20.0f, 30.0f};
 	sensor_calibration_subtract_gyro_bias(gyro);
 	vector_equal(gyro, original_gyro);
-	assert(sensor_calibration_commit_bias(zero, zero, true) == -EBUSY);
-	assert(sensor_calibration_commit_accel(before.accel_matrix) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == -EBUSY);
+	assert(sensor_calibration_commit_accel(before.accel_matrix, 0) == -EBUSY);
 	/* Rescan must preserve the first accepted transaction as well as the old view. */
 	sensor_calibration_imu_load();
 	apply_and_ack(SENSOR_CALIBRATION_BIAS_CHANGED);
+	assert(event_count == 1);
+	assert_event(0, 41, CAL_EVENT_END, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	sensor_imu_calibration_t expected = before;
 	memcpy(expected.accel_bias, accel_bias, sizeof(accel_bias));
 	memcpy(expected.gyro_bias, gyro_bias, sizeof(gyro_bias));
@@ -230,22 +240,22 @@ static void test_invalid_candidates_leave_applied_unchanged(void)
 	const float nonfinite[3] = {NAN, 0.0f, 0.0f};
 	const float accel_limit[3] = {0.5f, 0.0f, 0.0f};
 	const float gyro_limit[3] = {0.0f, 50.0f, 0.0f};
-	assert(sensor_calibration_commit_bias(NULL, zero, true) == -EINVAL);
-	assert(sensor_calibration_commit_bias(nonfinite, zero, true) == -EINVAL);
-	assert(sensor_calibration_commit_bias(zero, nonfinite, true) == -EINVAL);
-	assert(sensor_calibration_commit_bias(accel_limit, zero, true) == -EINVAL);
-	assert(sensor_calibration_commit_bias(zero, gyro_limit, true) == -EINVAL);
+	assert(sensor_calibration_commit_bias(NULL, zero, true, 0) == -EINVAL);
+	assert(sensor_calibration_commit_bias(nonfinite, zero, true, 0) == -EINVAL);
+	assert(sensor_calibration_commit_bias(zero, nonfinite, true, 0) == -EINVAL);
+	assert(sensor_calibration_commit_bias(accel_limit, zero, true, 0) == -EINVAL);
+	assert(sensor_calibration_commit_bias(zero, gyro_limit, true, 0) == -EINVAL);
 	float matrix[4][3];
 	memcpy(matrix, before.accel_matrix, sizeof(matrix));
 	matrix[1][1] = INFINITY;
-	assert(sensor_calibration_commit_accel(matrix) == -EINVAL);
+	assert(sensor_calibration_commit_accel(matrix, 0) == -EINVAL);
 	memcpy(matrix, before.accel_matrix, sizeof(matrix));
 	matrix[0][2] = 0.5f;
-	assert(sensor_calibration_commit_accel(matrix) == -EINVAL);
+	assert(sensor_calibration_commit_accel(matrix, 0) == -EINVAL);
 	memcpy(matrix, before.accel_matrix, sizeof(matrix));
 	matrix[2][1] = 1.5f;
-	assert(sensor_calibration_commit_accel(matrix) == -EINVAL);
-	assert(sensor_calibration_commit_accel(NULL) == -EINVAL);
+	assert(sensor_calibration_commit_accel(matrix, 0) == -EINVAL);
+	assert(sensor_calibration_commit_accel(NULL, 0) == -EINVAL);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
 	assert(!sensor_calibration_fusion_stale());
 	sensor_imu_calibration_t after = snapshot();
@@ -258,7 +268,7 @@ static void test_matrix_commit_sample_boundary(void)
 	baseline();
 	const float accel_bias[3] = {0.1f, 0.2f, 0.0f};
 	const float gyro_bias[3] = {1.0f, 2.0f, 3.0f};
-	assert(sensor_calibration_commit_bias(accel_bias, gyro_bias, true) == 0);
+	assert(sensor_calibration_commit_bias(accel_bias, gyro_bias, true, 0) == 0);
 	apply_and_ack(SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_imu_calibration_t before = snapshot();
 	const float matrix[4][3] = {
@@ -267,7 +277,7 @@ static void test_matrix_commit_sample_boundary(void)
 		{0.0f, 1.1f, -0.1f},
 		{0.05f, 0.0f, 1.1f},
 	};
-	assert(sensor_calibration_commit_accel(matrix) == 0);
+	assert(sensor_calibration_commit_accel(matrix, 0) == 0);
 	sensor_imu_calibration_t pending = snapshot();
 	snapshot_equal(&pending, &before);
 	float accel[3] = {1.0f, 2.0f, 3.0f};
@@ -293,7 +303,7 @@ static void test_matrix_commit_sample_boundary(void)
 	snapshot_equal(&reset_pending, &after);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_COEFFICIENTS_CHANGED);
 	assert(!sensor_calibration_fusion_stale());
-	assert(sensor_calibration_commit_bias(zero, zero, true) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == -EBUSY);
 	sensor_calibration_persist_pending();
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
 	sensor_imu_calibration_t reset = snapshot();
@@ -321,7 +331,7 @@ static void test_power_close_is_permanent_and_fusion_ack(void)
 {
 	baseline();
 	const float gyro_bias[3] = {4.0f, -5.0f, 6.0f};
-	assert(sensor_calibration_commit_bias(zero, gyro_bias, true) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro_bias, true, 0) == 0);
 	retained->fusion_id = 9;
 	sensor_calibration_prepare_power_down();
 	sensor_imu_calibration_t applied = snapshot();
@@ -329,8 +339,8 @@ static void test_power_close_is_permanent_and_fusion_ack(void)
 	vector_equal(retained->gyroBias, gyro_bias);
 	assert(storage_writes == 1);
 	assert(retained->fusion_id == 0);
-	assert(sensor_calibration_commit_bias(zero, zero, true) == -ESHUTDOWN);
-	assert(sensor_calibration_commit_accel(applied.accel_matrix) == -ESHUTDOWN);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == -ESHUTDOWN);
+	assert(sensor_calibration_commit_accel(applied.accel_matrix, 0) == -ESHUTDOWN);
 	assert(sensor_calibration_fusion_stale());
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_FRAME_CHANGED);
 	sensor_calibration_set_consumer_ready(false);
@@ -341,7 +351,7 @@ static void test_power_close_is_permanent_and_fusion_ack(void)
 	/* The unacknowledged FRAME_CHANGED above must not consume the save request. */
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_SAVE_FUSION);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
-	assert(sensor_calibration_commit_bias(zero, zero, true) == -ESHUTDOWN);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == -ESHUTDOWN);
 	assert(sensor_calibration_reset_accel() == -ESHUTDOWN);
 }
 
@@ -350,12 +360,15 @@ static void test_storage_failure_keeps_applied_ram_and_reports_error(void)
 	baseline();
 	const float gyro_bias[3] = {7.0f, 8.0f, 9.0f};
 	storage_result = -ENOSPC;
-	assert(sensor_calibration_commit_bias(zero, gyro_bias, true) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro_bias, true, 42) == 0);
+	assert(event_count == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
+	assert(event_count == 1);
+	assert_event(0, 42, CAL_EVENT_END, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	assert(storage_writes == 0);
 	assert(error_logs == 0);
 	vector_equal(retained->gyroBias, zero);
-	assert(sensor_calibration_commit_bias(zero, zero, true) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == -EBUSY);
 	sensor_imu_calibration_t applied = snapshot();
 	vector_equal(applied.gyro_bias, gyro_bias);
 	float gyro[3] = {10.0f, 10.0f, 10.0f};
@@ -366,6 +379,8 @@ static void test_storage_failure_keeps_applied_ram_and_reports_error(void)
 	assert(storage_writes == 1);
 	assert(error_logs == 1);
 	assert(logged_error == -ENOSPC);
+	assert(event_count == 2);
+	assert_event(1, 42, CAL_EVENT_STEP, CAL_OUTCOME_NONE, CAL_PHASE_STORAGE, CAL_REASON_STORAGE_ERROR);
 	vector_equal(retained->gyroBias, gyro_bias);
 	sensor_imu_calibration_t persisted = snapshot();
 	snapshot_equal(&persisted, &applied);
@@ -377,6 +392,7 @@ static void test_storage_failure_keeps_applied_ram_and_reports_error(void)
 	storage_result = 0;
 	assert(sensor_calibration_reset_imu() == 0);
 	apply_and_ack(SENSOR_CALIBRATION_FRAME_CHANGED);
+	assert(event_count == 2); /* Storage and a silent reset cannot reopen the operation. */
 }
 
 static void run_isolated(void (*test)(void))

@@ -1044,8 +1044,11 @@ static void eqf_rest_bias_update(void)
 
 /* ── Public API ────────────────────────────────────────────────────── */
 
+static bool rest_observation_pending;
+
 void eqf_init(float g_time, float a_time, float m_time)
 {
+	rest_observation_pending = false;
 	dt_gyr = g_time;
 	dt_acc = a_time;
 	dt_mag = m_time;
@@ -1091,6 +1094,7 @@ void eqf_init(float g_time, float a_time, float m_time)
 
 void eqf_load(const void *data)
 {
+	rest_observation_pending = false;
 	BUILD_ASSERT(sizeof(eqf_saved_t) <= sizeof(((struct retained_data *)0)->fusion_data),
 		     "EqF state exceeds fusion_data buffer");
 
@@ -1257,6 +1261,7 @@ void eqf_update_accel(float *a, float time)
 	/* apply bias measurement update during rest */
 	if (rest_detected && rest_gyr_lp_init)
 		eqf_rest_bias_update();
+	rest_observation_pending = true;
 }
 
 void eqf_update_mag(float *m, float time)
@@ -1441,6 +1446,16 @@ bool eqf_get_rest_detected(void)
 	return rest_detected;
 }
 
+static bool eqf_take_rest_observation(bool *out)
+{
+	bool pending = rest_observation_pending;
+	rest_observation_pending = false;
+	if (pending && out) {
+		*out = eqf_get_rest_detected();
+	}
+	return pending;
+}
+
 void eqf_get_relative_rest_deviations(float out[2])
 {
 	float gyr_th_rad = EQF_REST_TH_GYR * DEG_TO_RAD;
@@ -1490,6 +1505,7 @@ const sensor_fusion_t sensor_fusion_eqf = {
 	.get_lin_a = eqf_get_lin_a,
 	.get_quat = eqf_get_quat,
 	.get_rest_detected = eqf_get_rest_detected,
+	.take_rest_observation = eqf_take_rest_observation,
 	.get_relative_rest_deviations = eqf_get_relative_rest_deviations,
 	.get_mag_dist_detected = eqf_get_mag_dist_detected,
 	.get_quat6 = NULL, /* EqF attitude is magnetically coupled. */

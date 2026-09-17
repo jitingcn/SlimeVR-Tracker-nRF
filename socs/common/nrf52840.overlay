@@ -1,4 +1,9 @@
 / {
+	chosen {
+		/* CryptoCell is disabled; use the enabled nRF hardware RNG. */
+		zephyr,entropy = &rng;
+	};
+
 	sram0@2003f000 {
 		compatible = "zephyr,memory-region", "mmio-sram";
 		reg = <0x2003f000 DT_SIZE_K(4)>;

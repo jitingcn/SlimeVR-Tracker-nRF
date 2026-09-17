@@ -299,7 +299,7 @@ int sensor_offsetBias_internal(
 			(double)wait_gyro_odr,
 			min_sample_time_ms
 		);
-		return -2;
+		return BIAS_COLLECT_INSUFFICIENT_SAMPLES;
 	}
 
 #if CONFIG_SENSOR_USE_TCAL

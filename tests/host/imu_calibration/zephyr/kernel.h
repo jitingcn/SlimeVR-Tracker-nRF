@@ -16,10 +16,16 @@ static inline k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
 	return 0;
 }
 
+#ifdef TEST_IMU_PREEMPT
+void host_spin_unlocked(void);
+#endif
 static inline void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
 {
 	(void)key;
 	assert(pthread_mutex_unlock(&lock->mutex) == 0);
+#ifdef TEST_IMU_PREEMPT
+	host_spin_unlocked();
+#endif
 }
 
 struct k_mutex {

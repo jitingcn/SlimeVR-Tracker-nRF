@@ -1837,7 +1837,6 @@ static void console_cmd_mag(size_t argc, char **argv)
 			sensor_calibration_clear_mag(NULL, true);
 			printk("Magnetometer calibration cleared\n");
 		} else if (strcmp(subcmd, "cal") == 0 || strcmp(subcmd, "calibrate") == 0) {
-			sensor_calibration_clear_mag(NULL, true);
 			sensor_request_calibration_mag();
 			printk("Magnetometer calibration started\n");
 		} else {

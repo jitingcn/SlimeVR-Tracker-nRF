@@ -7,5 +7,36 @@
 .cache
 compile_commands.json
 
+# Host harness outputs (keep test_*.c and test_*.py visible)
+/tests/host/**/*.o
+/tests/host/**/*.so
+/tests/host/**/.generated/
+/tests/host/**/.generated.stamp
+/tests/host/concurrency/test_sensor_snapshot
+/tests/host/control_requests/test_raw_retx
+/tests/host/control_requests/test_channel_control
+/tests/host/diagnostics/test_sessions
+/tests/host/icm426xx_decode/test_icm426xx_decode
+/tests/host/imu_calibration/test_imu_calibration
+/tests/host/imu_calibration/test_lifecycle
+/tests/host/imu_calibration/test_button
+/tests/host/imu_calibration/test_button_extra
+/tests/host/imu_calibration/test_imu_worker
+/tests/host/imu_drivers/test_imu_odr
+/tests/host/mag_fit/test_mag_fit
+/tests/host/magneto/test_magneto
+/tests/host/online_mag/test_online_mag
+/tests/host/raw_collection/test_raw_collection
+/tests/host/sensor_drivers/test_mag_failures
+/tests/host/sensor_drivers/test_interface_intervals
+/tests/host/sensor_drivers/test_ict153xx
+/tests/host/sensor_drivers/test_icm45686
+/tests/host/sensor_drivers/test_lsm6dsv
+/tests/host/sensor_recovery/test_bmi_retrim
+
+# python-generated files
+__pycache__/
+*.py[oc]
+
 # version
 VERSION

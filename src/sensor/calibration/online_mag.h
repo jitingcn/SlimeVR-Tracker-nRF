@@ -88,7 +88,7 @@ int cal_online_mag_update_count(void);
 uint32_t cal_online_mag_norm_count(void);
 
 void magneto_online_snapshot_BAinv(float out[4][3]);
-void magneto_online_replace_BAinv_and_reset(const float replacement[4][3]);
+void magneto_online_replace_BAinv_and_reset(const float replacement[4][3], uint16_t operation_id);
 /* Sensor-only, consumed after sample service and before applying/fusing mag.
  * norm > 0 supplies validated calibrated-domain norm/dip; zero reacquires.
  * Bootstrap/manual replacement also emits this notification on warm startup. */

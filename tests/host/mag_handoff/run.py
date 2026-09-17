@@ -10,7 +10,7 @@ import tempfile
 ROOT = Path(os.environ.get('SOURCE_ROOT', Path(__file__).resolve().parents[3]))
 
 def function(source, name):
-    match = re.search(rf'^(?:static )?(?:void|bool) {name}\([^;{{]*\)\s*\{{', source, re.M)
+    match = re.search(rf'^(?:static )?(?:ALWAYS_INLINE )?(?:void|bool|float) {name}\([^;{{]*\)\s*\{{', source, re.M)
     if not match:
         raise ValueError(name)
     depth = 0
@@ -38,10 +38,52 @@ vqf_test = preamble + '''
 static vqf_params_t params;
 static vqf_state_t state;
 static vqf_coeffs_t coeffs;
-''' + function(vqf, 'vqf_rebase_mag') + r'''
+static bool rest_observation_pending;
+static float last_a[3];
+#define ARG_UNUSED(x) ((void)(x))
+#define IS_ENABLED(x) 0
+#define DEG_TO_RAD 0.01745329251994329577f
+#define CONST_EARTH_GRAVITY 9.80665f
+static void vqf_track_rest_diag(void) {}
+#define ALWAYS_INLINE inline
+#define BUILD_ASSERT(c,m) _Static_assert(c,m)
+#define printk(...) ((void)0)
+#define VQF_MEM_SIZE (sizeof(vqf_state_t) + sizeof(vqf_coeffs_t))
+struct retained_data { unsigned char fusion_data[2048]; };
+static float vqf_init_gyr_time, vqf_init_acc_time, vqf_init_mag_time;
+static uint32_t rest_enter_count, rest_exit_count;
+static float rest_total_s, rest_last_enter_time, rest_last_duration_s, uptime_s;
+static bool prev_rest_detected;
+static uint8_t rest_event_idx, rest_event_total;
+''' + '\n'.join(function(vqf, name) for name in (
+    'set_params', 'vqf_float_finite', 'vqf_vec3_finite', 'vqf_loaded_state_valid',
+    'vqf_safe_init_time', 'vqf_init', 'vqf_load', 'vqf_update_gyro', 'vqf_update_accel',
+    'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag')) + r'''
 int main(void) {
-    init_params(&params);
-    initVqf(&params, &state, &coeffs, .01f, .01f, .01f);
+    vqf_init(.01f,.01f,.01f);
+    bool rest = true;
+    float zero[3]={0}, invalid[3]={NAN,0,1}, still[3]={0,0,1};
+    assert(!vqf_take_rest_observation(&rest) && rest);
+    vqf_update_accel(zero,.01f); vqf_update_accel(invalid,.01f);
+    vqf_update_gyro(invalid,.01f);
+    assert(!vqf_take_rest_observation(&rest));
+    for(int i=0;i<500;i++) { vqf_update_gyro(zero,.01f); vqf_update_accel(still,.01f); }
+    assert(vqf_take_rest_observation(&rest) && rest);
+    assert(!vqf_take_rest_observation(&rest));
+    float moving[3]={200,0,0}; vqf_update_gyro(moving,.01f);
+    assert(vqf_take_rest_observation(&rest) && !rest);
+    vqf_update_accel(still,.01f);
+    assert(vqf_take_rest_observation(NULL) && !vqf_take_rest_observation(&rest));
+    unsigned char saved[VQF_MEM_SIZE];
+    memcpy(saved,&state,sizeof(state)); memcpy(saved+sizeof(state),&coeffs,sizeof(coeffs));
+    vqf_update_accel(still,.01f); vqf_load(saved);
+    assert(!vqf_take_rest_observation(&rest));
+    vqf_state_t bad_state; memcpy(&bad_state,saved,sizeof(bad_state));
+    bad_state.bias[0]=NAN; memcpy(saved,&bad_state,sizeof(bad_state));
+    vqf_update_accel(still,.01f); vqf_load(saved);
+    assert(!vqf_take_rest_observation(&rest)); /* rejection/reinit early return */
+    vqf_update_accel(still,.01f); vqf_init(.01f,.01f,.01f);
+    assert(!vqf_take_rest_observation(&rest));
     float g[3] = {.12f, -.21f, .4f}, a[3] = {0, 0, 9.81f};
     for (int i=0;i<100;i++) { updateGyr(&params,&state,&coeffs,g); updateAcc(&params,&state,&coeffs,a); }
     state.delta = .7f;
@@ -72,7 +114,28 @@ eqf_test = preamble + '''
 struct retained_data { unsigned char fusion_data[1024]; };
 ''' + eqf + r'''
 int main(void) {
-    eqf_init(.01f,.01f,.01f); mode=EQF_RUNNING;
+    eqf_init(.01f,.01f,.01f);
+    bool rest=true;
+    float zero[3]={0}, still[3]={0,0,1}, invalid[3]={0,0,9};
+    assert(!eqf_take_rest_observation(&rest) && rest);
+    eqf_update_accel(still,.01f); eqf_update_gyro(zero,.01f);
+    assert(!eqf_take_rest_observation(&rest)); /* INIT is not an observation. */
+    mode=EQF_RUNNING;
+    eqf_update_gyro(zero,.01f);
+    eqf_update_accel(invalid,.01f);
+    assert(!eqf_take_rest_observation(&rest)); /* gyro-only and rejected accel */
+    eqf_update_accel(still,.01f);
+    assert(eqf_take_rest_observation(&rest));
+    assert(!eqf_take_rest_observation(&rest));
+    eqf_update_accel(still,.01f);
+    assert(eqf_take_rest_observation(NULL) && !eqf_take_rest_observation(&rest));
+    eqf_update_accel(still,.01f); eqf_init(.01f,.01f,.01f);
+    assert(!eqf_take_rest_observation(&rest));
+    mode=EQF_RUNNING; eqf_update_accel(still,.01f);
+    unsigned char saved[1024]={0}; eqf_load(saved); /* Invalid-load early return. */
+    assert(!eqf_take_rest_observation(&rest));
+    mode=EQF_RUNNING; eqf_update_accel(still,.01f); eqf_save(saved); eqf_load(saved);
+    assert(!eqf_take_rest_observation(&rest));
     st.a_vec[0]=.01f;
     float A[9], b[3], P[36];
     memcpy(A,st.A,sizeof(A)); memcpy(b,st.a_vec,sizeof(b)); memcpy(P,st.P,sizeof(P));

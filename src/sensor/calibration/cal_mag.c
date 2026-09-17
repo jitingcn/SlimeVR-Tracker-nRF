@@ -21,6 +21,7 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
+#include "connection/tracker_events.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
 #include "system/watchdog.h"
@@ -50,6 +51,7 @@ static uint8_t last_magneto_progress;
 static int64_t magneto_progress_time;
 
 static int64_t mag_cal_last_status_log;
+static uint8_t mag_cal_coverage;
 
 double norm_sum;
 double sample_count;
@@ -68,16 +70,26 @@ static void magneto_update_dir_range(const float v[3]);
 static float magneto_min_dir_range(void);
 static void sensor_sample_mag_magneto_sample(const float m[3]);
 
+static void manual_finish(uint16_t op, uint8_t phase, uint8_t reason)
+{
+	sensor_calibration_samples_end();
+	magneto_reset();
+	set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
+	if (reason != CAL_REASON_NONE) {
+		cal_event_end(op, CAL_OUTCOME_FAILED, phase, reason);
+	}
+	tracker_events_notify();
+}
+
 int sensor_calibrate_mag(void)
 {
+	const uint16_t op = sensor_calibration_current_operation();
 	float zero[3] = {0};
 	float live_snapshot[4][3];
 	magneto_online_snapshot_BAinv(live_snapshot);
 	if (v_diff_mag(live_snapshot[0], zero) != 0) {
-		magneto_reset();
-		if (get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
-			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
-		}
+		manual_finish(op, CAL_PHASE_COLLECT, CAL_REASON_REPLACED);
 		return -1; // magnetometer calibration already exists
 	}
 
@@ -87,9 +99,16 @@ int sensor_calibrate_mag(void)
 
 	float m[3];
 	if (sensor_wait_mag(m, K_MSEC(1000))) {
+		manual_finish(op, CAL_PHASE_COLLECT, CAL_REASON_SAMPLE_TIMEOUT);
 		return -1; // Timeout
 	}
 	sensor_sample_mag_magneto_sample(m); // 400us
+	uint8_t coverage = (uint8_t)(fmaxf(0.0f, fminf(magneto_min_dir_range() / 2.0f, 1.0f)) * 10.0f) * 10;
+	if (coverage > mag_cal_coverage) {
+		mag_cal_coverage = coverage;
+		cal_event_step(op, CAL_PHASE_COVERAGE, coverage);
+		tracker_events_notify();
+	}
 
 	// Periodic status log every 1 second
 	int64_t now = k_uptime_get();
@@ -104,6 +123,8 @@ int sensor_calibrate_mag(void)
 
 	float m_inv[4][3];
 	LOG_INF("Calibrating magnetometer hard/soft iron offset");
+	cal_event_step(op, CAL_PHASE_FIT, 0);
+	tracker_events_notify();
 
 #if DEBUG
 	printk("ata:\n");
@@ -131,8 +152,7 @@ int sensor_calibrate_mag(void)
 	magneto_reset();
 	if (err) {
 		LOG_WRN("Magnetometer calibration failed: %d; previous calibration unchanged", err);
-		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
-		set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+		manual_finish(op, CAL_PHASE_FIT, CAL_REASON_FIT_ERROR);
 		return err;
 	}
 
@@ -161,25 +181,27 @@ int sensor_calibrate_mag(void)
 			);
 		}
 		sensor_calibration_validate_mag(NULL, true); // additionally verify old calibration
-		if (get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
-			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
-		}
+		manual_finish(op, CAL_PHASE_FIT, CAL_REASON_INVALID_MODEL);
 		return -1;
 	} else {
 		LOG_INF("Applying calibration");
-		magneto_online_replace_BAinv_and_reset(m_inv);
+		cal_event_step(op, CAL_PHASE_APPLY_PENDING, 0);
+		tracker_events_notify();
+		magneto_online_replace_BAinv_and_reset(m_inv, op);
 		sensor_fusion_reset_mag_ref();
 		sensor_mag_ref_reset(); // Recompute magRef from new calibration
 								// fusion invalidation not necessary
 	}
-	sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(retained->magBAinv));
+	int storage_err = sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(retained->magBAinv));
+	if (storage_err) {
+		cal_event_step(op, CAL_PHASE_STORAGE, CAL_REASON_STORAGE_ERROR);
+		tracker_events_notify();
+	}
 
 	LOG_INF("Finished calibration");
+	manual_finish(op, CAL_PHASE_APPLY_PENDING, CAL_REASON_NONE);
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
 	sensor_refresh_sensor_ids(); // Refresh reported mag status after calibration
-	if (get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
-		set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
-	}
 	return 0;
 }
 
@@ -189,6 +211,7 @@ void magneto_reset(void)
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
 	mag_cal_last_status_log = 0;
+	mag_cal_coverage = 0;
 	memset(mag_cal_workspace.ata, 0, sizeof(mag_cal_workspace.ata));
 	norm_sum = 0;
 	sample_count = 0;
@@ -257,6 +280,8 @@ typedef struct {
 
 int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 {
+	const uint16_t op = sensor_calibration_current_operation();
+	int64_t last_motion_event = -1000;
 	float rawData[3];
 	float pre_acc[3] = {0};
 	int resttime = 0;
@@ -278,6 +303,8 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 	// Main loop: until target number of samples collected
 	while (captured_count < CALIB_TARGET_SAMPLES) {
 
+		cal_event_step(op, CAL_PHASE_WAIT_POSE, captured_count + 1);
+		tracker_events_notify();
 		// 1. Wait for device to be stationary
 		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR); // Indicate searching for stationary state
 		bool pose_timeout = false;
@@ -293,6 +320,8 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 			}
 
 			if (sensor_wait_accel(rawData, K_MSEC(1000))) {
+				cal_event_end(op, CAL_OUTCOME_FAILED, CAL_PHASE_WAIT_POSE, CAL_REASON_SAMPLE_TIMEOUT);
+				tracker_events_notify();
 				return -2; // Timeout, magneto state not handled here
 			}
 
@@ -363,16 +392,26 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 		last_new_pose_time = k_uptime_get();
 
 		LOG_INF("Capturing pose %d/%d...", captured_count + 1, CALIB_TARGET_SAMPLES);
+		cal_event_step(op, CAL_PHASE_CAPTURE_POSE, captured_count + 1);
+		tracker_events_notify();
 		set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
 
 		int sample_idx = 0;
 		while (sample_idx < SAMPLES_PER_ORIENTATION) {
 			if (sensor_wait_accel(rawData, K_MSEC(1000))) {
+				cal_event_end(op, CAL_OUTCOME_FAILED, CAL_PHASE_CAPTURE_POSE, CAL_REASON_SAMPLE_TIMEOUT);
+				tracker_events_notify();
 				return -2;
 			}
 
 			if (!v_epsilon(rawData, pre_acc, 0.03f)) {
 				LOG_INF("Motion detected during capture, retrying...");
+				int64_t now = k_uptime_get();
+				if (now - last_motion_event >= 1000) {
+					last_motion_event = now;
+					cal_event_step(op, CAL_PHASE_RETRY, CAL_REASON_MOTION);
+					tracker_events_notify();
+				}
 				sample_idx = -1;
 				break;
 			}
@@ -394,6 +433,8 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 		}
 
 		captured_count++;
+		cal_event_step(op, CAL_PHASE_POSE_DONE, captured_count);
+		tracker_events_notify();
 		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 		LOG_INF("Pose %d saved!", captured_count);
 
@@ -405,12 +446,16 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 	}
 
 	LOG_INF("Calculating calibration matrix...");
+	cal_event_step(op, CAL_PHASE_FIT, 0);
+	tracker_events_notify();
 
 	wait_for_threads();
 	int err = magneto_current_calibration(a_inv, mag_cal_workspace.ata, norm_sum, sample_count);
 
 	magneto_reset();
 	if (err) {
+		cal_event_end(op, CAL_OUTCOME_FAILED, CAL_PHASE_FIT, CAL_REASON_FIT_ERROR);
+		tracker_events_notify();
 		return err;
 	}
 

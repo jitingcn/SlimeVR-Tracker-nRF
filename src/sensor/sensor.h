@@ -111,6 +111,10 @@ typedef struct sensor_fusion {
 
 	/* Rest / mag-quality policy (both VQF and EqF implement these). */
 	bool (*get_rest_detected)(void);
+	/* Consume one new detector observation; NULL discards it. Call only from
+	 * the sensor owner, or an exclusive lifecycle owner after the sensor
+	 * thread is confirmed stopped/suspended (not merely requested to stop). */
+	bool (*take_rest_observation)(bool *out);
 	void (*get_relative_rest_deviations)(float out[2]); /* [gyr, acc] vs thresholds */
 	bool (*get_mag_dist_detected)(void);
 	/* Sensor-thread only: replace magnetic domain, preserving attitude/bias. */

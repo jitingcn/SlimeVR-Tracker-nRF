@@ -49,8 +49,8 @@ void sensor_calibration_snapshot(sensor_imu_calibration_t *out);
  * occupied transaction/reset-all barrier, -ESHUTDOWN once terminally closed.
  * Accepted candidates survive suspend/failed rescan for recovery or power drain;
  * reset-all cancels them. Application remains at a sensor frame boundary. */
-int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro);
-int sensor_calibration_commit_accel(const float matrix[4][3]);
+int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro, uint16_t operation_id);
+int sensor_calibration_commit_accel(const float matrix[4][3], uint16_t operation_id);
 int sensor_calibration_reset_imu(void);
 int sensor_calibration_reset_accel(void);
 /* Power owner calls only after the sensor is quiescent. No live fusion mutation. */
@@ -80,9 +80,16 @@ enum sensor_calibration_request_id {
 	CAL_REQUEST_MAG = 6,
 };
 
+enum cal_request_origin {
+	CAL_REQUEST_USER = 0,
+	CAL_REQUEST_AUTO = 1,
+	CAL_REQUEST_AUTO_SILENT = 2,
+};
+
 /* QUERY returns the pending request ID, or 0 when idle. CLEAR ends sample
- * admission and clears the slot. Other requests return 0 if accepted, -1 if busy. */
-int sensor_calibration_request(int id);
+ * admission and clears the slot, not a candidate already handed to its owner. */
+int sensor_calibration_request(int id, enum cal_request_origin origin);
+uint16_t sensor_calibration_current_operation(void);
 
 void sensor_request_calibration(void);
 void sensor_request_calibration_6_side(void);

@@ -25,6 +25,48 @@ static float last_raw[3], last_up[3];
 static bool last_valid;
 static float fusion_norm, fusion_dip;
 static const float perfect[4][3] = {{.08f, -.04f, .03f}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+static uint16_t next_operation;
+static unsigned ended_events;
+static struct {
+	uint16_t operation;
+	uint8_t outcome, phase, reason;
+	float live[4][3];
+	unsigned dirty;
+} last_end, prior_end;
+
+uint16_t cal_event_begin(uint8_t kind, uint8_t phase, uint8_t detail)
+{
+	assert(kind == (CAL_KIND_MAG_ONLINE | CAL_EVENT_ORIGIN_AUTO));
+	assert(phase == CAL_PHASE_FREEZE && detail == 0);
+	if (++next_operation == 0) {
+		++next_operation;
+	}
+	return next_operation;
+}
+void cal_event_step(uint16_t op, uint8_t phase, uint8_t detail)
+{
+	(void)op;
+	(void)phase;
+	(void)detail;
+}
+void cal_event_end(uint16_t op, uint8_t outcome, uint8_t phase, uint8_t reason)
+{
+	if (!op) {
+		return;
+	}
+	prior_end = last_end;
+	++ended_events;
+	last_end.operation = op;
+	last_end.outcome = outcome;
+	last_end.phase = phase;
+	last_end.reason = reason;
+	memcpy(last_end.live, magBAinv, sizeof(last_end.live));
+	last_end.dirty = dirty_marks;
+}
+void tracker_events_notify(void)
+{
+	assert(!online_lock.held && !transaction);
+}
 
 void fixture_log(const char *format, ...)
 {
@@ -111,6 +153,10 @@ void fixture_reset(uint32_t now, int trusted)
 	clock_ms = now;
 	dirty_marks = transaction = feeds = solver_calls = 0;
 	log_count = storage_writes = 0;
+	next_operation = 0;
+	ended_events = 0;
+	memset(&last_end, 0, sizeof(last_end));
+	memset(&prior_end, 0, sizeof(prior_end));
 	cancel_action = 0;
 	automatic_sensor = true;
 	fusion_norm = trusted ? .5f : 0;
@@ -122,7 +168,7 @@ void fixture_reset(uint32_t now, int trusted)
 		initial[0][0] = .02f;
 	}
 	memcpy(storage.magBAinv, initial, sizeof(initial));
-	magneto_online_replace_BAinv_and_reset(initial);
+	magneto_online_replace_BAinv_and_reset(initial, 0);
 	magneto_online_runtime_configure(true);
 	last_raw[0] = .5f;
 	last_raw[1] = last_raw[2] = 0;
@@ -155,7 +201,7 @@ void fixture_reference(float norm, float dip)
 void fixture_model(const float value[12])
 {
 	memcpy(storage.magBAinv, value, sizeof(storage.magBAinv));
-	magneto_online_replace_BAinv_and_reset((const float (*)[3])value);
+	magneto_online_replace_BAinv_and_reset((const float (*)[3])value, 0);
 }
 void fixture_clear(void)
 {
@@ -191,7 +237,7 @@ void fixture_restore_identity(int sensor_started)
 	memcpy(storage.magBAinv, identity, sizeof(identity));
 	storage.onlineMagState.update_count = 1;
 	storage.onlineMagState.last_buf_avg_norm = .5f;
-	magneto_online_replace_BAinv_and_reset(storage.magBAinv);
+	magneto_online_replace_BAinv_and_reset(storage.magBAinv, 0);
 	magneto_online_runtime_configure(true);
 	magneto_online_runtime_load_retained();
 }
@@ -213,7 +259,7 @@ void k_msleep(unsigned ms)
 			sensor_calibration_online_mag_prepare_power_down();
 		}
 		if (action == 4) {
-			magneto_online_replace_BAinv_and_reset(perfect);
+			magneto_online_replace_BAinv_and_reset(perfect, 0);
 		}
 	}
 	if (automatic_sensor) {
@@ -465,10 +511,14 @@ static void test_holdout_and_confirmation(void)
 	assert(fusion_norm == 0); /* No fabricated horizontal field without gravity. */
 	samples(400, false, false);
 	assert(fixture_phase() == CONFIRMATION_READY && !dirty_marks);
+	assert(ended_events == 0);
 	assert(fixture_check());
 	assert(dirty_marks == 1 && fixture_updates() == 1);
 	assert(!memcmp(storage.magBAinv, perfect, sizeof(perfect)));
 	assert(!online.dip_known);
+	assert(ended_events == 1 && last_end.operation != 0);
+	assert(last_end.outcome == CAL_OUTCOME_SUCCESS && last_end.phase == CAL_PHASE_CONFIRM);
+	assert(last_end.dirty == 1 && !memcmp(last_end.live, perfect, sizeof(perfect)));
 }
 static void test_repeated_enable_preserves_trial(void)
 {
@@ -519,16 +569,46 @@ static void test_rejection_and_rollback(void)
 	fixture_reset(1000, 1);
 	trial();
 	sensor_calibration_set_online_mag_enabled(false);
+	assert(ended_events == 0);
 	samples(1, false, true);
 	assert(!memcmp(magBAinv, storage.magBAinv, sizeof(magBAinv)) && !dirty_marks);
+	assert(ended_events == 1 && last_end.outcome == CAL_OUTCOME_CANCELLED);
+	assert(last_end.reason == CAL_REASON_DISABLED);
+	assert(!memcmp(last_end.live, storage.magBAinv, sizeof(magBAinv)));
 	fixture_reset(1000, 1);
 	trial();
 	float manual[4][3];
 	memcpy(manual, perfect, sizeof(manual));
 	manual[0][0] = .06f;
-	magneto_online_replace_BAinv_and_reset(manual);
+	magneto_online_replace_BAinv_and_reset(manual, 0);
+	assert(ended_events == 0);
 	samples(1, false, true);
 	assert(!memcmp(magBAinv, manual, sizeof(manual)) && !dirty_marks);
+	assert(ended_events == 1 && last_end.outcome == CAL_OUTCOME_CANCELLED);
+	assert(last_end.reason == CAL_REASON_REPLACED);
+	assert(!memcmp(last_end.live, manual, sizeof(manual)));
+	/* A manual result has its own token; retiring the old trial must not
+	 * restore its previous matrix over the new model or complete it early. */
+	fixture_reset(1000, 1);
+	trial();
+	uint16_t old_operation = online.operation;
+	magneto_online_replace_BAinv_and_reset(manual, 100);
+	assert(ended_events == 0);
+	samples(1, false, true);
+	assert(ended_events == 2);
+	assert(prior_end.operation == old_operation && prior_end.outcome == CAL_OUTCOME_CANCELLED);
+	assert(prior_end.reason == CAL_REASON_REPLACED && !memcmp(prior_end.live, manual, sizeof(manual)));
+	assert(last_end.operation == 100 && last_end.outcome == CAL_OUTCOME_SUCCESS);
+	assert(last_end.phase == CAL_PHASE_APPLIED && !memcmp(last_end.live, manual, sizeof(manual)));
+	/* Overwriting an unapplied manual result cancels only that result. */
+	fixture_reset(1000, 1);
+	samples(1, false, true);
+	magneto_online_replace_BAinv_and_reset(perfect, 100);
+	magneto_online_replace_BAinv_and_reset(manual, 101);
+	assert(ended_events == 1 && last_end.operation == 100 && last_end.outcome == CAL_OUTCOME_CANCELLED);
+	samples(1, false, true);
+	assert(ended_events == 2 && last_end.operation == 101 && last_end.outcome == CAL_OUTCOME_SUCCESS);
+	assert(!memcmp(last_end.live, manual, sizeof(manual)));
 	/* No sensor callback arrives to service timeout before the delayed worker.
 	 * A completed probation must not authorize stale retained publication. */
 	fixture_reset(1000, 0);

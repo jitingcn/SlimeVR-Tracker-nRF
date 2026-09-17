@@ -36,3 +36,8 @@ out.mkdir(parents=True, exist_ok=True)
     function("src/system/system.c", "sys_user_shutdown")
     + function("src/system/system.c", "button_thread")
 )
+(out / "imu_worker.inc").write_text(
+    function("src/sensor/calibration/cal_imu.c", "imu_step")
+    + function("src/sensor/calibration/cal_imu.c", "imu_failed")
+    + function("src/sensor/calibration/cal_imu.c", "sensor_calibrate_imu")
+)

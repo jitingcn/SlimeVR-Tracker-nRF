@@ -28,6 +28,7 @@
 #include "system/watchdog.h"
 #include "util.h"
 #include "connection/connection.h"
+#include "connection/tracker_events.h"
 #include "calibration/calibration.h"
 #include "calibration/imu_calibration.h"
 #include "calibration/mag_common.h"
@@ -1033,6 +1034,8 @@ int sensor_request_scan(bool force)
 	/* Force rescan still needs hard abort: sensor may be blocked in I2C/FIFO wait.
 	 * Cooperative idle events cover OTA/suspend; keep abort only for this path. */
 	k_thread_abort(&sensor_thread_id); // stop the sensor thread // TODO: may need to handle fusion state
+	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
+	tracker_events_notify();
 	LOG_INF("Aborted sensor thread");
 	sensor_life_mark_idle();
 	sensor_life_mark_scan_done();
@@ -1600,6 +1603,8 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 
 int sensor_init(void)
 {
+	tracker_events_sensor_invalidate(TRACKER_REST_INITIALIZING);
+	tracker_events_notify();
 	int err;
 	sensor_mag_timing_reset();
 	sensor_diagnostics_reset_frame();
@@ -1904,6 +1909,7 @@ static bool sensor_mag_gravity(const float accel_sum[3], int accel_count, float 
 }
 
 typedef struct {
+	uint32_t sensor_epoch;
 	bool dc_active;
 	uint16_t packets;
 	float raw_m[3];
@@ -2618,6 +2624,25 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	float gyro_speed;
 	float lin_accel;
 	bool resting = sensor_update_resting_state(q, lin_a, now, &gyro_speed, &lin_accel);
+	/* Consume even an invalidated/suspended frame so stale detector work
+	 * cannot become a fresh observation after resume. */
+	bool fusion_rest = false;
+	bool fusion_fresh = sensor_fusion->take_rest_observation
+		&& sensor_fusion->take_rest_observation(&fusion_rest);
+	uint8_t backend = FUSION_BACKEND_UNKNOWN;
+	if (sensor_fusion->take_rest_observation) {
+		if (fusion_id == FUSION_VQF) {
+			backend = FUSION_BACKEND_VQF;
+		} else if (fusion_id == FUSION_EQF) {
+			backend = FUSION_BACKEND_EQF;
+		}
+	}
+	if (!atomic_get(&main_suspended)) {
+		tracker_events_observe_sensor(frame->sensor_epoch,
+			frame->g_count > 0 || frame->a_count > 0, resting,
+			fusion_fresh, fusion_rest, backend, (uint32_t)now);
+		tracker_events_notify();
+	}
 	sensor_update_sensor_state(resting, gyro_speed, lin_accel);
 
 	sensor_diagnostics_output(q, lin_a, sensor_loop_avg_a, temp, mag_enabled);
@@ -2843,6 +2868,9 @@ static void sensor_loop_wait(int64_t time_begin)
 #endif
 
 	if (atomic_get(&main_suspended)) {
+		if (sensor_fusion->take_rest_observation) {
+			sensor_fusion->take_rest_observation(NULL);
+		}
 		k_thread_suspend(&sensor_thread_id);
 	}
 
@@ -2884,6 +2912,7 @@ void sensor_loop(void)
 #endif
 
 			sensor_apply_calibration_frame();
+			frame.sensor_epoch = tracker_events_sensor_epoch();
 			sensor_loop_handle_data_collection(&frame.dc_active);
 			int64_t acq_begin_ticks = k_uptime_ticks();
 			sensor_loop_acquire(&frame);
@@ -2933,6 +2962,8 @@ void main_imu_suspend(void)
 {
 	sensor_calibration_set_consumer_ready(false);
 	atomic_set(&main_suspended, true);
+	tracker_events_sensor_invalidate(TRACKER_REST_SUSPENDED);
+	tracker_events_notify();
 	/* Thread cannot feed once frozen or self-suspended; pause WDT in all paths. */
 	watchdog_pause(WDT_CHANNEL_SENSOR);
 	if (!main_running) { // don't suspend if already stopped (TODO: may be called from sensor thread)
@@ -2949,6 +2980,9 @@ void main_imu_suspend(void)
 		}
 	}
 	k_thread_suspend(&sensor_thread_id);
+	if (sensor_fusion->take_rest_observation) {
+		sensor_fusion->take_rest_observation(NULL);
+	}
 	LOG_INF("Suspended sensor thread");
 }
 
@@ -2957,6 +2991,8 @@ void main_imu_resume(void)
 	if (!atomic_get(&main_suspended)) { // not suspended
 		return;
 	}
+	tracker_events_sensor_invalidate(TRACKER_REST_INITIALIZING);
+	tracker_events_notify();
 	watchdog_resume(WDT_CHANNEL_SENSOR);
 	sensor_calibration_set_consumer_ready(main_ok);
 	/* Resume may immediately preempt us with the higher-priority sensor thread.
@@ -2975,6 +3011,8 @@ void main_imu_wakeup(void)
 
 void main_imu_restart(void)
 {
+	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
+	tracker_events_notify();
 	sensor_mag_timing_reset();
 	if (main_ok) // only restart fusion if initialized
 	{

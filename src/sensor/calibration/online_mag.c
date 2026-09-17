@@ -1,4 +1,5 @@
 #include "globals.h"
+#include "connection/tracker_events.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
 #include "system/watchdog.h"
@@ -54,6 +55,8 @@ static struct {
 	float field, dip, candidate_field, reference_norm, reference_dip;
 	float norm_mean, norm_var, dir_bias, center[3], last_dir[3];
 	uint16_t recent_count, admitted_since_fit;
+	uint16_t operation, cancelled_operation, replacement_operation;
+	uint8_t cancel_reason;
 	uint8_t updates, phase;
 	bool enabled, suspended, fitter, started, replace_pending, ref_pending;
 	bool trusted, dip_known, trial, unchanged, candidate_dip_known;
@@ -123,8 +126,54 @@ static void clear_scores_locked(void)
 	online.diagnostics.last_gate = ONLINE_MAG_REJECT_NONE;
 }
 
-static void cancel_locked(uint32_t now)
+static uint8_t rejection_reason(uint8_t rejection)
 {
+	switch (rejection) {
+	case ONLINE_MAG_REJECT_FIT: return CAL_REASON_FIT_ERROR;
+	case ONLINE_MAG_REJECT_RADIAL: return CAL_REASON_RADIAL;
+	case ONLINE_MAG_REJECT_DIP: return CAL_REASON_DIP;
+	case ONLINE_MAG_REJECT_COVERAGE: return CAL_REASON_COVERAGE;
+	case ONLINE_MAG_REJECT_TIMEOUT: return CAL_REASON_EXPIRED;
+	case ONLINE_MAG_REJECT_CANCELLED: return CAL_REASON_RESET;
+	case ONLINE_MAG_REJECT_MATRIX: return CAL_REASON_INVALID_MODEL;
+	case ONLINE_MAG_REJECT_SAMPLE: return CAL_REASON_INVALID_SAMPLE;
+	case ONLINE_MAG_REJECT_OVERFLOW: return CAL_REASON_OVERFLOW;
+	case ONLINE_MAG_REJECT_NO_BENEFIT: return CAL_REASON_NO_BENEFIT;
+	default: return CAL_REASON_CANDIDATE_REJECTED;
+	}
+}
+
+static uint8_t event_phase(uint8_t phase)
+{
+	switch (phase) {
+	case FREEZE_REQUESTED: return CAL_PHASE_FREEZE;
+	case FROZEN: return CAL_PHASE_FIT;
+	case VALIDATION_READY:
+	case VALIDATING: return CAL_PHASE_VALIDATE;
+	case PROBATION: return CAL_PHASE_PROBATION;
+	case CONFIRMATION_READY: return CAL_PHASE_CONFIRM;
+	default: return CAL_PHASE_NONE;
+	}
+}
+
+/* Called only after a trial has ceased to be live (rollback or replacement). */
+static void finish_cancel_locked(void)
+{
+	cal_event_end(online.cancelled_operation, CAL_OUTCOME_CANCELLED,
+				  event_phase(online.phase), online.cancel_reason);
+	online.cancelled_operation = 0;
+}
+
+static void cancel_locked(uint32_t now, uint8_t reason)
+{
+	if (online.operation) {
+		online.cancelled_operation = online.operation;
+		online.operation = 0;
+		online.cancel_reason = reason;
+		if (!online.trial) {
+			finish_cancel_locked();
+		}
+	}
 	if (online.diagnostics.outcome == ONLINE_MAG_NONE) {
 		online.diagnostics.outcome = ONLINE_MAG_REJECTED;
 		online.diagnostics.rejection = ONLINE_MAG_REJECT_CANCELLED;
@@ -168,6 +217,15 @@ static void restart_locked(uint32_t now)
 		online.trial = false;
 		reference_locked(online.dip_known ? online.field : 0, online.dip_known ? online.dip : 0);
 	}
+	if (online.diagnostics.outcome == ONLINE_MAG_UNCHANGED) {
+		cal_event_end(online.operation, CAL_OUTCOME_SKIPPED, event_phase(online.phase), CAL_REASON_NO_BENEFIT);
+	} else if (online.diagnostics.outcome == ONLINE_MAG_ENVIRONMENT) {
+		cal_event_end(online.operation, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_ENVIRONMENT_ONLY);
+	} else if (online.diagnostics.outcome == ONLINE_MAG_REJECTED) {
+		cal_event_end(online.operation, CAL_OUTCOME_FAILED, event_phase(online.phase),
+					  rejection_reason(online.diagnostics.rejection));
+	}
+	online.operation = 0;
 	online.phase = TRAINING;
 	online.episode = now;
 	online.unchanged = false;
@@ -248,6 +306,9 @@ static void service_locked(uint32_t now)
 		online.replace_pending = false;
 		online.trial = false;
 		reference_locked(0, 0);
+		finish_cancel_locked();
+		cal_event_end(online.replacement_operation, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
+		online.replacement_operation = 0;
 	}
 	if (online.served != online.generation) {
 		if (online.trial) {
@@ -255,6 +316,7 @@ static void service_locked(uint32_t now)
 			online.trial = false;
 			reference_locked(online.dip_known ? online.field : 0, online.dip_known ? online.dip : 0);
 		}
+		finish_cancel_locked();
 		/* Cancellation invalidates the fit immediately, but its borrowed
 		 * memory is not reusable until the fitter explicitly releases it. */
 		if (!online.fitter) {
@@ -265,10 +327,12 @@ static void service_locked(uint32_t now)
 	if (online.phase == FREEZE_REQUESTED) {
 		memcpy(previous, magBAinv, sizeof(previous));
 		online.phase = FROZEN;
+		cal_event_step(online.operation, CAL_PHASE_FIT, 0);
 	} else if (online.phase == VALIDATION_READY) {
 		memset(directions, 0, sizeof(directions));
 		online.episode = now;
 		online.phase = VALIDATING;
+		cal_event_step(online.operation, CAL_PHASE_VALIDATE, 0);
 		clear_scores_locked();
 		online.last_sample = now;
 	}
@@ -281,11 +345,14 @@ void magneto_online_snapshot_BAinv(float out[4][3])
 	k_spin_unlock(&online_lock, key);
 }
 
-void magneto_online_replace_BAinv_and_reset(const float value[4][3])
+void magneto_online_replace_BAinv_and_reset(const float value[4][3], uint16_t operation_id)
 {
 	bool calibrated = has_model(value, false);
 	k_spinlock_key_t key = k_spin_lock(&online_lock);
-	cancel_locked(k_uptime_get_32());
+	const uint8_t reason = operation_id || calibrated ? CAL_REASON_REPLACED : CAL_REASON_RESET;
+	cancel_locked(k_uptime_get_32(), reason);
+	cal_event_end(online.replacement_operation, CAL_OUTCOME_CANCELLED, CAL_PHASE_APPLY_PENDING, reason);
+	online.replacement_operation = operation_id;
 	memset(&online.diagnostics, 0, sizeof(online.diagnostics));
 	online.updates = 0;
 	online.trusted = calibrated;
@@ -299,9 +366,14 @@ void magneto_online_replace_BAinv_and_reset(const float value[4][3])
 	if (!online.started) {
 		memcpy(magBAinv, value, sizeof(magBAinv));
 		online.replace_pending = false;
+		online.trial = false;
+		finish_cancel_locked();
+		cal_event_end(online.replacement_operation, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
+		online.replacement_operation = 0;
 		reference_locked(0, 0);
 	}
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 }
 
 bool magneto_online_take_mag_ref(float *norm, float *dip)
@@ -320,26 +392,29 @@ bool magneto_online_take_mag_ref(float *norm, float *dip)
 void magneto_online_reset(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&online_lock);
-	cancel_locked(k_uptime_get_32());
+	cancel_locked(k_uptime_get_32(), CAL_REASON_RESET);
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 }
 
 void magneto_online_runtime_reset(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&online_lock);
-	cancel_locked(k_uptime_get_32());
+	cancel_locked(k_uptime_get_32(), CAL_REASON_RESET);
 	online.updates = 0;
 	norm_reset();
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 }
 
 void magneto_online_runtime_configure(bool enabled)
 {
 	k_spinlock_key_t key = k_spin_lock(&online_lock);
 	online.enabled = enabled;
-	cancel_locked(k_uptime_get_32());
+	cancel_locked(k_uptime_get_32(), enabled ? CAL_REASON_RESET : CAL_REASON_DISABLED);
 	norm_reset();
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 }
 
 void magneto_online_runtime_load_retained(void)
@@ -351,16 +426,18 @@ void magneto_online_runtime_load_retained(void)
 	 * calibrated field reference. Reacquire from sensor-owned fusion. */
 	online.field = 0;
 	online.dip_known = false;
-	cancel_locked(k_uptime_get_32());
+	cancel_locked(k_uptime_get_32(), CAL_REASON_RESET);
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 }
 
 void sensor_calibration_online_mag_prepare_power_down(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&online_lock);
 	online.suspended = true;
-	cancel_locked(k_uptime_get_32());
+	cancel_locked(k_uptime_get_32(), CAL_REASON_POWER_DOWN);
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 }
 
 bool sensor_calibration_get_online_mag_debug(void)
@@ -670,6 +747,7 @@ static void finish_sample(
 				logged = online.diagnostics;
 				memset(directions, 0, sizeof(directions));
 				online.phase = PROBATION;
+				cal_event_step(online.operation, CAL_PHASE_PROBATION, 0);
 				clear_scores_locked();
 				online.episode = now;
 				goto serviced;
@@ -700,6 +778,7 @@ static void finish_sample(
 						= e->diagnostics.dip_delta > 0.04f ? ONLINE_MAG_REJECT_DIP : ONLINE_MAG_REJECT_COVERAGE;
 				}
 				online.phase = CONFIRMATION_READY;
+				cal_event_step(online.operation, CAL_PHASE_CONFIRM, 0);
 			}
 		}
 	}
@@ -708,6 +787,7 @@ done:
 serviced:
 	service_locked(now);
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 	if (event) {
 		log_snapshot(event, &logged);
 	}
@@ -798,6 +878,7 @@ void sensor_calibration_online_mag_sample(const float raw[3], const float up[3],
 		logged.rejection = logged.last_gate = ONLINE_MAG_REJECT_CANCELLED;
 		service_locked(now);
 		k_spin_unlock(&online_lock, key);
+		tracker_events_notify();
 		log_snapshot("cancelled trial retired", &logged);
 		key = k_spin_lock(&online_lock);
 	} else {
@@ -814,6 +895,7 @@ void sensor_calibration_online_mag_sample(const float raw[3], const float up[3],
 		struct online_mag_diagnostics logged = online.diagnostics;
 		restart_locked(now);
 		k_spin_unlock(&online_lock, key);
+		tracker_events_notify();
 		log_snapshot("timeout/rollback", &logged);
 		return;
 	}
@@ -843,6 +925,7 @@ void sensor_calibration_online_mag_sample(const float raw[3], const float up[3],
 	summary_due = ELAPSED(now, online.summary_time) >= 1000U;
 	online.last_sample = now;
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 
 	/* No IRQ-off floating point loops, inverse trig, or structural checks. */
 	if (!isfinite(dot3(raw, raw)) || dot3(raw, raw) < 1e-12f) {
@@ -910,6 +993,7 @@ validate:
 	return;
 out:
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 }
 
 struct fit_context {
@@ -943,6 +1027,7 @@ static bool confirm(void)
 	 * online path writing retained matrix or marking MAIN_MAG_BIAS_ID dirty. */
 	sys_warm_transaction_begin();
 	k_spinlock_key_t key = k_spin_lock(&online_lock);
+	uint16_t confirmed_operation = 0;
 	bool valid = online.phase == CONFIRMATION_READY && online.trial && online.generation == online.served
 			  && online.enabled && !online.suspended
 			  && ELAPSED(k_uptime_get_32(), online.episode) <= ONLINE_EPISODE_TIMEOUT_MS;
@@ -961,6 +1046,8 @@ static bool confirm(void)
 		retained->onlineMagState.last_buf_avg_norm = online.field;
 		online.diagnostics.outcome = ONLINE_MAG_UPDATED;
 		online.diagnostics.rejection = ONLINE_MAG_REJECT_NONE;
+		confirmed_operation = online.operation;
+		online.operation = 0;
 		restart_locked(k_uptime_get_32());
 	} else if (
 		online.phase == CONFIRMATION_READY && ELAPSED(k_uptime_get_32(), online.episode) > ONLINE_EPISODE_TIMEOUT_MS
@@ -976,6 +1063,12 @@ static bool confirm(void)
 		sys_warm_transaction_mark(MAIN_MAG_BIAS_ID, &retained->magBAinv, sizeof(magBAinv));
 	}
 	sys_warm_transaction_end(valid);
+	if (valid) {
+		key = k_spin_lock(&online_lock);
+		cal_event_end(confirmed_operation, CAL_OUTCOME_SUCCESS, CAL_PHASE_CONFIRM, CAL_REASON_NONE);
+		k_spin_unlock(&online_lock, key);
+	}
+	tracker_events_notify();
 	if (valid) {
 		sensor_refresh_sensor_ids();
 		log_snapshot("confirmed retained update (storage queued, not flash completion)", &logged);
@@ -1004,9 +1097,11 @@ bool sensor_calibration_online_mag_check(void)
 	online.episode = now;
 	online.fitter = true;
 	online.phase = FREEZE_REQUESTED;
+	online.operation = cal_event_begin(CAL_KIND_MAG_ONLINE | CAL_EVENT_ORIGIN_AUTO, CAL_PHASE_FREEZE, 0);
 	memset(&online.diagnostics, 0, sizeof(online.diagnostics));
 	ctx = (struct fit_context){online.generation, now, now};
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 	if (sensor_calibration_get_online_mag_debug()) {
 		LOG_INF("Online mag fit start");
 	}
@@ -1061,6 +1156,12 @@ bool sensor_calibration_online_mag_check(void)
 			);
 		}
 		if (error && trusted && fit_poll(&ctx)) {
+			key = k_spin_lock(&online_lock);
+			if (online.generation == ctx.generation) {
+				cal_event_step(online.operation, CAL_PHASE_RETRY, CAL_REASON_FIT_ERROR);
+			}
+			k_spin_unlock(&online_lock, key);
+			tracker_events_notify();
 			error = magneto_robust_fit(ONLINE_SLOTS, fit_read, fit_poll, &ctx, NULL, 0, output, &result);
 		}
 	}
@@ -1080,10 +1181,16 @@ bool sensor_calibration_online_mag_check(void)
 		online.diagnostics.outcome = ONLINE_MAG_REJECTED;
 		online.diagnostics.rejection = ONLINE_MAG_REJECT_FIT;
 		online.diagnostics.last_gate = ONLINE_MAG_REJECT_FIT;
+		if (!frozen || ELAPSED(k_uptime_get_32(), ctx.started) >= ONLINE_FIT_TIMEOUT_MS) {
+			cal_event_end(online.operation, CAL_OUTCOME_FAILED, event_phase(online.phase),
+						  !frozen ? CAL_REASON_SAMPLE_TIMEOUT : CAL_REASON_EXPIRED);
+			online.operation = 0;
+		}
 		restart_locked(k_uptime_get_32());
 	}
 	struct online_mag_diagnostics logged = online.diagnostics;
 	k_spin_unlock(&online_lock, key);
+	tracker_events_notify();
 	if (sensor_calibration_get_online_mag_debug()) {
 		LOG_INF("Online mag fit result errno=%d", error);
 	}

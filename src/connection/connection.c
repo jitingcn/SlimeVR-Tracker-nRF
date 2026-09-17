@@ -28,6 +28,7 @@
 #include "util.h"
 #include "esb.h"
 #include "sensor_data_snapshot.h"
+#include "tracker_events.h"
 #include "raw_retx.h"
 #include "tdma.h"
 #include "build_defines.h"
@@ -350,6 +351,8 @@ struct composite_builder {
 	int64_t stamps[5];
 	int n;
 	int used;
+	bool has_event;
+	struct tracker_event_tx event;
 };
 
 typedef int (*sub_fill_fn)(uint8_t *buf);
@@ -580,55 +583,6 @@ void connection_update_status(int status)
 //|rssi    | |3      |id      |svr_stat|status  |resv |rssi    |
 //| |4      |id      |q0               |q1               |q2               |q3               |m0 |m1 |m2 |
 //| |5      |id      |runtime (uint64, us)                              |resv              |rssi |
-
-bool connection_write_packet_0() // device info
-{
-	uint8_t data[16];
-
-	fill_normal_packet(SUB_PACKET_INFO, data);
-	return write_normal_packet(data);
-}
-
-bool connection_write_packet_1() // full precision quat and accel
-{
-	uint8_t data[16];
-
-	fill_normal_packet(SUB_PACKET_QUAT_ACCEL, data);
-	return write_normal_packet(data);
-}
-
-bool connection_write_packet_2() // reduced precision quat and accel with battery,
-				 // temp, and rssi
-{
-	uint8_t data[16];
-
-	fill_normal_packet(SUB_PACKET_COMPACT_QUAT, data);
-	return write_normal_packet(data);
-}
-
-bool connection_write_packet_3() // status
-{
-	uint8_t data[16];
-
-	fill_normal_packet(SUB_PACKET_STATUS, data);
-	return write_normal_packet(data);
-}
-
-bool connection_write_packet_4() // full precision quat and magnetometer
-{
-	uint8_t data[16];
-
-	fill_normal_packet(SUB_PACKET_QUAT_MAG, data);
-	return write_normal_packet(data);
-}
-
-bool connection_write_packet_5() // runtime estimate
-{
-	uint8_t data[16];
-
-	fill_normal_packet(SUB_PACKET_RUNTIME, data);
-	return write_normal_packet(data);
-}
 
 static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
@@ -1394,26 +1348,41 @@ static uint64_t test_rate_delay_us(uint64_t now_us)
  * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub0_type][sub0_data...]
  *         [sub1_type][sub1_data...]...[sequence]
  */
-static bool send_composite(const uint8_t *types, int n)
+static bool send_composite(const struct composite_builder *builder)
 {
 	uint8_t buf[ESB_MAX_PAYLOAD_LEN];
 	int pos = 0;
-
+	/* An event is only a tail of real business data, never a replacement pose.
+	 * Reject an empty builder without completing its event token: the event
+	 * remains pending for a later pose (or a normal-mode standalone send). */
+	if (builder->n <= 0 || builder->n > ARRAY_SIZE(builder->types)) {
+		return false;
+	}
 	buf[pos++] = ESB_COMPOSITE_TYPE;
 	buf[pos++] = tracker_id;
-	buf[pos++] = (uint8_t)n;
-
-	for (int i = 0; i < n; i++) {
-		uint8_t t = types[i];
-		buf[pos++] = t;
-		const struct sub_packet_desc *d = sub_packet_get(t);
-		if (d) {
-			pos += d->fill(&buf[pos]);
+	buf[pos++] = (uint8_t)(builder->n + builder->has_event);
+	for (int i = 0; i < builder->n; i++) {
+		const struct sub_packet_desc *d = sub_packet_get(builder->types[i]);
+		if (!d || pos + 1 + d->data_len + 1 > sizeof(buf)) {
+			return false;
 		}
+		buf[pos++] = builder->types[i];
+		pos += d->fill(&buf[pos]);
 	}
-
+	if (builder->has_event) {
+		if (pos + 16 + 1 > sizeof(buf)) {
+			return false;
+		}
+		buf[pos++] = TRACKER_EVENT_ESB_TYPE;
+		memcpy(&buf[pos], &builder->event.packet[2], 15);
+		pos += 15;
+	}
 	buf[pos++] = packet_sequence;
-	if (esb_write(buf, no_ack, pos) != 0) {
+	int err = esb_write(buf, no_ack, pos);
+	if (builder->has_event) {
+		tracker_events_complete(builder->event.token, err == 0, k_uptime_get_32());
+	}
+	if (err != 0) {
 		return false;
 	}
 	packet_sequence++;
@@ -1424,6 +1393,7 @@ static void composite_builder_reset(struct composite_builder *builder)
 {
 	builder->n = 0;
 	builder->used = 0;
+	builder->has_event = false;
 	memset(builder->last_times, 0, sizeof(builder->last_times));
 }
 
@@ -1434,7 +1404,8 @@ static void composite_builder_reset(struct composite_builder *builder)
 static bool composite_try_add(struct composite_builder *builder, uint8_t type)
 {
 	int need = 1 + sub_data_len(type); /* 1 for type byte + data */
-	if (builder->used + need > COMPOSITE_MAX_SUB_DATA) {
+	if (!sub_packet_get(type) || builder->n >= ARRAY_SIZE(builder->types)
+		|| builder->used + need > COMPOSITE_MAX_SUB_DATA) {
 		return false;
 	}
 	builder->types[builder->n] = type;
@@ -1469,9 +1440,14 @@ static void composite_commit_timestamps(const struct composite_builder *builder)
 	}
 }
 
-static bool send_composite_or_single(const struct composite_builder *builder, uint8_t fallback_type)
+static bool send_composite_or_single(struct composite_builder *builder, uint8_t fallback_type)
 {
-	if (builder->n > 1) {
+	/* Private event data is never a normal sub-packet or a direct-HID mirror. */
+	if (esb_ready() && builder->n > 0 && builder->used + 16 <= COMPOSITE_MAX_SUB_DATA
+		&& !esb_ota_is_active() && !get_status(SYS_STATUS_CONNECTION_ERROR)) {
+		builder->has_event = tracker_events_select(k_uptime_get_32(), tracker_id, &builder->event);
+	}
+	if (builder->n > 1 || builder->has_event) {
 		if (!esb_ready()) {
 #if CONFIG_CONNECTION_OVER_HID
 			/* Radio unavailable: HID is the configured output path;
@@ -1484,7 +1460,7 @@ static bool send_composite_or_single(const struct composite_builder *builder, ui
 
 		/* Radio available: only ESB queue success counts, so a failed
 		 * admission cannot advance the schedule or mirror to HID. */
-		if (!send_composite(builder->types, builder->n)) {
+		if (!send_composite(builder)) {
 			return false;
 		}
 #if CONFIG_CONNECTION_OVER_HID
@@ -1498,6 +1474,29 @@ static bool send_composite_or_single(const struct composite_builder *builder, ui
 static void connection_signal_wake(void)
 {
 	k_sem_give(&connection_wake_sem);
+}
+
+void connection_tracker_event_wake(void)
+{
+	connection_signal_wake();
+}
+
+/* True means an admission was attempted, not that the receiver received it. */
+static bool connection_send_tracker_event(void)
+{
+	struct tracker_event_tx event;
+	if (!esb_ready() || test_mode_get() || esb_ota_is_active()
+		|| get_status(SYS_STATUS_CONNECTION_ERROR)
+		|| !tracker_events_select(k_uptime_get_32(), tracker_id, &event)) {
+		return false;
+	}
+	int err = esb_write(event.packet, true, sizeof(event.packet));
+	tracker_events_complete(event.token, err == 0, k_uptime_get_32());
+	if (err != 0) {
+		/* The core defers another event attempt by at least 10ms. */
+		k_msleep(1);
+	}
+	return true;
 }
 
 static int64_t connection_next_deadline_ms(int64_t now)
@@ -1525,6 +1524,17 @@ static int64_t connection_next_deadline_ms(int64_t now)
 		}
 	}
 	if (!test_mode_get()) {
+		/* Test mode only piggybacks events on scheduled poses. An already-due
+		 * event cannot shorten that wait or it would keep this thread spinning. */
+		if (esb_ready() && !esb_ota_is_active() && !get_status(SYS_STATUS_CONNECTION_ERROR)) {
+			uint32_t event_deadline = tracker_events_deadline((uint32_t)now);
+			if (event_deadline != UINT32_MAX) {
+				int64_t e_dl = now + (int32_t)(event_deadline - (uint32_t)now);
+				if (e_dl < deadline) {
+					deadline = e_dl;
+				}
+			}
+		}
 		if (sensor_data_snapshot_m_pending(&sensor_data_snapshot)) {
 			int64_t m_dl = last_mag_time + 100;
 			if (m_dl < deadline) {
@@ -1728,7 +1738,12 @@ void connection_thread(void)
 			}
 			dc_conn_error_start = 0;
 
-			/* Raw data has priority over fusion data to minimize latency */
+			/* Raw streams yield one admission to a due event; test mode may
+			 * only carry events on its scheduled real pose packet. */
+			if (connection_raw_collection_active() && connection_send_tracker_event()) {
+				continue;
+			}
+			/* Otherwise raw data retains its existing priority. */
 			if (connection_process_raw_data()) {
 				continue;
 			}
@@ -1816,74 +1831,28 @@ void connection_thread(void)
 			continue;
 		}
 
-		/* No quat ready — handle standalone low-freq packets */
-		if (mag_due) {
-			/* Mag with optional low-frequency piggyback */
-			if (status_wanted || runtime_wanted) {
-				struct composite_builder builder;
-				composite_builder_reset(&builder);
+		/* No quat ready: all low-frequency packets may carry an event tail. */
+		if (mag_due || info_due || status_due || runtime_due) {
+			struct composite_builder builder;
+			composite_builder_reset(&builder);
+			uint8_t primary = mag_due ? SUB_PACKET_QUAT_MAG
+				: info_due ? SUB_PACKET_INFO
+				: status_due ? SUB_PACKET_STATUS : SUB_PACKET_RUNTIME;
+			if (mag_due) {
 				composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
-				composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
-				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
-				if (send_composite_or_single(&builder, SUB_PACKET_QUAT_MAG)) {
-					composite_commit_timestamps(&builder);
-				} else {
-					k_msleep(1);
-				}
-			} else if (connection_write_packet_4()) {
-				last_mag_time = now;
-			} else {
-				k_msleep(1);
-			}
-			continue;
-		}
-
-		if (info_due) {
-			/* Info with optional low-frequency piggyback */
-			if (status_wanted || runtime_wanted) {
-				struct composite_builder builder;
-				composite_builder_reset(&builder);
+			} else if (info_due) {
 				composite_try_add_due(&builder, SUB_PACKET_INFO, true, &last_info_time, now);
-				composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
-				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
-				if (send_composite_or_single(&builder, SUB_PACKET_INFO)) {
-					composite_commit_timestamps(&builder);
-				} else {
-					k_msleep(1);
-				}
-			} else if (connection_write_packet_0()) {
-				last_info_time = now;
+			}
+			composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
+			composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
+			if (send_composite_or_single(&builder, primary)) {
+				composite_commit_timestamps(&builder);
 			} else {
 				k_msleep(1);
 			}
 			continue;
 		}
-
-		if (status_due) {
-			if (runtime_wanted) {
-				struct composite_builder builder;
-				composite_builder_reset(&builder);
-				composite_try_add_due(&builder, SUB_PACKET_STATUS, true, &last_status_time, now);
-				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
-				if (send_composite_or_single(&builder, SUB_PACKET_STATUS)) {
-					composite_commit_timestamps(&builder);
-				} else {
-					k_msleep(1);
-				}
-			} else if (connection_write_packet_3()) {
-				last_status_time = now;
-			} else {
-				k_msleep(1);
-			}
-			continue;
-		}
-
-		if (runtime_due) {
-			if (connection_write_packet_5()) {
-				last_runtime_time = now;
-			} else {
-				k_msleep(1);
-			}
+		if (connection_send_tracker_event()) {
 			continue;
 		}
 

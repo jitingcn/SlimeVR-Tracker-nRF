@@ -29,6 +29,8 @@ uint32_t get_ping_interval_ms(void);
 void connection_print_ping_stats(void);
 /** Force the next PING to run immediately without old receiver-time slot gating. */
 void connection_request_ping_resync(void);
+/** Wake the single connection owner for newly due event work. */
+void connection_tracker_event_wake(void);
 void connection_clocks_request_start(void);
 void connection_clocks_request_start_delay_us(uint32_t delay_us);
 void connection_clocks_request_stop(void);
@@ -45,12 +47,6 @@ void connection_update_sensor_temp(float temp);
 void connection_update_battery(bool battery_available, bool plugged, bool charged, uint32_t battery_pptt, int battery_mV);
 void connection_update_status(int status);
 
-bool connection_write_packet_0();
-bool connection_write_packet_1();
-bool connection_write_packet_2();
-bool connection_write_packet_3();
-bool connection_write_packet_4();
-bool connection_write_packet_5();
 
 // Raw sensor data collection (runtime controlled via PONG command)
 

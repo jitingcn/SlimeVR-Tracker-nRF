@@ -29,6 +29,7 @@
 #include "system/watchdog.h"
 #include "system/esb_ota.h"
 #include "connection.h"
+#include "tracker_events.h"
 #include "zephyr/sys/byteorder.h"
 #include "zephyr/sys/time_units.h"
 
@@ -202,6 +203,8 @@ static void esb_remote_cmd_six_side_cal(void)
 	sensor_request_calibration_6_side();
 #else
 	LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
+	cal_event_reject(CAL_KIND_ACCEL_POSES, CAL_REASON_UNSUPPORTED);
+	tracker_events_notify();
 #endif
 }
 
@@ -226,7 +229,6 @@ static void esb_remote_cmd_mag_clear(void)
 static void esb_remote_cmd_mag_cal(void)
 {
 	LOG_INF("Executing remote command: MAG_CAL");
-	sensor_calibration_clear_mag(NULL, true);
 	sensor_request_calibration_mag();
 }
 
@@ -1743,6 +1745,7 @@ void esb_set_pair(uint64_t addr)
 	}
 	esb_reset_pair();
 	memcpy(paired_addr, &addr, sizeof(paired_addr));
+	tracker_events_session_changed();
 	LOG_INF("Paired");
 	sys_write(PAIRED_ID, retained->paired_addr, paired_addr,
 			  sizeof(paired_addr)); // Write new address and tracker id
@@ -1823,6 +1826,9 @@ void esb_pair(void)
 		}
 		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_CONNECTION);
 		LOG_INF("Paired");
+		/* RX only copied the identity; entropy and queue reset belong here,
+		 * in the pairing thread, before the new radio session is ready. */
+		tracker_events_session_changed();
 		sys_write(
 			PAIRED_ID,
 			retained->paired_addr,
@@ -1849,6 +1855,7 @@ void esb_reset_pair(void)
 		esb_deinitialize(); // make sure esb is off
 		esb_conn_state = ESB_ST_PAIRING;
 		memset(paired_addr, 0, sizeof(paired_addr));
+		tracker_events_session_changed();
 		LOG_INF("Pairing requested");
 	}
 }

@@ -47,6 +47,8 @@
 #define RAD_TO_DEG 57.29577951308232087680f /* (float)(180.0 / M_PI) */
 #endif
 
+static bool rest_observation_pending;
+
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 /* ---------- Adaptive tauAcc configuration ---------- */
 /*
@@ -195,6 +197,7 @@ static void set_params()
 
 void vqf_init(float g_time, float a_time, float m_time)
 {
+	rest_observation_pending = false;
 	set_params();
 	vqf_init_gyr_time = g_time;
 	vqf_init_acc_time = a_time;
@@ -272,6 +275,7 @@ static float vqf_safe_init_time(float saved_time, float loaded_time)
 
 void vqf_load(const void *data)
 {
+	rest_observation_pending = false;
 	BUILD_ASSERT(
 		VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
 		"VQF state+coeffs exceeds fusion_data buffer in retained memory"
@@ -327,6 +331,7 @@ void vqf_update_gyro(float *g, float time)
 	}
 	/* Fixed coeffs->gyrTs path (caller-dt / lastGyrTsUs synth disabled for A/B). */
 	updateGyr(&params, &state, &coeffs, g_rad);
+	rest_observation_pending = true;
 }
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
@@ -455,6 +460,9 @@ void vqf_update_accel(float *a, float time)
 #endif
 	/* Fixed coeffs->accTs path (caller-dt / lastAccTsUs synth disabled for A/B). */
 	updateAcc(&params, &state, &coeffs, a_m_s2);
+	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0) {
+		rest_observation_pending = true;
+	}
 	vqf_track_rest_diag();
 }
 
@@ -547,6 +555,16 @@ void vqf_get_quat(float *q)
 bool vqf_get_rest_detected(void)
 {
 	return getRestDetected(&state);
+}
+
+static bool vqf_take_rest_observation(bool *out)
+{
+	bool pending = rest_observation_pending;
+	rest_observation_pending = false;
+	if (pending && out) {
+		*out = vqf_get_rest_detected();
+	}
+	return pending;
 }
 
 bool vqf_get_mag_dist_detected(void)
@@ -982,6 +1000,7 @@ const sensor_fusion_t sensor_fusion_vqf = {
 	.get_quat = vqf_get_quat,
 
 	.get_rest_detected = vqf_get_rest_detected,
+	.take_rest_observation = vqf_take_rest_observation,
 	.get_relative_rest_deviations = vqf_get_relative_rest_deviations,
 	.get_mag_dist_detected = vqf_get_mag_dist_detected,
 	.get_quat6 = vqf_get_quat6,
