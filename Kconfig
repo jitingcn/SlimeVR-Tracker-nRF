@@ -190,16 +190,20 @@ config USE_IMU_TIMEOUT
 config IMU_TIMEOUT_RAMP_MIN
     int "Sensor timeout minimum delay (ms)"
     default 5000
+    range 5000 2147483647
     depends on USE_IMU_TIMEOUT || SENSOR_USE_LOW_POWER_2
     help
         Minimum timeout during no motion. Initial period on wake up.
+        At least 5000 ms to allow the wake-on-motion warning floor.
 
 config IMU_TIMEOUT_RAMP_MAX
     int "Sensor timeout maximum delay (ms)"
     default 15000
+    range 5000 2147483647
     depends on USE_IMU_TIMEOUT || SENSOR_USE_LOW_POWER_2
     help
         Maximum timeout during no motion.
+        At least 5000 ms to allow the wake-on-motion warning floor.
 
 config USE_ACTIVE_TIMEOUT
     bool "Use activity timeout"
@@ -237,9 +241,11 @@ config ACTIVE_TIMEOUT_THRESHOLD
 config ACTIVE_TIMEOUT_DELAY
     int "Activity timeout delay (ms)"
     default 1800000
+    range 5000 2147483647
     depends on USE_ACTIVE_TIMEOUT
     help
         Activity timeout duration when triggered.
+        At least 5000 ms to allow the wake-on-motion warning floor.
 
 config DYNAMIC_ACTIVE_TIMEOUT
     bool "Adapt activity timeout after wake-on-motion"
@@ -252,14 +258,18 @@ config DYNAMIC_ACTIVE_TIMEOUT
 config ACTIVE_TIMEOUT_IDLE_WAKE_DELAY
     int "Low-activity wake timeout (ms)"
     default 90000
-    range 1000 3600000
+    range 5000 3600000
     depends on DYNAMIC_ACTIVE_TIMEOUT
+    help
+        At least 5000 ms to allow the wake-on-motion warning floor.
 
 config ACTIVE_TIMEOUT_REPEAT_WAKE_DELAY
     int "Repeated low-activity wake timeout (ms)"
     default 90000
-    range 1000 3600000
+    range 5000 3600000
     depends on DYNAMIC_ACTIVE_TIMEOUT
+    help
+        At least 5000 ms to allow the wake-on-motion warning floor.
 
 config ACTIVE_TIMEOUT_REPEAT_WAKE_COUNT
     int "Low-activity wakes before shortest timeout"

@@ -45,16 +45,34 @@ required for mapped partitions.
 ## Tracker events
 
 Matching receiver firmware can expose calibration lifecycle, tracker rest,
-fusion rest, completed button groups, and impending WOM/shutdown notifications
+fusion rest, completed button groups, and power lifecycle notifications
 through its `scripts/hid_cmd.py` client. See the
 [receiver event guide](https://github.com/jitingcn/SlimeVR-Tracker-nRF-Receiver#tracker-events)
 for subscriptions and calibration watches.
 
 This is a bounded, best-effort channel, not a reliable action log. Rest reports
-are current observations; button groups are distinct actions; power reports
-are intentions, not confirmation that sleep or shutdown completed. Radio
-admission and finite repetitions do not guarantee delivery. Notifications never
-delay shutdown.
+are current observations; button groups are distinct actions. `BOOT` or `WAKE`
+is deferred for three seconds after early boot classification; `WAKE` means a
+hardware SYSTEMOFF wake, not identification of a particular wake GPIO.
+A detected hardware watchdog reset adds `WATCHDOG_RESET`; retained historical
+channel diagnostics are not treated as proof of the current failure.
+
+`WILL_WOM` is queued at least five seconds before physical sleep. The original idle
+deadline is retained unless the full warning interval requires a later sleep.
+Motion or another eligibility interruption withdraws the reversible request and
+emits `WOM_CANCELLED`; readiness waits do not publish a premature intention.
+The 30-second ESB/status fallback budget starts once per boot, at the first
+not-ready normal sleep attempt that reaches its original idle deadline;
+cancelling or replanning does not renew it. An early warning interrupted before
+that deadline does not change the next idle-timeout ramp anchor. The IMU ramp
+and activity-timeout delay settings have a 5000 ms Kconfig minimum to match the
+warning floor. Announcement/cancellation logs include forced mode, deadline and
+remaining lead for diagnosis.
+`WILL_SHUTDOWN` and `WILL_REBOOT` get a bounded 500 ms transmission opportunity
+before normal subsystem teardown. Power intentions are not confirmation that
+the transition completed, and radio admission and finite repetitions do not
+guarantee delivery. Emergency watchdog resets and abrupt power loss cannot wait
+for notification delivery.
 
 ## License
 

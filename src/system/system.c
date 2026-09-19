@@ -58,6 +58,32 @@ uint32_t sys_get_reset_reason(void)
 	return boot_reset_reason;
 }
 
+/* Only hardware SYSTEMOFF evidence classifies WAKE; retained sleep intent and
+ * fast-wake hints cannot establish that the physical transition succeeded. */
+static bool sys_boot_woke_from_off(void)
+{
+	uint32_t reason = sys_get_reset_reason();
+#ifdef NRF_RESET
+#ifdef RESET_RESETREAS_OFF_Msk
+	return (reason & RESET_RESETREAS_OFF_Msk) != 0;
+#else
+	return false;
+#endif
+#else
+	return (reason & POWER_RESETREAS_OFF_Msk) != 0;
+#endif
+}
+
+static int sys_boot_event_init(void)
+{
+	tracker_events_schedule_boot(sys_boot_woke_from_off(), watchdog_caused_reset());
+	return 0;
+}
+
+/* Before main's potentially five-second button hold, with kernel services
+ * available. The reset snapshot is already immutable at PRE_KERNEL_1. */
+SYS_INIT(sys_boot_event_init, APPLICATION, 0);
+
 #if DT_NODE_HAS_PROP(DT_ALIAS(sw0), gpios) // Alternate button if available to use as "reset key"
 #define BUTTON_EXISTS true
 static void button_thread(void);

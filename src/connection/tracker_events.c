@@ -32,6 +32,12 @@ static struct k_spinlock event_lock;
 static struct record queue[QUEUE_SIZE];
 static struct operation operations[OP_SIZE];
 static struct state_slot states[2];
+/* Physical-boot observations survive identity changes only until admission. */
+static struct {
+	uint32_t at, token[2];
+	uint8_t phase;
+	bool scheduled, retired, pending[2];
+} startup;
 static uint32_t nonce, serial, epoch = 1, next_send, diagnostics_at;
 static uint32_t drops, coalesces, suppressions;
 static uint16_t sequence, next_operation;
@@ -93,6 +99,11 @@ static struct record materialize(
 		.valid = true
 	};
 }
+static bool startup_pending(const struct record *r)
+{
+	return (startup.pending[0] && startup.token[0] == r->token)
+		|| (startup.pending[1] && startup.token[1] == r->token);
+}
 static void enqueue(struct record record)
 {
 	unsigned victim = 0;
@@ -103,13 +114,26 @@ static void enqueue(struct record record)
 			found = true;
 			break;
 		}
-		if ((queue[i].copies && !queue[victim].copies)
-			|| ((!!queue[i].copies == !!queue[victim].copies) && (int32_t)(queue[i].token - queue[victim].token) < 0)) {
+		if (startup_pending(&queue[i])) {
+			continue;
+		}
+		bool power = queue[i].event.kind == TRACKER_EVENT_KIND_POWER;
+		bool victim_power = queue[victim].event.kind == TRACKER_EVENT_KIND_POWER;
+		if (startup_pending(&queue[victim]) || (!power && victim_power)
+			|| (power == victim_power
+				&& ((queue[i].copies && !queue[victim].copies)
+					|| ((!!queue[i].copies == !!queue[victim].copies)
+						&& (int32_t)(queue[i].token - queue[victim].token) < 0)))) {
 			victim = i;
 		}
 	}
 	if (!found) {
 		drops++;
+		/* Ordinary telemetry must not evict a power notice's repeat budget. */
+		if (queue[victim].event.kind == TRACKER_EVENT_KIND_POWER
+			&& record.event.kind != TRACKER_EVENT_KIND_POWER) {
+			return;
+		}
 	}
 	queue[victim] = record;
 	notify_pending = true;
@@ -329,9 +353,38 @@ void tracker_event_notice(uint8_t kind, uint8_t phase, uint8_t detail)
 	struct tracker_event e
 		= {.nonce = nonce, .kind = kind, .event = CAL_EVENT_NOTICE, .phase = phase, .detail = detail};
 	if (tracker_event_valid(&e)) {
+		if (kind == TRACKER_EVENT_KIND_POWER && (phase == POWER_WILL_SHUTDOWN || phase == POWER_WILL_REBOOT)) {
+			/* A startup generated after this intent could incorrectly supersede it.
+			 * Already materialized records retain their older ordering identity. */
+			startup.retired = true;
+			startup.pending[0] = startup.pending[1] = false;
+		}
+		if (kind == TRACKER_EVENT_KIND_POWER && phase == POWER_WOM_CANCELLED) {
+			for (unsigned i = 0; i < QUEUE_SIZE; i++) {
+				if (queue[i].valid && queue[i].event.kind == TRACKER_EVENT_KIND_POWER
+					&& queue[i].event.phase == POWER_WILL_WOM) {
+					queue[i].valid = false;
+				}
+			}
+		}
 		enqueue(materialize(0, kind, CAL_EVENT_NOTICE, 0, phase, detail, now, 3));
 	}
 	k_spin_unlock(&event_lock, key);
+}
+void tracker_events_schedule_boot(bool wake, bool watchdog_reset)
+{
+	uint32_t now = k_uptime_get_32();
+	k_spinlock_key_t key = k_spin_lock(&event_lock);
+	if (!startup.scheduled && !startup.retired && !entropy_failed) {
+		startup.scheduled = true;
+		startup.at = now + TRACKER_EVENT_BOOT_DELAY_MS;
+		startup.phase = wake ? POWER_WAKE : POWER_BOOT;
+		startup.pending[0] = true;
+		startup.pending[1] = watchdog_reset;
+		notify_pending = true;
+	}
+	k_spin_unlock(&event_lock, key);
+	tracker_events_notify();
 }
 uint32_t tracker_events_sensor_epoch(void)
 {
@@ -389,9 +442,21 @@ void tracker_events_observe_sensor(
 static void maintain(uint32_t now)
 {
 	for (unsigned i = 0; i < QUEUE_SIZE; i++) {
-		if (queue[i].valid && due(now, queue[i].born + 15000)) {
+		if (queue[i].valid && !startup_pending(&queue[i]) && due(now, queue[i].born + TRACKER_EVENT_TTL_MS)) {
 			queue[i].valid = false;
 			drops++;
+		}
+	}
+	if (nonce && startup.scheduled && due(now, startup.at)) {
+		for (unsigned i = 0; i < 2; i++) {
+			if (startup.pending[i] && !startup.token[i]) {
+				struct record r = materialize(
+					0, TRACKER_EVENT_KIND_POWER, CAL_EVENT_NOTICE, 0,
+					i ? POWER_WATCHDOG_RESET : startup.phase, 0, now, 3
+				);
+				startup.token[i] = r.token;
+				enqueue(r);
+			}
 		}
 	}
 	for (unsigned i = 0; i < OP_SIZE; i++) {
@@ -413,15 +478,21 @@ static void maintain(uint32_t now)
 		}
 	}
 }
+/* Power selection includes repeats, ahead of all ordinary records. Every valid
+ * queue entry has copies < limit: completion invalidates exhausted entries. */
 static struct record *oldest_first(bool power)
 {
 	struct record *best = NULL;
 	for (unsigned i = 0; i < QUEUE_SIZE; i++) {
 		struct record *r = &queue[i];
-		if (!r->valid || r->copies || (power && r->event.kind != TRACKER_EVENT_KIND_POWER)) {
+		if (!r->valid || (power ? r->event.kind != TRACKER_EVENT_KIND_POWER : r->copies != 0)) {
 			continue;
 		}
-		if (!best || (int32_t)(r->token - best->token) < 0) {
+		bool urgent = power && (r->event.phase == POWER_WILL_SHUTDOWN || r->event.phase == POWER_WILL_REBOOT);
+		bool best_urgent = best && power
+			&& (best->event.phase == POWER_WILL_SHUTDOWN || best->event.phase == POWER_WILL_REBOOT);
+		if (!best || (urgent && !best_urgent)
+			|| (urgent == best_urgent && (int32_t)(r->token - best->token) < 0)) {
 			best = r;
 		}
 	}
@@ -556,8 +627,14 @@ void tracker_events_complete(uint32_t token, bool success, uint32_t now)
 		return;
 	}
 	send_gate = true;
-	next_send = now + (success ? 100 : 10);
+	next_send = now + (success ? TRACKER_EVENT_SPACING_MS : 10);
 	if (success) {
+		bool startup_admitted = startup.token[0] == token || startup.token[1] == token;
+		for (unsigned i = 0; i < 2; i++) {
+			if (startup.token[i] == token) {
+				startup.pending[i] = false;
+			}
+		}
 		struct operation *sent_op = lookup(selected.event.operation_id);
 		if (sent_op) {
 			sent_op->heartbeat = now + 2000;
@@ -575,6 +652,9 @@ void tracker_events_complete(uint32_t token, bool success, uint32_t now)
 		}
 		for (unsigned i = 0; i < QUEUE_SIZE; i++) {
 			struct record *r = &queue[i];
+			if (r->valid && r->token == token && !r->copies && startup_admitted) {
+				r->born = now;
+			}
 			receipt(r, token, now);
 			if (r->valid && r->token == token && r->copies >= r->limit) {
 				r->valid = false;
@@ -610,6 +690,12 @@ static void deadline_add(uint32_t *best, uint32_t value, uint32_t now)
 	if (due(now, value)) {
 		value = now;
 	}
+	/* UINT32_MAX is no work. Use the next timestamp (zero after rollover),
+	 * not now + 1: signed-delta consumers sleep until the boundary, without
+	 * polling each millisecond while a future sentinel-valued deadline waits. */
+	if (value == UINT32_MAX) {
+		value = 0;
+	}
 	if (*best == UINT32_MAX || (int32_t)(value - *best) < 0) {
 		*best = value;
 	}
@@ -620,6 +706,11 @@ uint32_t tracker_events_deadline(uint32_t now)
 	uint32_t best = UINT32_MAX;
 	if (nonce) {
 		maintain(now);
+		for (unsigned i = 0; i < 2; i++) {
+			if (startup.pending[i] && !startup.token[i]) {
+				deadline_add(&best, startup.at, now);
+			}
+		}
 		for (unsigned i = 0; i < QUEUE_SIZE; i++) {
 			if (queue[i].valid) {
 				deadline_add(&best, now, now);
@@ -670,6 +761,11 @@ uint32_t tracker_events_deadline(uint32_t now)
 		}
 		if (best != UINT32_MAX && send_gate) {
 			best = later(best, next_send);
+			/* The send gate can also land on the sentinel; defer that timestamp
+			 * by one millisecond across rollover, just as deadline_add does. */
+			if (best == UINT32_MAX) {
+				best = 0;
+			}
 		}
 	}
 	bool report = due(now, diagnostics_at) && (drops || coalesces || suppressions);
@@ -718,7 +814,9 @@ void tracker_events_session_changed(void)
 	memset(states, 0, sizeof(states));
 	sequence = 0;
 	send_gate = false;
-	notify_pending = false;
+	/* Re-materialize only observations never admitted in the old identity. */
+	startup.token[0] = startup.token[1] = 0;
+	notify_pending = startup.pending[0] || startup.pending[1];
 	selected.valid = false;
 	if (!++epoch) {
 		++epoch;

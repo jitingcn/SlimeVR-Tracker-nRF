@@ -60,6 +60,8 @@ static struct {bool (*take_rest_observation)(bool*);} backend={take_observation}
 static const typeof(backend) *sensor_fusion=&backend;
 static int fusion_id=FUSION_VQF;
 static void sensor_calibration_set_consumer_ready(bool x) {(void)x;}
+/* Power lifecycle behavior is exercised by the ota_power host harness. */
+static void sys_cancel_WOM(void) {}
 static void watchdog_pause(int x) {(void)x;}
 static void watchdog_resume(int x) {(void)x;}
 static void k_thread_suspend(int *x) {(void)x; suspended++;}

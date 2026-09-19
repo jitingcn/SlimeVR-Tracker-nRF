@@ -29,10 +29,12 @@ struct peripheral { reset_register RESETREAS; } registers;
 #define RESET_RESETREAS_RESETPIN_Msk 1u
 #define RESET_RESETREAS_DOG0_Msk 2u
 #define RESET_RESETREAS_DOG1_Msk 4u
+#define RESET_RESETREAS_OFF_Msk (1u << 8)
 #else
 /* nRF52833/840 fields. */
 #define POWER_RESETREAS_RESETPIN_Msk 1u
 #define POWER_RESETREAS_DOG_Msk 2u
+#define POWER_RESETREAS_OFF_Msk (1u << 16)
 #define POWER_RESETREAS_VBUS_Msk (1u << 20)
 #endif
 
@@ -48,6 +50,19 @@ struct init_registration {
 #define APPLICATION 1
 #define CONFIG_APPLICATION_INIT_PRIORITY 90
 #define SYS_INIT(fn, stage, priority) static init_registration init_##fn(fn, stage, priority)
+static int current_stage = -1;
+static int current_priority = -1;
+struct boot_schedule {
+	const bool wake;
+	const bool watchdog;
+	const int stage;
+	const int priority;
+};
+static std::vector<boot_schedule> boot_schedules;
+static void tracker_events_schedule_boot(bool wake, bool watchdog)
+{
+	boot_schedules.push_back({wake, watchdog, current_stage, current_priority});
+}
 #define DT_NODE_HAS_PROP(...) 0
 #define BUTTON_EXISTS 1
 #define USER_SHUTDOWN_ENABLED 0
@@ -97,12 +112,26 @@ int main(int argc, char **argv)
 	assert(argc == 2);
 	const uint32_t reason = static_cast<uint32_t>(strtoul(argv[1], nullptr, 0));
 	registers.RESETREAS.value = reason;
+#if MODEL_SOC == 54
+	const bool expected_wake = reason & RESET_RESETREAS_OFF_Msk;
+	const bool expected_watchdog = reason & (RESET_RESETREAS_DOG0_Msk | RESET_RESETREAS_DOG1_Msk);
+#else
+	const bool expected_wake = reason & POWER_RESETREAS_OFF_Msk;
+	const bool expected_watchdog = reason & POWER_RESETREAS_DOG_Msk;
+#endif
 	std::stable_sort(init_entries.begin(), init_entries.end(), [](const auto &a, const auto &b) {
 		return a.stage != b.stage ? a.stage < b.stage : a.priority < b.priority;
 	});
 	for (const auto &entry : init_entries) {
+		current_stage = entry.stage;
+		current_priority = entry.priority;
 		assert(entry.run() == 0);
 	}
+	/* Scheduling cannot wait for main's button handling or require TASK_WDT. */
+	assert(boot_schedules.size() == 1);
+	assert(boot_schedules[0].wake == expected_wake);
+	assert(boot_schedules[0].watchdog == expected_watchdog);
+	assert(sys_boot_woke_from_off() == expected_wake);
 
 	/* The decision immediately before retained validation must still see pin. */
 	assert(ram_retention_valid == !(reason & 1u));
@@ -112,7 +141,10 @@ int main(int argc, char **argv)
 #else
 	assert(!button_read_filtered());
 #endif
+	current_stage = APPLICATION + 1;
+	current_priority = -1;
 	assert(tracker_main() == 0);
+	assert(boot_schedules.size() == 1);
 	const bool counted_pin = (reason & 1u) && !IGNORE_RESET;
 	const std::vector<uint8_t> expected = counted_pin ? std::vector<uint8_t>{101, 100}
 						       : std::vector<uint8_t>{100};
@@ -120,11 +152,6 @@ int main(int argc, char **argv)
 	assert(applied_reset_mode == (counted_pin ? 0 : 255));
 	assert(registers.RESETREAS.value == 0);
 	assert(registers.RESETREAS.writes == 1);
-#if MODEL_SOC == 54
-	const bool expected_watchdog = reason & (2u | 4u);
-#else
-	const bool expected_watchdog = reason & 2u;
-#endif
 	assert(watchdog_caused_reset() == expected_watchdog);
 #ifdef HAS_RESET_SNAPSHOT
 	assert(sys_get_reset_reason() == reason);
@@ -132,6 +159,10 @@ int main(int argc, char **argv)
 	registers.RESETREAS.value = ~reason;
 	assert(sys_get_reset_reason() == reason);
 	assert(watchdog_caused_reset() == expected_watchdog);
+	assert(sys_boot_woke_from_off() == expected_wake);
+	assert(boot_schedules.size() == 1);
+	assert(boot_schedules[0].wake == expected_wake);
+	assert(boot_schedules[0].watchdog == expected_watchdog);
 #endif
 	printf("reset model passed: soc=%d reason=0x%x ignore=%d\n", MODEL_SOC, reason, IGNORE_RESET);
 }

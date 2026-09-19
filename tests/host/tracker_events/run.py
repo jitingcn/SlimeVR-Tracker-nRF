@@ -64,7 +64,11 @@ def main():
     parser.add_argument("--end-to-end", action="store_true")
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
-    cases = args.case or ["copies", "lifecycle", "progress", "online", "states", "receipts", "scheduling", "state-heartbeat", "entropy-error", "entropy-zero"]
+    cases = args.case or ["copies", "lifecycle", "progress", "online", "states", "receipts", "scheduling", "state-heartbeat", "entropy-error", "entropy-zero",
+                          "startup-boot", "startup-wake", "startup-watchdog", "startup-wake-watchdog",
+                          "startup-late", "startup-wrap", "startup-session", "power-priority", "wom-cancellation",
+                          "terminal-priority", "terminal-before-startup", "terminal-before-schedule",
+                          "startup-disconnected", "startup-wrap-sentinel", "next-send-wrap-sentinel"]
     cc = shlex.split(os.environ.get("CC", "cc"))
     with tempfile.TemporaryDirectory(prefix="tracker-events-") as temp:
         temp = Path(temp)

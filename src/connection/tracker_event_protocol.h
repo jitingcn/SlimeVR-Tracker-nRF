@@ -25,6 +25,10 @@
 #define TRACKER_EVENT_LEASE_MS 15000U
 #define TRACKER_EVENT_SENSOR_FRESH_MS 1000U
 #define TRACKER_EVENT_TTL_MS 15000U
+/* Tracker-only timing policy, mirrored here for byte-identical protocol copies. */
+#define TRACKER_EVENT_BOOT_DELAY_MS 3000U
+#define TRACKER_EVENT_WOM_ADVANCE_MS 5000U
+#define TRACKER_EVENT_POWER_FLUSH_MS 500U
 #define RCV_HID_OP_TRACKER_EVENTS 224
 #define RCV_HID_OP_TRACKER_EVENT 225
 #define RCV_HID_OP_TRACKER_OBSERVATION 226
@@ -139,6 +143,11 @@ enum { FUSION_BACKEND_UNKNOWN = 0, FUSION_BACKEND_VQF = 1, FUSION_BACKEND_EQF = 
 enum {
 	POWER_WILL_WOM = 1,
 	POWER_WILL_SHUTDOWN = 2,
+	POWER_BOOT = 3,
+	POWER_WAKE = 4,
+	POWER_WILL_REBOOT = 5,
+	POWER_WOM_CANCELLED = 6,
+	POWER_WATCHDOG_RESET = 7,
 	POWER_REASON_UNKNOWN = 0,
 	POWER_WOM_NORMAL = 1,
 	POWER_WOM_FORCED = 2,
@@ -207,7 +216,11 @@ static inline bool tracker_event_valid(const struct tracker_event *e)
 	case TRACKER_EVENT_KIND_FUSION_REST:
 		return e->event == CAL_EVENT_STATE && e->phase <= 3 && e->detail <= 2;
 	case TRACKER_EVENT_KIND_POWER:
-		return e->event == CAL_EVENT_NOTICE && ((e->phase == 1 && e->detail <= 2) || (e->phase == 2 && e->detail == 0));
+		return e->event == CAL_EVENT_NOTICE
+			&& (((e->phase == POWER_WILL_WOM || e->phase == POWER_WOM_CANCELLED) && e->detail <= POWER_WOM_FORCED)
+				|| (e->phase != POWER_WOM_CANCELLED
+					&& e->phase >= POWER_WILL_SHUTDOWN && e->phase <= POWER_WATCHDOG_RESET
+					&& e->detail == POWER_REASON_UNKNOWN));
 	case TRACKER_EVENT_KIND_BUTTON:
 		return e->event == CAL_EVENT_NOTICE && e->phase == 1 && e->detail != 0;
 	default:

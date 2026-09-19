@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <zephyr/kernel.h>
 #include <zephyr/spinlock.h>
 
@@ -35,6 +36,7 @@ struct power_request_mailbox {
 	enum sys_power_request request;
 	enum power_request_state state;
 	enum power_ota_reboot_state ota_reboot;
+	uint32_t generation;
 	bool physical_started;
 };
 
@@ -48,6 +50,10 @@ static inline int power_request_submit(struct power_request_mailbox *mailbox,
 	}
 
 	k_spinlock_key_t key = k_spin_lock(&mailbox->lock);
+	if (mailbox->physical_started) {
+		k_spin_unlock(&mailbox->lock, key);
+		return -EBUSY;
+	}
 	if (mailbox->ota_reboot != POWER_OTA_REBOOT_NONE) {
 		int err = request == SYS_POWER_REQ_REBOOT &&
 			mailbox->ota_reboot == POWER_OTA_REBOOT_READY ? 0 : -EBUSY;
@@ -60,6 +66,7 @@ static inline int power_request_submit(struct power_request_mailbox *mailbox,
 		return err;
 	}
 	mailbox->request = request;
+	mailbox->generation++;
 	mailbox->state = POWER_REQUEST_QUEUED;
 	k_spin_unlock(&mailbox->lock, key);
 	k_sem_give(wake);
@@ -69,29 +76,33 @@ static inline int power_request_submit(struct power_request_mailbox *mailbox,
 /* Only the power thread claims/finishes requests. Never remove a request at
  * claim time: a producer cannot replace the transition while it is executing.
  */
-static inline enum sys_power_request power_request_begin(struct power_request_mailbox *mailbox)
+static inline enum sys_power_request power_request_begin(struct power_request_mailbox *mailbox,
+							 uint32_t *generation)
 {
 	k_spinlock_key_t key = k_spin_lock(&mailbox->lock);
 	enum sys_power_request request = SYS_POWER_REQ_NONE;
 	if (mailbox->state != POWER_REQUEST_EXECUTING &&
 	    mailbox->ota_reboot == POWER_OTA_REBOOT_READY) {
 		mailbox->request = SYS_POWER_REQ_REBOOT;
+		mailbox->generation++;
 		mailbox->state = POWER_REQUEST_QUEUED;
 	}
 	if (mailbox->ota_reboot != POWER_OTA_REBOOT_RESERVED &&
 	    (mailbox->state == POWER_REQUEST_QUEUED || mailbox->state == POWER_REQUEST_RETRY)) {
 		request = mailbox->request;
 		mailbox->state = POWER_REQUEST_EXECUTING;
+		*generation = mailbox->generation;
 	}
 	k_spin_unlock(&mailbox->lock, key);
 	return request;
 }
 
 static inline void power_request_finish(struct power_request_mailbox *mailbox,
-					enum sys_power_request request, bool consumed)
+					enum sys_power_request request, uint32_t generation, bool consumed)
 {
 	k_spinlock_key_t key = k_spin_lock(&mailbox->lock);
-	if (mailbox->state == POWER_REQUEST_EXECUTING && mailbox->request == request) {
+	if (mailbox->state == POWER_REQUEST_EXECUTING && mailbox->request == request &&
+	    mailbox->generation == generation) {
 		mailbox->physical_started = false;
 		if (consumed) {
 			if (request == SYS_POWER_REQ_REBOOT) {
@@ -104,6 +115,52 @@ static inline void power_request_finish(struct power_request_mailbox *mailbox,
 		}
 	}
 	k_spin_unlock(&mailbox->lock, key);
+}
+
+/* Revoke only reversible WOM, leaving any other mailbox owner untouched.
+ * Return whether intent may be withdrawn (also true if the mailbox no longer
+ * contains WOM); physical shutdown is irreversible and returns false. */
+static inline bool power_request_cancel_wom(struct power_request_mailbox *mailbox)
+{
+	k_spinlock_key_t key = k_spin_lock(&mailbox->lock);
+	bool reversible = !mailbox->physical_started;
+	if (reversible &&
+	    (mailbox->request == SYS_POWER_REQ_WOM || mailbox->request == SYS_POWER_REQ_WOM_FORCE)) {
+		mailbox->generation++;
+		mailbox->request = SYS_POWER_REQ_NONE;
+		mailbox->state = POWER_REQUEST_EMPTY;
+	}
+	k_spin_unlock(&mailbox->lock, key);
+	return reversible;
+}
+
+/* The policy mutex excludes re-planning, not mailbox owner completion. Check
+ * the claim under the mailbox lock before allowing a stale owner to cancel
+ * policy belonging to a replacement. The physical gate still rechecks it. */
+static inline bool power_request_wom_claim_current(struct power_request_mailbox *mailbox,
+						   uint32_t generation)
+{
+	k_spinlock_key_t key = k_spin_lock(&mailbox->lock);
+	bool current = mailbox->state == POWER_REQUEST_EXECUTING &&
+		mailbox->generation == generation && !mailbox->physical_started &&
+		(mailbox->request == SYS_POWER_REQ_WOM || mailbox->request == SYS_POWER_REQ_WOM_FORCE);
+	k_spin_unlock(&mailbox->lock, key);
+	return current;
+}
+
+static inline bool power_request_start_wom(struct power_request_mailbox *mailbox,
+					   uint32_t generation)
+{
+	k_spinlock_key_t key = k_spin_lock(&mailbox->lock);
+	bool allowed = mailbox->state == POWER_REQUEST_EXECUTING &&
+		mailbox->generation == generation && !mailbox->physical_started &&
+		mailbox->ota_reboot == POWER_OTA_REBOOT_NONE &&
+		(mailbox->request == SYS_POWER_REQ_WOM || mailbox->request == SYS_POWER_REQ_WOM_FORCE);
+	if (allowed) {
+		mailbox->physical_started = true;
+	}
+	k_spin_unlock(&mailbox->lock, key);
+	return allowed;
 }
 
 /* Reserve before touching bootloader state. An EXECUTING request may still be

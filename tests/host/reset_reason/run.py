@@ -63,6 +63,9 @@ for name in ("saved_gpregret", "last_reset_was_wdt"):
         parts.append(declaration.group())
 parts += [function(watchdog, "watchdog_early_check"),
           registration(watchdog, "watchdog_early_check"), "#endif"]
+parts += [function(system, "sys_boot_woke_from_off"),
+          function(system, "sys_boot_event_init"),
+          registration(system, "sys_boot_event_init")]
 parts.append(re.search(r"^static bool ram_retention_valid[^;]*;", system, re.MULTILINE).group())
 # Retained validation/NVS restoration follows this policy decision. Stop at that
 # boundary to inspect whether reset-pin correctly withholds automatic trust;
@@ -97,8 +100,10 @@ with tempfile.TemporaryDirectory(prefix="tracker-reset-reason-") as directory:
                 subprocess.run(command, check=True)
                 # Each invocation gets a genuine fresh boot (zero-initialized
                 # cached state), not a test-only reset of production globals.
-                reasons = [1, 1 << 20, 2, 0, 1 | 2 | (1 << 20) | (1 << 16)]
+                off = 1 << (8 if soc == 54 else 16)
+                reasons = [1, 1 << 20, 2, 0, 1 | 2 | (1 << 20) | (1 << 16),
+                           off, off | 1 | 2 | (1 << 20), 1 | 2 | (1 << 20)]
                 if soc == 54:
-                    reasons.append(4)
+                    reasons += [4, off | 4 | 1 | (1 << 20), off | 2 | 4 | (1 << 20)]
                 for reason in reasons:
                     subprocess.run([str(binary), str(reason)], check=True)

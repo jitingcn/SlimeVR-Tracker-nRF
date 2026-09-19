@@ -60,5 +60,19 @@ int main(void)
     event=(struct tracker_event){.nonce=1,.kind=TRACKER_EVENT_KIND_BUTTON,.event=CAL_EVENT_NOTICE,.phase=BUTTON_CLICK_GROUP};
     assert(!tracker_event_encode(packet,&event));
     event.detail=255; assert(tracker_event_encode(packet,&event));
+    event=(struct tracker_event){.nonce=1,.kind=TRACKER_EVENT_KIND_POWER,.event=CAL_EVENT_NOTICE};
+    for(unsigned phase=POWER_WILL_WOM;phase<=POWER_WATCHDOG_RESET;phase++) {
+        event.phase=phase; event.detail=0;
+        assert(tracker_event_encode(packet,&event));
+        assert(tracker_event_decode(packet,17,&event) && event.phase==phase);
+        event.detail=POWER_WOM_FORCED;
+        assert(tracker_event_encode(packet,&event)==(phase==POWER_WILL_WOM || phase==POWER_WOM_CANCELLED));
+        event.detail=POWER_WOM_FORCED+1;
+        assert(!tracker_event_encode(packet,&event));
+    }
+    event.detail=0; event.phase=POWER_WATCHDOG_RESET+1;
+    assert(!tracker_event_encode(packet,&event));
+    event.phase=0;
+    assert(!tracker_event_encode(packet,&event));
     puts("PASS production protocol golden, bounds, future phase, kind-domain validation");
 }

@@ -10,6 +10,7 @@
 #include "connection/esb.h"
 #include "system/esb_ota.h"
 #include "watchdog.h"
+#include "test_mode.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -48,7 +49,7 @@ LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
 #include "nrf_gpio_util.h" /* after LOG_MODULE_REGISTER: helpers use LOG_INF */
 
-static bool sys_WOM(bool force);
+static bool sys_WOM(bool force, uint32_t generation);
 static bool sys_system_off(void);
 static bool sys_system_reboot(void);
 
@@ -56,6 +57,19 @@ static int sys_power_state_request(enum sys_power_request id);
 
 static struct power_request_mailbox power_requests;
 static K_SEM_DEFINE(power_wake_sem, 0, 1);
+/* Serializes reversible WOM policy and its event ordering; never held across
+ * sleep, sensor shutdown, or radio admission. Mailbox generation protects the
+ * power owner's outstanding claim independently of this mutex. */
+static K_MUTEX_DEFINE(power_plan_lock);
+static bool wom_planned;
+static bool wom_force;
+static bool wom_announced;
+static int64_t wom_deadline;
+static int64_t wom_commit_at;
+static bool wom_ready_timeout_initialized;
+static int64_t wom_ready_timeout;
+static int64_t wom_last_eligible;
+#define WOM_ELIGIBILITY_LEASE_MS 1000
 
 K_THREAD_DEFINE(disable_DFU_thread_id, 128, sys_skip_dfu, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // skip DFU if the system is running correctly
 
@@ -324,13 +338,90 @@ static void wait_for_logging(void)
 #endif
 }
 
-#if IMU_INT_EXISTS && CONFIG_DELAY_SLEEP_ON_STATUS
-static int64_t system_off_timeout = 0;
-#endif
-
-int sys_request_WOM(bool force)
+static void sys_cancel_WOM_locked(void)
 {
-	return sys_power_state_request(force ? SYS_POWER_REQ_WOM_FORCE : SYS_POWER_REQ_WOM);
+	if (!power_request_cancel_wom(&power_requests)) {
+		return;
+	}
+	if (wom_announced) {
+		tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WOM_CANCELLED,
+			wom_force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
+		tracker_events_notify();
+		LOG_INF("WOM cancelled: force=%d deadline=%lld remaining_lead=%lldms",
+			wom_force, wom_deadline, MAX(0, wom_commit_at - k_uptime_get()));
+	}
+	wom_planned = false;
+	wom_announced = false;
+}
+
+void sys_cancel_WOM(void)
+{
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	sys_cancel_WOM_locked();
+	k_mutex_unlock(&power_plan_lock);
+}
+
+static bool sys_wom_ready(bool force, int64_t now)
+{
+#if CONFIG_DELAY_SLEEP_ON_STATUS
+	if (force || (esb_ready() && status_ready())) {
+		return true;
+	}
+	/* One readiness budget per boot, starting only when a blocked attempt is
+	 * actually due, not at its early notice threshold. Uptime zero is valid. */
+	if (!wom_ready_timeout_initialized) {
+		if (now < wom_deadline) {
+			return false;
+		}
+		wom_ready_timeout = now + 30000;
+		wom_ready_timeout_initialized = true;
+	}
+	return now >= wom_ready_timeout;
+#else
+	return true;
+#endif
+}
+
+/* Called continuously by the sensor while the original idle policy remains
+ * eligible. Readiness delays are unadvertised; every announced plan gets its
+ * full lead time, even when rest debounce consumed part of the idle timeout. */
+int sys_plan_WOM(bool force, int64_t deadline)
+{
+#if !IMU_INT_EXISTS
+	return -ENOTSUP;
+#else
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	int64_t now = k_uptime_get();
+	if (wom_planned && (wom_force != force || wom_deadline != deadline ||
+			    now - wom_last_eligible >= WOM_ELIGIBILITY_LEASE_MS)) {
+		sys_cancel_WOM_locked();
+	}
+	int err = power_request_submit(&power_requests,
+		force ? SYS_POWER_REQ_WOM_FORCE : SYS_POWER_REQ_WOM, &power_wake_sem);
+	if (!err) {
+		if (!wom_planned) {
+			wom_planned = true;
+			wom_force = force;
+			wom_deadline = deadline;
+		}
+		wom_last_eligible = now;
+		if (!sys_wom_ready(force, now)) {
+			if (wom_announced) {
+				sys_cancel_WOM_locked();
+			}
+		} else if (!wom_announced) {
+			wom_commit_at = MAX(deadline, now + TRACKER_EVENT_WOM_ADVANCE_MS);
+			wom_announced = true;
+			tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WILL_WOM,
+				force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
+			tracker_events_notify();
+			LOG_INF("WOM announced: force=%d deadline=%lld lead=%lldms",
+				force, deadline, wom_commit_at - now);
+		}
+	}
+	k_mutex_unlock(&power_plan_lock);
+	return err;
+#endif
 }
 
 int sys_request_system_off(void)
@@ -345,7 +436,13 @@ int sys_request_system_reboot(void)
 
 int sys_ota_reboot_reserve(void)
 {
-	return power_request_ota_reserve(&power_requests);
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	int err = power_request_ota_reserve(&power_requests);
+	if (!err) {
+		sys_cancel_WOM_locked();
+	}
+	k_mutex_unlock(&power_plan_lock);
+	return err;
 }
 
 void sys_ota_reboot_resolve(bool prepared)
@@ -354,34 +451,37 @@ void sys_ota_reboot_resolve(bool prepared)
 }
 
 /* Returns true when the power request is consumed; false to keep it queued. */
-static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what does the system do?
+static bool sys_WOM(bool force, uint32_t generation)
 {
-	LOG_INF("IMU wake up requested");
-	/* Block sleep during OTA (active or suppressed) */
-	if (esb_ota_is_active() || connection_get_ota_suppressed()) {
-		LOG_INF("IMU wake up blocked by OTA");
-		return true; /* consume; sensor re-requests after next idle cycle */
+	/* These checks may race with cancellation/rearming. The final generation
+	 * gate below, under the policy mutex, must own this exact claim. */
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	bool veto = esb_ota_is_active() || connection_get_ota_suppressed() ||
+		test_mode_get() || get_status(SYS_STATUS_CALIBRATION_RUNNING) || main_imu_is_suspended();
+	if (!power_request_wom_claim_current(&power_requests, generation)) {
+		k_mutex_unlock(&power_plan_lock);
+		return true;
 	}
-#if IMU_INT_EXISTS
-#if CONFIG_DELAY_SLEEP_ON_STATUS
-	if (!force && (!esb_ready() || !status_ready())) // Wait for esb to pair in case the user is still trying to pair the device
-	{
-		if (!system_off_timeout)
-			system_off_timeout = k_uptime_get() + 30000; // allow system off after 30 seconds if status errors are still active
-		if (k_uptime_get() < system_off_timeout)
-		{
-			LOG_INF("IMU wake up not available, waiting on ESB/status ready");
-			return false; /* keep request so power_thread retries after timeout */
-		}
-		LOG_INF("ESB/status ready timed out");
+	int64_t now = k_uptime_get();
+	if (veto || !wom_planned || now - wom_last_eligible >= WOM_ELIGIBILITY_LEASE_MS ||
+	    (wom_announced && !sys_wom_ready(force, now))) {
+		sys_cancel_WOM_locked();
+		k_mutex_unlock(&power_plan_lock);
+		return true;
 	}
-#endif
-	if (!power_request_start_physical(&power_requests, false)) {
+	if (!wom_announced || now < wom_commit_at) {
+		k_mutex_unlock(&power_plan_lock);
 		return false;
 	}
-	tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WILL_WOM,
-		force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
-	tracker_events_notify();
+#if IMU_INT_EXISTS
+	if (!power_request_start_wom(&power_requests, generation)) {
+		k_mutex_unlock(&power_plan_lock);
+		return false;
+	}
+	/* The intent is now irrevocable; suspend hooks must not withdraw it. */
+	wom_planned = false;
+	wom_announced = false;
+	k_mutex_unlock(&power_plan_lock);
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
 	sensor_calibration_online_mag_retained_save();
@@ -397,6 +497,9 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	if (pin_config == 0xFF) {
 		/* Already past configure_system_off; cannot restore cleanly. */
 		LOG_ERR("IMU wake up setup failed after shutdown prep, rebooting");
+		tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WOM_CANCELLED,
+			force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
+		tracker_events_notify();
 		sys_system_reboot(); /* owner-private emergency path after shutdown prep */
 		return true;
 	}
@@ -423,26 +526,41 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	sys_poweroff();
 	return true;
 #else
+	sys_cancel_WOM_locked();
+	k_mutex_unlock(&power_plan_lock);
 	LOG_WRN("IMU wake up GPIO does not exist");
 	LOG_WRN("IMU wake up not available");
 	return true;
 #endif
 }
 
+/* Connection remains the only radio producer. This bounded airtime window
+ * does not assert queue admission, RF completion, or receiver delivery. */
+static void sys_power_notice(uint8_t code)
+{
+	tracker_event_notice(TRACKER_EVENT_KIND_POWER, code, POWER_REASON_UNKNOWN);
+	tracker_events_notify();
+	k_msleep(TRACKER_EVENT_POWER_FLUSH_MS);
+}
+
 /* Returns true when the request is consumed; false to keep it queued. */
 static bool sys_system_off(void) // TODO: add timeout
 {
 	LOG_INF("System off requested");
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	sys_cancel_WOM_locked();
 	/* Block shutdown during OTA (active or suppressed) */
 	if (esb_ota_is_active() || connection_get_ota_suppressed()) {
 		LOG_INF("System off blocked by OTA");
+		k_mutex_unlock(&power_plan_lock);
 		return false; /* keep queued until OTA finishes */
 	}
 	if (!power_request_start_physical(&power_requests, false)) {
+		k_mutex_unlock(&power_plan_lock);
 		return false;
 	}
-	tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WILL_SHUTDOWN, POWER_REASON_UNKNOWN);
-	tracker_events_notify();
+	k_mutex_unlock(&power_plan_lock);
+	sys_power_notice(POWER_WILL_SHUTDOWN);
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* persist warm cal before session clear / power loss */
 	sensor_calibration_online_mag_cold_start();
@@ -480,9 +598,14 @@ static bool sys_system_off(void) // TODO: add timeout
 static bool sys_system_reboot(void) // TODO: add timeout
 {
 	LOG_INF("System reboot requested");
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	sys_cancel_WOM_locked();
 	if (!power_request_start_physical(&power_requests, true)) {
+		k_mutex_unlock(&power_plan_lock);
 		return false;
 	}
+	k_mutex_unlock(&power_plan_lock);
+	sys_power_notice(POWER_WILL_REBOOT);
 	configure_system_off(); // Common subsystem shutdown and prepare sense pins
 	sys_flush_warm(); /* persist warm cal before reboot (covers OTA reboot path) */
 	sensor_calibration_online_mag_cold_start();
@@ -506,7 +629,10 @@ static bool sys_system_reboot(void) // TODO: add timeout
 
 static int sys_power_state_request(enum sys_power_request id)
 {
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	sys_cancel_WOM_locked();
 	int err = power_request_submit(&power_requests, id, &power_wake_sem);
+	k_mutex_unlock(&power_plan_lock);
 	if (err) {
 		LOG_DBG("Power request %d rejected: %d", id, err);
 	}
@@ -582,14 +708,15 @@ static void power_thread(void)
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 		pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
 #endif
-		enum sys_power_request requested = power_request_begin(&power_requests);
+		uint32_t generation = 0;
+		enum sys_power_request requested = power_request_begin(&power_requests, &generation);
 		bool consumed = true;
 		switch (requested) {
 		case SYS_POWER_REQ_WOM:
-			consumed = sys_WOM(false);
+			consumed = sys_WOM(false, generation);
 			break;
 		case SYS_POWER_REQ_WOM_FORCE:
-			consumed = sys_WOM(true);
+			consumed = sys_WOM(true, generation);
 			break;
 		case SYS_POWER_REQ_SYSTEM_OFF:
 			consumed = sys_system_off();
@@ -601,7 +728,7 @@ static void power_thread(void)
 		default:
 			break;
 		}
-		power_request_finish(&power_requests, requested, consumed);
+		power_request_finish(&power_requests, requested, generation, consumed);
 
 		bool docked = dock_read();
 		bool charging = chg_read();

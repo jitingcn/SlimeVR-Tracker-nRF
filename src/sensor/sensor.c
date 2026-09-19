@@ -251,6 +251,11 @@ static bool sensor_sensor_init;
 static bool sensor_sensor_scanning;
 
 static atomic_t main_suspended;
+
+bool main_imu_is_suspended(void)
+{
+	return atomic_get(&main_suspended) != 0;
+}
 static bool main_running = false;
 
 /* Cooperative idle/scan wait bits — replaces k_usleep(1) spins in suspend paths. */
@@ -1527,6 +1532,7 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
 	bool in_test_mode = test_mode_get();
 	bool ota_suppressed_now = esb_ota_is_active() || connection_get_ota_suppressed();
+	bool suspended = atomic_get(&main_suspended);
 	int64_t now_ms = k_uptime_get();
 	sensor_update_session_motion(gyro_speed, lin_accel, now_ms);
 
@@ -1538,8 +1544,9 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 	}
 	was_ota_suppressed = ota_suppressed_now;
 
-	if (!in_test_mode && !calibrating && !ota_suppressed_now && resting) {
+	if (!in_test_mode && !calibrating && !ota_suppressed_now && !suspended && resting) {
 		int64_t last_data_delta = now_ms - last_data_time;
+		bool wom_eligible = false;
 		if (sensor_mode < SENSOR_SENSOR_MODE_LOW_POWER
 			&& last_data_delta > CONFIG_SENSOR_LP_TIMEOUT) // No motion in lp timeout
 		{
@@ -1566,35 +1573,48 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 			sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY;
 		}
 		int64_t active_timeout_delay = sensor_get_active_timeout_delay();
-		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_ACTIVITY && last_data_delta > active_timeout_delay) {
-			LOG_INF("No motion from sensors in %llds", active_timeout_delay / 1000);
-			int request_err = 0;
 #if CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
-			request_err = sys_request_WOM(true);
+		if (sensor_timeout >= SENSOR_SENSOR_TIMEOUT_ACTIVITY &&
+		    last_data_delta >= MAX(0, active_timeout_delay - TRACKER_EVENT_WOM_ADVANCE_MS)) {
+			wom_eligible = true;
+			if (sys_plan_WOM(true, last_data_time + active_timeout_delay) == 0 &&
+			    last_data_delta > active_timeout_delay) {
+				sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY_ELAPSED;
+			}
+		}
 #elif CONFIG_SHUTDOWN_ON_ACTIVE_TIMEOUT && CONFIG_USER_SHUTDOWN
-			request_err = sys_request_system_off();
-#endif
-			if (!request_err) {
+		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_ACTIVITY && last_data_delta > active_timeout_delay) {
+			if (sys_request_system_off() == 0) {
 				sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY_ELAPSED;
 			}
 		}
 #endif
+#endif /* CONFIG_USE_ACTIVE_TIMEOUT */
 #if CONFIG_USE_IMU_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
-		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_IMU && last_data_delta > imu_timeout) // No motion in ramp time
-		{
-			LOG_INF("No motion from sensors in %llds", imu_timeout / 1000);
-			// Queue power state request
-			if (sys_request_WOM(false) == 0) {
+		if (sensor_timeout <= SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED &&
+		    last_data_delta >= MAX(0, imu_timeout - TRACKER_EVENT_WOM_ADVANCE_MS)) {
+			wom_eligible = true;
+			/* Announcing early is not a suspend attempt. Preserve the original
+			 * ramp anchor only once the original idle threshold is due and
+			 * its request has been accepted. */
+			if (sys_plan_WOM(false, last_data_time + imu_timeout) == 0 &&
+			    last_data_delta > imu_timeout) {
 				sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED;
 			}
 		}
 #endif
+		if (!wom_eligible) {
+			sys_cancel_WOM();
+		}
 	} else {
-		if (sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER_2 || sensor_timeout == SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED) {
+		sys_cancel_WOM();
+		if (sensor_mode == SENSOR_SENSOR_MODE_LOW_POWER_2 ||
+		    sensor_timeout == SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED) {
 			last_suspend_attempt_time = k_uptime_get();
 		}
 		// last_data_time now updated when sending data to improve responsiveness
-		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED) { // Resetting IMU timeout
+		if (sensor_timeout == SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED ||
+		    sensor_timeout == SENSOR_SENSOR_TIMEOUT_ACTIVITY_ELAPSED) {
 			sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 		}
 		sensor_mode = SENSOR_SENSOR_MODE_LOW_NOISE;
@@ -1603,6 +1623,7 @@ static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin
 
 int sensor_init(void)
 {
+	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_INITIALIZING);
 	tracker_events_notify();
 	int err;
@@ -2705,6 +2726,9 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 			// If auto-calibration is enabled, reset last_data_time to prevent sleep
 			if (sensor_tcal_get_auto_calibration()) {
 				last_data_time = now;
+				/* The idle planner ran earlier in this frame. Withdraw now:
+				 * waiting until its next pass leaves a physical-gate window. */
+				sys_cancel_WOM();
 			}
 		}
 	}
@@ -2962,6 +2986,7 @@ void main_imu_suspend(void)
 {
 	sensor_calibration_set_consumer_ready(false);
 	atomic_set(&main_suspended, true);
+	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_SUSPENDED);
 	tracker_events_notify();
 	/* Thread cannot feed once frozen or self-suspended; pause WDT in all paths. */
@@ -3011,6 +3036,7 @@ void main_imu_wakeup(void)
 
 void main_imu_restart(void)
 {
+	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
 	tracker_events_notify();
 	sensor_mag_timing_reset();
