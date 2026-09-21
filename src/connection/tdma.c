@@ -287,7 +287,9 @@ static bool tdma_wait_for_data_admission(uint8_t reserve_ticks)
 		uint64_t target = target_frame * frame_ticks + slot_start + TDMA_SLOT_TARGET_OFFSET;
 		uint64_t own_ping_frame = frame_number - frame_number % period_frames
 			+ tdma_ping_phase_frame(slot_index, total_slots, period_frames);
-		if (own_ping_frame <= frame_number) {
+		/* The current frame's PING can still be ahead of us. Keep it as a
+		 * barrier so a data wait cannot sleep through that guarded window. */
+		if (own_ping_frame < frame_number) {
 			own_ping_frame += period_frames;
 		}
 		uint64_t own_ping_target = own_ping_frame * frame_ticks

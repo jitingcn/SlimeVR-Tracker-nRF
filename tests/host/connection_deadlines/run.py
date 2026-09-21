@@ -86,7 +86,8 @@ parts = [prefix,
 parts += [function(tdma, name) for name in (
     "tdma_ping_period_frames", "tdma_ping_phase_frame", "tdma_sleep_network_ticks",
     "tdma_wait_until_network_tick", "tdma_config_snapshot", "tdma_ping_target",
-    "tdma_ping_wake_delay_ms", "tdma_wait_for_ping_window")]
+    "tdma_ping_wake_delay_ms", "tdma_wait_for_ping_window",
+    "tdma_slot_ping_frame", "tdma_data_frame_guarded", "tdma_wait_for_data_admission")]
 parts += [function(connection, name) for name in ("connection_next_deadline_ms", "connection_idle_wait")]
 start = connection.index("\t\tbool mag_due =")
 end = connection.index("\n\n", start)
@@ -203,10 +204,46 @@ static void ping(void) {
     }
     puts("PASS PING early yield, slot admission, duplicate and sync/config boundaries at both kernel rates");
 }
+static void data_ping_boundary(void) {
+    const uint32_t rates[] = { 32768, 31250 };
+    for (unsigned rate = 0; rate < 2; ++rate) {
+        kernel_hz = rates[rate];
+        for (uint8_t slots = 1; slots <= 14; ++slots) {
+            for (uint8_t width = 16; width <= 64; width += 2) {
+                for (uint8_t slot = 0; slot < slots; ++slot) {
+                    uint16_t frame_ticks = slots * width;
+                    uint32_t period = tdma_ping_period_frames(frame_ticks);
+                    uint64_t frame = 20 * period + tdma_ping_phase_frame(slot, slots, period);
+                    uint64_t target = frame * frame_ticks + slot * width + TDMA_SLOT_TARGET_OFFSET;
+                    /* A data write may reach admission after clock startup,
+                     * already inside the frame whose PING is still ahead. */
+                    for (uint64_t tick = frame * frame_ticks; tick <= target; ++tick) {
+                        tdma_runtime_enabled = 1;
+                        tdma_cfg_pack = TDMA_PACK(slot, width, frame_ticks);
+                        tdma_last_ping_frame = tdma_last_admitted_frame = UINT64_MAX;
+                        tdma_last_ping_pack = tdma_last_admitted_pack = 0;
+                        sync_age = 0; invalidate_on_sleep = false;
+                        virtual_us = (tick * 1000000 + 32767) / 32768;
+                        uint64_t before = virtual_us;
+                        assert(!tdma_wait_for_data_admission(8));
+                        assert(virtual_us == before); /* Yield, do not sleep through PING. */
+                        assert(tdma_wait_for_ping_window() == TDMA_PING_ADMITTED);
+                        assert(esb_get_server_time_ticks_64() <= target + TDMA_PING_LATE_TOLERANCE_TICKS);
+                    }
+                    /* Outside the protected frame, data remains admissible. */
+                    virtual_us = ((target + 2 * frame_ticks) * 1000000 + 32767) / 32768;
+                    assert(tdma_wait_for_data_admission(8));
+                }
+            }
+        }
+    }
+    puts("PASS data yields to current-frame PING and resumes after guard at both kernel rates");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (strcmp(argv[1], "deadlines") == 0) deadlines();
     else if (strcmp(argv[1], "ping") == 0) ping();
+    else if (strcmp(argv[1], "data-ping") == 0) data_ping_boundary();
     else return 2;
     return 0;
 }
@@ -221,5 +258,5 @@ with tempfile.TemporaryDirectory(prefix="slimenrf-deadline-smoke-") as directory
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
         "-fno-pie", "-no-pie", str(source), "-o", str(binary)], check=True)
-    for selected in (["deadlines", "ping"] if case == "all" else [case]):
+    for selected in (["deadlines", "ping", "data-ping"] if case == "all" else [case]):
         subprocess.run([str(binary), selected], check=True)
