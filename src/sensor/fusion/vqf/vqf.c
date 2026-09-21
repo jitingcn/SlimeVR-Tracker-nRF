@@ -617,11 +617,6 @@ void vqf_set_delta(float delta)
 	state.delta = delta;
 }
 
-void vqf_get_relative_rest_deviations(float *out)
-{
-	getRelativeRestDeviations(&params, &state, out);
-}
-
 void vqf_get_debug_info(vqf_debug_info_t *info)
 {
 	if (!info) {
@@ -1001,7 +996,6 @@ const sensor_fusion_t sensor_fusion_vqf = {
 
 	.get_rest_detected = vqf_get_rest_detected,
 	.take_rest_observation = vqf_take_rest_observation,
-	.get_relative_rest_deviations = vqf_get_relative_rest_deviations,
 	.get_mag_dist_detected = vqf_get_mag_dist_detected,
 	.get_quat6 = vqf_get_quat6,
 	.rebase_mag = vqf_rebase_mag,

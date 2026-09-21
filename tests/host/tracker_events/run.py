@@ -80,6 +80,9 @@ def main():
         source = temp / "core.c"
         source.write_text('#include "leaves.h"\n#include "' + str(ROOT / "src/connection/tracker_events.c") + '"\n' + (HERE / "test_core.c").read_text())
         flags = ["-std=c11", "-Wall", "-Wextra", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-misleading-indentation", "-O0", "-g", "-I", str(temp), "-I", str(ROOT / "src")]
+        motion = temp / "motion"
+        subprocess.run(cc + flags + [str(HERE / "test_motion.c"), str(ROOT / "src/sensor/motion_state.c"), str(ROOT / "src/util.c"), "-lm", "-o", str(motion)], check=True)
+        subprocess.run([str(motion)], check=True)
         protocol = temp / "protocol"
         subprocess.run(cc + flags + [str(HERE / "test_protocol.c"), "-o", str(protocol)], check=True)
         subprocess.run([str(protocol)], check=True)

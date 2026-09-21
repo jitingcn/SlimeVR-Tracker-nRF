@@ -349,7 +349,7 @@ static void power_notices(void)
 #if !IMU_INT_EXISTS
 	fixture(); memset(&ota, 0, sizeof(ota));
 	assert(sys_plan_WOM(false, now_ms) == -ENOTSUP);
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	assert(notices == 0 && physical_offs == 0);
 #endif
 }
@@ -359,7 +359,7 @@ static void idle_until(int64_t deadline)
 {
 	while (now_ms < deadline) {
 		now_ms += MIN(100, deadline - now_ms);
-		sensor_update_sensor_state(true, 0, 0);
+		sensor_update_sensor_state(true);
 		power_iteration();
 	}
 }
@@ -370,7 +370,7 @@ static void sensor_deadlines_and_cancellation(void)
 	 * enough to give a full five-second announced lead. */
 	fixture(); memset(&ota, 0, sizeof(ota));
 	last_data_time = 10000; last_suspend_attempt_time = 0; now_ms = 14999;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	assert(notices == 0);
 	idle_until(15000);
 	assert(notices == 1 && notice_phase == POWER_WILL_WOM);
@@ -379,7 +379,7 @@ static void sensor_deadlines_and_cancellation(void)
 	idle_until(20000);
 	assert(physical_offs == 1 && notice_log[0].time == 15000);
 	fixture(); memset(&ota, 0, sizeof(ota)); now_ms = 1500;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	idle_until(6499);
 	assert(physical_offs == 0);
 	idle_until(6500);
@@ -389,14 +389,14 @@ static void sensor_deadlines_and_cancellation(void)
 	 * old mailbox from becoming physical after the original deadline. */
 	for (int interruption = 0; interruption < 5; interruption++) {
 		fixture(); memset(&ota, 0, sizeof(ota));
-		sensor_update_sensor_state(true, 0, 0);
+		sensor_update_sensor_state(true);
 		assert(notices == 1);
 		now_ms += 100;
 		test_active = interruption == 1;
 		calibration_active = interruption == 2;
 		ota_suppressed = interruption == 3;
 		atomic_set(&main_suspended, interruption == 4);
-		sensor_update_sensor_state(interruption != 0, 0, 0);
+		sensor_update_sensor_state(interruption != 0);
 		assert(notices == 2 && notice_phase == POWER_WOM_CANCELLED);
 		assert(notice_detail == POWER_WOM_NORMAL);
 		now_ms += 10000;
@@ -407,7 +407,7 @@ static void sensor_deadlines_and_cancellation(void)
 	fixture(); memset(&ota, 0, sizeof(ota));
 	sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY;
 	now_ms = CONFIG_ACTIVE_TIMEOUT_DELAY - TRACKER_EVENT_WOM_ADVANCE_MS;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	assert(notice_detail == POWER_WOM_FORCED);
 	idle_until(CONFIG_ACTIVE_TIMEOUT_DELAY - 1);
 	assert(physical_offs == 0);
@@ -418,17 +418,17 @@ static void sensor_deadlines_and_cancellation(void)
 static void readiness_cancel_and_rearm(void)
 {
 	fixture(); memset(&ota, 0, sizeof(ota)); link_ready = false;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	power_iteration();
 	assert(notices == 0 && physical_offs == 0);
 	now_ms += 100;
-	sensor_update_sensor_state(false, 0, 0); /* historical stale retry defect */
+	sensor_update_sensor_state(false); /* historical stale retry defect */
 	link_ready = true; now_ms += 10000;
 	power_iteration();
 	assert(notices == 0 && physical_offs == 0);
 	last_data_time = now_ms;
 	last_suspend_attempt_time = now_ms;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	assert(notices == 1);
 	int64_t fresh_notice = now_ms;
 	idle_until(fresh_notice + 4999);
@@ -439,13 +439,13 @@ static void readiness_cancel_and_rearm(void)
 	/* Losing readiness after announcement cancels; renewed readiness earns a
 	 * new lead rather than resurrecting the old nearly-expired countdown. */
 	fixture(); memset(&ota, 0, sizeof(ota));
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	idle_until(now_ms + 4000);
 	link_ready = false;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	assert(notice_phase == POWER_WOM_CANCELLED);
 	link_ready = true; now_ms += 100;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	fresh_notice = now_ms;
 	assert(notice_phase == POWER_WILL_WOM && notices == 3);
 	idle_until(fresh_notice + 4999);
@@ -457,7 +457,7 @@ static void readiness_cancel_and_rearm(void)
 	 * the timeout permits sleep, followed by a new full lead window. */
 	fixture(); memset(&ota, 0, sizeof(ota)); link_ready = false;
 	sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	/* Exercise the plan directly to keep the normal policy (activity normally
 	 * supersedes it at15s) and refresh its continuous-eligibility lease. */
 	int64_t original_deadline = wom_deadline;
@@ -507,9 +507,9 @@ static void stale_generation_and_veto(void)
 	/* A resumed sensor cannot refresh away a missed eligibility interval even
 	 * if the power owner was also delayed and never observed the expiry. */
 	fixture(); memset(&ota, 0, sizeof(ota));
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	now_ms += WOM_ELIGIBILITY_LEASE_MS;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	assert(notices == 3 && notice_log[1].phase == POWER_WOM_CANCELLED);
 	int64_t resumed = now_ms;
 	idle_until(resumed + 4999);
@@ -555,7 +555,7 @@ static void wom_supersession_and_failure(void)
 		assert(physical_reboots == (replacement != 0));
 	}
 	fixture(); memset(&ota, 0, sizeof(ota)); wom_pin = 255;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	idle_until(now_ms + 5000);
 	assert(physical_offs == 0 && physical_reboots == 1);
 	assert(notices == 3 && notice_log[1].phase == POWER_WOM_CANCELLED);
@@ -651,12 +651,12 @@ static void ramp_anchor_tracks_due_attempts(void)
 {
 	fixture(); memset(&ota, 0, sizeof(ota));
 	last_data_time = 10000; now_ms = 15000;
-	sensor_update_sensor_state(true, 0, 0); /* early10s-ramp notice */
+	sensor_update_sensor_state(true); /* early10s-ramp notice */
 	assert(notices == 1);
 	now_ms = 16000;
-	sensor_update_sensor_state(false, 0, 0);
+	sensor_update_sensor_state(false);
 	last_data_time = now_ms; /* real publication follows the policy pass */
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	/* The old anchor still yields a15s ramp, not5s from the early notice. */
 	idle_until(25999);
 	assert(notices == 2);
@@ -670,12 +670,12 @@ static void ramp_anchor_tracks_due_attempts(void)
 	/* Due accepted attempt preserves the old ramp reset even without LP2. */
 	fixture(); memset(&ota, 0, sizeof(ota)); link_ready = false;
 	last_data_time = 10000; now_ms = 20001;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	now_ms = 20100;
-	sensor_update_sensor_state(false, 0, 0);
+	sensor_update_sensor_state(false);
 	last_data_time = now_ms;
 	link_ready = true;
-	sensor_update_sensor_state(true, 0, 0);
+	sensor_update_sensor_state(true);
 	assert(notices == 1 && notice_log[0].time == 20100);
 	idle_until(25099);
 	assert(physical_offs == 0);

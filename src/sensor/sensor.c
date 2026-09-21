@@ -55,7 +55,7 @@
 
 
 #ifndef SENSOR_REST_ENTER_STABLE_MS
-#define SENSOR_REST_ENTER_STABLE_MS 1500
+#define SENSOR_REST_ENTER_STABLE_MS 1000
 #endif
 #ifndef SENSOR_REST_EXIT_MOTION_MS
 #define SENSOR_REST_EXIT_MOTION_MS 250
@@ -148,12 +148,6 @@ static int force_scan_request_count = 0;
 // Periodic retained save interval (ms) for crash recovery
 #define RETAINED_SAVE_INTERVAL_MS 5000
 
-/* Rest gyro speed uses an EMA of the calibrated gyro VECTOR (per-axis), so
- * zero-mean high-frequency noise (or a large but constant ZRO residual) does
- * not keep the tracker in "active" forever; only sustained rotation moves the
- * EMA. Time constant ~120 ms at 416 Hz (alpha = 0.02/sample). */
-#define REST_GYRO_SPEED_EMA_ALPHA 0.02f
-static float rest_gyro_speed_ema[3];
 /* Magnetometer reads share one deadline regardless of the selected bus backend. */
 static int64_t mag_read_period_ticks = 1;
 static int64_t next_mag_read_ticks;
@@ -163,6 +157,7 @@ static int64_t last_mag_fusion_ticks;
 static float accel_actual_time;
 static float gyro_actual_time;
 static float mag_actual_time;
+int sensor_update_time_ms = 6;
 
 static void sensor_mag_timing_reset(void)
 {
@@ -314,15 +309,6 @@ bool sensor_fusion_get_rest_detected(void)
 		return false;
 	}
 	return sensor_fusion->get_rest_detected();
-}
-
-bool sensor_fusion_get_relative_rest_deviations(float out[2])
-{
-	if (!sensor_fusion || !sensor_fusion->get_relative_rest_deviations) {
-		return false;
-	}
-	sensor_fusion->get_relative_rest_deviations(out);
-	return true;
 }
 
 bool sensor_fusion_get_mag_dist_detected(void)
@@ -497,127 +483,190 @@ static inline void sensor_rotate_sensor_vector_to_device_frame(const float *sens
 	v_rotate(sensor_vector, sensor_vector_to_device_quat, device_vector);
 }
 
-typedef struct {
-	bool initialized;
-	bool resting;
-	int64_t quiet_since_ms;
-	int64_t motion_since_ms;
-	float reference_q[4];
-} sensor_rest_state_t;
+/* Upper-motion state is owned exclusively by the sensor thread. Lifecycle
+ * callers invalidate the event epoch; they never reset these filters. */
+static struct sensor_rest_detector rest_detector;
+static struct {
+	uint32_t epoch;
+	bool epoch_valid, initialized, resting, previous_valid, frame_invalid;
+	int64_t gyro_ms, accel_ms, frame_ms, previous_ms;
+	uint32_t quiet_ms, motion_ms;
+	float reference_q[4], previous_q[4];
+} sensor_motion_state = {.gyro_ms = -1, .accel_ms = -1, .frame_ms = -1};
 
-typedef struct {
-	bool available;
-	bool detected;
-	float deviations[2];
-} sensor_fusion_rest_sample_t;
-
-static sensor_rest_state_t rest_state
-	= {.initialized = false,
-	   .resting = false,
-	   .quiet_since_ms = 0,
-	   .motion_since_ms = 0,
-	   .reference_q = {1.0f, 0.0f, 0.0f, 0.0f}};
-
-static void sensor_reset_resting_state(void)
+static void sensor_motion_reset(void)
 {
-	rest_state.initialized = false;
-	rest_state.resting = false;
-	rest_state.quiet_since_ms = 0;
-	rest_state.motion_since_ms = 0;
-	rest_state.reference_q[0] = 1.0f;
-	rest_state.reference_q[1] = 0.0f;
-	rest_state.reference_q[2] = 0.0f;
-	rest_state.reference_q[3] = 0.0f;
-	rest_gyro_speed_ema[0] = 0.0f;
-	rest_gyro_speed_ema[1] = 0.0f;
-	rest_gyro_speed_ema[2] = 0.0f;
+	memset(&sensor_motion_state, 0, sizeof(sensor_motion_state));
+	sensor_motion_state.gyro_ms = sensor_motion_state.accel_ms = sensor_motion_state.frame_ms = -1;
+	sensor_rest_detector_reset(&rest_detector);
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+	/* Discard partial credit, not the one-way meaningful-session latch. */
+	sensor_session_activity_score.value_ms = 0;
+	sensor_session_activity_score.last_update_ms = -1;
+#endif
 }
 
-static void sensor_record_rest_gyro_motion(const float *g)
+static bool sensor_motion_frame_current(uint32_t epoch)
 {
-	for (int i = 0; i < 3; i++) {
-		rest_gyro_speed_ema[i] += REST_GYRO_SPEED_EMA_ALPHA * (g[i] - rest_gyro_speed_ema[i]);
+	return !atomic_get(&main_suspended) && epoch == tracker_events_sensor_epoch();
+}
+
+static uint32_t sensor_motion_freshness_ms(float period_s)
+{
+	/* Two effective fusion/merge periods or two configured loop intervals,
+	 * whichever is slower, plus the existing 10ms missed-IRQ polling slack.
+	 * Clock: observed k_uptime_get() milliseconds, not nominal sample time.
+	 * This admits 33/100ms batching and short lower-ODR holds without allowing
+	 * a stopped channel to refresh itself from the other channel's samples. */
+	if (!v_finite(&period_s, 1) || period_s <= 0.0f) {
+		return 0;
 	}
+	return (uint32_t)ceilf(2000.0f * fmaxf(period_s, sensor_update_time_ms / 1000.0f)) + 10;
 }
 
-static sensor_fusion_rest_sample_t sensor_get_fusion_rest_sample(void)
+static uint32_t sensor_motion_gyro_freshness_ms(void)
 {
-	sensor_fusion_rest_sample_t sample = {.available = false, .detected = false, .deviations = {INFINITY, INFINITY}};
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	return sensor_motion_freshness_ms(gyro_effective_time);
+#else
+	return sensor_motion_freshness_ms(gyro_actual_time);
+#endif
+}
 
-	if (sensor_fusion_get_relative_rest_deviations(sample.deviations)) {
-		sample.available = true;
-		sample.detected = sensor_fusion_get_rest_detected();
+static uint32_t sensor_motion_accel_freshness_ms(void)
+{
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	return sensor_motion_freshness_ms(accel_effective_time);
+#else
+	return sensor_motion_freshness_ms(accel_actual_time);
+#endif
+}
+
+static bool sensor_motion_channel_expired(int64_t at, int64_t now, uint32_t limit)
+{
+	return at >= 0 && (now < at || now - at > limit);
+}
+
+static void sensor_motion_prepare(uint32_t epoch, int64_t now)
+{
+	if (!sensor_motion_state.epoch_valid || sensor_motion_state.epoch != epoch
+		|| !sensor_motion_frame_current(epoch)
+		|| sensor_motion_channel_expired(sensor_motion_state.gyro_ms, now, sensor_motion_gyro_freshness_ms())
+		|| sensor_motion_channel_expired(sensor_motion_state.accel_ms, now, sensor_motion_accel_freshness_ms())) {
+		sensor_motion_reset();
+		sensor_motion_state.epoch = epoch;
+		sensor_motion_state.epoch_valid = true;
 	}
-
-	return sample;
+	sensor_motion_state.frame_invalid = false;
 }
 
-static bool sensor_update_resting_state(
-	const float *current_q,
-	const float *lin_a,
-	int64_t now_ms,
-	float *gyro_speed_out,
-	float *lin_accel_out
-)
+static float sensor_motion_quat_angle(const float a[4], const float b[4])
 {
-	if (!rest_state.initialized) {
-		memcpy(rest_state.reference_q, current_q, sizeof(rest_state.reference_q));
-		rest_state.quiet_since_ms = 0;
-		rest_state.motion_since_ms = 0;
-		rest_state.initialized = true;
-		*gyro_speed_out = 0.0f;
-		*lin_accel_out = 0.0f;
+	/* Vector of conj(a)*b keeps sub-milliradian rotations that acos(dot)
+	 * loses in float at a 6ms cadence. abs(scalar) identifies q and -q. */
+	float x = a[0]*b[1] - a[1]*b[0] - a[2]*b[3] + a[3]*b[2];
+	float y = a[0]*b[2] + a[1]*b[3] - a[2]*b[0] - a[3]*b[1];
+	float z = a[0]*b[3] - a[1]*b[2] + a[2]*b[1] - a[3]*b[0];
+	float w = a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3];
+	return 2.0f * atan2f(sqrtf(x*x + y*y + z*z), fabsf(w));
+}
+
+/* current_q has been validated and normalized once by the publisher. */
+static bool sensor_motion_observe(
+	uint32_t epoch, int g_count, int a_count, float current_q[4],
+	const float lin_a[3], int64_t now, bool *resting, float *speed, float *linear)
+{
+	*resting = false;
+	*speed = -1.0f; /* No completed activity window. */
+	*linear = 0.0f;
+	struct sensor_rest_evidence evidence;
+	sensor_rest_detector_take(&rest_detector, &evidence);
+	float norm2 = current_q[0]*current_q[0] + current_q[1]*current_q[1]
+		+ current_q[2]*current_q[2] + current_q[3]*current_q[3];
+	if (!sensor_motion_frame_current(epoch) || !sensor_motion_state.epoch_valid || sensor_motion_state.epoch != epoch
+		|| sensor_motion_state.frame_invalid || !v_finite(current_q, 4)
+		|| !v_finite(&norm2, 1) || norm2 <= 0.0f || !v_finite(lin_a, 3)
+		|| (a_count > 0 && !evidence.accel_valid)) {
+		sensor_motion_reset();
 		return false;
 	}
-
-	float gyro_speed = sqrtf(
-		rest_gyro_speed_ema[0] * rest_gyro_speed_ema[0] + rest_gyro_speed_ema[1] * rest_gyro_speed_ema[1]
-		+ rest_gyro_speed_ema[2] * rest_gyro_speed_ema[2]
-	);
-	float zero[3] = {0.0f, 0.0f, 0.0f};
-	float lin_accel = v_diff_mag(lin_a, zero);
-	float quat_delta = q_diff_mag(current_q, rest_state.reference_q);
-	sensor_fusion_rest_sample_t fusion_rest = sensor_get_fusion_rest_sample();
-	const float *fusion_deviations = fusion_rest.available ? fusion_rest.deviations : NULL;
-	bool quiet = sensor_motion_is_quiet(gyro_speed, lin_accel, quat_delta, fusion_rest.detected, fusion_deviations);
-	bool active = sensor_motion_is_active(gyro_speed, lin_accel, quat_delta, fusion_deviations);
-	*gyro_speed_out = gyro_speed;
-	*lin_accel_out = lin_accel;
-
-	if (rest_state.resting) {
-		if (active) {
-			if (rest_state.motion_since_ms == 0) {
-				rest_state.motion_since_ms = now_ms;
-			}
-			if (now_ms - rest_state.motion_since_ms >= SENSOR_REST_EXIT_MOTION_MS) {
-				rest_state.resting = false;
-				rest_state.quiet_since_ms = 0;
-				memcpy(rest_state.reference_q, current_q, sizeof(rest_state.reference_q));
+	if (g_count > 0) sensor_motion_state.gyro_ms = now;
+	if (a_count > 0) sensor_motion_state.accel_ms = now;
+	int64_t elapsed = sensor_motion_state.frame_ms < 0 ? 0 : now - sensor_motion_state.frame_ms;
+	sensor_motion_state.frame_ms = now;
+	bool known = sensor_motion_state.gyro_ms >= 0 && sensor_motion_state.accel_ms >= 0
+		&& evidence.accel_valid
+		&& !sensor_motion_channel_expired(sensor_motion_state.gyro_ms, now, sensor_motion_gyro_freshness_ms())
+		&& !sensor_motion_channel_expired(sensor_motion_state.accel_ms, now, sensor_motion_accel_freshness_ms());
+	if (!known) {
+		sensor_motion_state.initialized = sensor_motion_state.resting = sensor_motion_state.previous_valid = false;
+		sensor_motion_state.quiet_ms = sensor_motion_state.motion_ms = 0;
+		return false;
+	}
+	if (g_count == 0 && a_count == 0) {
+		/* Held values may remain valid, but an empty frame earns no dwell or
+		 * activity credit and cannot refresh external observations. */
+		*resting = sensor_motion_state.resting;
+		sensor_motion_state.previous_valid = false;
+		return false;
+	}
+	float squared = lin_a[0]*lin_a[0] + lin_a[1]*lin_a[1] + lin_a[2]*lin_a[2];
+	if (!v_finite(&squared, 1)) {
+		sensor_motion_reset();
+		return false;
+	}
+	*linear = sqrtf(squared);
+	if (!sensor_motion_state.initialized) {
+		memcpy(sensor_motion_state.reference_q, current_q, sizeof(sensor_motion_state.reference_q));
+		sensor_motion_state.initialized = true;
+		elapsed = 0;
+	}
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+	if (sensor_session_woke_from_wom && !sensor_session_meaningful_motion) {
+		/* Activity alone uses a >=100ms net-angle window: frame-to-frame
+		 * quaternion noise must not amplify into meaningful movement. */
+		if (sensor_motion_state.previous_valid && now - sensor_motion_state.previous_ms >= 100) {
+			*speed = sensor_motion_quat_angle(sensor_motion_state.previous_q, current_q)
+				* (180000.0f / (float)M_PI) / (float)(now - sensor_motion_state.previous_ms);
+			sensor_motion_state.previous_valid = false;
+		}
+		if (!sensor_motion_state.previous_valid) {
+			memcpy(sensor_motion_state.previous_q, current_q, sizeof(sensor_motion_state.previous_q));
+			sensor_motion_state.previous_ms = now;
+			sensor_motion_state.previous_valid = true;
+		}
+	}
+#endif
+	float angle = sensor_motion_quat_angle(sensor_motion_state.reference_q, current_q);
+	uint32_t dt = elapsed > 0 ? (uint32_t)elapsed : 0;
+	if (sensor_motion_state.resting) {
+		if (sensor_motion_is_active(*linear, angle, &evidence)) {
+			/* Start the high-threshold dwell at this observation. */
+			if (sensor_motion_state.motion_ms == 0) sensor_motion_state.motion_ms = 1;
+			else sensor_motion_state.motion_ms += dt;
+			if (sensor_motion_state.motion_ms > SENSOR_REST_EXIT_MOTION_MS) {
+				sensor_motion_state.resting = false;
+				sensor_motion_state.quiet_ms = sensor_motion_state.motion_ms = 0;
+				memcpy(sensor_motion_state.reference_q, current_q, sizeof(sensor_motion_state.reference_q));
 			}
 		} else {
-			rest_state.motion_since_ms = 0;
-			if (!quiet) {
-				rest_state.quiet_since_ms = 0;
-			} else {
-				rest_state.quiet_since_ms = now_ms;
-			}
+			sensor_motion_state.motion_ms = 0;
 		}
-	} else if (quiet) {
-		if (rest_state.quiet_since_ms == 0) {
-			rest_state.quiet_since_ms = now_ms;
-		}
-		if (now_ms - rest_state.quiet_since_ms >= SENSOR_REST_ENTER_STABLE_MS) {
-			rest_state.resting = true;
-			rest_state.motion_since_ms = 0;
-			memcpy(rest_state.reference_q, current_q, sizeof(rest_state.reference_q));
+	} else if (sensor_motion_is_quiet(*linear, angle, &evidence)) {
+		if (sensor_motion_state.quiet_ms == 0) sensor_motion_state.quiet_ms = 1;
+		else sensor_motion_state.quiet_ms += dt;
+		if (sensor_motion_state.quiet_ms > SENSOR_REST_ENTER_STABLE_MS) {
+			sensor_motion_state.resting = true;
+			sensor_motion_state.motion_ms = 0;
+			/* Start the fixed resting reference at the confirmed pose. */
+			memcpy(sensor_motion_state.reference_q, current_q, sizeof(sensor_motion_state.reference_q));
 		}
 	} else {
-		rest_state.quiet_since_ms = 0;
-		rest_state.motion_since_ms = 0;
-		memcpy(rest_state.reference_q, current_q, sizeof(rest_state.reference_q));
+		sensor_motion_state.quiet_ms = sensor_motion_state.motion_ms = 0;
+		memcpy(sensor_motion_state.reference_q, current_q, sizeof(sensor_motion_state.reference_q));
 	}
-
-	return rest_state.resting;
+	*resting = sensor_motion_state.resting;
+	return true;
 }
 
 static int sensor_scan(void);
@@ -1415,7 +1464,6 @@ static void sensor_apply_calibration_frame(void)
 	sensor_retained_write();
 }
 
-int sensor_update_time_ms = 6;
 
 // TODO: get rid of it.. ?
 static void set_update_time_ms(int time_ms)
@@ -1503,13 +1551,13 @@ static int64_t sensor_get_active_timeout_delay(void)
 	return CONFIG_ACTIVE_TIMEOUT_DELAY;
 }
 
-static void sensor_update_session_motion(float gyro_speed, float lin_accel, int64_t now_ms)
+static void sensor_update_session_motion(float angular_speed_dps, float lin_accel, int64_t now_ms)
 {
 #if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
 	if (sensor_session_woke_from_wom && !sensor_session_meaningful_motion) {
 		if (sensor_activity_score_update(
 				&sensor_session_activity_score,
-				gyro_speed,
+				angular_speed_dps,
 				lin_accel,
 				now_ms,
 				SENSOR_ACTIVITY_STARTUP_GUARD_MS,
@@ -1527,14 +1575,13 @@ static void sensor_update_session_motion(float gyro_speed, float lin_accel, int6
 // Check the IMU gyroscope // TODO: gyro sanity not used
 // TODO: timeouts and power management should be outside sensor! (ie. sleeping/shutdown even if the imu completely
 // errored out) all this really means is that this should be called in sensor loop while the sensor is in an error state
-static void sensor_update_sensor_state(bool resting, float gyro_speed, float lin_accel)
+static void sensor_update_sensor_state(bool resting)
 {
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
 	bool in_test_mode = test_mode_get();
 	bool ota_suppressed_now = esb_ota_is_active() || connection_get_ota_suppressed();
 	bool suspended = atomic_get(&main_suspended);
 	int64_t now_ms = k_uptime_get();
-	sensor_update_session_motion(gyro_speed, lin_accel, now_ms);
 
 	/* Reset activity timer on OTA suppression→unsuppression transition
 	 * to prevent accumulated idle time from immediately triggering sleep
@@ -1953,7 +2000,7 @@ static void feed_calibrated_gyro(float *g, float dt, int *g_count)
 {
 	sensor_diagnostics_on_cal_gyro(g);
 
-	sensor_record_rest_gyro_motion(g);
+	if (!v_finite(g, 3) || !v_finite(&dt, 1) || dt <= 0.0f) sensor_motion_state.frame_invalid = true;
 
 	// Process fusion with calibrated gyro data
 	sensor_fusion->update_gyro(g, dt);
@@ -2134,7 +2181,7 @@ static void feed_gyro_sample(
 
 	/* Per-sample stats on firmware-compensated g; Δq merge; one fusion step. */
 	sensor_diagnostics_on_cal_gyro(g);
-	sensor_record_rest_gyro_motion(g);
+	if (!v_finite(g, 3)) sensor_motion_state.frame_invalid = true;
 
 	/* Freeze fusion residual bias for the whole window (layer 2). */
 	if (gyro_oversample_count == 0) {
@@ -2172,6 +2219,10 @@ static void feed_calibrated_accel(float *a, float dt, float *a_sum, int *a_count
 	// Update range statistics with calibrated accel data
 	sensor_diagnostics_on_cal_accel(a);
 #endif // CONFIG_SENSOR_RANGE_STATS
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING <= 1
+	sensor_rest_detector_update_accel(&rest_detector, a, dt);
+	if (rest_detector.accel.frame_invalid) sensor_motion_state.frame_invalid = true;
+#endif
 
 	// Process fusion with calibrated accel data
 	sensor_fusion->update_accel(a, dt);
@@ -2200,6 +2251,13 @@ static void feed_accel_sample(
 	sensor_diagnostics_on_raw_accel(raw_a);
 
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	/* Observe each calibrated sample before averaging can hide a transient.
+	 * Do not enqueue extra calibration samples: its original merged cadence
+	 * and fusion/range-statistics cadence remain unchanged. */
+	float rest_a[3] = {raw_a[0], raw_a[1], raw_a[2]};
+	sensor_calibration_apply_accel(rest_a);
+	sensor_rest_detector_update_accel(&rest_detector, rest_a, accel_actual_time);
+	if (rest_detector.accel.frame_invalid) sensor_motion_state.frame_invalid = true;
 	oversample_accum3(accel_oversample_sum, raw_a);
 	float a_avg[3];
 	if (!oversample_try_avg3(accel_oversample_sum, &accel_oversample_count, CONFIG_SENSOR_ACCEL_OVERSAMPLING, a_avg)) {
@@ -2633,18 +2691,21 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 
 	// Get updated quaternion from fusion
 	sensor_fusion->get_quat(q);
-	q_normalize(q, q); // safe to use self as output
+	float q_norm2 = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];
+	bool valid_q = v_finite(q, 4) && v_finite(&q_norm2, 1) && q_norm2 > 0.0f;
+	if (valid_q) q_normalize(q, q);
 
 	// Get linear acceleration
 	float lin_a[3] = {0};
-	if (v_diff_mag(sensor_loop_avg_a, lin_a) != 0) { // lin_a as zero vector
+	if (valid_q && v_diff_mag(sensor_loop_avg_a, lin_a) != 0) {
 		a_to_lin_a(q, sensor_loop_avg_a, lin_a);
 	}
 
 	int64_t now = k_uptime_get();
-	float gyro_speed;
-	float lin_accel;
-	bool resting = sensor_update_resting_state(q, lin_a, now, &gyro_speed, &lin_accel);
+	float angular_speed_dps, lin_accel;
+	bool resting;
+	bool observed = sensor_motion_observe(frame->sensor_epoch, frame->g_count, frame->a_count,
+		q, lin_a, now, &resting, &angular_speed_dps, &lin_accel);
 	/* Consume even an invalidated/suspended frame so stale detector work
 	 * cannot become a fresh observation after resume. */
 	bool fusion_rest = false;
@@ -2658,13 +2719,30 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 			backend = FUSION_BACKEND_EQF;
 		}
 	}
-	if (!atomic_get(&main_suspended)) {
-		tracker_events_observe_sensor(frame->sensor_epoch,
-			frame->g_count > 0 || frame->a_count > 0, resting,
+	if (sensor_motion_frame_current(frame->sensor_epoch)) {
+		tracker_events_observe_sensor(frame->sensor_epoch, observed, resting,
 			fusion_fresh, fusion_rest, backend, (uint32_t)now);
 		tracker_events_notify();
 	}
-	sensor_update_sensor_state(resting, gyro_speed, lin_accel);
+	/* Validate before local power/calibration consumers, not just telemetry.
+	 * Empty or unknown evidence never grants sleeping/calibration eligibility. */
+	resting = resting && observed && sensor_motion_frame_current(frame->sensor_epoch);
+	if (observed && sensor_motion_frame_current(frame->sensor_epoch)) {
+		if (angular_speed_dps >= 0.0f)
+			sensor_update_session_motion(angular_speed_dps, lin_accel, now);
+	} else {
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+		sensor_session_activity_score.last_update_ms = -1;
+#endif
+	}
+	sensor_update_sensor_state(resting);
+	if (!valid_q || !sensor_motion_frame_current(frame->sensor_epoch)) {
+#if CONFIG_SENSOR_USE_TCAL
+		sensor_runtime_calibration_check(false);
+		sensor_tcal_continuous_motion_detected();
+#endif
+		return;
+	}
 
 	sensor_diagnostics_output(q, lin_a, sensor_loop_avg_a, temp, mag_enabled);
 
@@ -2704,6 +2782,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	}
 
 #if CONFIG_SENSOR_USE_TCAL
+	resting = resting && sensor_motion_frame_current(frame->sensor_epoch);
 	// Check for boot calibration (higher priority than auto calibration)
 	sensor_tcal_boot_calibration_check();
 
@@ -2954,6 +3033,10 @@ void sensor_loop(void)
 				}
 			} else {
 				int64_t vqf_begin_ticks = k_uptime_ticks();
+				sensor_motion_prepare(frame.sensor_epoch, k_uptime_get());
+				if (!sensor_motion_frame_current(frame.sensor_epoch)) {
+					continue;
+				}
 				sensor_loop_process_fifo(&frame);
 				sensor_window_vqf_us += k_ticks_to_us_near64(k_uptime_ticks() - vqf_begin_ticks);
 				sensor_loop_process_mag(&frame);
@@ -3063,7 +3146,6 @@ void main_imu_restart(void)
 		if (had_mag_ref && saved_ref_norm > 0) {
 			sensor_fusion_set_mag_ref(saved_ref_norm, saved_ref_dip);
 		}
-		sensor_reset_resting_state();
 	}
 }
 

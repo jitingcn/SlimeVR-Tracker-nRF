@@ -31,7 +31,6 @@ void eqf_get_lin_a(float *lin_a);
 void eqf_get_quat(float *q);
 
 bool eqf_get_rest_detected(void);
-void eqf_get_relative_rest_deviations(float out[2]);
 bool eqf_get_mag_dist_detected(void);
 void eqf_get_mag_ref(float *norm, float *dip);
 

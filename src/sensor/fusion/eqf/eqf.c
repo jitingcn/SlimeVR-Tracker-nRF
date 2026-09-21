@@ -1456,13 +1456,6 @@ static bool eqf_take_rest_observation(bool *out)
 	return pending;
 }
 
-void eqf_get_relative_rest_deviations(float out[2])
-{
-	float gyr_th_rad = EQF_REST_TH_GYR * DEG_TO_RAD;
-	out[0] = sqrtf(rest_gyr_dev) / gyr_th_rad;
-	out[1] = sqrtf(rest_acc_dev) / EQF_REST_TH_ACC;
-}
-
 bool eqf_get_mag_dist_detected(void)
 {
 	return mag_dist_detected;
@@ -1506,7 +1499,6 @@ const sensor_fusion_t sensor_fusion_eqf = {
 	.get_quat = eqf_get_quat,
 	.get_rest_detected = eqf_get_rest_detected,
 	.take_rest_observation = eqf_take_rest_observation,
-	.get_relative_rest_deviations = eqf_get_relative_rest_deviations,
 	.get_mag_dist_detected = eqf_get_mag_dist_detected,
 	.get_quat6 = NULL, /* EqF attitude is magnetically coupled. */
 	.rebase_mag = eqf_rebase_mag,

@@ -54,7 +54,6 @@ void sensor_mag_ref_reset(void);
 
 /* Fusion policy accessors (backend-agnostic; prefer over vqf_* / eqf_*). */
 bool sensor_fusion_get_rest_detected(void);
-bool sensor_fusion_get_relative_rest_deviations(float out[2]);
 bool sensor_fusion_get_mag_dist_detected(void);
 /* Thread-safe requests, applied only by sensor before the next magnetic feed. */
 void sensor_fusion_reset_mag_ref(void);
@@ -116,7 +115,6 @@ typedef struct sensor_fusion {
 	 * the sensor owner, or an exclusive lifecycle owner after the sensor
 	 * thread is confirmed stopped/suspended (not merely requested to stop). */
 	bool (*take_rest_observation)(bool *out);
-	void (*get_relative_rest_deviations)(float out[2]); /* [gyr, acc] vs thresholds */
 	bool (*get_mag_dist_detected)(void);
 	/* Sensor-thread only: replace magnetic domain, preserving attitude/bias. */
 	void (*rebase_mag)(float norm, float dip);

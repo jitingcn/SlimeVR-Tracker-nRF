@@ -58,8 +58,7 @@ parts += [block(sensor, r"^enum sensor_sensor_mode \{", True),
           block(sensor, r"^enum sensor_sensor_timeout \{", True)]
 for name in ("sensor_mode", "sensor_timeout", "was_ota_suppressed"):
     parts.append(re.search(rf"^static [^\n]* {name}[^;]*;", sensor, re.MULTILINE).group())
-for name in ("sensor_get_active_timeout_delay", "sensor_update_session_motion",
-             "sensor_update_sensor_state"):
+for name in ("sensor_get_active_timeout_delay", "sensor_update_sensor_state"):
     parts.append(function(sensor, name))
 for name in ("esb_ota_is_active", "esb_ota_get_status", "esb_ota_handle_verify",
              "esb_ota_handle_activate", "esb_ota_handle_abort", "esb_ota_check_timeout"):
