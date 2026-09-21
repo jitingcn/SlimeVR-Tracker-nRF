@@ -50,6 +50,22 @@ through its `scripts/hid_cmd.py` client. See the
 [receiver event guide](https://github.com/jitingcn/SlimeVR-Tracker-nRF-Receiver#tracker-events)
 for subscriptions and calibration watches.
 
+The `Tracker event telemetry` Kconfig menu provides independent build-time
+switches, all enabled by default:
+
+| Option | Reports |
+| --- | --- |
+| `CONFIG_TRACKER_EVENT_CALIBRATION` | Calibration lifecycle, progress, and results |
+| `CONFIG_TRACKER_EVENT_TRACKER_REST` | Tracker motion/rest state |
+| `CONFIG_TRACKER_EVENT_FUSION_REST` | VQF/EqF rest-detection state |
+| `CONFIG_TRACKER_EVENT_POWER` | Power intentions, boot/wake, and watchdog reset |
+
+For example, set `CONFIG_TRACKER_EVENT_FUSION_REST=n` in your build configuration
+to disable only fusion-state reports, including their repeats and heartbeats.
+These switches affect telemetry only: fusion, rest detection, calibration,
+sensor lifecycle, and power-management timing remain unchanged. Button-group
+events remain enabled independently of these four switches.
+
 This is a bounded, best-effort channel, not a reliable action log. Rest reports
 are current observations; button groups are distinct actions. `BOOT` or `WAKE`
 is deferred for three seconds after early boot classification; `WAKE` means a

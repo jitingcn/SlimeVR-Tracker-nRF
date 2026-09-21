@@ -47,6 +47,10 @@ static int sys_csrand_get(void *dest,size_t len) {
 }
 void connection_tracker_event_wake(void) { assert(lock_depth==0); wake_calls++; }
 #define CONFIG_APPLICATION_INIT_PRIORITY 90
+#define CONFIG_TRACKER_EVENT_CALIBRATION 1
+#define CONFIG_TRACKER_EVENT_TRACKER_REST 1
+#define CONFIG_TRACKER_EVENT_FUSION_REST 1
+#define CONFIG_TRACKER_EVENT_POWER 1
 #define APPLICATION 0
 #define SYS_INIT(fn,level,priority) static int (*host_init)(void)=fn
 #define LOG_MODULE_REGISTER(...)
@@ -90,6 +94,22 @@ def main():
         subprocess.run(cc + flags + [str(source), "-o", str(binary)], check=True)
         for case in cases:
             subprocess.run([str(binary), case], check=True)
+        if not args.case:
+            switches = ("CALIBRATION", "TRACKER_REST", "FUSION_REST", "POWER")
+            for mask in range(16):
+                disabled = "".join(
+                    f"#undef CONFIG_TRACKER_EVENT_{name}\n"
+                    for bit, name in enumerate(switches) if not mask & (1 << bit)
+                )
+                source.write_text(
+                    '#include "leaves.h"\n' + disabled
+                    + f"#define TEST_EVENT_MASK {mask}\n"
+                    + '#include "' + str(ROOT / "src/connection/tracker_events.c") + '"\n'
+                    + (HERE / "test_config.c").read_text()
+                )
+                config_binary = temp / "config"
+                subprocess.run(cc + flags + [str(source), "-o", str(config_binary)], check=True)
+                subprocess.run([str(config_binary)], check=True)
         if args.wire_output or args.end_to_end:
             wire = subprocess.check_output([str(binary), "wire"], text=True)
             destination = args.wire_output or temp / "wire.txt"

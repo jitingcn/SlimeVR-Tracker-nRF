@@ -140,6 +140,9 @@ static void enqueue(struct record record)
 }
 static struct operation *allocate(uint8_t kind, uint32_t now)
 {
+#if !defined(CONFIG_TRACKER_EVENT_CALIBRATION)
+	return NULL;
+#endif
 	if (!nonce || !tracker_event_is_calibration(kind)) {
 		return NULL;
 	}
@@ -309,6 +312,16 @@ void cal_event_reject(uint8_t kind, uint8_t reason)
 }
 static void set_state(unsigned i, uint8_t phase, uint8_t detail, uint32_t now)
 {
+#if !defined(CONFIG_TRACKER_EVENT_TRACKER_REST)
+	if (i == 0) {
+		return;
+	}
+#endif
+#if !defined(CONFIG_TRACKER_EVENT_FUSION_REST)
+	if (i == 1) {
+		return;
+	}
+#endif
 	struct state_slot *s = &states[i];
 	if (s->candidate && s->phase == phase && s->detail == detail) {
 		return;
@@ -348,6 +361,11 @@ void tracker_event_set_state(uint8_t kind, uint8_t phase, uint8_t detail)
 }
 void tracker_event_notice(uint8_t kind, uint8_t phase, uint8_t detail)
 {
+#if !defined(CONFIG_TRACKER_EVENT_POWER)
+	if (kind == TRACKER_EVENT_KIND_POWER) {
+		return;
+	}
+#endif
 	uint32_t now = k_uptime_get_32();
 	k_spinlock_key_t key = k_spin_lock(&event_lock);
 	struct tracker_event e
@@ -373,6 +391,9 @@ void tracker_event_notice(uint8_t kind, uint8_t phase, uint8_t detail)
 }
 void tracker_events_schedule_boot(bool wake, bool watchdog_reset)
 {
+#if !defined(CONFIG_TRACKER_EVENT_POWER)
+	return;
+#endif
 	uint32_t now = k_uptime_get_32();
 	k_spinlock_key_t key = k_spin_lock(&event_lock);
 	if (!startup.scheduled && !startup.retired && !entropy_failed) {
@@ -420,13 +441,22 @@ void tracker_events_observe_sensor(
 	uint32_t now
 )
 {
+#if !defined(CONFIG_TRACKER_EVENT_TRACKER_REST) && !defined(CONFIG_TRACKER_EVENT_FUSION_REST)
+	(void)now;
+#endif
 	k_spinlock_key_t key = k_spin_lock(&event_lock);
 	if (nonce && frame_epoch == epoch) {
+#if defined(CONFIG_TRACKER_EVENT_TRACKER_REST)
 		if (tracker_fresh) {
 			states[0].observed = true;
 			states[0].last_observed = now;
 			set_state(0, tracker_rest ? 1 : 0, 0, now);
 		}
+#else
+		(void)tracker_fresh;
+		(void)tracker_rest;
+#endif
+#if defined(CONFIG_TRACKER_EVENT_FUSION_REST)
 		if (backend != FUSION_BACKEND_VQF && backend != FUSION_BACKEND_EQF) {
 			states[1].observed = false;
 			set_state(1, 3, 0, now);
@@ -435,6 +465,11 @@ void tracker_events_observe_sensor(
 			states[1].last_observed = now;
 			set_state(1, fusion_rest ? 1 : 0, backend, now);
 		}
+#else
+		(void)fusion_fresh;
+		(void)fusion_rest;
+		(void)backend;
+#endif
 	}
 	k_spin_unlock(&event_lock, key);
 }

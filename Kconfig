@@ -558,6 +558,41 @@ config CONNECTION_OVER_HID
         Use HID if available.
         Otherwise, use ESB only.
 
+menu "Tracker event telemetry"
+
+config TRACKER_EVENT_CALIBRATION
+    bool "Calibration event telemetry"
+    default y
+    help
+        Publish calibration lifecycle, progress, result, and heartbeat events.
+        Disabling this option does not change calibration or logging.
+
+config TRACKER_EVENT_TRACKER_REST
+    bool "Tracker rest state telemetry"
+    default y
+    help
+        Publish tracker rest and motion state changes, unavailable state, and
+        periodic state refreshes. Does not change motion detection, sensor
+        power saving, or logging.
+
+config TRACKER_EVENT_FUSION_REST
+    bool "Fusion rest state telemetry"
+    default y
+    help
+        Publish fusion rest state changes, unavailable or unsupported state,
+        and periodic state refreshes. Does not change fusion, bias estimation,
+        or logging.
+
+config TRACKER_EVENT_POWER
+    bool "Power event telemetry"
+    default y
+    help
+        Publish boot, wake, watchdog reset, sleep, shutdown, reboot, and
+        wake-on-motion cancellation notices. Does not change power management
+        or logging. Button notices remain enabled independently.
+
+endmenu
+
 config SLIMEVR_USB_DEVICE_VID
     hex "SlimeVR USB vendor ID"
     default 0x1209
