@@ -1499,6 +1499,19 @@ static bool connection_send_tracker_event(void)
 	return true;
 }
 
+/* A packet refused by ESB admission is rebuilt from the live snapshot and
+ * retried. Retrying a millisecond later is only useful while TDMA can still
+ * admit soon: with receiver time missing or stale every attempt is refused
+ * before the ESB FIFO, and that tight retry turned a receiver outage into
+ * ~800 hopeless writes per second for as long as it lasted. */
+#define SEND_RETRY_MS 1
+#define SEND_RETRY_STALLED_MS 10
+
+static uint32_t connection_send_retry_ms(void)
+{
+	return tdma_admission_stalled() ? SEND_RETRY_STALLED_MS : SEND_RETRY_MS;
+}
+
 static int64_t connection_next_deadline_ms(int64_t now)
 {
 	int64_t deadline = now + 1000; /* bounded fallback */
@@ -1826,7 +1839,7 @@ void connection_thread(void)
 				}
 				composite_commit_timestamps(&builder);
 			} else {
-				k_msleep(1);
+				k_msleep(connection_send_retry_ms());
 			}
 			continue;
 		}
@@ -1848,7 +1861,7 @@ void connection_thread(void)
 			if (send_composite_or_single(&builder, primary)) {
 				composite_commit_timestamps(&builder);
 			} else {
-				k_msleep(1);
+				k_msleep(connection_send_retry_ms());
 			}
 			continue;
 		}

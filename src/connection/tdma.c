@@ -513,6 +513,19 @@ bool tdma_is_enabled(void)
 #endif
 }
 
+bool tdma_admission_stalled(void)
+{
+	/* Every TDMA config is validated before it can enable admission, so a
+	 * missing runtime config is "not stalled" rather than a permanent stall. */
+	if (!atomic_get(&tdma_runtime_enabled)) {
+		return false;
+	}
+	/* Mirrors the refusal in tdma_wait_for_data_admission(): without receiver
+	 * time there is no slot to wait for, so admission fails immediately. */
+	int64_t sync_age = esb_get_sync_age_ms();
+	return sync_age < 0 || sync_age > TDMA_SYNC_STALE_MS;
+}
+
 void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch)
 {
 #if CONFIG_CONNECTION_TDMA

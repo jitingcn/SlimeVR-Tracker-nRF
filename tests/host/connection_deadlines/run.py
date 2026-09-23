@@ -87,7 +87,8 @@ parts += [function(tdma, name) for name in (
     "tdma_ping_period_frames", "tdma_ping_phase_frame", "tdma_sleep_network_ticks",
     "tdma_wait_until_network_tick", "tdma_config_snapshot", "tdma_ping_target",
     "tdma_ping_wake_delay_ms", "tdma_wait_for_ping_window",
-    "tdma_slot_ping_frame", "tdma_data_frame_guarded", "tdma_wait_for_data_admission")]
+    "tdma_slot_ping_frame", "tdma_data_frame_guarded", "tdma_wait_for_data_admission",
+    "tdma_admission_stalled")]
 parts += [function(connection, name) for name in ("connection_next_deadline_ms", "connection_idle_wait")]
 start = connection.index("\t\tbool mag_due =")
 end = connection.index("\n\n", start)
@@ -239,11 +240,48 @@ static void data_ping_boundary(void) {
     }
     puts("PASS data yields to current-frame PING and resumes after guard at both kernel rates");
 }
+static void admission_stall(void) {
+    /* The retry cadence in connection.c backs off exactly while this predicate
+     * holds, so it must match an admission that is refused without any radio
+     * work: otherwise a disconnect wait spins on hopeless writes. */
+    const uint8_t width = 16, slots = 1, reserve = 8;
+    kernel_hz = 32768;
+    for (int64_t age = -1; age <= PING_INTERVAL_MS * 10 + 1; age += 500) {
+        tdma_runtime_enabled = 1;
+        tdma_cfg_pack = TDMA_PACK(0, width, slots * width);
+        tdma_last_admitted_frame = UINT64_MAX;
+        tdma_last_admitted_pack = 0;
+        tdma_last_ping_frame = UINT64_MAX;
+        tdma_last_ping_pack = 0;
+        sync_age = age; invalidate_on_sleep = false;
+        virtual_us = 1100000;
+        uint64_t before = virtual_us;
+        bool admitted = tdma_wait_for_data_admission(reserve);
+        if (tdma_admission_stalled()) {
+            assert(!admitted && virtual_us == before);
+        }
+    }
+    /* TDMA off is not a stall: admission is not TDMA-gated then. */
+    tdma_runtime_enabled = 0;
+    sync_age = -1;
+    assert(!tdma_admission_stalled());
+    tdma_runtime_enabled = 1;
+    sync_age = 0;
+    assert(!tdma_admission_stalled());
+    sync_age = PING_INTERVAL_MS * 10;
+    assert(!tdma_admission_stalled());
+    sync_age = PING_INTERVAL_MS * 10 + 1;
+    assert(tdma_admission_stalled());
+    sync_age = -1;
+    assert(tdma_admission_stalled());
+    puts("PASS admission stall predicate matches refusals that consume no radio time");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (strcmp(argv[1], "deadlines") == 0) deadlines();
     else if (strcmp(argv[1], "ping") == 0) ping();
     else if (strcmp(argv[1], "data-ping") == 0) data_ping_boundary();
+    else if (strcmp(argv[1], "stall") == 0) admission_stall();
     else return 2;
     return 0;
 }
@@ -258,5 +296,5 @@ with tempfile.TemporaryDirectory(prefix="slimenrf-deadline-smoke-") as directory
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
         "-fno-pie", "-no-pie", str(source), "-o", str(binary)], check=True)
-    for selected in (["deadlines", "ping", "data-ping"] if case == "all" else [case]):
+    for selected in (["deadlines", "ping", "data-ping", "stall"] if case == "all" else [case]):
         subprocess.run([str(binary), selected], check=True)

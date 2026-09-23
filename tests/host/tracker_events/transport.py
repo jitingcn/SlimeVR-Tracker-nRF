@@ -27,7 +27,7 @@ def block(source, pattern, semicolon=False):
 
 
 def function(source, name):
-    return block(source, rf"^(?:static\s+)?(?:const struct sub_packet_desc \*|bool|void|int)\s*{name}\([^;{{]*\)\s*\{{")
+    return block(source, rf"^(?:static\s+)?(?:const struct sub_packet_desc \*|bool|void|int|uint32_t)\s*{name}\([^;{{]*\)\s*\{{")
 
 
 PREFIX = r'''
@@ -66,7 +66,8 @@ static size_t sent_len;
 static uint32_t k_uptime_get_32(void) { return now_ms; }
 static uint64_t k_uptime_ticks(void) { return clock_us; }
 static uint64_t k_ticks_to_us_near64(uint64_t x) { return x; }
-static void k_msleep(int x) { (void)x; sleeps++; }
+static int last_sleep_ms;
+static void k_msleep(int x) { last_sleep_ms = x; sleeps++; }
 static void k_usleep(int x) { (void)x; sleeps++; }
 static bool esb_ready(void) { return radio; }
 static bool esb_ota_is_active(void) { return ota; }
@@ -97,6 +98,8 @@ static void atomic_inc(atomic_t *v) { ++*v; }
 static bool atomic_cas(atomic_t *v,int64_t a,int64_t b) { if(*v!=a)return false;*v=b;return true; }
 static uint32_t get_ping_interval_ms(void) { return 1000; }
 static bool tdma_ping_wake_delay_ms(uint32_t *p) { (void)p; return false; }
+static bool tdma_stalled;
+static bool tdma_admission_stalled(void) { return tdma_stalled; }
 static uint32_t ping_server_phase_delay_ms(uint32_t x) { (void)x; return 0; }
 static uint8_t connection_get_id(void) { return tracker_id; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
@@ -192,6 +195,27 @@ static void test_lowfreq_target(bool with_event, bool fail_first) {
     assert(test_rate_schedule.next_due_us==10023437 && test_rate_schedule.remainder==64);
     assert_lowfreq_times(10007);
 }
+/* A refused admission is rebuilt from the live snapshot and retried. Retrying
+ * a millisecond later is only sane while TDMA can still admit soon; with
+ * receiver time unusable every retry is refused, which turned a receiver
+ * outage into ~800 hopeless writes per second for as long as it lasted. */
+static void test_send_backoff(void) {
+    reset(); pose_pending=true; event_due=false; send_error=-EAGAIN; tdma_stalled=true;
+    iteration();
+    assert(sends==1 && sleeps==1 && last_sleep_ms==SEND_RETRY_STALLED_MS);
+    tdma_stalled=false;
+    iteration();
+    assert(sends==2 && sleeps==2 && last_sleep_ms==SEND_RETRY_MS);
+    /* A failed low-frequency send leaves status/runtime/info due, so that
+     * branch was the steady 1 ms feeder during an outage. */
+    reset(); last_status_time=0; event_due=false; send_error=-EAGAIN; tdma_stalled=true;
+    iteration();
+    assert(sends==1 && sleeps==1 && last_sleep_ms==SEND_RETRY_STALLED_MS);
+    tdma_stalled=false;
+    iteration();
+    assert(sends==2 && sleeps==2 && last_sleep_ms==SEND_RETRY_MS);
+    puts("PASS refused-admission retry backs off while TDMA cannot admit and stays tight when it can");
+}
 int main(void) {
     struct composite_builder b;
     reset(); composite_builder_reset(&b);
@@ -262,6 +286,7 @@ int main(void) {
     test_lowfreq_target(true,true);
     reset(); ota=true; assert(!connection_send_tracker_event()); assert(selects==0);
     reset(); error=true; assert(!connection_send_tracker_event()); assert(selects==0);
+    test_send_backoff();
     puts("PASS transport tail/capacity/failure/mirror/sequence/raw fairness/PING priority/target pose admission");
     puts("PASS test-mode lowfreq wire 4/3/5/0 (45B), optional event (61B), exact 128-TPS deadlines, enqueue failure accounting");
 }
@@ -274,6 +299,7 @@ def run():
     header = (ROOT / "src/connection/esb.h").read_text()
     constants = "\n".join(re.findall(r"^#define (?:ESB_|SUB_PACKET_)[^\n]*", header, re.MULTILINE))
     constants += "\n" + "\n".join(re.findall(r"^#define SUB_DATA_LEN_[^\n]*", source, re.MULTILINE))
+    constants += "\n" + "\n".join(re.findall(r"^#define SEND_RETRY_[^\n]*", source, re.MULTILINE))
     parts = [constants, enum, PREFIX]
     # Numerical sensor serializers are leaves; actual production type/length table is retained.
     for name, size in (("info", "INFO"), ("quat_accel", "QUAT"), ("compact_quat", "COMPACT"), ("status", "STATUS"), ("mag", "MAG"), ("runtime", "RUNTIME")):
@@ -282,7 +308,7 @@ def run():
               "typedef int (*sub_fill_fn)(uint8_t *buf);",
               block(source, r"^struct sub_packet_desc \{", True),
               block(source, r"^static const struct sub_packet_desc sub_packet_table\[\] = \{", True)]
-    for name in ("sub_packet_get", "sub_data_len", "connection_hid_output_ready", "fill_normal_packet", "write_normal_packet", "write_hid_packet_type", "write_hid_composite_as_normal_packets", "connection_write_packet_type", "send_composite", "composite_builder_reset", "composite_try_add", "composite_try_add_due", "composite_commit_timestamps", "send_composite_or_single", "connection_send_tracker_event"):
+    for name in ("sub_packet_get", "sub_data_len", "connection_hid_output_ready", "fill_normal_packet", "write_normal_packet", "write_hid_packet_type", "write_hid_composite_as_normal_packets", "connection_write_packet_type", "send_composite", "composite_builder_reset", "composite_try_add", "composite_try_add_due", "composite_commit_timestamps", "send_composite_or_single", "connection_send_retry_ms", "connection_send_tracker_event"):
         parts.append(function(source, name))
     parts.append(block(source, r"^static struct \{\n\s*uint64_t next_due_us;", True)
                  + " test_rate_schedule;")
