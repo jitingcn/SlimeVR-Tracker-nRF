@@ -248,10 +248,10 @@ static void test_deadline_rejects_unreserved_output(void)
 	assert(reports == 0);
 	assert(stopped_count == 1 && stopped_counts[0] == 0);
 
-	/* Long uptime exercises the real 64-bit timestamp path. */
+	/* The advertised maximum must survive until 60s, including at long uptime. */
 	now_ms = (int64_t)UINT32_MAX + 1234;
-	sensor_debug_start(30);
-	now_ms += 29999;
+	sensor_debug_start(60);
+	now_ms += 59999;
 	assert(sensor_debug_is_active());
 	now_ms++;
 	assert(!sensor_debug_is_active());

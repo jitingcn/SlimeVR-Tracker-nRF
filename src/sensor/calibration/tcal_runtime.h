@@ -71,6 +71,12 @@ extern float runtime_cal_last_temp;
 void update_tcal_state(void);
 void tcal_accum_reset(void);
 void sensor_tcal_runtime_init_from_retained(void);
+/* Caller holds the T-Cal lock across point mutation and publication. */
+void sensor_tcal_refresh_model(void);
+uint32_t sensor_tcal_reference_generation(void);
+bool sensor_tcal_take_bias_reset(void);
+void sensor_tcal_clear_doffset(void);
+void sensor_tcal_mark_measured_bias(void);
 
 /* calibration_thread entry points (were file-local) */
 int sensor_perform_boot_calibration(void);

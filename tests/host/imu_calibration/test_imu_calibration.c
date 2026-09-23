@@ -14,6 +14,11 @@
 #include "event_probe.h"
 static struct host_retained retained_storage;
 struct host_retained *retained = &retained_storage;
+void sensor_tcal_clear_doffset(void)
+{
+	retained->bootCalState.doffset_valid = false;
+	memset(retained->bootCalState.doffset, 0, sizeof(retained->bootCalState.doffset));
+}
 static int storage_result;
 static unsigned storage_writes;
 static unsigned retained_updates;

@@ -9,6 +9,7 @@ struct k_spinlock {
 	pthread_mutex_t mutex;
 };
 typedef int k_spinlock_key_t;
+typedef int k_timeout_t;
 
 static inline k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
 {

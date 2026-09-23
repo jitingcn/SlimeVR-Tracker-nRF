@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise production D_offset lifecycles with hardware and event sinks replaced."""
+"""Exercise production T-Cal compensation and D_offset lifecycles with fake hardware."""
 import os
 from pathlib import Path
 import re
@@ -12,26 +12,28 @@ ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
 source = (ROOT / "src/sensor/calibration/tcal_runtime.c").read_text()
 
 
-def function(name):
-    match = re.search(rf"^(?:static )?(?:void|int|bool) {name}\([^;{{]*\)\s*\{{", source, re.M)
+def function(name, text=source):
+    match = re.search(rf"^(?:static )?(?:void|int|bool|uint32_t) {name}\([^;{{]*\)\s*\{{", text, re.M)
     if match is None:
         raise ValueError(name)
     tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.S)
     depth = 0
-    for token in tokens.finditer(source, source.index("{", match.start())):
+    for token in tokens.finditer(text, text.index("{", match.start())):
         if token.group() == "{":
             depth += 1
         elif token.group() == "}":
             depth -= 1
             if depth == 0:
-                return source[match.start():token.end()]
+                return text[match.start():token.end()]
     raise ValueError(name)
 
 
 runtime_header = (ROOT / "src/sensor/calibration/tcal_runtime.h").read_text()
 constants = "\n".join(line for line in runtime_header.splitlines()
                       if line.startswith(("#define BOOT_CAL_", "#define RUNTIME_CAL_")))
-state = source[source.index("static bool runtime_cal_enabled"):source.index("static bool tcal_compensation_enabled")]
+state = source[source.index("static bool runtime_cal_enabled"):source.index("uint32_t sensor_tcal_reference_generation")]
+calibration = (ROOT / "src/sensor/calibration/calibration.c").read_text()
+reference_state = calibration[calibration.index("static float last_gyro_tcal_offset"):calibration.index("#endif", calibration.index("static float last_gyro_tcal_offset"))]
 preamble = r'''
 #include <assert.h>
 #include <math.h>
@@ -54,12 +56,34 @@ static struct {
     struct { bool enabled, completed, doffset_valid; unsigned attempt_count; float doffset[3]; } bootCalState;
     struct { bool valid; unsigned count; } tempCalState;
     struct { float temp; } tempCalPoints[TCAL_BUFFER_SIZE];
+    bool tcal_enabled;
+    uint8_t fusion_id;
 } retained_data;
 static typeof(retained_data) *retained = &retained_data;
 static int64_t clock_ms = 10000;
 static float temperature = 25.0f;
 static bool stationary = true;
 static int collect_error, lookup_error, request_slot;
+static bool curve_sloped;
+static float model_shift;
+static unsigned lock_depth;
+void sensor_tcal_lock(void) { lock_depth++; }
+void sensor_tcal_unlock(void) { assert(lock_depth); lock_depth--; }
+static bool v_finite(const float *v, unsigned n) {
+    for (unsigned i = 0; i < n; ++i) if (!isfinite(v[i])) return false;
+    return true;
+}
+static void sensor_sample_gyro(float *g) { (void)g; }
+static void sensor_calibration_gyro_bias(float *g) {
+    g[0] = 1.0f; g[1] = -2.0f; g[2] = 0.5f;
+}
+void sensor_tcal_feed_continuous_sample(const float g[3], float temp) { (void)g; (void)temp; }
+void sensor_tcal_model_changed(void) {}
+void sensor_tcal_build_lut_priority(float temp) { (void)temp; }
+#define TCAL_ENABLED_ID 1
+static void sys_write(int id, void *dest, const void *value, size_t size) {
+    (void)id; memcpy(dest, value, size);
+}
 static unsigned event_count, terminal_count, begin_count, token_reads, request_count;
 static uint8_t last_outcome, last_phase, last_reason, last_kind;
 static int last_request;
@@ -84,11 +108,15 @@ int sensor_calibration_request(int id, enum cal_request_origin origin) {
 int sensor_tcal_mls_lookup(float temp, float bias[3]) {
     (void)temp;
     bias[0] = 0.1f; bias[1] = 0.2f; bias[2] = 0.3f;
+    if (curve_sloped) for (int i = 0; i < 3; ++i) bias[i] += (temp - 25.0f) * (i + 1) + model_shift;
     return lookup_error;
 }
+int sensor_tcal_lut_lookup(float temp, float bias[3]) { (void)temp; (void)bias; return -1; }
+static bool disable_during_collect;
 static int sensor_boot_bias_collect(float *bias, float *temp) {
     bias[0] = 0.2f; bias[1] = 0.1f; bias[2] = 0.5f;
     *temp = temperature;
+    if (disable_during_collect) sensor_tcal_set_enabled(false);
     return collect_error;
 }
 static int sensor_runtime_bias_collect(float *bias, float *temp) {
@@ -125,12 +153,146 @@ static void expect_terminal(uint8_t outcome, uint8_t phase, uint8_t reason) {
     assert(terminal_count == 1);
     assert(last_outcome == outcome && last_phase == phase && last_reason == reason);
 }
+static void expect_vector(const float actual[3], const float expected[3]) {
+    for (int i = 0; i < 3; ++i) assert(fabsf(actual[i] - expected[i]) < 0.00001f);
+}
+static bool sample(float g[3], float delta[3]) {
+    g[0] = 10; g[1] = 20; g[2] = 30;
+    delta[0] = delta[1] = delta[2] = 999;
+    bool reset = sensor_calibration_process_gyro(g, delta);
+    assert(!sensor_calibration_gyro_reference_pending());
+    assert(lock_depth == 0);
+    return reset;
+}
+static void compensation(const char *scenario) {
+    const float zero[3] = {0};
+    float before[3], after[3], delta[3], expected[3];
+    sensor_tcal_refresh_apply_cache();
+    assert(sensor_calibration_gyro_reference_pending());
+    assert(!sample(before, delta));
+    expect_vector(delta, zero);
+    if (!strcmp(scenario, "toggle_continuity")) {
+        float residual[3] = {0.7f, -0.2f, 0.4f};
+        float original[3]; memcpy(original, residual, sizeof(original));
+        for (int enabled = 0; enabled < 2; ++enabled) {
+            sensor_tcal_set_enabled(enabled);
+            assert(sensor_calibration_gyro_reference_pending());
+            assert(!sample(after, delta));
+            for (int i = 0; i < 3; ++i) {
+                assert(fabsf((after[i] - residual[i] - delta[i]) - (before[i] - residual[i])) < 0.00001f);
+                residual[i] += delta[i];
+            }
+            memcpy(before, after, sizeof(before));
+            sensor_tcal_set_enabled(enabled);
+            assert(!sample(after, delta));
+            expect_vector(delta, zero);
+        }
+        expect_vector(residual, original);
+    } else if (!strcmp(scenario, "natural_temperature")) {
+        curve_sloped = true;
+        temperature += 1;
+        assert(!sensor_calibration_gyro_reference_pending());
+        assert(!sample(after, delta));
+        expect_vector(delta, zero);
+        for (int i = 0; i < 3; ++i) expected[i] = before[i] - (i + 1);
+        expect_vector(after, expected);
+    } else if (!strcmp(scenario, "disabled_model")) {
+        sensor_tcal_set_enabled(false);
+        assert(!sample(before, delta));
+        curve_sloped = true; model_shift = 5;
+        retained->fusion_id = 1;
+        sensor_tcal_refresh_model();
+        assert(!sensor_calibration_gyro_reference_pending());
+        assert(retained->fusion_id == 1);
+        assert(!sample(after, delta));
+        expect_vector(after, before);
+        expect_vector(delta, zero);
+    } else if (!strcmp(scenario, "initial_reset")) {
+        sensor_calibration_reset_gyro_reference();
+        assert(sensor_calibration_gyro_reference_pending());
+        sensor_tcal_set_enabled(false);
+        assert(!sample(after, delta));
+        expect_vector(delta, zero);
+    } else {
+        const float measured[3] = {0.6f, -0.4f, 0.8f};
+        retained->fusion_id = 1;
+        assert(sensor_tcal_calculate_doffset(measured, temperature, current_operation) == 0);
+        assert(retained->fusion_id == 0);
+        assert(sensor_calibration_gyro_reference_pending());
+        if (!strcmp(scenario, "physical_once") || !strcmp(scenario, "fallback_no_d")) {
+            assert(sample(after, delta));
+            for (int i = 0; i < 3; ++i) expected[i] = after[i] - before[i];
+            expect_vector(delta, expected);
+            for (int i = 0; i < 3; ++i) expected[i] = (i + 1) * 10 - measured[i];
+            expect_vector(after, expected);
+            assert(!sample(after, delta));
+            expect_vector(delta, zero);
+            if (!strcmp(scenario, "physical_once")) {
+                memcpy(before, after, sizeof(before));
+                sensor_tcal_set_enabled(false);
+                assert(!sample(after, delta));
+                sensor_tcal_set_enabled(true);
+                assert(!sample(after, delta));
+                expect_vector(after, before);
+                retained->fusion_id = 1;
+                sensor_tcal_clear_doffset();
+                assert(retained->fusion_id == 0);
+                assert(sensor_calibration_gyro_reference_pending());
+                assert(!sample(after, delta));
+                for (int i = 0; i < 3; ++i) expected[i] = after[i] - before[i];
+                expect_vector(delta, expected);
+            }
+            if (!strcmp(scenario, "fallback_no_d")) {
+                lookup_error = -1;
+                assert(!sample(after, delta));
+                const float fallback[3] = {9, 22, 29.5f};
+                expect_vector(after, fallback);
+                expect_vector(delta, zero);
+            }
+        } else if (!strcmp(scenario, "model_invalidates_d") || !strcmp(scenario, "model_replaces_applied_d")) {
+            if (!strcmp(scenario, "model_replaces_applied_d")) assert(sample(before, delta));
+            curve_sloped = true; model_shift = 2;
+            sensor_tcal_refresh_model();
+            assert(!retained->bootCalState.doffset_valid);
+            assert(!sample(after, delta));
+            for (int i = 0; i < 3; ++i) expected[i] = (i + 1) * 10 - (0.1f * (i + 1) + 2) - before[i];
+            expect_vector(delta, expected);
+            for (int i = 0; i < 3; ++i) expected[i] = (i + 1) * 10 - (0.1f * (i + 1) + 2);
+            expect_vector(after, expected);
+        } else if (!strcmp(scenario, "toggle_cancels_physical")) {
+            sensor_tcal_set_enabled(false);
+            assert(!sample(after, delta));
+            sensor_tcal_set_enabled(true);
+            assert(!sample(after, delta));
+            expect_vector(after, before);
+        } else {
+            assert(!"unknown compensation scenario");
+        }
+    }
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     const char *scenario = argv[1];
     retained->bootCalState.enabled = true;
     quality_points();
-    if (!strcmp(scenario, "boot_skip") || !strcmp(scenario, "runtime_skip")) {
+    if (!strncmp(scenario, "comp_", 5)) {
+        compensation(scenario + 5);
+        printf("tcal compensation: %s passed\n", scenario);
+        return 0;
+    }
+    if (!strcmp(scenario, "boot_disabled")) {
+        sensor_tcal_set_enabled(false);
+        sensor_tcal_boot_calibration_check();
+        assert(request_count == 0 && event_count == 0);
+        assert(sensor_perform_boot_calibration() == 0);
+        assert(!retained->bootCalState.doffset_valid);
+        expect_terminal(CAL_OUTCOME_SKIPPED, CAL_PHASE_WAIT_STILL, CAL_REASON_DISABLED);
+    } else if (!strcmp(scenario, "boot_disabled_during_collect")) {
+        disable_during_collect = true;
+        assert(sensor_perform_boot_calibration() == 0);
+        assert(!sensor_tcal_get_enabled() && !retained->bootCalState.doffset_valid);
+        expect_terminal(CAL_OUTCOME_SKIPPED, CAL_PHASE_VALIDATE, CAL_REASON_DISABLED);
+    } else if (!strcmp(scenario, "boot_skip") || !strcmp(scenario, "runtime_skip")) {
         retained->tempCalState.count = 4;
         retained->tempCalPoints[4].temp = 0;
         int result = !strcmp(scenario, "boot_skip") ? sensor_perform_boot_calibration() : sensor_perform_runtime_calibration();
@@ -148,7 +310,7 @@ int main(int argc, char **argv) {
         lookup_error = -1;
         retained->bootCalState.doffset_valid = true;
         assert(sensor_perform_boot_calibration() != 0);
-        assert(!retained->bootCalState.doffset_valid);
+        assert(retained->bootCalState.doffset_valid);
         expect_terminal(CAL_OUTCOME_FAILED, CAL_PHASE_VALIDATE, CAL_REASON_FIT_ERROR);
     } else if (!strcmp(scenario, "motion")) {
         stationary = false;
@@ -222,9 +384,21 @@ int main(int argc, char **argv) {
     return 0;
 }
 '''
-parts = [preamble, constants, state]
+parts = [preamble, constants, state, reference_state]
 parts.extend(function(name) for name in (
-    "sensor_tcal_assess_quality", "sensor_tcal_calculate_doffset", "sensor_boot_cal_abandon",
+    "sensor_tcal_mark_measured_bias",
+    "sensor_tcal_reference_generation", "sensor_tcal_take_bias_reset",
+    "sensor_tcal_clear_doffset", "sensor_tcal_refresh_apply_cache",
+    "sensor_tcal_refresh_model", "sensor_tcal_curve_apply_ready",
+    "sensor_tcal_get_auto_calibration", "sensor_tcal_get_enabled", "sensor_tcal_set_enabled",
+))
+parts.extend(function(name, calibration) for name in (
+    "sensor_calibration_process_gyro", "sensor_calibration_reset_gyro_reference",
+    "sensor_calibration_gyro_reference_pending",
+))
+parts.extend(function(name) for name in (
+    "sensor_tcal_assess_quality", "sensor_tcal_calculate_doffset_locked",
+    "sensor_tcal_calculate_doffset", "sensor_boot_cal_abandon",
     "sensor_tcal_boot_calibration_check", "sensor_perform_boot_calibration",
     "sensor_perform_runtime_calibration", "sensor_runtime_calibration_check",
     "sensor_tcal_check_auto_calibration",
@@ -233,6 +407,11 @@ scenarios = (
     "boot_skip", "runtime_skip", "boot_applied", "runtime_applied", "fit_error", "motion",
     "temperature", "fallback_busy", "gate_coverage", "gate_expired", "gate_active",
     "auto_busy", "supplement_busy", "runtime_disabled", "collection_reasons",
+    "boot_disabled", "boot_disabled_during_collect",
+    "comp_toggle_continuity", "comp_natural_temperature", "comp_disabled_model",
+    "comp_initial_reset", "comp_physical_once", "comp_fallback_no_d",
+    "comp_model_invalidates_d", "comp_toggle_cancels_physical",
+    "comp_model_replaces_applied_d",
 )
 with tempfile.TemporaryDirectory(prefix="tcal-events-") as directory:
     tmp = Path(directory)

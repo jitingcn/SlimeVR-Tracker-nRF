@@ -170,22 +170,30 @@ static bool sample(uint32_t at,int gyro,int accel,float degrees) {
     publish_observation(&frame);
     return local_rest;
 }
+static float active_yaw_fixture(void) {
+    struct sensor_rest_evidence evidence={.accel_valid=true};
+    const float rad=3.14159265358979323846f/180.0f;
+    for(float degrees=.001f;degrees<180;degrees+=.001f)
+        if(sensor_motion_is_active(0,degrees*rad,&evidence)) return degrees;
+    assert(!"no active orientation within physical range");
+    return 0;
+}
 static void rest_motion_contracts(void) {
+    const float exit_yaw=active_yaw_fixture();
     reset_motion();
     for(unsigned t=0;t<1000;t+=10) assert(!sample(t,1,1,0));
     assert(sample(1000,1,1,0));assert(cal_rest);
-    for(unsigned t=1010;t<1260;t+=10) assert(sample(t,1,1,1.01f));
-    assert(!sample(1260,1,1,1.01f));assert(!cal_rest);
+    for(unsigned t=1010;t<1260;t+=10) assert(sample(t,1,1,exit_yaw+.05f));
+    assert(!sample(1260,1,1,exit_yaw+.05f));assert(!cal_rest);
     reset_motion();
     assert(!sample(0,1,1,0));
     for(unsigned t=10;t<1000;t+=10) assert(!sample(t,1,1,.10f));
     assert(sample(1000,1,1,.10f));
-    /* Confirmed entry anchors rest at .10deg, not the candidate's0deg:
-     * 1.05deg is only .95deg from rest, inside the1.0deg exit gate even after
-     * a full exit dwell. */
-    for(unsigned t=1010;t<=1310;t+=10) assert(sample(t,1,1,1.05f));
-    for(unsigned t=1320;t<1570;t+=10) assert(sample(t,1,1,1.15f));
-    assert(!sample(1570,1,1,1.15f)); /* 1.05deg from resting ref for250ms */
+    /* Anchor confirmed entry at .10deg, not the candidate's0deg. Choose a
+     * pose above the policy's exit gate from0 but below it from .10deg. */
+    for(unsigned t=1010;t<=1310;t+=10) assert(sample(t,1,1,exit_yaw+.05f));
+    for(unsigned t=1320;t<1570;t+=10) assert(sample(t,1,1,exit_yaw+.15f));
+    assert(!sample(1570,1,1,exit_yaw+.15f)); /* exit dwell from confirmed ref */
     reset_motion();
     for(unsigned t=0;t<=1500;t+=10)sample(t,1,1,0);
     sensor_loop_avg_a[0]=.30f/CONST_EARTH_GRAVITY;

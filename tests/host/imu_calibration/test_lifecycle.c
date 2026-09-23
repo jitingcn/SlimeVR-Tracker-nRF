@@ -17,6 +17,11 @@
 void tracker_events_sensor_invalidate(uint8_t reason) { (void)reason; }
 static struct host_retained retained_storage;
 struct host_retained *retained = &retained_storage;
+void sensor_tcal_clear_doffset(void)
+{
+	retained->bootCalState.doffset_valid = false;
+	memset(retained->bootCalState.doffset, 0, sizeof(retained->bootCalState.doffset));
+}
 static K_MUTEX_DEFINE(sys_storage_lock);
 static bool key_exists[8];
 static float stored[8][12];

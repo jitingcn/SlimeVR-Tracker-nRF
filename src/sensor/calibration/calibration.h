@@ -28,7 +28,11 @@
 
 /* Sensor feeds data to calibration */
 void sensor_calibration_process_accel(float a[3]);
-void sensor_calibration_process_gyro(float g[3]);
+/* Sensor owner: delta is old minus new firmware offset (unscaled dps).
+ * Return true for a new measured calibration, which resets residual bias. */
+bool sensor_calibration_process_gyro(float g[3], float reference_delta[3]);
+void sensor_calibration_reset_gyro_reference(void);
+bool sensor_calibration_gyro_reference_pending(void);
 void sensor_calibration_process_mag(float m[3]);
 
 void sensor_calibration_update_sensor_ids(int imu);

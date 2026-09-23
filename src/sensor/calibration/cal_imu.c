@@ -253,6 +253,7 @@ void sensor_calibrate_imu(void)
 			);
 			int idx = TEMP_TO_IDX(avg_temp);
 			if (idx >= 0 && idx < TCAL_BUFFER_SIZE) {
+				sensor_tcal_lock();
 
 				// Hysteresis-aware blending: prefer rising-phase data.
 				// Use tcal_current_direction directly — do not infer from temp comparison.
@@ -292,6 +293,9 @@ void sensor_calibrate_imu(void)
 				retained->tempCalPoints[idx].temp = avg_temp;
 				memcpy(retained->tempCalPoints[idx].bias, g_bias, sizeof(g_bias));
 				retained->tempCalState.valid = false; // Invalidate old curve
+				sensor_tcal_refresh_model();
+				sensor_tcal_mark_measured_bias();
+				sensor_tcal_unlock();
 				/* User-initiated: warm-mark then flush so pin-reset keeps points. */
 				update_tcal_state();
 				sys_flush_warm();

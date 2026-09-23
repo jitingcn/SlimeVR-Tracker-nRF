@@ -90,6 +90,8 @@ LOG_MODULE_REGISTER(calibration, LOG_LEVEL_INF);
 
 #if CONFIG_SENSOR_USE_TCAL
 static float last_gyro_tcal_offset[3] = {0.0f, 0.0f, 0.0f};
+static uint32_t last_gyro_reference_generation;
+static bool last_gyro_reference_valid;
 #endif
 
 static void calibration_thread(void);
@@ -106,15 +108,16 @@ void sensor_calibration_process_accel(float a[3])
 #endif
 }
 
-void sensor_calibration_process_gyro(float g[3])
+bool sensor_calibration_process_gyro(float g[3], float reference_delta[3])
 {
 	sensor_sample_gyro(g);
+	memset(reference_delta, 0, sizeof(float) * 3);
 #if CONFIG_SENSOR_USE_TCAL
 	float calculated_offset[3];
 	bool offset_calculated = false;
 
 	const bool auto_cal = sensor_tcal_get_auto_calibration();
-	const bool curve_ready = sensor_tcal_curve_apply_ready();
+	bool curve_ready = sensor_tcal_curve_apply_ready();
 	float temp = NAN;
 	if (auto_cal || curve_ready) {
 		temp = sensor_get_current_imu_temperature();
@@ -125,6 +128,12 @@ void sensor_calibration_process_gyro(float g[3])
 		sensor_tcal_feed_continuous_sample(g, temp);
 	}
 
+	sensor_tcal_lock();
+	curve_ready = sensor_tcal_curve_apply_ready();
+	/* Mode may have changed while collecting the raw sample. */
+	if (curve_ready && !v_finite(&temp, 1)) {
+		temp = sensor_get_current_imu_temperature();
+	}
 	/* Cached enable∧points≥min — LUT/MLS; else ZRO below. */
 	if (curve_ready) {
 		if (sensor_tcal_lut_lookup(temp, calculated_offset) == 0) {
@@ -138,7 +147,7 @@ void sensor_calibration_process_gyro(float g[3])
 		sensor_calibration_gyro_bias(calculated_offset);
 	}
 
-	if (retained->bootCalState.doffset_valid) {
+	if (offset_calculated && retained->bootCalState.doffset_valid) {
 #if CONFIG_CMSIS_DSP
 		arm_add_f32(calculated_offset, retained->bootCalState.doffset, calculated_offset, 3);
 #else
@@ -156,9 +165,43 @@ void sensor_calibration_process_gyro(float g[3])
 	}
 #endif
 
+	uint32_t generation = sensor_tcal_reference_generation();
+	bool reset = sensor_tcal_take_bias_reset();
+	if (last_gyro_reference_valid && generation != last_gyro_reference_generation) {
+		for (int i = 0; i < 3; i++) {
+			reference_delta[i] = last_gyro_tcal_offset[i] - calculated_offset[i];
+		}
+	}
+	last_gyro_reference_generation = generation;
+	last_gyro_reference_valid = true;
 	memcpy(last_gyro_tcal_offset, calculated_offset, sizeof(last_gyro_tcal_offset));
+	sensor_tcal_unlock();
+	return reset;
 #else
 	sensor_calibration_subtract_gyro_bias(g);
+	return false;
+#endif
+}
+
+void sensor_calibration_reset_gyro_reference(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	sensor_tcal_lock();
+	last_gyro_reference_valid = false;
+	sensor_tcal_unlock();
+#endif
+}
+
+bool sensor_calibration_gyro_reference_pending(void)
+{
+#if CONFIG_SENSOR_USE_TCAL
+	sensor_tcal_lock();
+	bool pending = !last_gyro_reference_valid ||
+		last_gyro_reference_generation != sensor_tcal_reference_generation();
+	sensor_tcal_unlock();
+	return pending;
+#else
+	return false;
 #endif
 }
 
@@ -575,7 +618,8 @@ static void calibration_thread(void)
 
 #if CONFIG_SENSOR_USE_TCAL
 		// Continue LUT background build if in progress
-		if (sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_BACKGROUND) {
+		if (sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_PRIORITY ||
+		    sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_BACKGROUND) {
 			if (sensor_tcal_build_lut_continue()) {
 				LOG_INF(
 					"T-Cal LUT: Background build complete (%d/%d entries)",
@@ -742,8 +786,7 @@ void sensor_tcal_clear(void)
 		return;
 	}
 
-	// Invalidate lookup cache since calibration data will be cleared
-	sensor_tcal_cache_invalidate();
+	sensor_tcal_lock();
 
 	// Reset temperature direction tracking
 	tcal_current_direction = TCAL_DIR_UNKNOWN;
@@ -753,6 +796,8 @@ void sensor_tcal_clear(void)
 	memset(retained->tempCalPoints, 0, sizeof(retained->tempCalPoints));
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
 	memset(&retained->tempCalState, 0, sizeof(retained->tempCalState)); // Clear the whole state struct
+	sensor_tcal_refresh_model();
+	sensor_tcal_unlock();
 
 	// Save cleared state to NVS directly (don't call update_tcal_state which refreshes runtime state)
 	sys_write(
@@ -774,19 +819,9 @@ void sensor_tcal_clear(void)
 		sizeof(retained->tempCalCoeffs)
 	);
 
-	// Also clear boot/runtime calibration D_offset since T-Cal is being reset
-	retained->bootCalState.doffset_valid = false;
-	retained->bootCalState.doffset[0] = 0.0f;
-	retained->bootCalState.doffset[1] = 0.0f;
-	retained->bootCalState.doffset[2] = 0.0f;
-	LOG_INF("Clearing D_offset along with T-Cal data");
 
 	// Reset continuous accumulator sampling state
 	tcal_accum_reset();
-	sensor_tcal_refresh_apply_cache();
-
-	// Manual command: invalidate fusion to force quaternion recalculation
-	sensor_request_fusion_reset();
 
 	printk("All temperature calibration data and D_offset have been cleared.\n");
 }
@@ -805,10 +840,9 @@ void sensor_tcal_remove_point(int index_to_remove)
 		return;
 	}
 
+	sensor_tcal_lock();
 	// Check if there was actually data in that slot
 	if (retained->tempCalPoints[index_to_remove].temp != 0.0f) {
-		// Invalidate lookup cache since a point is being removed
-		sensor_tcal_cache_invalidate();
 
 		LOG_INF("Removing T-Cal point at index %d.", index_to_remove);
 
@@ -825,11 +859,14 @@ void sensor_tcal_remove_point(int index_to_remove)
 		}
 		retained->tempCalState.count = new_count;
 		retained->tempCalState.valid = false;
+		sensor_tcal_refresh_model();
+		sensor_tcal_unlock();
 
 		printk("Point at index %d removed. Recalculating MLS state...\n", index_to_remove);
 		update_tcal_state();
 		sys_flush_warm(); /* console/user action: durable immediately */
 	} else {
+		sensor_tcal_unlock();
 		printk("No data found at index %d. Nothing to remove.\n", index_to_remove);
 	}
 }
@@ -880,7 +917,9 @@ bool sensor_tcal_needs_nearby_point(float temp, float *closest_temp, float *dist
 
 void sensor_calibration_get_last_gyro_offset(float offset[3])
 {
+	sensor_tcal_lock();
 	memcpy(offset, last_gyro_tcal_offset, sizeof(last_gyro_tcal_offset));
+	sensor_tcal_unlock();
 }
 
 #endif

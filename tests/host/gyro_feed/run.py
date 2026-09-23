@@ -52,9 +52,17 @@ static struct {float gyroSensScale[3];} retained_data = {{1.125f, 0.9375f, 1.062
 static const typeof(retained_data) *retained = &retained_data;
 static void sensor_diagnostics_on_raw_gyro(float *g) {(void)g; raw_count++;}
 static void sensor_diagnostics_on_cal_gyro(float *g) {memcpy(cal_samples[cal_count++], g, 3*sizeof(float));}
-static void sensor_calibration_process_gyro(float *g) {
+static float calibration_delta[3];
+static bool physical_reset;
+static unsigned reset_count;
+static bool sensor_calibration_process_gyro(float *g, float *delta) {
     const float offsets[3] = {0.125f, -0.0625f, 0.03125f};
     for (int i=0;i<3;i++) g[i] -= offsets[i];
+    memcpy(delta, calibration_delta, sizeof(calibration_delta));
+    memset(calibration_delta, 0, sizeof(calibration_delta));
+    bool reset = physical_reset;
+    physical_reset = false;
+    return reset;
 }
 static void get_bias(float *g) {memcpy(g, fusion_bias, sizeof(fusion_bias));}
 static void update_gyro(float *g, float dt) {
@@ -63,9 +71,25 @@ static void update_gyro(float *g, float dt) {
     received_dt[feed_count++] = dt;
     if (change_bias_on_feed) fusion_bias[0] = 40.0f;
 }
-static const struct {void (*update_gyro)(float*,float); void (*get_gyro_bias)(float*);}
-    backend = {update_gyro, get_bias};
+static float filtered_gyro[3] = {2, 3, 4};
+static void rebase_bias(const float *delta) {
+    for (int i = 0; i < 3; ++i) {
+        fusion_bias[i] += delta[i];
+        filtered_gyro[i] += delta[i];
+    }
+}
+static void reset_bias(float *bias) {
+    memcpy(fusion_bias, bias, sizeof(fusion_bias));
+    reset_count++;
+}
+static const struct {
+    void (*update_gyro)(float*,float);
+    void (*get_gyro_bias)(float*);
+    void (*rebase_gyro_bias)(const float*);
+    void (*set_gyro_bias)(float*);
+} backend = {update_gyro, get_bias, rebase_bias, reset_bias};
 static const typeof(backend) *sensor_fusion = &backend;
+static bool sensor_fusion_init = true;
 '''
 state = source[source.index('static uint8_t gyro_oversample_n'):source.index('\n#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1', source.index('static uint8_t gyro_oversample_n'))]
 parts = [preamble, state, 'static struct {bool frame_invalid;} sensor_motion_state;']
@@ -75,6 +99,12 @@ parts += [function(name) for name in ('gyro_dq_mul', 'gyro_dq_accumulate_sample'
 parts += ['#endif', function('feed_gyro_sample')]
 main = r'''
 
+static void feed_desired(const float desired[3], int *count) {
+    const float offsets[3] = {0.125f, -0.0625f, 0.03125f};
+    float raw[3];
+    for (int i = 0; i < 3; ++i) raw[i] = desired[i] / retained->gyroSensScale[i] + offsets[i];
+    feed_gyro_sample(raw, count, true);
+}
 int main(int argc, char **argv) {
     int n = argc > 1 ? atoi(argv[1]) : 1;
     int count = 0;
@@ -83,6 +113,34 @@ int main(int argc, char **argv) {
     gyro_effective_time = gyro_actual_time * n;
     gyro_dq_acc[0] = 1.0f;
 #endif
+    if (argc > 2) {
+        const bool reset = !strcmp(argv[2], "physical");
+        float old_bias[3]; memcpy(old_bias, fusion_bias, sizeof(old_bias));
+        float desired[3] = {old_bias[0] + 90.0f, old_bias[1], old_bias[2]};
+        if (n > 1) feed_desired(desired, &count);
+        const float shift[3] = {0.5f, -0.25f, 0.125f};
+        memcpy(calibration_delta, shift, sizeof(shift));
+        if (reset) {
+            physical_reset = true;
+            desired[0] = 20.0f; desired[1] = desired[2] = 0.0f;
+        } else {
+            for (int i = 0; i < 3; ++i) desired[i] += calibration_delta[i] * retained->gyroSensScale[i];
+        }
+        const int remaining = reset ? n : n - (n > 1);
+        for (int i = 0; i < remaining; ++i) {
+            feed_desired(desired, &count);
+            assert(feed_count == (unsigned)(i == remaining - 1));
+        }
+        assert(count == 1 && reset_count == (unsigned)reset);
+        for (int i = 0; i < 3; ++i) {
+            assert(fabsf(received[0][i] - desired[i]) < 0.001f);
+            assert(fabsf(fusion_bias[i] - (reset ? 0.0f : desired[i] - (i == 0 ? 90.0f : 0.0f))) < 0.00001f);
+            assert(fabsf(filtered_gyro[i] - ((i + 2) + shift[i] * retained->gyroSensScale[i])) < 0.00001f);
+        }
+        assert(received_dt[0] == n * gyro_actual_time);
+        puts(reset ? "physical reset discards partial merge" : "scaled rebase preserves merged residual");
+        return 0;
+    }
     if (n == 1) {
         /* Include near-zero input: exp/log N=1 used to discard tiny rotation. */
         const float inputs[][3] = {
@@ -147,8 +205,9 @@ with tempfile.TemporaryDirectory(prefix='sensor-fast-') as directory:
     for compiled, runtime in scenarios:
         binary = tmp/f'gyro-{compiled}'
         subprocess.run(shlex.split(os.environ.get('CC','cc')) + ['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie',f'-DCONFIG_SENSOR_GYRO_OVERSAMPLING={compiled}','-I',str(tmp),'-I',str(ROOT/'src'),str(unit),str(ROOT/'src/sensor/motion_state.c'),str(ROOT/'src/util.c'),'-lm','-o',str(binary)],check=True)
-        result = subprocess.run([str(binary),str(runtime)])
-        if result.returncode:
-            failures.append((compiled,runtime,result.returncode))
+        for scenario in (None, "rebase", "physical"):
+            result = subprocess.run([str(binary), str(runtime)] + ([scenario] if scenario else []))
+            if result.returncode:
+                failures.append((compiled, runtime, scenario, result.returncode))
     if failures:
         raise SystemExit(f'Failed (compile N, runtime N, exit): {failures}')

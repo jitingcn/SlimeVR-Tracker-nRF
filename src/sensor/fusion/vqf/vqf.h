@@ -40,6 +40,8 @@ void vqf_update(float *g, float *a, float *m, float time);
 
 void vqf_get_gyro_bias(float *g_off);
 void vqf_set_gyro_bias(float *g_off);
+/* New gyro input = old input + delta_dps, in input-IMU axes. */
+void vqf_rebase_gyro_bias(const float delta_dps[3]);
 
 void vqf_update_gyro_sanity(float *g, float *m);
 int vqf_get_gyro_sanity(void);

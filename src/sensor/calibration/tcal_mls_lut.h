@@ -24,6 +24,7 @@
 #define SLIMENRF_CAL_TCAL_MLS_LUT_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #if CONFIG_SENSOR_USE_TCAL
 
@@ -42,10 +43,24 @@ typedef enum {
 	MLS_LUT_BUILD_COMPLETE
 } MlsLutBuildState;
 
+/*
+ * Recursive model/cache lock. All retained T-Cal model reads and writes must
+ * use this lock, including selection of the bias applied to a gyro sample.
+ * Do not hold it across persistence, sleeping, or LUT continuation.
+ */
+void sensor_tcal_lock(void);
+void sensor_tcal_unlock(void);
+uint32_t sensor_tcal_model_generation(void);
+/* Call after a model mutation, before releasing its lock. Does not clear D. */
+void sensor_tcal_model_changed(void);
+
 int sensor_tcal_mls_lookup(float temp, float bias_out[3]);
 int sensor_tcal_lut_lookup(float temp, float bias_out[3]);
+/* Schedule only; fitting runs in the calibration worker's continuation. */
 void sensor_tcal_build_lut_priority(float current_temp);
+/* Handles PRIORITY and BACKGROUND states; call without an outer model lock. */
 bool sensor_tcal_build_lut_continue(void);
+/* Discards caches only: does not advance the model generation or clear D. */
 void sensor_tcal_cache_invalidate(void);
 
 MlsLutBuildState sensor_tcal_lut_get_build_state(void);

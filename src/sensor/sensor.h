@@ -100,6 +100,8 @@ typedef struct sensor_fusion {
 
 	void (*get_gyro_bias)(float *);
 	void (*set_gyro_bias)(float *);
+	/* Input coordinate change (new input = old + delta), not a measurement. */
+	void (*rebase_gyro_bias)(const float delta_dps[3]);
 
 	void (*update_gyro_sanity)(float *, float *);
 	int (*get_gyro_sanity)(void);

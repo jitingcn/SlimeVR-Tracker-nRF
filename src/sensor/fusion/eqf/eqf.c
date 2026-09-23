@@ -1421,6 +1421,25 @@ void eqf_set_gyro_bias(float *g_off)
 	st.a_vec[2] = -Ab[2];
 }
 
+void eqf_rebase_gyro_bias(const float delta_dps[3])
+{
+	/* b_hat = -A^T*a_vec: b_hat += delta requires a_vec -= A*delta.
+	 * Preserve attitude, covariance, rest evidence and LP initialization. */
+	float delta[3] = {
+		delta_dps[0] * DEG_TO_RAD,
+		delta_dps[1] * DEG_TO_RAD,
+		delta_dps[2] * DEG_TO_RAD
+	};
+	float rotated_delta[3];
+	m3v(st.A, delta, rotated_delta);
+	for (int i = 0; i < 3; i++) {
+		st.a_vec[i] -= rotated_delta[i];
+		if (rest_gyr_lp_init) {
+			rest_gyr_lp[i] += delta[i];
+		}
+	}
+}
+
 void eqf_get_lin_a(float *lin_a)
 {
 	/* gravity direction in body frame = A^T · [0,0,1] = row 2 of A */
@@ -1493,6 +1512,7 @@ const sensor_fusion_t sensor_fusion_eqf = {
 	.update = eqf_update,
 	.get_gyro_bias = eqf_get_gyro_bias,
 	.set_gyro_bias = eqf_set_gyro_bias,
+	.rebase_gyro_bias = eqf_rebase_gyro_bias,
 	.update_gyro_sanity = eqf_update_gyro_sanity,
 	.get_gyro_sanity = eqf_get_gyro_sanity,
 	.get_lin_a = eqf_get_lin_a,

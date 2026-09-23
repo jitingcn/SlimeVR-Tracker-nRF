@@ -3,6 +3,9 @@
 #include "util.h"
 #include "imu_calibration.h"
 #include "connection/tracker_events.h"
+#if CONFIG_SENSOR_USE_TCAL
+#include "tcal_runtime.h"
+#endif
 
 #include <errno.h>
 #include <math.h>
@@ -153,7 +156,7 @@ static int submit_bias(const float a_bias[3], const float g_bias[3], bool persis
 		pending.bias = true;
 		pending.matrix = false;
 		pending.persist_gyro = persist_gyro;
-		pending.clear_boot_offset = reset;
+		pending.clear_boot_offset = true;
 		pending.effect = reset ? SENSOR_CALIBRATION_FRAME_CHANGED : SENSOR_CALIBRATION_BIAS_CHANGED;
 		pending.operation_id = operation_id;
 	}
@@ -245,18 +248,17 @@ enum sensor_calibration_effect sensor_calibration_apply_pending(void)
 	fusion_stale |= effect != SENSOR_CALIBRATION_COEFFICIENTS_CHANGED;
 	pending.fusion_changed = effect != SENSOR_CALIBRATION_COEFFICIENTS_CHANGED;
 	pending.effect = SENSOR_CALIBRATION_UNCHANGED;
-#if CONFIG_SENSOR_USE_TCAL
-	if (clear_boot_offset) {
-		retained->bootCalState.doffset_valid = false;
-		memset(retained->bootCalState.doffset, 0, sizeof(retained->bootCalState.doffset));
-	}
-#else
-	(void)clear_boot_offset;
-#endif
 	pending.persist = true;
 	uint16_t operation_id = pending.operation_id;
 	cal_event_end(operation_id, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	k_spin_unlock(&coefficient_lock, key);
+#if CONFIG_SENSOR_USE_TCAL
+	if (clear_boot_offset) {
+		sensor_tcal_clear_doffset();
+	}
+#else
+	(void)clear_boot_offset;
+#endif
 	if (operation_id) {
 		tracker_events_notify();
 	}

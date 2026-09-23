@@ -7,6 +7,7 @@ LDLIBS += -lm -fsanitize=undefined -pthread
 SOURCES := test_imu_calibration.c ../../../src/sensor/calibration/imu_calibration.c
 HEADERS := ../../../src/sensor/calibration/imu_calibration.h ../../../src/sensor/calibration/calibration.h globals.h system/system.h util.h zephyr/kernel.h
 HEADERS += event_probe.h ../../../src/connection/tracker_events.h ../../../src/connection/tracker_event_protocol.h
+HEADERS += ../../../src/sensor/calibration/tcal_runtime.h ../../../src/sensor/calibration/cal_sample.h
 
 .PHONY: check clean
 

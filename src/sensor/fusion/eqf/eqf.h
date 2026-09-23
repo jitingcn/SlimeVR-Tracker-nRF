@@ -23,6 +23,8 @@ void eqf_update(float *g, float *a, float *m, float time);
 
 void eqf_get_gyro_bias(float *g_off);
 void eqf_set_gyro_bias(float *g_off);
+/* New gyro input = old input + delta_dps, in input-IMU axes. */
+void eqf_rebase_gyro_bias(const float delta_dps[3]);
 
 void eqf_update_gyro_sanity(float *g, float *m);
 int eqf_get_gyro_sanity(void);

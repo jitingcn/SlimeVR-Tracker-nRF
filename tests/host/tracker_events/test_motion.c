@@ -94,12 +94,27 @@ static void invalid_and_strict_gates(void)
 	evidence.accel_deviation_squared_m2_s4 = 0;
 	const float rad = 3.14159265358979323846f / 180.0f;
 	assert(!sensor_motion_is_quiet(.5f, 0, &evidence));
-	/* Upper rest policy: entry below .60deg, exit above1.0deg. */
-	assert(!sensor_motion_is_quiet(0, .60f * rad, &evidence));
-	assert(sensor_motion_is_quiet(0, .599f * rad, &evidence));
-	assert(!sensor_motion_is_active(1.2f, 1.0f * rad, &evidence));
+	assert(!sensor_motion_is_active(1.2f, 0, &evidence));
 	assert(sensor_motion_is_active(1.21f, 0, &evidence));
-	assert(sensor_motion_is_active(0, 1.001f * rad, &evidence));
+	/* Check entry/hold/exit hysteresis without pinning tuning constants. */
+	bool saw_quiet = false, saw_hold = false, saw_active = false;
+	for (int millidegrees = 0; millidegrees <= 180000; millidegrees++) {
+		float angle = (float)millidegrees * .001f * rad;
+		bool quiet = sensor_motion_is_quiet(0, angle, &evidence);
+		bool active = sensor_motion_is_active(0, angle, &evidence);
+		assert(!(quiet && active));
+		if (quiet) {
+			assert(!saw_hold && !saw_active);
+			saw_quiet = true;
+		} else if (!active) {
+			assert(saw_quiet && !saw_active);
+			saw_hold = true;
+		} else {
+			assert(saw_hold);
+			saw_active = true;
+		}
+	}
+	assert(saw_quiet && saw_hold && saw_active);
 }
 
 int main(void)

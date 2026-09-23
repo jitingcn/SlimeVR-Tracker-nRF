@@ -33,6 +33,9 @@
 #include "calibration/imu_calibration.h"
 #include "calibration/mag_common.h"
 #include "calibration/online_mag.h"
+#if CONFIG_SENSOR_USE_TCAL
+#include "calibration/tcal_mls_lut.h"
+#endif
 #include "motion_state.h"
 #include "zephyr/logging/log.h"
 
@@ -1221,18 +1224,20 @@ void sensor_retained_read(void) // TODO: move some of this to sys? or move to ca
 
 void sensor_retained_write(void) // TODO: move to sys?
 {
-	if (skip_fusion_save || atomic_get(&fusion_requests) || sensor_calibration_fusion_stale()) {
-		/* Never save fusion against coefficients or reset requests not yet applied. */
+#if CONFIG_SENSOR_USE_TCAL
+	sensor_tcal_lock();
+#endif
+	if (skip_fusion_save || atomic_get(&fusion_requests) || sensor_calibration_fusion_stale() ||
+	    sensor_calibration_gyro_reference_pending()) {
+		/* Never save fusion against a baseline not yet consumed by the sensor. */
 		retained->fusion_id = 0;
-		retained_update();
-		return;
+	} else if (sensor_fusion_init) {
+		sensor_fusion->save(retained->fusion_data);
+		retained->fusion_id = fusion_id;
 	}
-	if (!sensor_fusion_init) {
-		return;
-	}
-	//	memcpy(retained->magBias, sensor_calibration_get_magBias(), sizeof(retained->magBias));
-	sensor_fusion->save(retained->fusion_data);
-	retained->fusion_id = fusion_id;
+#if CONFIG_SENSOR_USE_TCAL
+	sensor_tcal_unlock();
+#endif
 	retained_update();
 }
 
@@ -1456,9 +1461,12 @@ static void sensor_apply_calibration_frame(void)
 	if (reset) {
 		main_imu_restart();
 	}
-	if (sensor_fusion_init && (reset || requests || effect == SENSOR_CALIBRATION_BIAS_CHANGED)) {
-		float zero[3] = {0};
-		sensor_fusion->set_gyro_bias(zero);
+	if (reset || requests || effect == SENSOR_CALIBRATION_BIAS_CHANGED) {
+		sensor_calibration_reset_gyro_reference();
+		if (sensor_fusion_init) {
+			float zero[3] = {0};
+			sensor_fusion->set_gyro_bias(zero);
+		}
 	}
 	sensor_calibration_fusion_applied();
 	sensor_retained_write();
@@ -1871,6 +1879,7 @@ int sensor_init(void)
 	LOG_INF("Using %s", fusion_names[fusion_id]);
 	LOG_INF("Initialized fusion");
 	sensor_fusion_init = true;
+	sensor_calibration_reset_gyro_reference();
 	sensor_mag_timing_reset();
 
 
@@ -2160,7 +2169,8 @@ static void feed_gyro_sample(
 	sensor_diagnostics_on_raw_gyro(raw_g);
 
 	/* --- Firmware compensation (layer 1): TCal / static ZRO / D_offset --- */
-	sensor_calibration_process_gyro(raw_g);
+	float reference_delta[3];
+	bool measured_reset = sensor_calibration_process_gyro(raw_g, reference_delta);
 	float g[] = {raw_g[0], raw_g[1], raw_g[2]};
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -2169,8 +2179,37 @@ static void feed_gyro_sample(
 		g[0] *= retained->gyroSensScale[0];
 		g[1] *= retained->gyroSensScale[1];
 		g[2] *= retained->gyroSensScale[2];
+		reference_delta[0] *= retained->gyroSensScale[0];
+		reference_delta[1] *= retained->gyroSensScale[1];
+		reference_delta[2] *= retained->gyroSensScale[2];
 	}
 #endif
+
+	if (measured_reset) {
+		float zero[3] = {0};
+		if (sensor_fusion_init) {
+			/* Translate input histories, then accept the physical zero-bias
+			 * measurement rather than preserving the previous residual. */
+			sensor_fusion->rebase_gyro_bias(reference_delta);
+			sensor_fusion->set_gyro_bias(zero);
+		}
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+		/* A physical calibration is not a change of coordinates. */
+		gyro_oversample_count = 0;
+		gyro_dq_acc[0] = 1.0f;
+		gyro_dq_acc[1] = gyro_dq_acc[2] = gyro_dq_acc[3] = 0.0f;
+#endif
+	} else if (reference_delta[0] != 0.0f || reference_delta[1] != 0.0f || reference_delta[2] != 0.0f) {
+		if (sensor_fusion_init) {
+			sensor_fusion->rebase_gyro_bias(reference_delta);
+		}
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+		/* Keep already-integrated debiased samples; only their carrier changes. */
+		for (int i = 0; i < 3; i++) {
+			gyro_merge_bias_dps[i] += reference_delta[i];
+		}
+#endif
+	}
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 	/* I2C runs at the fusion ODR: match the non-oversampled feed exactly. */
@@ -3119,6 +3158,7 @@ void main_imu_wakeup(void)
 
 void main_imu_restart(void)
 {
+	sensor_calibration_reset_gyro_reference();
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
 	tracker_events_notify();

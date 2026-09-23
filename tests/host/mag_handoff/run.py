@@ -58,8 +58,108 @@ static uint8_t rest_event_idx, rest_event_total;
 ''' + '\n'.join(function(vqf, name) for name in (
     'set_params', 'vqf_float_finite', 'vqf_vec3_finite', 'vqf_loaded_state_valid',
     'vqf_safe_init_time', 'vqf_init', 'vqf_load', 'vqf_update_gyro', 'vqf_update_accel',
-    'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag')) + r'''
+    'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag',
+    'vqf_rebase_gyro_bias')) + r'''
+static void check_gyro_rebase(int warmup) {
+    vqf_init(.01f,.01f,.01f);
+    /* The native moving vertical-bias prior is anchored at zero, not
+     * translation invariant. Isolate the rest observer and LP histories. */
+    params.motionBiasEstEnabled=false;
+    vqf_state_t shifted=state;
+    const float delta_dps[3]={.35f,-.2f,.15f};
+    vqf_real_t delta[3], g[3]={.003f,-.002f,.001f}, translated[3];
+    vqf_real_t a[3]={.1f,-.2f,9.8f};
+    for(int j=0;j<3;j++) {
+        delta[j]=delta_dps[j]*DEG_TO_RAD;
+        shifted.bias[j]+=delta[j];
+        translated[j]=g[j]+delta[j];
+    }
+    for(int i=0;i<warmup;i++) {
+        updateGyr(&params,&state,&coeffs,g);
+        updateAcc(&params,&state,&coeffs,a);
+        updateGyr(&params,&shifted,&coeffs,translated);
+        updateAcc(&params,&shifted,&coeffs,a);
+    }
+    vqf_state_t before=state;
+    vqf_rebase_gyro_bias(delta_dps);
+    assert(!memcmp(before.gyrQuat,state.gyrQuat,sizeof(state.gyrQuat)));
+    assert(!memcmp(before.accQuat,state.accQuat,sizeof(state.accQuat)));
+    assert(!memcmp(before.biasP,state.biasP,sizeof(state.biasP)));
+    assert(before.restDetected==state.restDetected && before.restT==state.restT);
+    assert(!memcmp(before.restLastSquaredDeviations,state.restLastSquaredDeviations,
+                   sizeof(state.restLastSquaredDeviations)));
+    if(!warmup) {
+        assert(!memcmp(before.restGyrLpState,state.restGyrLpState,sizeof(state.restGyrLpState)));
+        assert(!memcmp(before.motionBiasEstBiasLpState,state.motionBiasEstBiasLpState,
+                       sizeof(state.motionBiasEstBiasLpState)));
+    } else {
+        for(int j=0;j<6;j++) {
+            assert((isnan(state.restGyrLpState[j]) && isnan(shifted.restGyrLpState[j]))
+                   || fabs(state.restGyrLpState[j]-shifted.restGyrLpState[j])<2e-5);
+        }
+        for(int j=0;j<4;j++) {
+            assert((isnan(state.motionBiasEstBiasLpState[j]) && isnan(shifted.motionBiasEstBiasLpState[j]))
+                   || fabs(state.motionBiasEstBiasLpState[j]-shifted.motionBiasEstBiasLpState[j])<2e-5);
+        }
+    }
+    /* Compare with a native replay that used translated coordinates from
+     * its very first sample, including warm-up -> mature transitions. */
+    for(int i=0;i<400;i++) {
+        updateGyr(&params,&state,&coeffs,translated);
+        updateAcc(&params,&state,&coeffs,a);
+        updateGyr(&params,&shifted,&coeffs,translated);
+        updateAcc(&params,&shifted,&coeffs,a);
+        vqf_real_t q[4], expected[4];
+        getQuat6D(&state,q); getQuat6D(&shifted,expected);
+        for(int j=0;j<4;j++) assert(fabs(q[j]-expected[j])<2e-5);
+        for(int j=0;j<3;j++) assert(fabs(state.bias[j]-shifted.bias[j])<2e-5);
+        assert(state.restDetected==shifted.restDetected);
+        assert(fabs(state.restLastSquaredDeviations[0]-shifted.restLastSquaredDeviations[0])<1e-8);
+    }
+}
+static void check_static_baseline_handoff(void) {
+    /* Production parameters, raw z=.4 dps, old offset=.1, new offset=.3.
+     * Warm the real native observer for 30 s before the -.2 dps handoff. */
+    vqf_init(.01f,.01f,.01f);
+    vqf_real_t old_g[3]={0,0,.3f*DEG_TO_RAD};
+    vqf_real_t new_g[3]={0,0,.1f*DEG_TO_RAD};
+    vqf_real_t a[3]={0,0,9.80665f};
+    setBiasEstimate(&state,old_g,.18f*DEG_TO_RAD);
+    for(int i=0;i<3000;i++) {
+        updateGyr(&params,&state,&coeffs,old_g);
+        updateAcc(&params,&state,&coeffs,a);
+    }
+    assert(state.restDetected);
+    vqf_real_t warm_bias[3];
+    memcpy(warm_bias,state.bias,sizeof(warm_bias));
+    setBiasEstimate(&state,warm_bias,.18f*DEG_TO_RAD);
+    vqf_state_t control=state;
+    float delta[3]={0,0,-.2f};
+    vqf_rebase_gyro_bias(delta);
+    for(int i=0;i<3000;i++) {
+        updateGyr(&params,&state,&coeffs,new_g);
+        updateAcc(&params,&state,&coeffs,a);
+        updateGyr(&params,&control,&coeffs,old_g);
+        updateAcc(&params,&control,&coeffs,a);
+        assert(state.restDetected && control.restDetected);
+        for(int j=0;j<3;j++)
+            assert(fabs((new_g[j]-state.bias[j])-(old_g[j]-control.bias[j]))<2e-7);
+        assert(fabs(state.restLastSquaredDeviations[0]-control.restLastSquaredDeviations[0])<1e-10);
+        vqf_real_t q[4], expected[4];
+        getQuat6D(&state,q); getQuat6D(&control,expected);
+        for(int j=0;j<4;j++) assert(fabs(q[j]-expected[j])<2e-5);
+    }
+}
 int main(void) {
+    check_static_baseline_handoff();
+    check_gyro_rebase(0);   /* no samples: preserve native NaN sentinels */
+    check_gyro_rebase(1);   /* partial initialization: translate sums */
+    check_gyro_rebase(243); /* cross the motion-LP initialization boundary */
+    check_gyro_rebase(350); /* mature native biquad histories */
+    vqf_init(.01f,.01f,.01f);
+    float large_delta[3]={50,-60,70};
+    vqf_rebase_gyro_bias(large_delta);
+    for(int j=0;j<3;j++) assert(fabs(state.bias[j]-large_delta[j]*DEG_TO_RAD)<1e-6);
     vqf_init(.01f,.01f,.01f);
     bool rest = true;
     float zero[3]={0}, invalid[3]={NAN,0,1}, still[3]={0,0,1};
@@ -113,7 +213,43 @@ eqf_test = preamble + '''
 #define CONST_EARTH_GRAVITY 9.80665f
 struct retained_data { unsigned char fusion_data[1024]; };
 ''' + eqf + r'''
+static void check_gyro_rebase(void) {
+    eqf_init(.01f,.01f,.01f);
+    float delta[3]={.35f,-.2f,.15f};
+    eqf_rebase_gyro_bias(delta);
+    assert(!rest_gyr_lp_init); /* no fabricated history */
+    eqf_init(.01f,.01f,.01f);
+    mode=EQF_RUNNING;
+    /* Nonidentity body->earth transform catches a wrong-sign/frame rebase. */
+    const float rotation[9]={0,-1,0,1,0,0,0,0,1};
+    memcpy(st.A,rotation,sizeof(rotation));
+    float original_bias[3]={.1f,-.3f,.2f};
+    eqf_set_gyro_bias(original_bias);
+    float g[3]={.4f,-.1f,.3f};
+    eqf_update_gyro(g,.01f);
+    eqf_saved_t before=st;
+    float bias_before[3], bias_after[3], lp_before[3], dev_before=rest_gyr_dev;
+    eqf_get_gyro_bias(bias_before);
+    memcpy(lp_before,rest_gyr_lp,sizeof(lp_before));
+    eqf_rebase_gyro_bias(delta);
+    eqf_get_gyro_bias(bias_after);
+    assert(!memcmp(before.A,st.A,sizeof(st.A)) && !memcmp(before.P,st.P,sizeof(st.P)));
+    assert(rest_gyr_lp_init && rest_gyr_dev==dev_before);
+    for(int j=0;j<3;j++) {
+        assert(fabsf(bias_after[j]-bias_before[j]-delta[j])<1e-5f);
+        assert(fabsf(rest_gyr_lp[j]-lp_before[j]-delta[j]*DEG_TO_RAD)<1e-7f);
+        g[j]+=delta[j];
+    }
+    eqf_update_gyro(g,.01f);
+    assert(rest_gyr_dev<1e-12f); /* no reference-change motion impulse */
+    float large_delta[3]={50,-60,70};
+    eqf_get_gyro_bias(bias_before);
+    eqf_rebase_gyro_bias(large_delta);
+    eqf_get_gyro_bias(bias_after);
+    for(int j=0;j<3;j++) assert(fabsf(bias_after[j]-bias_before[j]-large_delta[j])<1e-4f);
+}
 int main(void) {
+    check_gyro_rebase();
     eqf_init(.01f,.01f,.01f);
     bool rest=true;
     float zero[3]={0}, still[3]={0,0,1}, invalid[3]={0,0,9};
