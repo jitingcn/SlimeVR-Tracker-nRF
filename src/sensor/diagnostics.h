@@ -31,6 +31,8 @@
 #define SENSOR_DEBUG_QDEV_QOUT 0
 #endif
 
+#define SENSOR_DEBUG_MAX_DURATION_SEC 60U
+
 /* Console-safe session transitions. Expiry and output accounting are atomic;
  * already reserved output can finish printing after a stop/restart. */
 void sensor_debug_start(uint32_t duration_sec);

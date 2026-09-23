@@ -1308,7 +1308,10 @@ static void print_help(void)
 	printk("  stack                      Print thread and ISR stack high-water usage\n");
 #endif
 	printk("  help                       Show this help message\n");
-	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 1s)\n");
+	printk(
+		"  debug [duration]           Start sensor debug mode at FIFO rate (1-%us, default 1s)\n",
+		SENSOR_DEBUG_MAX_DURATION_SEC
+	);
 	printk("  range                      Show sensor range statistics (min/max values)\n");
 	printk("  range reset                Reset sensor range statistics\n");
 #if CONFIG_VQF_BENCH
@@ -2017,10 +2020,13 @@ static void console_cmd_debug(size_t argc, char **argv)
 	if (arg) {
 		char *endptr;
 		long dur = strtol(arg, &endptr, 10);
-		if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= 60) {
+		if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= (long)SENSOR_DEBUG_MAX_DURATION_SEC) {
 			duration = (uint32_t)dur;
 		} else {
-			printk("Invalid duration (1-60s). Using default 1 seconds.\n");
+			printk(
+				"Invalid duration (1-%us). Using default 1 seconds.\n",
+				SENSOR_DEBUG_MAX_DURATION_SEC
+			);
 		}
 	}
 	sensor_debug_start(duration);

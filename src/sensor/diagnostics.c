@@ -434,7 +434,7 @@ void sensor_diagnostics_output(
 // Debug mode control functions
 void sensor_debug_start(uint32_t duration_sec)
 {
-	if (duration_sec == 0 || duration_sec > 30) {
+	if (duration_sec == 0 || duration_sec > SENSOR_DEBUG_MAX_DURATION_SEC) {
 		duration_sec = 10; // Default to 10 seconds
 	}
 
