@@ -249,6 +249,21 @@ static int led_pwm_period[5][1] = {
 
 // Using brightness and value if PWM is supported, otherwise value is coerced to on/off
 // TODO: use computed constants for high/low brightness and color values
+/*
+ * Sleep the remainder of a nominal pattern step. A strip update blocks for over
+ * a millisecond, so sleeping the full step on top of it would stretch the
+ * pattern cadence by a third (measured: 6.65 s per breathing cycle instead of
+ * the intended 5 s) and make the fade steps that much coarser.
+ */
+static void led_pattern_sleep(uint32_t step_start_ticks, uint32_t step_us)
+{
+	uint32_t elapsed_us = k_ticks_to_us_floor32(k_uptime_ticks() - step_start_ticks);
+
+	if (elapsed_us < step_us) {
+		k_usleep(step_us - elapsed_us);
+	}
+}
+
 static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value_pptt)
 {
 	LOG_DBG("led_pin_set: color %d, brightness %d, value %d", color, brightness_pptt, value_pptt);
@@ -371,11 +386,14 @@ static void led_thread(void)
 			break;
 		case SYS_LED_PATTERN_ONESHOT_POWEROFF:
 			if (led_pattern_state++ > 0) {
+				uint32_t fade_step_start = k_uptime_ticks();
+
 				led_pin_set(
 					SYS_LED_COLOR_DEFAULT,
 					(202 - led_pattern_state) * 50,
 					(led_pattern_state != 202 ? 10000 : 0)
 				);
+				led_pattern_sleep(fade_step_start, 5000);
 			} else {
 				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
 			}
@@ -383,8 +401,6 @@ static void led_thread(void)
 				set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
 			} else if (led_pattern_state == 1) {
 				k_msleep(250);
-			} else {
-				k_msleep(5);
 			}
 			break;
 		case SYS_LED_PATTERN_ONESHOT_PROGRESS:
@@ -426,6 +442,7 @@ static void led_thread(void)
 			break;
 		case SYS_LED_PATTERN_PULSE_PERSIST:
 			led_pattern_state = (led_pattern_state + 1) % 1000;
+			uint32_t step_start = k_uptime_ticks();
 			//			float led_value = sinf(led_pattern_state * (M_PI / 1000));
 			//			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_value * 10000);
 			int led_value = led_pattern_state > 500 ? 1000 - led_pattern_state : led_pattern_state;
@@ -439,7 +456,7 @@ static void led_thread(void)
 				led_value = (led_value - 400) * 5 + 9500;
 			}
 			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_value);
-			k_msleep(5);
+			led_pattern_sleep(step_start, 5000);
 			break;
 		case SYS_LED_PATTERN_ACTIVE_PERSIST: // off duration first because the device may turn on multiple times rapidly
 											 // and waste battery power
