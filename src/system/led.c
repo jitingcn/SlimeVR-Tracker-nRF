@@ -260,12 +260,14 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 #if LED_STRIP_EXISTS
 	static struct led_rgb pixel[1];
 	value_pptt = value_pptt * brightness_pptt / 10000;
+	value_pptt = value_pptt * CONFIG_LED_GLOBAL_BRIGHTNESS_PPTT / 10000;
 	pixel[0].r = 255 * (led_pwm_period[color][0] * value_pptt / 10000) / 10000;
 	pixel[0].g = 255 * (led_pwm_period[color][1] * value_pptt / 10000) / 10000;
 	pixel[0].b = 255 * (led_pwm_period[color][2] * value_pptt / 10000) / 10000;
 	led_strip_update_rgb(strip, pixel, 1);
 #elif PWM_LED_EXISTS
 	value_pptt = value_pptt * brightness_pptt / 10000;
+	value_pptt = value_pptt * CONFIG_LED_GLOBAL_BRIGHTNESS_PPTT / 10000;
 	// only supporting color if PWM is supported
 	pwm_set_pulse_dt(&pwm_led, pwm_led.period / 10000 * (led_pwm_period[color][0] * value_pptt / 10000));
 #if PWM_LED1_EXISTS

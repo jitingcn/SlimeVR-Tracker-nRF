@@ -82,6 +82,14 @@ config LED_DEFAULT_COLOR_B
 
 endmenu
 
+config LED_GLOBAL_BRIGHTNESS_PPTT
+    int "Global LED brightness (pptt)"
+    range 0 10000
+    default 10000
+    help
+        Scale LED output brightness in parts per ten-thousand.
+        10000 is full brightness, 2500 is 25%.
+
 config USER_EXTRA_ACTIONS
     bool "Multiple press actions"
     help
