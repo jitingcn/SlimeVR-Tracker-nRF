@@ -99,6 +99,24 @@ config LED_STRIP_TIMING_LOG
         update blocked, once per 1000 frames (about every 5 seconds while a
         pattern is fading). Diagnostic for fade smoothness on real hardware.
 
+menu "Thread stack sizes"
+
+config LED_THREAD_STACK_SIZE
+    int "LED thread stack size"
+    default 512
+    help
+        Stack size of the LED thread. LED strip drivers run the update path in
+        the caller's context, so this size also has to cover the strip driver.
+
+config STATUS_THREAD_STACK_SIZE
+    int "Status thread stack size"
+    default 512
+    help
+        Stack size of the status thread. Status changes call into the LED
+        driver, so the LED strip update path can run on this stack as well.
+
+endmenu
+
 config USER_EXTRA_ACTIONS
     bool "Multiple press actions"
     help
