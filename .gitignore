@@ -23,6 +23,7 @@ compile_commands.json
 /tests/host/imu_calibration/test_button_extra
 /tests/host/imu_calibration/test_imu_worker
 /tests/host/imu_drivers/test_imu_odr
+/tests/host/led_strip_fade/test_led_strip_fade
 /tests/host/mag_fit/test_mag_fit
 /tests/host/magneto/test_magneto
 /tests/host/online_mag/test_online_mag

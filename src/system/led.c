@@ -7,6 +7,7 @@
 #include <zephyr/pm/device.h>
 
 #include "led.h"
+#include "led_strip_fade.h"
 
 LOG_MODULE_REGISTER(led, LOG_LEVEL_INF);
 
@@ -25,6 +26,7 @@ static const struct gpio_dt_spec led_en = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, led
 #include <zephyr/drivers/led_strip.h>
 #define STRIP_NODE DT_ALIAS(led_strip)
 static const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
+static struct led_strip_fade led_fade;
 #endif
 
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, led_gpios)
@@ -87,6 +89,9 @@ static int led_pattern_state;
 static int led_pin_init(void)
 {
 	LOG_DBG("led_pin_init");
+#ifdef LED_STRIP_EXISTS
+	led_strip_fade_reset(&led_fade);
+#endif
 #if LED_EXISTS
 	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
 	gpio_pin_set_dt(&led, 0);
@@ -261,9 +266,9 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 	static struct led_rgb pixel[1];
 	value_pptt = value_pptt * brightness_pptt / 10000;
 	value_pptt = value_pptt * CONFIG_LED_GLOBAL_BRIGHTNESS_PPTT / 10000;
-	pixel[0].r = 255 * (led_pwm_period[color][0] * value_pptt / 10000) / 10000;
-	pixel[0].g = 255 * (led_pwm_period[color][1] * value_pptt / 10000) / 10000;
-	pixel[0].b = 255 * (led_pwm_period[color][2] * value_pptt / 10000) / 10000;
+	pixel[0].r = led_strip_fade_next(&led_fade, led_pwm_period[color][0], value_pptt, 0);
+	pixel[0].g = led_strip_fade_next(&led_fade, led_pwm_period[color][1], value_pptt, 1);
+	pixel[0].b = led_strip_fade_next(&led_fade, led_pwm_period[color][2], value_pptt, 2);
 	led_strip_update_rgb(strip, pixel, 1);
 #elif PWM_LED_EXISTS
 	value_pptt = value_pptt * brightness_pptt / 10000;
