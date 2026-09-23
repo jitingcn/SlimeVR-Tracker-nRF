@@ -1187,7 +1187,7 @@ void event_handler(struct esb_evt const *event)
 						ping_failed = false;
 						ping_failures = 0;
 						esb_conn_state = ESB_ST_PAIRED;
-						if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
+						if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 							set_status(SYS_STATUS_CONNECTION_ERROR, false);
 							connection_error_start_time = 0;
 							shutdown_requested = false;
@@ -1206,7 +1206,7 @@ void event_handler(struct esb_evt const *event)
 					ping_failed = false;
 					ping_failures = 0;
 					esb_conn_state = ESB_ST_PAIRED;
-					if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
+					if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 						ping_success_streak++;
 						if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
 							set_status(SYS_STATUS_CONNECTION_ERROR, false);

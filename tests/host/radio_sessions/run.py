@@ -97,11 +97,20 @@ for name in ("connection_raw_collection_active", "connection_reset_raw_collectio
 returns_status = re.search(r"^int connection_set_data_collection_batch\(", connection, re.MULTILINE)
 collection.append("static int batch_request(bool enable, uint16_t rate) { " + ("return connection_set_data_collection_batch(enable, rate);" if returns_status else "connection_set_data_collection_batch(enable, rate); return 0;") + " }")
 
+# Keep the real status bit values and getter: treating the connection-error
+# mask as a bool in a fixture would hide a permanently blocked producer.
+status = (SOURCE / "system/status.c").read_text()
+start = esb.index("\t\t\t\t\tuint8_t rx_id = rx_payload.data[1];")
+end = esb.index("\n\t\t\t\t\tbool match_ctr", start)
+recovery = constants + "\n" + function(status, "get_status")
+recovery += "\n" + "\n".join(re.findall(r"^#define PING_RECOVERY_THRESHOLD[^\n]*", esb, re.MULTILINE))
+recovery += "\nstatic void receive_valid_pong(void) { do {\n" + esb[start:end] + "\n(void)counter_diff;\n} while (0); }\n"
+
 with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     temporary = Path(directory)
     (temporary / "connection").mkdir()
     (temporary / "connection/connection.h").write_text((SOURCE / "connection/connection.h").read_text())
-    for name, parts in (("payload", payload), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection))):
+    for name, parts in (("payload", payload), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery)):
         (temporary / f"{name}.inc").write_text(parts)
     # Keep hardware leaves in the established fixture; exercise the new private
     # packet through the same extracted production ESB dispatch.
@@ -142,7 +151,7 @@ int main(void) {
     return 0;
 }
 ''')
-    for name in ("payload", "commands", "collection"):
+    for name in ("payload", "commands", "collection", "recovery"):
         if os.environ.get("RADIO_CASE") not in (None, name):
             continue
         binary = temporary / name
