@@ -90,6 +90,15 @@ config LED_GLOBAL_BRIGHTNESS_PPTT
         Scale LED output brightness in parts per ten-thousand.
         10000 is full brightness, 2500 is 25%.
 
+config LED_STRIP_TIMING_LOG
+    bool "Log LED strip frame timing"
+    default n
+    depends on LED_STRIP
+    help
+        Log one line with the LED strip frame period and how long the strip
+        update blocked, once per 1000 frames (about every 5 seconds while a
+        pattern is fading). Diagnostic for fade smoothness on real hardware.
+
 config USER_EXTRA_ACTIONS
     bool "Multiple press actions"
     help
