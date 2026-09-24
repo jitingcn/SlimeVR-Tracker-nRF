@@ -664,6 +664,12 @@ static void power_thread(void)
 	static bool boot_success_checked = false;
 	static bool watchdog_registered = false;
 	static bool ota_gpregret_logged = false;
+	int battery_mV = 0;
+	int16_t battery_pptt = -1;
+#if !DT_NODE_HAS_STATUS(DT_NODELABEL(pmic_charger), okay)
+	int64_t next_battery_sample_ms = 0;
+	uint8_t last_battery_inputs = 0;
+#endif
 
 	/* Register power thread with watchdog (watchdog is initialized via SYS_INIT) */
 	if (!watchdog_registered) {
@@ -739,10 +745,32 @@ static void power_thread(void)
 			LOG_WRN("Failed to read charger state: %d", charger_state_err);
 		}
 
-		int battery_mV;
-		int16_t battery_pptt = read_batt_mV(&battery_mV);
-		if (battery_pptt < 0)
-			LOG_ERR("Failed to read battery voltage: %d", battery_pptt);
+#ifdef POWER_USBREGSTATUS_VBUSDETECT_Msk
+		bool usb_plugged = NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk;
+#else
+		bool usb_plugged = false;
+#endif
+		int64_t now_ms = k_uptime_get();
+		bool fresh_battery_sample = true;
+#if !DT_NODE_HAS_STATUS(DT_NODELABEL(pmic_charger), okay)
+		uint8_t battery_inputs = charging | (charged << 1) | (usb_plugged << 2)
+			| (pmic_plugged << 3);
+		fresh_battery_sample = now_ms >= next_battery_sample_ms
+			|| battery_inputs != last_battery_inputs;
+		if (fresh_battery_sample)
+		{
+			/* Throttle failures too; independent input edges can sample sooner.
+			 * The power loop and its safety checks still wake every 100 ms. */
+			next_battery_sample_ms = now_ms + 500;
+			last_battery_inputs = battery_inputs;
+		}
+#endif
+		if (fresh_battery_sample)
+		{
+			battery_pptt = read_batt_mV(&battery_mV);
+			if (battery_pptt < 0)
+				LOG_ERR("Failed to read battery voltage: %d", battery_pptt);
+		}
 		bool battery_pptt_valid = power_battery_pptt_is_valid(battery_pptt);
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
@@ -752,12 +780,6 @@ static void power_thread(void)
 			plugged = true;
 		else if ((plugged && battery_mV <= 4250) || abnormal_reading)
 			plugged = false;
-#ifdef POWER_USBREGSTATUS_VBUSDETECT_Msk
-		bool usb_plugged = NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk;
-#else
-		bool usb_plugged = false;
-#endif
-		int64_t now_ms = k_uptime_get();
 		bool raw_device_plugged = charging || charged || plugged || usb_plugged || pmic_plugged;
 		bool plug_state_debouncing = power_battery_update_plugged_state(raw_device_plugged, now_ms);
 		bool plug_signal_settling = power_battery_plug_signal_settling(plug_state_debouncing, now_ms);
@@ -795,8 +817,9 @@ static void power_thread(void)
 			sys_system_off(); /* owner-private battery/dock shutdown */
 		}
 
-		power_battery_feed_and_track(battery_pptt_valid, plug_signal_settling, battery_pptt,
-					     battery_available, battery_mV);
+		if (fresh_battery_sample)
+			power_battery_feed_and_track(battery_pptt_valid, plug_signal_settling, battery_pptt,
+						     battery_available, battery_mV);
 
 		int16_t calibrated_battery_pptt = power_battery_calibrated_pptt();
 		connection_update_battery(

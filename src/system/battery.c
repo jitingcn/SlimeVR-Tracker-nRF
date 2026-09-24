@@ -276,22 +276,25 @@ int battery_sample(void) {
 		rc = adc_read(ddp->adc, sp);
 		sp->calibrate = false;
 		if (rc == 0) {
-			int32_t val = ddp->raw;
+			int32_t adc_uv = ddp->raw;
 
-			adc_raw_to_millivolts(
+			rc = adc_raw_to_microvolts(
 				adc_ref_internal(ddp->adc),
 				ddp->adc_cfg.gain,
 				sp->resolution,
-				&val
+				&adc_uv
 			);
-
-			if (dcp->output_ohm != 0) {
-				rc = val * (uint64_t)dcp->full_ohm / dcp->output_ohm;
-				LOG_INF("raw %u ~ %u mV => %d mV\n", ddp->raw, val, rc);
-			} else {
-				rc = val;
-				LOG_INF("raw %u ~ %u mV\n", ddp->raw, val);
+			if (rc != 0) {
+				return rc;
 			}
+
+			/* Preserve sub-mV precision until after scaling the divider. */
+			int64_t battery_uv = adc_uv;
+			if (dcp->output_ohm != 0) {
+				battery_uv = battery_uv * dcp->full_ohm / dcp->output_ohm;
+			}
+			rc = battery_uv / 1000;
+			LOG_INF("raw %d ~ %d uV => %d mV\n", ddp->raw, adc_uv, rc);
 		}
 	}
 

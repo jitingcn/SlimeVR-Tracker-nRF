@@ -7,7 +7,13 @@
 
 #include "power_battery.h"
 
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(pmic_charger), okay)
 #define BATTERY_SAMPLES 24
+#else
+/* Five 500 ms ADC samples keep nominal fill near the former 24 x 100 ms.
+ * Fewer independent measurements do not provide equivalent noise reduction. */
+#define BATTERY_SAMPLES 5
+#endif
 #define BATTERY_PLUG_DEBOUNCE_MS 500
 #define BATTERY_PLUG_SETTLE_MS 3000
 
@@ -121,10 +127,17 @@ static bool update_battery(int16_t battery_pptt)
 		sorted_pptt[j + 1] = key;
 	}
 
-	// Average across median 75% of samples
+	/* Retain warmup averaging and the PMIC's middle-75% rule. A full
+	 * five-sample ADC window drops both extremes (middle three), so one
+	 * isolated spike within the SOC reset threshold cannot bias the mean. */
+	uint8_t trim = samples / 8;
+#if !DT_NODE_HAS_STATUS(DT_NODELABEL(pmic_charger), okay)
+	if (samples == BATTERY_SAMPLES)
+		trim = 1;
+#endif
 	average_pptt = 0;
 	uint8_t valid_samples = 0;
-	for (uint8_t i = BATTERY_SAMPLES - (samples - samples / 8); i < (BATTERY_SAMPLES - samples / 8); i++)
+	for (uint8_t i = BATTERY_SAMPLES - samples + trim; i < BATTERY_SAMPLES - trim; i++)
 	{
 		if (sorted_pptt[i] != -1)
 		{
