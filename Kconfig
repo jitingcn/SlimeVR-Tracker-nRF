@@ -115,6 +115,22 @@ config STATUS_THREAD_STACK_SIZE
         Stack size of the status thread. Status changes call into the LED
         driver, so the LED strip update path can run on this stack as well.
 
+config USB_INIT_THREAD_STACK_SIZE
+    int "USB init thread stack size"
+    default 512
+    help
+        Stack size of the USB init thread. It registers the descriptors and
+        enables the USB device, and the USBD callbacks for the first bus
+        events (bus reset, configuration, VBUS) run in this context, so the
+        whole USB device stack init and enumeration path has to fit here.
+
+config USB_CTRL_THREAD_STACK_SIZE
+    int "USB control thread stack size"
+    default 512
+    help
+        Stack size of the USB control thread, which services CDC line state
+        changes and the DFU touch window.
+
 endmenu
 
 config USER_EXTRA_ACTIONS

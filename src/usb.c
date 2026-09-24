@@ -38,10 +38,10 @@ static void usb_ctrl_service_step(
 	const struct log_backend *backend,
 	struct usb_ctrl_service_state *state
 );
-K_THREAD_DEFINE(usb_ctrl_thread_id, 512, usb_ctrl_thread, NULL, NULL, NULL, CONSOLE_THREAD_PRIORITY, 0, 0);
+K_THREAD_DEFINE(usb_ctrl_thread_id, CONFIG_USB_CTRL_THREAD_STACK_SIZE, usb_ctrl_thread, NULL, NULL, NULL, CONSOLE_THREAD_PRIORITY, 0, 0);
 K_THREAD_DEFINE(
 	usb_init_thread_id,
-	256,
+	CONFIG_USB_INIT_THREAD_STACK_SIZE,
 	usb_init_thread,
 	NULL,
 	NULL,
