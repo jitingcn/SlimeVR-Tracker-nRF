@@ -3074,6 +3074,15 @@ void sensor_loop(void)
 				int64_t vqf_begin_ticks = k_uptime_ticks();
 				sensor_motion_prepare(frame.sensor_epoch, k_uptime_get());
 				if (!sensor_motion_frame_current(frame.sensor_epoch)) {
+					/* Stale frame: the sensor epoch moved, or a suspension
+					 * is pending. Drop the frame, but still run the loop
+					 * tail - it publishes the idle signal the shutdown
+					 * path waits for and is the only place this thread
+					 * self-suspends. Skipping it leaves the thread in the
+					 * acquisition path while the power thread force
+					 * suspends it, which strands a synchronous bus
+					 * transaction and blocks the shutdown sequence. */
+					sensor_loop_wait(time_begin);
 					continue;
 				}
 				sensor_loop_process_fifo(&frame);
