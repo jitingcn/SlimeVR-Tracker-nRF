@@ -79,12 +79,6 @@ int main(void)
 	bool booting_from_shutdown
 		= !reboot_counter && (reset_pin_reset || button_read()); // 0 means from user shutdown or failed ram validation
 
-	/* if button is not held after booting from shutdown, power off again
-	 * if button press is normal, continue boot
-	 * if button is held past the long-hold window, reset pairing only
-	 * when multiple-press actions are not enabled
-	 */
-
 	if (button_read()) {
 		while (button_read()) {
 			if (system_uptime_since_boot_ms() > 1000) {
@@ -101,11 +95,6 @@ int main(void)
 			}
 			k_msleep(1);
 		}
-#if USER_SHUTDOWN_ENABLED
-		if (system_uptime_since_boot_ms() < 50 && booting_from_shutdown) { // debounce
-			sys_request_system_off();
-		}
-#endif
 		if (system_uptime_since_boot_ms() <= 5000) {
 			set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);
 		} else {
