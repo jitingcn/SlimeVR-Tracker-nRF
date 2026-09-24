@@ -1,0 +1,11 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+board:
+  name: sk_cheesecake_nrf_p00
+  full_name: KemoPati SK CheeseCake NRF P00
+  vendor: kemopati
+  socs:
+    - name: nrf52840
+      variants:
+        - name: uf2

@@ -1,0 +1,19 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+identifier: sk_cheesecake_nrf_p00/nrf52840/uf2
+name: sk_cheesecake_nrf_p00_uf2
+vendor: kemopati
+type: mcu
+arch: arm
+ram: 256
+flash: 1024
+toolchain:
+  - zephyr
+  - gnuarmemb
+  - xtools
+supported:
+  - gpio
+  - i2s
+  - spi
+  - usb_device
