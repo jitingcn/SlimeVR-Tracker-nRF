@@ -70,4 +70,8 @@ enum sys_led_color {
 
 void set_led(enum sys_led_pattern led_pattern, int priority);
 
+/* Blocking black/power-gate barrier for shutdown threads only (not ISR or
+ * LED-worker context). Concurrent callers are serialized. */
+void led_shutdown(void);
+
 #endif

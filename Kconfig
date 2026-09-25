@@ -90,6 +90,15 @@ config LED_GLOBAL_BRIGHTNESS_PPTT
         Scale LED output brightness in parts per ten-thousand.
         10000 is full brightness, 2500 is 25%.
 
+config LED_NETWORK_SYNC
+    bool "Synchronize ordinary status LEDs to receiver time"
+    depends on CONNECTION_TDMA
+    default y
+    help
+        Share active, charging pulse and low-battery phase using fresh
+        receiver time. Other indications remain local. Raw 32-bit clock
+        wrap may alter one interval; subsequent periods are unchanged.
+
 config LED_STRIP_TIMING_LOG
     bool "Log LED strip frame timing"
     default n

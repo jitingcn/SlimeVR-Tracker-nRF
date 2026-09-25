@@ -42,6 +42,48 @@ to read image addresses from HEX output. The SDK includes the
 [upstream HEX-first UF2 fix](https://github.com/zephyrproject-rtos/zephyr/pull/107944)
 required for mapped partitions.
 
+## Synchronized status LEDs
+
+`CONFIG_LED_NETWORK_SYNC` is enabled by default with TDMA support. Trackers
+connected to the same receiver with a valid, fresh TDMA clock share the phase
+of ordinary status indications, on GPIO LEDs, PWM LEDs and LED strips:
+
+- Normal operation: 300 ms on every 10 seconds.
+- Charging: the existing 5-second breathing waveform.
+- Low battery: 500 ms on, 500 ms off.
+
+Error, pairing, calibration, DFU and finite event indications keep local timing,
+nominal durations, flash counts and priority. Their deadlines include output
+time rather than adding driver latency to every step. Steady lights have no
+phase to synchronize. Brightness settings and LED-strip low-brightness dithering
+remain in effect. Changing the visible pattern resets the strip's quantization
+residual without cycling device power, so the previous animation cannot change
+the next steady color. Repeating the same request does not reset dithering.
+
+No receiver update or protocol change is required. The existing 32-bit network
+clock wraps every 36 hours, 24 minutes and 32 seconds. A 5/10-second indication
+can have one altered interval at that boundary (the normal 10-second flash can
+have a 12-second gap); trackers use the same wrapped phase and resume their
+normal periods. The firmware does not independently extend the clock epoch on
+each tracker, so late joiners can use the same phase.
+
+Before initial synchronization, indications run locally. On loss of valid
+synchronization they continue locally using the last offset; this is not a
+guarantee of continued inter-device alignment. Fresh synchronization realigns
+them. Ordinary non-fading indications check clock changes at most 250 ms apart,
+without high-frequency LED writes; breathing retains its 5 ms rendering cadence.
+
+Entering the normal-operation indication retains at least 9.7 seconds of
+initial darkness, then joins a complete shared flash window. This can delay the
+first flash to just under 19.7 seconds. Repeated requests for the same state do
+not restart that waiting period. Set `CONFIG_LED_NETWORK_SYNC=n` for local-only
+timing.
+
+The LED worker owns rendering and device power transitions. Shutdown paths wait
+for its explicit black/off acknowledgment instead of suspending a thread during
+a driver transfer. Host runtime checks cover the production worker and clock
+adapter; they do not establish physical multi-device timing accuracy.
+
 ## Tracker events
 
 Matching receiver firmware can expose calibration lifecycle, tracker rest,

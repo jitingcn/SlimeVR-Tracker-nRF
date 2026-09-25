@@ -87,6 +87,15 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
  * force_resync bypasses admission for unslotted startup recovery. */
 int esb_write_ping(uint8_t *data, bool force_resync);
 
+/**
+ * Coherent, read-only status clock snapshot (both output pointers required).
+ * Always fills local_ticks with low32 local time in the fixed 32768 Hz domain.
+ * network_ticks defaults to local_ticks; true means a paired, error-free
+ * connection with valid runtime TDMA config and a fresh accepted time sync.
+ * A synchronized network_ticks value of zero is valid. No epoch unwrapping.
+ */
+bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks);
+
 #define PING_INTERVAL_MS 997
 // Ping/Pong types for ACK payload validation
 #define ESB_PING_TYPE 0xF0

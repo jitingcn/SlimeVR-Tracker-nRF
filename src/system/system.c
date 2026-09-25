@@ -831,7 +831,7 @@ int sys_user_shutdown(void)
 	if (button_read()) // If alternate button is available and still pressed, wait for the user to stop pressing the
 					   // button
 	{
-		set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
+		led_shutdown();
 		bool led_on = false;
 		while (button_read()) {
 			if (!led_on && k_uptime_get() - start_time > 500) // long pattern starts with led on, so delay pattern a bit
@@ -846,7 +846,7 @@ int sys_user_shutdown(void)
 			}
 			k_msleep(1);
 		}
-		set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
+		led_shutdown();
 	}
 #if USER_SHUTDOWN_ENABLED
 	return sys_request_system_off();

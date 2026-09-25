@@ -186,6 +186,19 @@ static bool tdma_config_snapshot(
 		&& *total_slots > 0 && *slot_index < *total_slots;
 }
 
+int64_t tdma_status_clock_max_age_ms(void)
+{
+#if CONFIG_CONNECTION_TDMA
+	uint32_t pack;
+	uint8_t slot_index, total_slots, slot_ticks;
+	uint16_t frame_ticks;
+	if (tdma_config_snapshot(&pack, &slot_index, &total_slots, &slot_ticks, &frame_ticks)) {
+		return TDMA_SYNC_STALE_MS;
+	}
+#endif
+	return -1;
+}
+
 static bool tdma_data_frame_guarded(
 	uint64_t frame_number,
 	uint8_t slot_index,

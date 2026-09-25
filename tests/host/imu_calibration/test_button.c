@@ -42,6 +42,7 @@ static bool button_read(void) { return !scripted && (reads++ == 0 || hold_to_can
 static void set_status(int id, bool value) { (void)id; button_status = value; }
 static bool get_status(int id) { (void)id; return button_status; }
 static void set_led(int pattern, int priority) { (void)pattern; (void)priority; }
+static void led_shutdown(void) {}
 static void watchdog_register_thread(int channel, int timeout) { (void)channel; (void)timeout; }
 static void watchdog_feed(int channel) { (void)channel; feeds++; }
 static void reboot_counter_write(int value) { (void)value; }

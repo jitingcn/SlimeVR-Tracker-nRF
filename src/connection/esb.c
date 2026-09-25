@@ -2225,6 +2225,38 @@ void esb_get_ping_request_data(uint8_t out[4])
 	irq_unlock(key);
 }
 
+bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks)
+{
+	/* ESB RX publishes these fields in interrupt context. Capture the kernel
+	 * timestamp and all eligibility/estimator state together; do the 64-bit
+	 * conversions and skew arithmetic after releasing the interrupt lock. */
+	unsigned key = irq_lock();
+	uint64_t kernel_ticks = k_uptime_ticks();
+	bool synced = server_time_synced && esb_conn_state == ESB_ST_PAIRED
+		&& get_status(SYS_STATUS_CONNECTION_ERROR) == 0;
+	int64_t max_age_ms = tdma_status_clock_max_age_ms();
+	int64_t last_sync_ms = g_last_sync_timestamp;
+	uint32_t offset = g_server_ticks_offset;
+	uint32_t reference_ticks = g_last_sync_local_ticks;
+	int32_t skew_ppb = g_clock_skew_ppb;
+	irq_unlock(key);
+
+	uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks);
+	*local_ticks = local;
+	*network_ticks = local;
+	int64_t age_ms = (int64_t)k_ticks_to_ms_floor64(kernel_ticks) - last_sync_ms;
+	if (!synced || max_age_ms < 0 || age_ms < 0 || age_ms > max_age_ms) {
+		return false;
+	}
+
+	uint32_t elapsed = local - reference_ticks;
+	int64_t correction = (int64_t)skew_ppb * elapsed / 1000000000LL;
+	/* Unsigned additions deliberately retain the receiver's low32 epoch;
+	 * zero is a valid synchronized timestamp, not an unavailable sentinel. */
+	*network_ticks = local + offset + (uint32_t)correction;
+	return true;
+}
+
 uint64_t esb_get_server_time_ticks_64(void)
 {
 	if (!server_time_synced) {

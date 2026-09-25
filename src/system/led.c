@@ -8,6 +8,10 @@
 
 #include "led.h"
 #include "led_strip_fade.h"
+#include "led_sync.h"
+#if CONFIG_LED_NETWORK_SYNC
+#include "connection/esb.h"
+#endif
 
 LOG_MODULE_REGISTER(led, LOG_LEVEL_INF);
 
@@ -78,13 +82,15 @@ static const struct pwm_dt_spec pwm_led1 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led1));
 static const struct pwm_dt_spec pwm_led2 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 #endif
 
-static enum sys_led_pattern current_led_pattern;
-static int current_priority;
-
-#if LED_EXISTS || LED_STRIP_EXISTS
+#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
+static struct k_spinlock led_request_lock;
+K_SEM_DEFINE(led_changed, 0, 1);
+K_SEM_DEFINE(led_quiesced, 0, 1);
+K_MUTEX_DEFINE(led_shutdown_lock);
+static bool shutdown_pending;
 static enum sys_led_pattern led_patterns[SYS_LED_PATTERN_DEPTH]
 	= {[0 ...(SYS_LED_PATTERN_DEPTH - 1)] = SYS_LED_PATTERN_OFF};
-static int led_pattern_state;
+static uint32_t led_generations[SYS_LED_PATTERN_DEPTH];
 
 static int led_pin_init(void)
 {
@@ -313,20 +319,6 @@ static void led_strip_timing_note(uint32_t start_ticks)
 }
 #endif
 
-/*
- * Sleep the remainder of a nominal pattern step. A strip update blocks for over
- * a millisecond, so sleeping the full step on top of it would stretch the
- * pattern cadence by a third (measured: 6.65 s per breathing cycle instead of
- * the intended 5 s) and make the fade steps that much coarser.
- */
-static void led_pattern_sleep(uint32_t step_start_ticks, uint32_t step_us)
-{
-	uint32_t elapsed_us = k_ticks_to_us_floor32(k_uptime_ticks() - step_start_ticks);
-
-	if (elapsed_us < step_us) {
-		k_usleep(step_us - elapsed_us);
-	}
-}
 
 static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value_pptt)
 {
@@ -372,200 +364,307 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 }
 #endif
 
-void set_led(enum sys_led_pattern led_pattern, int priority)
+/* Only the worker owns driver calls, including power and strip transfers. */
+void set_led(enum sys_led_pattern pattern, int priority)
 {
-	LOG_DBG("set_led: current_led_pattern %d, current_priority %d", current_led_pattern, current_priority);
-	LOG_DBG("set_led: pattern %d, priority %d", led_pattern, priority);
-#if LED_EXISTS || LED_STRIP_EXISTS
-	if (led_pattern <= SYS_LED_PATTERN_OFF && k_current_get() == led_thread_id) {
-		led_patterns[current_priority] = led_pattern;
-	} else {
-		led_patterns[priority] = led_pattern;
-	}
-	for (priority = 0; priority < SYS_LED_PATTERN_DEPTH; priority++) {
-		if (led_patterns[priority] == SYS_LED_PATTERN_OFF) {
-			continue;
-		}
-		led_pattern = led_patterns[priority];
-		break;
-	}
-	if (led_pattern == current_led_pattern && led_pattern > SYS_LED_PATTERN_OFF) {
+#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
+	if (priority < 0 || priority >= SYS_LED_PATTERN_DEPTH) {
 		return;
 	}
-	current_led_pattern = led_pattern;
-	current_priority = priority;
-	led_pattern_state = 0;
-	if (current_led_pattern <= SYS_LED_PATTERN_OFF) {
-		led_suspend();
-		k_thread_suspend(led_thread_id);
-		LOG_DBG("set_led: suspended led_thread_id");
-	} else if (k_current_get() != led_thread_id) // do not suspend if called from thread
-	{
-		k_thread_suspend(led_thread_id);
-		LOG_DBG("set_led: suspended led_thread_id");
-		led_resume();
-		k_thread_resume(led_thread_id);
-		k_wakeup(led_thread_id);
-		LOG_DBG("set_led: resumed led_thread_id");
-	} else {
-		led_resume();
-		k_thread_resume(led_thread_id);
-		k_wakeup(led_thread_id);
-		LOG_DBG("set_led: resumed led_thread_id");
+	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
+	if (led_patterns[priority] != pattern) {
+		led_patterns[priority] = pattern;
+		led_generations[priority]++;
 	}
+	k_spin_unlock(&led_request_lock, key);
+	k_sem_give(&led_changed);
+#else
+	(void)pattern;
+	(void)priority;
 #endif
 }
 
+void led_shutdown(void)
+{
+#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
+	/* Shutdown callers may overlap; this operation cannot be superseded by
+	 * an ordinary request while the driver finishes its current transfer. */
+	k_mutex_lock(&led_shutdown_lock, K_FOREVER);
+	k_sem_reset(&led_quiesced);
+	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
+	shutdown_pending = true;
+	k_spin_unlock(&led_request_lock, key);
+	k_sem_give(&led_changed);
+	k_sem_take(&led_quiesced, K_FOREVER);
+	k_mutex_unlock(&led_shutdown_lock);
+#endif
+}
+
+#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
+struct led_request {
+	enum sys_led_pattern pattern;
+	int owner;
+	uint32_t generation;
+};
+
+static struct led_request led_request_snapshot(void)
+{
+	struct led_request request = {.pattern = SYS_LED_PATTERN_OFF, .owner = -1};
+	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
+	for (int i = 0; i < SYS_LED_PATTERN_DEPTH; i++) {
+		if (led_patterns[i] != SYS_LED_PATTERN_OFF) {
+			request.pattern = led_patterns[i];
+			request.owner = i;
+			request.generation = led_generations[i];
+			break;
+		}
+	}
+	k_spin_unlock(&led_request_lock, key);
+	return request;
+}
+
+static bool led_complete(struct led_request request, enum sys_led_pattern result)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
+	int winner = -1;
+	for (int i = 0; i < SYS_LED_PATTERN_DEPTH; i++) {
+		if (led_patterns[i] != SYS_LED_PATTERN_OFF) {
+			winner = i;
+			break;
+		}
+	}
+	bool matches = request.owner >= 0 && winner == request.owner
+		&& led_patterns[request.owner] == request.pattern
+		&& led_generations[request.owner] == request.generation;
+	if (matches) {
+		led_patterns[request.owner] = result;
+		led_generations[request.owner]++;
+	}
+	k_spin_unlock(&led_request_lock, key);
+	k_sem_give(&led_changed);
+	return matches;
+}
+
+static uint32_t led_local_ticks(void)
+{
+	/* nRF54 kernel ticks are 31250 Hz; LED phase is always 32768 Hz. */
+	uint64_t ticks = k_uptime_ticks();
+	return (uint32_t)((ticks / CONFIG_SYS_CLOCK_TICKS_PER_SEC) * LED_SYNC_HZ
+		+ (ticks % CONFIG_SYS_CLOCK_TICKS_PER_SEC) * LED_SYNC_HZ
+			/ CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+}
+#endif
+
 static void led_thread(void)
 {
-#if !LED_EXISTS && !LED_STRIP_EXISTS
+#if !LED_EXISTS && !LED_STRIP_EXISTS && !PWM_LED_EXISTS
 	LOG_WRN("LED GPIO does not exist");
 	return;
 #else
-	while (1) {
-		LOG_DBG("led_thread: current_led_pattern %d", current_led_pattern);
-		switch (current_led_pattern) {
-		case SYS_LED_PATTERN_ON:
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 10000);
-			k_thread_suspend(led_thread_id);
-			break;
-		case SYS_LED_PATTERN_SHORT:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_PAIRING, 10000, led_pattern_state * 10000);
-			k_msleep(led_pattern_state == 1 ? 100 : 900);
-			break;
-		case SYS_LED_PATTERN_LONG:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
-			k_msleep(500);
-			break;
-		case SYS_LED_PATTERN_FLASH:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
-			k_msleep(200);
-			break;
-
-		case SYS_LED_PATTERN_ONESHOT_POWERON:
-			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, !(led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 7) {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			} else {
-				k_msleep(200);
-			}
-			break;
-		case SYS_LED_PATTERN_ONESHOT_POWEROFF:
-			if (led_pattern_state++ > 0) {
-				uint32_t fade_step_start = k_uptime_ticks();
-
-				led_pin_set(
-					SYS_LED_COLOR_DEFAULT,
-					(202 - led_pattern_state) * 50,
-					(led_pattern_state != 202 ? 10000 : 0)
-				);
-				led_pattern_sleep(fade_step_start, 5000);
-			} else {
+	enum sys_led_pattern current = SYS_LED_PATTERN_OFF;
+	int owner = -1;
+	uint32_t generation = 0;
+	int state = 0;
+	bool powered = false;
+	int last_value = -1;
+	int last_brightness = -1;
+	enum sys_led_color last_color = SYS_LED_COLOR_DEFAULT;
+	int64_t due = 0;
+	uint32_t local_origin = 0;
+	struct led_sync_start active = {0};
+#if CONFIG_LED_NETWORK_SYNC
+	uint32_t held_offset = 0;
+	bool have_offset = false;
+#endif
+	for (;;) {
+		k_spinlock_key_t key = k_spin_lock(&led_request_lock);
+		bool shutting_down = shutdown_pending;
+		k_spin_unlock(&led_request_lock, key);
+		if (shutting_down) {
+			if (powered) {
 				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
 			}
-			if (led_pattern_state == 202) {
-				set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
-			} else if (led_pattern_state == 1) {
-				k_msleep(250);
+			led_suspend();
+			powered = false;
+			last_value = -1;
+			key = k_spin_lock(&led_request_lock);
+			led_patterns[SYS_LED_PRIORITY_HIGHEST] = SYS_LED_PATTERN_OFF_FORCE;
+			led_generations[SYS_LED_PRIORITY_HIGHEST]++;
+			shutdown_pending = false;
+			k_spin_unlock(&led_request_lock, key);
+			k_sem_give(&led_quiesced);
+		}
+		struct led_request request = led_request_snapshot();
+		int64_t now = k_uptime_ticks();
+		if (request.pattern != current ||
+		    (request.owner == owner && request.generation != generation)) {
+			current = request.pattern;
+			state = 0;
+			due = now;
+			local_origin = led_local_ticks();
+			active = (struct led_sync_start){.entered = local_origin};
+			/* A new effect starts with a fresh first frame, not the previous
+			 * effect's fractional strip brightness. Keep hardware powered. */
+#if LED_STRIP_EXISTS
+			led_strip_fade_reset(&led_fade);
+#endif
+			last_value = -1;
+		}
+		owner = request.owner;
+		generation = request.generation;
+		if (current <= SYS_LED_PATTERN_OFF) {
+			if (powered) {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
+				led_suspend();
+				powered = false;
 			}
-			break;
-		case SYS_LED_PATTERN_ONESHOT_PROGRESS:
-			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, !(led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 5) {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			} else {
-				k_msleep(200);
-			}
-			break;
-		case SYS_LED_PATTERN_ONESHOT_COMPLETE:
-			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, !(led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 9) {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			} else {
-				k_msleep(200);
-			}
-			break;
-		case SYS_LED_PATTERN_ONESHOT_PING:
-			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, (led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 20) { // 10 flashes (states 1-20), turn off at 20
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			} else {
-				k_msleep(200);
-			}
-			break;
-
+			k_sem_take(&led_changed, K_FOREVER);
+			continue;
+		}
+		if (!powered) {
+			led_resume();
+			powered = true;
+			last_value = -1;
+		}
+		if (now < due) {
+			k_sem_take(&led_changed, due == INT64_MAX ? K_FOREVER : K_TICKS(due - now));
+			continue;
+		}
+		uint32_t wait_us = 0;
+		bool forever = false;
+		int brightness = 10000;
+		int value = 0;
+		enum sys_led_color color = SYS_LED_COLOR_DEFAULT;
+		enum sys_led_pattern completed = SYS_LED_PATTERN_OFF;
+		bool complete = false;
+		switch (current) {
+		case SYS_LED_PATTERN_ON:
 		case SYS_LED_PATTERN_ON_PERSIST:
-			led_pin_set(SYS_LED_COLOR_SUCCESS, 2000, 10000);
-			k_thread_suspend(led_thread_id);
+			color = current == SYS_LED_PATTERN_ON ? SYS_LED_COLOR_DEFAULT : SYS_LED_COLOR_SUCCESS;
+			brightness = current == SYS_LED_PATTERN_ON ? 10000 : 2000;
+			value = 10000;
+			forever = true;
+			break;
+		case SYS_LED_PATTERN_SHORT:
+		case SYS_LED_PATTERN_LONG:
+		case SYS_LED_PATTERN_FLASH:
+		case SYS_LED_PATTERN_DFU:
+			state = (state + 1) % 2;
+			value = state * 10000;
+			color = current == SYS_LED_PATTERN_SHORT ? SYS_LED_COLOR_PAIRING :
+				current == SYS_LED_PATTERN_DFU ? SYS_LED_COLOR_CHARGING : SYS_LED_COLOR_DEFAULT;
+			wait_us = current == SYS_LED_PATTERN_SHORT ? (state ? 100000 : 900000) :
+				current == SYS_LED_PATTERN_LONG ? 500000 :
+				current == SYS_LED_PATTERN_FLASH ? 200000 : 100000;
+			break;
+		case SYS_LED_PATTERN_ONESHOT_POWERON:
+		case SYS_LED_PATTERN_ONESHOT_PROGRESS:
+		case SYS_LED_PATTERN_ONESHOT_COMPLETE:
+		case SYS_LED_PATTERN_ONESHOT_PING:
+			state++;
+			color = current == SYS_LED_PATTERN_ONESHOT_PROGRESS ||
+				current == SYS_LED_PATTERN_ONESHOT_COMPLETE ? SYS_LED_COLOR_SUCCESS : SYS_LED_COLOR_DEFAULT;
+			value = (current == SYS_LED_PATTERN_ONESHOT_PING ? state % 2 : !(state % 2)) * 10000;
+			complete = state == (current == SYS_LED_PATTERN_ONESHOT_POWERON ? 7 :
+				current == SYS_LED_PATTERN_ONESHOT_PROGRESS ? 5 :
+				current == SYS_LED_PATTERN_ONESHOT_COMPLETE ? 9 : 20);
+			wait_us = 200000;
+			break;
+		case SYS_LED_PATTERN_ONESHOT_POWEROFF:
+			state++;
+			brightness = state == 1 ? 10000 : (202 - state) * 50;
+			value = state == 1 || state == 202 ? 0 : 10000;
+			wait_us = state == 1 ? 250000 : 5000;
+			complete = state == 202;
+			completed = SYS_LED_PATTERN_OFF_FORCE;
 			break;
 		case SYS_LED_PATTERN_LONG_PERSIST:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_CHARGING, 2000, led_pattern_state * 10000);
-			k_msleep(500);
-			break;
 		case SYS_LED_PATTERN_PULSE_PERSIST:
-			led_pattern_state = (led_pattern_state + 1) % 1000;
-			uint32_t step_start = k_uptime_ticks();
-			//			float led_value = sinf(led_pattern_state * (M_PI / 1000));
-			//			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_value * 10000);
-			int led_value = led_pattern_state > 500 ? 1000 - led_pattern_state : led_pattern_state;
-			if (led_value < 200) {
-				led_value = (led_value) * 30;
-			} else if (led_value < 300) {
-				led_value = (led_value - 200) * 20 + 6000;
-			} else if (led_value < 400) {
-				led_value = (led_value - 300) * 15 + 8000;
-			} else {
-				led_value = (led_value - 400) * 5 + 9500;
+		case SYS_LED_PATTERN_ACTIVE_PERSIST: {
+			uint32_t local = led_local_ticks();
+			uint32_t clock = local - local_origin;
+#if CONFIG_LED_NETWORK_SYNC
+			uint32_t network;
+			if (esb_get_status_clock(&local, &network)) {
+				if (!have_offset && !active.started) {
+					active.joined = false;
+				}
+				held_offset = network - local;
+				have_offset = true;
 			}
-			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_value);
-			led_pattern_sleep(step_start, 5000);
+			clock = have_offset ? local + held_offset : local - local_origin;
+#endif
+			uint32_t distance;
+			if (current == SYS_LED_PATTERN_PULSE_PERSIST) {
+				color = SYS_LED_COLOR_CHARGING;
+				value = led_sync_pulse(led_sync_phase(clock, 5U * LED_SYNC_HZ));
+				distance = 164U;
+			} else if (current == SYS_LED_PATTERN_LONG_PERSIST) {
+				color = SYS_LED_COLOR_CHARGING;
+				brightness = 2000;
+				uint32_t phase = led_sync_phase(clock, LED_SYNC_HZ);
+				value = phase < LED_SYNC_HZ / 2U ? 10000 : 0;
+				distance = LED_SYNC_HZ / 2U - phase % (LED_SYNC_HZ / 2U);
+			} else {
+				uint32_t phase = led_sync_phase(clock, LED_SYNC_ACTIVE_PERIOD);
+				value = led_sync_active(&active, local, phase) ? 10000 : 0;
+				distance = phase < LED_SYNC_ACTIVE_OFF ?
+					LED_SYNC_ACTIVE_OFF - phase : LED_SYNC_ACTIVE_PERIOD - phase;
+				if (!active.eligible) {
+					uint32_t hold = LED_SYNC_ACTIVE_OFF - (local - active.entered);
+					if (hold < distance) {
+						distance = hold;
+					}
+				}
+			}
+			distance = led_sync_until(clock, distance);
+#if CONFIG_LED_NETWORK_SYNC
+			if (distance > LED_SYNC_HZ / 4U) {
+				distance = LED_SYNC_HZ / 4U;
+			}
+#endif
+			wait_us = (uint32_t)(((uint64_t)distance * 1000000U + LED_SYNC_HZ - 1U) / LED_SYNC_HZ);
 			break;
-		case SYS_LED_PATTERN_ACTIVE_PERSIST: // off duration first because the device may turn on multiple times rapidly
-											 // and waste battery power
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, !led_pattern_state * 10000);
-			k_msleep(led_pattern_state ? 9700 : 300);
-			break;
-
-		case SYS_LED_PATTERN_ERROR_A: // TODO: should this use 20% duty cycle?
-			led_pattern_state = (led_pattern_state + 1) % 10;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 4 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
-			break;
+		}
+		case SYS_LED_PATTERN_ERROR_A:
 		case SYS_LED_PATTERN_ERROR_B:
-			led_pattern_state = (led_pattern_state + 1) % 10;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 6 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
-			break;
 		case SYS_LED_PATTERN_ERROR_C:
-			led_pattern_state = (led_pattern_state + 1) % 10;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 8 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
-			break;
 		case SYS_LED_PATTERN_ERROR_D:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, led_pattern_state * 10000);
-			k_msleep(500);
+			color = SYS_LED_COLOR_ERROR;
+			state = (state + 1) % (current == SYS_LED_PATTERN_ERROR_D ? 2 : 10);
+			value = (state % 2 && (current == SYS_LED_PATTERN_ERROR_D ||
+				state < 4 + 2 * ((int)current - SYS_LED_PATTERN_ERROR_A))) * 10000;
+			wait_us = 500000;
 			break;
-
-		case SYS_LED_PATTERN_DFU:
-			/* Fast yellow pulse: 100 ms on, 100 ms off. */
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_pattern_state * 10000);
-			k_msleep(100);
-			break;
-
 		default:
-			LOG_DBG("led_thread: suspending led_thread_id");
-			k_thread_suspend(led_thread_id);
+			forever = true;
+			break;
+		}
+		/* Fade frames retain sub-level dither; stable outputs need no
+		 * transfer merely to check clock freshness. */
+		if (value != last_value || brightness != last_brightness || color != last_color
+		    || current == SYS_LED_PATTERN_PULSE_PERSIST
+		    || current == SYS_LED_PATTERN_ONESHOT_POWEROFF) {
+			led_pin_set(color, brightness, value);
+			last_value = value;
+			last_brightness = brightness;
+			last_color = color;
+		}
+		if (complete) {
+			if (!led_complete(request, completed)) {
+				/* A new winning owner may inherit this final frame. A
+				 * replacement in the same slot instead restarts above. */
+				state--;
+			} else {
+				/* A lower-priority one-shot may now become visible. */
+				state = 0;
+			}
+			due = k_uptime_ticks();
+		} else if (forever) {
+			due = INT64_MAX;
+			k_sem_take(&led_changed, K_FOREVER);
+		} else {
+			due = now + k_us_to_ticks_ceil64(wait_us);
 		}
 	}
 #endif
