@@ -10,6 +10,51 @@ config USE_SLIMENRF_CONSOLE
     help
         Use basic console for commands.
 
+config CUSTOMER_INFO
+    bool "Read CUSTOMER provenance"
+    depends on SOC_SERIES_NRF52
+    default y
+    select CRC
+    help
+        Report the generic SNCI record at CUSTOMER byte offset 64.
+        Read-only convention, not a reservation or ownership claim.
+        No UICR writes, boot gating, or authentication are performed.
+
+config CUSTOMER_INFO_CHECK_IDENTITY
+    bool "Compare CUSTOMER provenance with an explicit expected identity"
+    depends on CUSTOMER_INFO
+    default n
+    help
+        Diagnostic comparison only; mismatch never blocks startup.
+        Set the expected namespace, product and hardware revision explicitly.
+        A blank manufacturer namespace leaves identity not_checked.
+
+config CUSTOMER_INFO_EXPECTED_MANUFACTURER
+    string "Expected manufacturer namespace"
+    depends on CUSTOMER_INFO_CHECK_IDENTITY
+    help
+        Explicit namespace, not inferred from the firmware board name.
+        Use 1-7 uppercase letters/digits with optional internal single hyphens.
+        Leave blank to disable comparison.
+
+config CUSTOMER_INFO_EXPECTED_PRODUCT_ID
+    int "Expected product ID"
+    depends on CUSTOMER_INFO_CHECK_IDENTITY
+    range -1 65535
+    default -1
+    help
+        Explicit product ID in the expected manufacturer's namespace.
+        Minus one means unspecified and leaves identity not_checked.
+
+config CUSTOMER_INFO_EXPECTED_HARDWARE_REVISION
+    int "Expected hardware revision"
+    depends on CUSTOMER_INFO_CHECK_IDENTITY
+    range -1 65535
+    default -1
+    help
+        Explicit hardware revision; zero is a valid revision.
+        Minus one means unspecified and leaves identity not_checked.
+
 choice
 	prompt "Battery voltage mapping"
     default BATTERY_USE_REG_LDO_MAPPING

@@ -9,6 +9,13 @@
 
 #include <hal/nrf_gpio.h>
 
+#if CONFIG_CUSTOMER_INFO && CONFIG_CUSTOMER_INFO_SKT0
+#include <hal/nrf_uicr.h>
+#include <zephyr/sys/byteorder.h>
+#include "../../../src/system/customer_info.h"
+#include "../sk_common/customer_info_skt0.h"
+#endif
+
 /*
  * Power-pin bring-up shared by the SK CheeseCake NRF P00 and P10 tracker
  * boards; both packages carry this file unchanged. The P10-only external clock
@@ -54,3 +61,26 @@ static int board_sk_cheesecake_init(void)
 }
 
 SYS_INIT(board_sk_cheesecake_init, PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+
+#if CONFIG_CUSTOMER_INFO && CONFIG_CUSTOMER_INFO_SKT0
+void customer_info_read_board_variant(struct customer_info_result *out)
+{
+	uint8_t record[CUSTOMER_INFO_RECORD_SIZE];
+	const volatile uint32_t *customer = &NRF_UICR->CUSTOMER[0];
+
+	for (size_t i = 0; i < CUSTOMER_INFO_RECORD_SIZE / sizeof(uint32_t); i++) {
+		uint32_t word = customer[i];
+		sys_put_le32(word, record + i * sizeof(uint32_t));
+	}
+	customer_info_skt0_decode(record, sizeof(record), out);
+	out->source = out->status == CUSTOMER_INFO_ABSENT
+		? CUSTOMER_INFO_SOURCE_NONE : CUSTOMER_INFO_SOURCE_SLOT_A;
+#if CONFIG_CUSTOMER_INFO_SKT0_PRODUCT_ID >= 0 && CONFIG_CUSTOMER_INFO_SKT0_HARDWARE_REVISION >= 0
+	if (out->status == CUSTOMER_INFO_VALID) {
+		out->identity = out->info.product_id == CONFIG_CUSTOMER_INFO_SKT0_PRODUCT_ID &&
+			out->info.hardware_revision == CONFIG_CUSTOMER_INFO_SKT0_HARDWARE_REVISION
+			? CUSTOMER_INFO_IDENTITY_MATCH : CUSTOMER_INFO_IDENTITY_MISMATCH;
+	}
+#endif
+}
+#endif

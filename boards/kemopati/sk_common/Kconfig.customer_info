@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config CUSTOMER_INFO_SKT0
+	bool "Read legacy SKT0 customer information"
+	depends on SOC_SERIES_NRF52
+	default n
+	help
+	  Read the SK factory record in UICR CUSTOMER words 0..15 only when
+	  the generic SNCI record in words 16..31 is completely erased.
+	  This compatibility reader never writes UICR. This preference is inert
+	  when CUSTOMER_INFO is disabled.
+
+config CUSTOMER_INFO_SKT0_PRODUCT_ID
+	int "Expected SKT0 product ID (-1 to leave unchecked)"
+	depends on SOC_SERIES_NRF52
+	range -1 65535
+	default -1
+	help
+	  SKT0 numeric identity is checked only when both this value and
+	  CUSTOMER_INFO_SKT0_HARDWARE_REVISION are nonnegative. Zero is valid.
+	  This metadata is inert when CUSTOMER_INFO or CUSTOMER_INFO_SKT0 is disabled.
+
+config CUSTOMER_INFO_SKT0_HARDWARE_REVISION
+	int "Expected SKT0 hardware revision (-1 to leave unchecked)"
+	depends on SOC_SERIES_NRF52
+	range -1 65535
+	default -1
+	help
+	  A mismatch is diagnostic and does not invalidate the factory record.
+	  This metadata is inert when CUSTOMER_INFO or CUSTOMER_INFO_SKT0 is disabled.

@@ -21,6 +21,9 @@
 #if CONFIG_THREAD_ANALYZER
 #include <zephyr/debug/thread_analyzer.h>
 #endif
+#if CONFIG_CUSTOMER_INFO
+#include "system/customer_info.h"
+#endif
 
 #define USB_EXISTS 0
 #if CONFIG_USB_DEVICE_STACK_NEXT
@@ -1082,6 +1085,10 @@ static void print_battery(void)
 static void print_info(void)
 {
 	print_board();
+#if CONFIG_CUSTOMER_INFO
+	printk("\n");
+	customer_info_report(CUSTOMER_INFO_REPORT_CONSOLE_SUMMARY);
+#endif
 	printk("\n");
 	print_sensor_summary();
 	printk("\n");
@@ -1253,6 +1260,9 @@ static void print_help(void)
 	printk("\n=== Available Commands ===\n\n");
 	printk("Device Information:\n");
 	printk("  info                       Get device information\n");
+#if CONFIG_CUSTOMER_INFO
+	printk("  customer                   Get manufacturing provenance details\n");
+#endif
 	printk("  sensor                     Get sensor rates and calibration detail\n");
 	printk("  uptime                     Get device uptime\n");
 	printk("  battery                    Get battery information\n");
@@ -1488,6 +1498,15 @@ static void console_cmd_info(size_t argc, char **argv)
 	ARG_UNUSED(argv);
 	print_info();
 }
+
+#if CONFIG_CUSTOMER_INFO
+static void console_cmd_customer(size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	customer_info_report(CUSTOMER_INFO_REPORT_CONSOLE_DETAILS);
+}
+#endif
 
 static void console_cmd_sensor(size_t argc, char **argv)
 {
@@ -2159,6 +2178,9 @@ static void console_cmd_test(size_t argc, char **argv)
 static const struct console_cmd console_cmds[] = {
 	{"help", console_cmd_help},
 	{"info", console_cmd_info},
+#if CONFIG_CUSTOMER_INFO
+	{"customer", console_cmd_customer},
+#endif
 	{"sensor", console_cmd_sensor},
 	{"uptime", console_cmd_uptime},
 	{"shutdown", console_cmd_shutdown},

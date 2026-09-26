@@ -23,6 +23,9 @@
 #include "globals.h"
 #include "system/system.h"
 #include "system/uptime.h"
+#if CONFIG_CUSTOMER_INFO
+#include "system/customer_info.h"
+#endif
 // #include "timer.h"
 #include "connection/esb.h"
 #include "sensor/sensor.h"
@@ -149,6 +152,9 @@ int main(void)
 	}
 
 	sys_reset_mode(reset_mode);
+#if CONFIG_CUSTOMER_INFO
+	customer_info_report(CUSTOMER_INFO_REPORT_LOG_SUMMARY);
+#endif
 
 	return 0;
 }
