@@ -28,13 +28,18 @@
 #define LOG_DBG(...)
 #define LOG_WRN(...)
 #define LOG_INF(...)
+void host_log_error(const char *format, ...);
+#define LOG_ERR(...) host_log_error(__VA_ARGS__)
 #define LOG_LEVEL_INF 0
 #define DT_PATH(x) x
 #define DT_ALIAS(x) x
 #define HOST_CAT_INNER(a,b) a##b
 #define HOST_CAT(a,b) HOST_CAT_INNER(a,b)
 #define DT_NODE_HAS_PROP(n,p) HOST_CAT(DT_PROP_, p)
-#define DT_PROP_led_en_gpios 1
+#ifndef HOST_GATE
+#define HOST_GATE 1
+#endif
+#define DT_PROP_led_en_gpios HOST_GATE
 #ifndef HOST_LED
 #define HOST_LED 1
 #endif
@@ -78,6 +83,7 @@ static inline void k_spin_unlock(struct k_spinlock *s, k_spinlock_key_t k) {(voi
 static inline void k_sem_give(struct k_sem *s) {s->count = 1;}
 static inline uint64_t k_us_to_ticks_ceil64(uint64_t us) {return (us * CONFIG_SYS_CLOCK_TICKS_PER_SEC + 999999) / 1000000;}
 int64_t k_uptime_ticks(void);
+int32_t k_msleep(int32_t duration);
 struct k_mutex { int unused; };
 #define K_MUTEX_DEFINE(n) struct k_mutex n
 static inline void k_mutex_lock(struct k_mutex *m, k_timeout_t t) {(void)m; (void)t;}

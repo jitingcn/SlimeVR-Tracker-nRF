@@ -80,9 +80,12 @@ not restart that waiting period. Set `CONFIG_LED_NETWORK_SYNC=n` for local-only
 timing.
 
 The LED worker owns rendering and device power transitions. Shutdown paths wait
-for its explicit black/off acknowledgment instead of suspending a thread during
-a driver transfer. Host runtime checks cover the production worker and clock
-adapter; they do not establish physical multi-device timing accuracy.
+for its black/off operation acknowledgment instead of suspending a thread during
+a driver transfer. Gated LED strips wait 2 ms after power enable before device
+resume; strip shutdown waits 1 ms after the black-frame call returns before
+suspend/power removal. These are conservative timing margins, not confirmation
+of I2S hardware completion or successful black-frame delivery. A failed black
+write does not prevent power removal or block shutdown indefinitely.
 
 ## Tracker events
 

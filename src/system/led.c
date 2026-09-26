@@ -31,6 +31,8 @@ static const struct gpio_dt_spec led_en = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, led
 #define STRIP_NODE DT_ALIAS(led_strip)
 static const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
 static struct led_strip_fade led_fade;
+static bool strip_error_logged;
+static int64_t strip_error_log_ticks;
 #endif
 
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, led_gpios)
@@ -173,6 +175,10 @@ static void led_resume(void)
 #if LED_EN_EXISTS
 	gpio_pin_configure_dt(&led_en, GPIO_OUTPUT);
 	gpio_pin_set_dt(&led_en, 1);
+#if LED_STRIP_EXISTS
+	/* Rail settling margin, only on the worker's off -> on transition. */
+	k_msleep(2);
+#endif
 #endif
 #ifdef LED_STRIP_EXISTS
 	pm_device_action_run(strip, PM_DEVICE_ACTION_RESUME);
@@ -320,7 +326,7 @@ static void led_strip_timing_note(uint32_t start_ticks)
 #endif
 
 
-static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value_pptt)
+static bool led_pin_set(enum sys_led_color color, int brightness_pptt, int value_pptt)
 {
 	LOG_DBG("led_pin_set: color %d, brightness %d, value %d", color, brightness_pptt, value_pptt);
 	if (brightness_pptt < 0) {
@@ -337,16 +343,33 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 	static struct led_rgb pixel[1];
 	value_pptt = value_pptt * brightness_pptt / 10000;
 	value_pptt = value_pptt * CONFIG_LED_GLOBAL_BRIGHTNESS_PPTT / 10000;
-	pixel[0].r = led_strip_fade_next(&led_fade, led_pwm_period[color][0], value_pptt, 0);
-	pixel[0].g = led_strip_fade_next(&led_fade, led_pwm_period[color][1], value_pptt, 1);
-	pixel[0].b = led_strip_fade_next(&led_fade, led_pwm_period[color][2], value_pptt, 2);
+	struct led_strip_fade next_fade = led_fade;
+	const struct led_rgb requested = {
+		.r = led_strip_fade_next(&next_fade, led_pwm_period[color][0], value_pptt, 0),
+		.g = led_strip_fade_next(&next_fade, led_pwm_period[color][1], value_pptt, 1),
+		.b = led_strip_fade_next(&next_fade, led_pwm_period[color][2], value_pptt, 2),
+	};
+	pixel[0] = requested;
 #if CONFIG_LED_STRIP_TIMING_LOG
 	uint32_t led_frame_start = k_uptime_ticks();
 #endif
-	led_strip_update_rgb(strip, pixel, 1);
+	int err = led_strip_update_rgb(strip, pixel, 1);
 #if CONFIG_LED_STRIP_TIMING_LOG
 	led_strip_timing_note(led_frame_start);
 #endif
+	if (err < 0) {
+		int64_t now = k_uptime_ticks();
+		if (!strip_error_logged ||
+		    now - strip_error_log_ticks >= CONFIG_SYS_CLOCK_TICKS_PER_SEC) {
+			LOG_ERR("strip RGB %u/%u/%u update failed: %d",
+				requested.r, requested.g, requested.b, err);
+			strip_error_logged = true;
+			strip_error_log_ticks = now;
+		}
+		return false;
+	}
+	/* A rejected frame must not spend the fractional brightness carry. */
+	led_fade = next_fade;
 #elif PWM_LED_EXISTS
 	value_pptt = value_pptt * brightness_pptt / 10000;
 	value_pptt = value_pptt * CONFIG_LED_GLOBAL_BRIGHTNESS_PPTT / 10000;
@@ -361,6 +384,7 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 #else
 	gpio_pin_set_dt(&led, value_pptt > 5000);
 #endif
+	return true;
 }
 #endif
 
@@ -470,6 +494,7 @@ static void led_thread(void)
 	int last_brightness = -1;
 	enum sys_led_color last_color = SYS_LED_COLOR_DEFAULT;
 	int64_t due = 0;
+	unsigned steady_attempts = 0;
 	uint32_t local_origin = 0;
 	struct led_sync_start active = {0};
 #if CONFIG_LED_NETWORK_SYNC
@@ -483,6 +508,10 @@ static void led_thread(void)
 		if (shutting_down) {
 			if (powered) {
 				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
+#if LED_STRIP_EXISTS
+				/* Electrical margin, not a driver completion acknowledgment. */
+				k_msleep(1);
+#endif
 			}
 			led_suspend();
 			powered = false;
@@ -501,6 +530,7 @@ static void led_thread(void)
 			current = request.pattern;
 			state = 0;
 			due = now;
+			steady_attempts = 0;
 			local_origin = led_local_ticks();
 			active = (struct led_sync_start){.entered = local_origin};
 			/* A new effect starts with a fresh first frame, not the previous
@@ -515,6 +545,9 @@ static void led_thread(void)
 		if (current <= SYS_LED_PATTERN_OFF) {
 			if (powered) {
 				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
+#if LED_STRIP_EXISTS
+				k_msleep(1);
+#endif
 				led_suspend();
 				powered = false;
 			}
@@ -525,6 +558,7 @@ static void led_thread(void)
 			led_resume();
 			powered = true;
 			last_value = -1;
+			now = k_uptime_ticks();
 		}
 		if (now < due) {
 			k_sem_take(&led_changed, due == INT64_MAX ? K_FOREVER : K_TICKS(due - now));
@@ -642,13 +676,18 @@ static void led_thread(void)
 		}
 		/* Fade frames retain sub-level dither; stable outputs need no
 		 * transfer merely to check clock freshness. */
+		bool rendered = true;
 		if (value != last_value || brightness != last_brightness || color != last_color
 		    || current == SYS_LED_PATTERN_PULSE_PERSIST
 		    || current == SYS_LED_PATTERN_ONESHOT_POWEROFF) {
-			led_pin_set(color, brightness, value);
-			last_value = value;
-			last_brightness = brightness;
-			last_color = color;
+			rendered = led_pin_set(color, brightness, value);
+			if (rendered) {
+				last_value = value;
+				last_brightness = brightness;
+				last_color = color;
+			} else {
+				last_value = -1;
+			}
 		}
 		if (complete) {
 			if (!led_complete(request, completed)) {
@@ -661,8 +700,15 @@ static void led_thread(void)
 			}
 			due = k_uptime_ticks();
 		} else if (forever) {
-			due = INT64_MAX;
-			k_sem_take(&led_changed, K_FOREVER);
+			/* Only indefinitely held frames retry. Timed effects keep their
+			 * normal deadlines, including 5ms fades. A same-pattern wake
+			 * cannot refill this budget or revive an exhausted output. */
+			if (!rendered && ++steady_attempts < 3) {
+				due = k_uptime_ticks() + k_us_to_ticks_ceil64(100000);
+			} else {
+				due = INT64_MAX;
+				k_sem_take(&led_changed, K_FOREVER);
+			}
 		} else {
 			due = now + k_us_to_ticks_ceil64(wait_us);
 		}
