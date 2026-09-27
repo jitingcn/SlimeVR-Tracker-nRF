@@ -42,7 +42,7 @@ void sensor_retained_read(void);
 void sensor_retained_write(void);
 void sensor_record_wom_sleep(void);
 
-void sensor_shutdown(void);
+int sensor_shutdown(void);
 uint8_t sensor_setup_WOM(void);
 
 void sensor_set_mag_enabled(bool enabled);
@@ -65,14 +65,27 @@ void sensor_request_fusion_reset(void);
 void sensor_request_fusion_bias_reset(void);
 
 void wait_for_threads(void);
-void main_imu_suspend(void);
+/* Failure means the caller must not reconfigure hardware or stop clocks. */
+int main_imu_suspend(void);
 bool main_imu_is_suspended(void);
 void main_imu_resume(void);
 void main_imu_wakeup(void);
-void main_imu_restart(void);
+int main_imu_restart(void);
 
 #if CONFIG_SENSOR_USE_TCAL
 float sensor_get_current_imu_temperature(void);
+#endif
+
+#if CONFIG_SENSOR_TCAL_HEATED
+struct sensor_temperature_observation {
+	float raw_c;
+	float filtered_c;
+	int64_t sampled_at_ms;
+	uint32_t sequence;
+};
+/* Snapshot only: does not refresh the sample timestamp or heater lease. */
+int sensor_get_imu_temperature_observation(
+	struct sensor_temperature_observation *out, int64_t max_age_ms);
 #endif
 
 // Get actual sensor ODR (Output Data Rate) in Hz

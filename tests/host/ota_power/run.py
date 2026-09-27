@@ -48,6 +48,9 @@ for pattern in (r"^static struct power_request_mailbox power_requests;",
                 r"^static (?:bool|int64_t) wom_[^;]+;",
                 r"^#define WOM_ELIGIBILITY_LEASE_MS .*$"):
     parts.extend(re.findall(pattern, power, re.MULTILINE))
+parts.append("#if CONFIG_SENSOR_TCAL_HEATED\n" +
+             re.search(r"^static atomic_t heater_power_terminal;", power, re.MULTILINE).group() +
+             "\n" + function(power, "heater_power_ready") + "\n#endif")
 parts.append(function(sensor, "main_imu_is_suspended"))
 for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_wom_ready", "sys_plan_WOM",
              "sys_power_state_request", "sys_request_system_off", "sys_request_system_reboot",
@@ -68,6 +71,15 @@ for name in ("esb_ota_is_active", "esb_ota_get_status", "esb_ota_handle_verify",
 # accidental admission without introducing mock copies of the admission rules.
 begin = function(ota, "esb_ota_handle_begin")
 parts.append(begin[:begin.index("\t/* Validate CRC-8 */")] + "\treturn 0;\n}")
+# Exercise the common lifecycle gate and both real handoff tails. Staging
+# address/flash preparation is outside this lifecycle contract.
+start = begin.index("\t/* Suspend sensor thread and hardware")
+branch = begin.index("#if OTA_USE_RAM_ENGINE", start)
+ram_end = begin.index("#else /* !OTA_USE_RAM_ENGINE */", branch)
+ready = begin.index("\t/* VTOR relocation not needed", ram_end)
+end = begin.index("#endif /* OTA_USE_RAM_ENGINE */", ready)
+parts.append("static int ota_suspend_and_ready(uint32_t image_size, uint16_t total_packets) {\n" +
+             begin[start:ram_end] + "\n#else\n" + begin[ready:end] + "\n#endif\n}")
 # Exercise the actual power-loop dispatch, including its completion semantics.
 start = power.index("\t\tuint32_t generation = 0;")
 end = power.index("power_request_finish(&power_requests, requested, generation, consumed);", start)
@@ -130,10 +142,15 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
     (void)key; assert(lock->locked); lock->locked = false;
 }
 """)
-    for variant in range(16):
+    for variant in range(64):
         mcuboot, imu_int = (variant // 2) % 2, variant % 2
-        low_power_2, active_delay = (variant // 4) % 2, 5000 if variant // 8 else 90000
-        binary = temporary / f"ota-power-{mcuboot}-{imu_int}-{low_power_2}-{active_delay}"
+        low_power_2 = (variant // 4) % 2
+        active_delay = 5000 if (variant // 8) % 2 else 90000
+        heated = (variant // 16) % 2
+        forced_ram = variant // 32
+        if forced_ram and mcuboot:
+            continue
+        binary = temporary / f"ota-power-{mcuboot}-{imu_int}-{low_power_2}-{active_delay}-{heated}-{forced_ram}"
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-g", "-O1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
@@ -141,6 +158,10 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
             f"-DIMU_INT_EXISTS={imu_int}",
             f"-DCONFIG_SENSOR_USE_LOW_POWER_2={low_power_2}",
             f"-DCONFIG_ACTIVE_TIMEOUT_DELAY={active_delay}",
+            f"-DCONFIG_SENSOR_TCAL_HEATED={heated}",
+            "-DCONFIG_SOC_NRF52840=1",
+            f"-DCONFIG_ESB_OTA_FORCE_RAM_ENGINE={forced_ram}",
+            f"-DOTA_USE_RAM_ENGINE={forced_ram}",
             "-I", str(temporary), "-I", str(SRC), str(HERE / "test_ota_power.c"),
             "-o", str(binary),
         ]

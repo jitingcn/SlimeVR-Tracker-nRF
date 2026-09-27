@@ -6,6 +6,9 @@
 #if CONFIG_SENSOR_USE_TCAL
 #include "tcal_runtime.h"
 #endif
+#if CONFIG_SENSOR_TCAL_HEATED
+#include "tcal_heated.h"
+#endif
 
 #include <errno.h>
 #include <math.h>
@@ -27,6 +30,9 @@ static bool clearing;
 static bool fusion_stale;
 static bool fusion_save_pending;
 static bool clear_event_pending;
+#if CONFIG_SENSOR_TCAL_HEATED
+static bool heated_reserved;
+#endif
 
 /* One complete transaction: first accepted candidate cannot be overwritten.
  * No wait for the sensor thread (calibration can temporarily suspend it). */
@@ -130,6 +136,11 @@ void sensor_calibration_snapshot(sensor_imu_calibration_t *out)
 
 static int reserve_candidate(void)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	if (heated_reserved) {
+		return -EBUSY;
+	}
+#endif
 	if (closing) {
 		return -ESHUTDOWN;
 	}
@@ -138,6 +149,26 @@ static int reserve_candidate(void)
 	}
 	return clearing || pending.effect != SENSOR_CALIBRATION_UNCHANGED || pending.persist ? -EBUSY : 0;
 }
+
+#if CONFIG_SENSOR_TCAL_HEATED
+int sensor_calibration_imu_reserve_heated(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
+	int err = reserve_candidate();
+	if (!err) {
+		heated_reserved = true;
+	}
+	k_spin_unlock(&coefficient_lock, key);
+	return err;
+}
+
+void sensor_calibration_imu_release_heated(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
+	heated_reserved = false;
+	k_spin_unlock(&coefficient_lock, key);
+}
+#endif
 
 static int submit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro, bool reset,
 		       uint16_t operation_id)
@@ -336,6 +367,9 @@ void sensor_calibration_fusion_applied(void)
 
 void sensor_calibration_prepare_power_down(void)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	(void)sensor_tcal_heated_abort(TCAL_HEATED_STOP_POWER_DOWN);
+#endif
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
 	closing = true;
 	k_spin_unlock(&coefficient_lock, key);
@@ -353,6 +387,9 @@ void sensor_calibration_prepare_power_down(void)
  * Live coefficients are unchanged, just as for the other reset-all runtime state. */
 void sensor_calibration_clear_begin(void)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	sensor_tcal_heated_clear_begin();
+#endif
 	k_mutex_lock(&persistence_lock, K_FOREVER);
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
 	clearing = true;
@@ -373,6 +410,9 @@ void sensor_calibration_clear_end(void)
 	clear_event_pending = false;
 	k_spin_unlock(&coefficient_lock, key);
 	k_mutex_unlock(&persistence_lock);
+#if CONFIG_SENSOR_TCAL_HEATED
+	sensor_tcal_heated_clear_end();
+#endif
 	if (notify) {
 		tracker_events_notify();
 	}

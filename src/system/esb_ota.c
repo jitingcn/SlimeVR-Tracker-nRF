@@ -397,6 +397,20 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 			OTA_FLASH_BASE, ota.target_flash_base);
 	}
 
+	/* Suspend sensor thread and hardware to free CPU, SPI/I2C bus,
+	 * and GPIO interrupts during OTA. OTA always ends with reboot. */
+	LOG_WRN("OTA: Suspending sensor subsystem for OTA update");
+	int sensor_err = main_imu_suspend();
+	if (!sensor_err) {
+		sensor_err = sensor_shutdown();
+	}
+	if (sensor_err) {
+		LOG_ERR("OTA BEGIN: sensor shutdown failed: %d", sensor_err);
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_ERROR;
+		ota_send_status();
+		return sensor_err;
+	}
 #if OTA_USE_RAM_ENGINE
 	/*
 	 * RAM engine mode: no staging area needed.
@@ -471,12 +485,6 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 		ota.staging_base, image_size, image_pages);
 #endif
 
-	/* Suspend sensor thread and hardware to free CPU, SPI/I2C bus,
-	 * and GPIO interrupts during OTA. OTA always ends with reboot. */
-	LOG_WRN("OTA: Suspending sensor subsystem for OTA update");
-	watchdog_pause(WDT_CHANNEL_SENSOR);
-	main_imu_suspend();
-	sensor_shutdown();
 
 	/* VTOR relocation not needed: data goes to staging area, not running firmware */
 

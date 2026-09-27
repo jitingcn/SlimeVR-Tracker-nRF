@@ -38,6 +38,10 @@
 #define CONFIG_SLEEP_ON_ACTIVE_TIMEOUT 1
 #define SYS_STATUS_CALIBRATION_RUNNING 1
 static bool test_active, calibration_active, ota_suppressed;
+#if CONFIG_SENSOR_TCAL_HEATED
+static bool heated_pending;
+static bool sensor_tcal_heated_busy(void) { return heated_pending; }
+#endif
 static atomic_t main_suspended;
 static int64_t last_data_time, last_suspend_attempt_time;
 static bool test_mode_get(void) { return test_active; }
@@ -54,6 +58,14 @@ static bool finish_during_preparation;
 static bool observe_abort_clear;
 static int abort_gap_observations;
 static unsigned notices, shutdown_prepares;
+static bool shutdown_allowed;
+static int suspend_result, shutdown_result, sensor_shutdown_calls;
+static int main_imu_suspend(void) { return suspend_result; }
+static int sensor_shutdown(void) { sensor_shutdown_calls++; return shutdown_result; }
+static unsigned ram_launches;
+#if OTA_USE_RAM_ENGINE
+static void ota_launch_ram_engine(void) { ram_launches++; }
+#endif
 static uint8_t notice_phase, notice_detail, wom_pin;
 static bool link_ready = true;
 static bool esb_ready(void) { return link_ready; }
@@ -94,8 +106,11 @@ bool esb_ota_is_active(void);
 static int prepare_upgrade(void);
 
 static bool connection_get_ota_suppressed(void) { return ota_suppressed; }
-static void configure_system_off(void)
+static bool configure_system_off(void)
 {
+	if (!shutdown_allowed) {
+		return false;
+	}
 	assert(notices > 0);
 	int64_t lead = now_ms - notice_log[notices - 1].time;
 	assert(lead >= (notice_phase == POWER_WILL_WOM ?
@@ -106,6 +121,7 @@ static void configure_system_off(void)
 	unsigned before_cancel = notices;
 	sys_cancel_WOM();
 	assert(notices == before_cancel);
+	return true;
 }
 static void sys_flush_warm(void) {}
 static void sensor_calibration_online_mag_cold_start(void) {}
@@ -202,6 +218,13 @@ static void fixture(void)
 	wom_planned = wom_announced = wom_ready_timeout_initialized = false;
 	wom_deadline = wom_commit_at = wom_ready_timeout = wom_last_eligible = 0;
 	test_active = calibration_active = ota_suppressed = false;
+	shutdown_allowed = true;
+	suspend_result = shutdown_result = sensor_shutdown_calls = 0;
+	ram_launches = 0;
+#if CONFIG_SENSOR_TCAL_HEATED
+	heated_pending = false;
+	atomic_set(&heater_power_terminal, 0);
+#endif
 	atomic_set(&main_suspended, 0);
 	sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 	sensor_mode = SENSOR_SENSOR_MODE_LOW_NOISE;
@@ -534,6 +557,25 @@ static void stale_generation_and_veto(void)
 		assert(physical_offs == 0 && notice_phase == POWER_WOM_CANCELLED);
 	}
 }
+#if CONFIG_SENSOR_TCAL_HEATED
+static void pending_heat_veto(void)
+{
+	/* Reservation alone must veto physical WoM, before worker status exists. */
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_plan_WOM(false, now_ms + 5000) == 0);
+	for (int i = 0; i < 50; i++) {
+		now_ms += 100;
+		assert(sys_plan_WOM(false, wom_deadline) == 0);
+	}
+	heated_pending = true;
+	power_iteration();
+	assert(physical_offs == 0 && notice_phase == POWER_WOM_CANCELLED);
+	assert(heater_power_ready());
+	/* Sensor policy cannot quietly downshift ODR while the request is pending. */
+	sensor_update_sensor_state(true);
+	assert(sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE);
+}
+#endif
 
 static void wom_supersession_and_failure(void)
 {
@@ -683,6 +725,47 @@ static void ramp_anchor_tracks_due_attempts(void)
 	assert(physical_offs == 1);
 }
 #endif
+static void failed_shutdown_keeps_power(void)
+{
+	for (int reboot = 0; reboot < 2; reboot++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		shutdown_allowed = false;
+		assert((reboot ? sys_request_system_reboot() : sys_request_system_off()) == 0);
+		power_iteration();
+		assert(physical_offs == 0 && physical_reboots == 0 && shutdown_prepares == 0);
+#if CONFIG_SENSOR_TCAL_HEATED
+		assert(!heater_power_ready());
+#endif
+		shutdown_allowed = true;
+		power_iteration();
+		assert(physical_reboots == reboot && physical_offs == !reboot);
+	}
+}
+
+
+static void ota_requires_safe_sensor_shutdown(void)
+{
+	fixture();
+	suspend_result = -EIO;
+	assert(ota_suspend_and_ready(4096, 64) == -EIO);
+	assert(ota.state == OTA_STATE_ERROR && ota.error_code == OTA_STATUS_ERROR);
+	assert(sensor_shutdown_calls == 0 && ram_launches == 0);
+
+	fixture();
+	shutdown_result = -ETIMEDOUT;
+	assert(ota_suspend_and_ready(4096, 64) == -ETIMEDOUT);
+	assert(ota.state == OTA_STATE_ERROR && ota.error_code == OTA_STATUS_ERROR);
+	assert(sensor_shutdown_calls == 1 && ram_launches == 0);
+
+	fixture();
+	assert(ota_suspend_and_ready(4096, 64) == 0);
+	assert(sensor_shutdown_calls == 1);
+#if OTA_USE_RAM_ENGINE
+	assert(ota.state == OTA_STATE_RECEIVING && ram_launches == 1);
+#else
+	assert(ota.state == OTA_STATE_READY && ram_launches == 0);
+#endif
+}
 
 int main(void)
 {
@@ -697,8 +780,13 @@ int main(void)
 	recovery_after_preparation_failure();
 	abort_preserves_recovery_ownership();
 	physical_shutdown_wins();
+	failed_shutdown_keeps_power();
+	ota_requires_safe_sensor_shutdown();
 	power_notices();
 #if IMU_INT_EXISTS
+#if CONFIG_SENSOR_TCAL_HEATED
+	pending_heat_veto();
+#endif
 	sensor_deadlines_and_cancellation();
 	readiness_cancel_and_rearm();
 	stale_generation_and_veto();

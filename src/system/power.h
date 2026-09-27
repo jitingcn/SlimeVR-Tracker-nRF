@@ -38,4 +38,11 @@ void sys_ota_reboot_resolve(bool prepared);
 bool vin_read(void);
 bool vbus_read(void);
 
+#if CONFIG_SENSOR_TCAL_HEATED
+/* Physical inputs only; never inferred from battery voltage/debounced status. */
+bool heater_external_power_present(void);
+/* Lock-free admission check: false once a physical power transition starts. */
+bool heater_power_ready(void);
+#endif
+
 #endif

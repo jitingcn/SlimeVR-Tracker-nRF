@@ -36,6 +36,10 @@
 #if CONFIG_SENSOR_USE_TCAL
 #include "calibration/tcal_mls_lut.h"
 #endif
+#if CONFIG_SENSOR_TCAL_HEATED
+#include "calibration/tcal_heated.h"
+#include <errno.h>
+#endif
 #include "motion_state.h"
 #include "zephyr/logging/log.h"
 
@@ -389,6 +393,92 @@ static float sensor_tcal_temp = 25.0f;
 static float sensor_tcal_temp_raw = 25.0f;
 static bool sensor_tcal_temp_filter_initialized = false;
 static int64_t sensor_tcal_temp_filter_last_ms = 0;
+#endif
+
+#if CONFIG_SENSOR_TCAL_HEATED
+static struct k_spinlock temperature_observation_lock;
+static K_MUTEX_DEFINE(temperature_lifecycle_lock);
+static struct sensor_temperature_observation temperature_observation;
+static bool temperature_observation_valid;
+static bool temperature_observation_enabled;
+static uint32_t temperature_filter_epoch;
+static uint32_t temperature_epoch;
+static bool heated_resting;
+
+int sensor_get_imu_temperature_observation(
+	struct sensor_temperature_observation *out, int64_t max_age_ms)
+{
+	if (!out || max_age_ms < 0) {
+		return -EINVAL;
+	}
+	k_spinlock_key_t key = k_spin_lock(&temperature_observation_lock);
+	struct sensor_temperature_observation sample = temperature_observation;
+	bool valid = temperature_observation_valid;
+	k_spin_unlock(&temperature_observation_lock, key);
+	int64_t age = k_uptime_get() - sample.sampled_at_ms;
+	if (!valid || age < 0 || age > max_age_ms) {
+		return -EAGAIN;
+	}
+	*out = sample;
+	return 0;
+}
+
+static int sensor_temperature_invalidate(void)
+{
+	/* Never enter from a calibration/core lock: closing admission may take
+	 * the shared request gate and synchronously stop the PWM. */
+	k_mutex_lock(&temperature_lifecycle_lock, K_FOREVER);
+	k_spinlock_key_t key = k_spin_lock(&temperature_observation_lock);
+	temperature_observation_valid = false;
+	temperature_observation_enabled = false;
+	temperature_epoch++;
+	k_spin_unlock(&temperature_observation_lock, key);
+	int err = sensor_tcal_heated_abort(TCAL_HEATED_STOP_SENSOR_STOP);
+	k_mutex_unlock(&temperature_lifecycle_lock);
+	return err;
+}
+
+static void sensor_temperature_resume(void)
+{
+	k_mutex_lock(&temperature_lifecycle_lock, K_FOREVER);
+	k_spinlock_key_t key = k_spin_lock(&temperature_observation_lock);
+	temperature_observation_enabled = main_ok && !atomic_get(&main_suspended);
+	temperature_observation_valid = false;
+	temperature_epoch++;
+	k_spin_unlock(&temperature_observation_lock, key);
+	k_mutex_unlock(&temperature_lifecycle_lock);
+}
+
+static uint32_t sensor_temperature_read_epoch(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&temperature_observation_lock);
+	uint32_t epoch = temperature_epoch;
+	k_spin_unlock(&temperature_observation_lock, key);
+	return epoch;
+}
+
+static void sensor_temperature_publish(uint32_t epoch, int64_t sampled_at_ms)
+{
+	k_mutex_lock(&temperature_lifecycle_lock, K_FOREVER);
+	k_spinlock_key_t key = k_spin_lock(&temperature_observation_lock);
+	bool accepted = temperature_observation_enabled && epoch == temperature_epoch
+		&& main_ok && !atomic_get(&main_suspended)
+		&& v_finite(&sensor_tcal_temp_raw, 1) && v_finite(&sensor_tcal_temp, 1)
+		&& sensor_tcal_temp_raw > -20.0f && sensor_tcal_temp_raw < 60.0f
+		&& sensor_tcal_temp > -20.0f && sensor_tcal_temp < 60.0f;
+	if (accepted) {
+		temperature_observation.raw_c = sensor_tcal_temp_raw;
+		temperature_observation.filtered_c = sensor_tcal_temp;
+		temperature_observation.sampled_at_ms = sampled_at_ms;
+		temperature_observation.sequence++;
+		temperature_observation_valid = true;
+	}
+	k_spin_unlock(&temperature_observation_lock, key);
+	if (accepted && heater_power_ready() && !esb_ota_is_active() && !connection_get_ota_suppressed()) {
+		sensor_tcal_heated_set_ready(true);
+	}
+	k_mutex_unlock(&temperature_lifecycle_lock);
+}
 #endif
 
 // #define DEBUG true
@@ -1083,7 +1173,11 @@ int sensor_request_scan(bool force)
 		}
 	}
 
-	main_imu_suspend();
+	int suspend_err = main_imu_suspend();
+	if (suspend_err) {
+		LOG_ERR("Sensor scan blocked by heater shutdown: %d", suspend_err);
+		return suspend_err;
+	}
 
 	/* Pause watchdog before aborting thread to prevent timeout */
 	watchdog_pause(WDT_CHANNEL_SENSOR);
@@ -1256,10 +1350,21 @@ void sensor_record_wom_sleep(void)
 #endif
 }
 
-void sensor_shutdown(void) // Communicate all imus to shut down
+int sensor_shutdown(void) // Communicate all imus to shut down
 {
-	sensor_calibration_set_consumer_ready(false);
+#if CONFIG_SENSOR_TCAL_HEATED
+	bool was_ok = main_ok;
 	main_ok = false;
+	int err = sensor_temperature_invalidate();
+	if (err) {
+		main_ok = was_ok;
+		LOG_ERR("Sensor shutdown blocked by heater: %d", err);
+		return err;
+	}
+#else
+	main_ok = false;
+#endif
+	sensor_calibration_set_consumer_ready(false);
 	/*
 	 * Do not call sensor_request_scan() here. Rescan aborts the sensor thread and
 	 * re-probes the bus; during OTA / power-off the bus or sensor clock may already
@@ -1269,7 +1374,7 @@ void sensor_shutdown(void) // Communicate all imus to shut down
 	sensor_mag_timing_reset();
 	if (!sensor_sensor_init || sensor_imu == NULL || sensor_imu == &sensor_imu_none) {
 		LOG_INF("sensor_shutdown: sensors not initialized, skip");
-		return;
+		return 0;
 	}
 
 	sys_interface_resume();
@@ -1278,6 +1383,7 @@ void sensor_shutdown(void) // Communicate all imus to shut down
 	}
 	sensor_imu->shutdown();
 	sys_interface_suspend();
+	return 0;
 }
 
 uint8_t sensor_setup_WOM(void)
@@ -1370,7 +1476,11 @@ void sensor_set_mag_enabled(bool enabled)
 	}
 
 	LOG_INF("%s magnetometer (runtime)...", enabled ? "Enabling" : "Disabling");
-	main_imu_suspend();
+	int suspend_err = main_imu_suspend();
+	if (suspend_err) {
+		LOG_ERR("Magnetometer change blocked by heater shutdown: %d", suspend_err);
+		return;
+	}
 	sys_interface_resume();
 
 	int err = 0;
@@ -1393,7 +1503,11 @@ void sensor_set_mag_enabled(bool enabled)
 	mag_enabled = enabled;
 
 	skip_fusion_save = true;
-	main_imu_restart();
+	int restart_err = main_imu_restart();
+	if (restart_err) {
+		LOG_ERR("Fusion restart failed; sensor left suspended: %d", restart_err);
+		return;
+	}
 	sensor_mag_ref_reset();
 	sensor_refresh_sensor_ids();
 
@@ -1459,7 +1573,12 @@ static void sensor_apply_calibration_frame(void)
 	memset(accel_oversample_sum, 0, sizeof(accel_oversample_sum));
 #endif
 	if (reset) {
-		main_imu_restart();
+		int err = main_imu_restart();
+		if (err) {
+			atomic_or(&fusion_requests, requests | FUSION_REQUEST_RESET);
+			LOG_ERR("Fusion reset deferred by heater shutdown: %d", err);
+			return;
+		}
 	}
 	if (reset || requests || effect == SENSOR_CALIBRATION_BIAS_CHANGED) {
 		sensor_calibration_reset_gyro_reference();
@@ -1586,6 +1705,9 @@ static void sensor_update_session_motion(float angular_speed_dps, float lin_acce
 static void sensor_update_sensor_state(bool resting)
 {
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
+#if CONFIG_SENSOR_TCAL_HEATED
+	calibrating = calibrating || sensor_tcal_heated_busy();
+#endif
 	bool in_test_mode = test_mode_get();
 	bool ota_suppressed_now = esb_ota_is_active() || connection_get_ota_suppressed();
 	bool suspended = atomic_get(&main_suspended);
@@ -2325,6 +2447,12 @@ static void sensor_loop_handle_data_collection(bool *dc_active)
 
 static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	uint32_t temperature_read_epoch = sensor_temperature_read_epoch();
+	/* FIFO-backed temperatures belong to this acquisition, not its eventual
+	 * completion. A blocked read must consume freshness, never extend it. */
+	int64_t temperature_sampled_at_ms = k_uptime_get();
+#endif
 	// Resume devices
 	int64_t resume_begin_ticks = k_uptime_ticks();
 	sys_interface_resume();
@@ -2373,9 +2501,16 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 #if CONFIG_SENSOR_USE_TCAL
 	// Read IMU temperature after FIFO read so FIFO-backed drivers
 	// can return a sample synchronized with the current accel/gyro batch.
+#if CONFIG_SENSOR_TCAL_HEATED
+	if (temperature_read_epoch != temperature_filter_epoch) {
+		temperature_filter_epoch = temperature_read_epoch;
+		sensor_tcal_temp_filter_initialized = false;
+		heated_resting = false;
+	}
+#endif
 	temp = sensor_imu->temp_read();
 	// Only update if the value looks like a valid temperature (-20 to 60).
-	if (temp != 0.0f && temp > -20.0f && temp < 60.0f) {
+	if (v_finite(&temp, 1) && temp != 0.0f && temp > -20.0f && temp < 60.0f) {
 		int64_t now_ms = k_uptime_get();
 		last_temp_time = now_ms;
 
@@ -2401,14 +2536,39 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 			}
 		}
 		sensor_tcal_temp_filter_last_ms = now_ms;
+#if CONFIG_SENSOR_TCAL_HEATED
+		sensor_temperature_publish(temperature_read_epoch, temperature_sampled_at_ms);
+#endif
 
 		connection_update_sensor_temp(sensor_tcal_temp);
 	}
+#if CONFIG_SENSOR_TCAL_HEATED
+	else {
+		/* Invalid transactions must not leave an admissible cached reading.
+		 * In particular, an out-of-range hot reading is not mere absence. */
+		k_mutex_lock(&temperature_lifecycle_lock, K_FOREVER);
+		k_spinlock_key_t key = k_spin_lock(&temperature_observation_lock);
+		temperature_observation_valid = false;
+		k_spin_unlock(&temperature_observation_lock, key);
+		enum tcal_heated_stop_reason reason = v_finite(&temp, 1)
+			&& temp >= CONFIG_SENSOR_TCAL_HEATED_MAX_TEMP_C
+			? TCAL_HEATED_STOP_OVERTEMP : TCAL_HEATED_STOP_STALE_TEMP;
+		int err = sensor_tcal_heated_abort(reason);
+		if (err) {
+			LOG_ERR("Heater temperature fault shutdown failed: %d", err);
+		}
+		sensor_tcal_heated_set_ready(false);
+		k_mutex_unlock(&temperature_lifecycle_lock);
+	}
+#endif
 #else
 	// Read IMU temperature after FIFO read so FIFO-backed drivers can reuse it.
 	temp = sensor_imu->temp_read(); // TODO: use as calibration data
 	last_temp_time = k_uptime_get();
 	connection_update_sensor_temp(temp);
+#endif
+#if CONFIG_SENSOR_TCAL_HEATED
+	sensor_tcal_heated_update(heated_resting);
 #endif
 
 	frame->raw_collect_temp_c = NAN;
@@ -2766,6 +2926,10 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	/* Validate before local power/calibration consumers, not just telemetry.
 	 * Empty or unknown evidence never grants sleeping/calibration eligibility. */
 	resting = resting && observed && sensor_motion_frame_current(frame->sensor_epoch);
+#if CONFIG_SENSOR_TCAL_HEATED
+	heated_resting = resting;
+	sensor_tcal_heated_update(resting);
+#endif
 	if (observed && sensor_motion_frame_current(frame->sensor_epoch)) {
 		if (angular_speed_dps >= 0.0f)
 			sensor_update_session_motion(angular_speed_dps, lin_accel, now);
@@ -3021,6 +3185,14 @@ static void sensor_loop_wait(int64_t time_begin)
 
 void sensor_loop(void)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	int heater_err = sensor_temperature_invalidate();
+	if (heater_err) {
+		LOG_ERR("Sensor initialization blocked by heater shutdown: %d", heater_err);
+		return;
+	}
+	heated_resting = false;
+#endif
 	sensor_calibration_set_consumer_ready(false);
 	main_ok = false;
 	if (!sensor_sensor_init) {
@@ -3040,6 +3212,9 @@ void sensor_loop(void)
 	} else {
 		main_ok = true;
 		sensor_calibration_set_consumer_ready(!atomic_get(&main_suspended));
+#if CONFIG_SENSOR_TCAL_HEATED
+		sensor_temperature_resume();
+#endif
 		sensor_startup_discard_until_ms = k_uptime_get() + CONFIG_SENSOR_STARTUP_DISCARD_MS;
 		sensor_startup_discard_logged = false;
 	}
@@ -3053,6 +3228,9 @@ void sensor_loop(void)
 			frame.loop_begin = k_uptime_ticks();
 #endif
 
+#if CONFIG_SENSOR_TCAL_HEATED
+			sensor_tcal_heated_update(heated_resting);
+#endif
 			sensor_apply_calibration_frame();
 			frame.sensor_epoch = tracker_events_sensor_epoch();
 			sensor_loop_handle_data_collection(&frame.dc_active);
@@ -3113,17 +3291,25 @@ void wait_for_threads(void)
 	}
 }
 
-void main_imu_suspend(void)
+int main_imu_suspend(void)
 {
-	sensor_calibration_set_consumer_ready(false);
+#if CONFIG_SENSOR_TCAL_HEATED
+	/* Close publication/admission before requesting the owner to suspend. */
+	int err = sensor_temperature_invalidate();
+	if (err) {
+		LOG_ERR("Sensor suspension blocked by heater shutdown: %d", err);
+		return err;
+	}
+#endif
 	atomic_set(&main_suspended, true);
+	sensor_calibration_set_consumer_ready(false);
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_SUSPENDED);
 	tracker_events_notify();
 	/* Thread cannot feed once frozen or self-suspended; pause WDT in all paths. */
 	watchdog_pause(WDT_CHANNEL_SENSOR);
 	if (!main_running) { // don't suspend if already stopped (TODO: may be called from sensor thread)
-		return;          // thread self-suspends at end of sensor_loop_wait when main_suspended
+		return 0;        // thread self-suspends at end of sensor_loop_wait when main_suspended
 	}
 	if (sensor_sensor_scanning) {
 		if (k_event_wait(&sensor_life_events, SENSOR_LIFE_SCAN_DONE, false, K_MSEC(10000)) == 0) {
@@ -3140,6 +3326,7 @@ void main_imu_suspend(void)
 		sensor_fusion->take_rest_observation(NULL);
 	}
 	LOG_INF("Suspended sensor thread");
+	return 0;
 }
 
 void main_imu_resume(void)
@@ -3154,6 +3341,9 @@ void main_imu_resume(void)
 	/* Resume may immediately preempt us with the higher-priority sensor thread.
 	 * Publish before waking it so the loop cannot self-suspend on stale intent. */
 	atomic_set(&main_suspended, false);
+#if CONFIG_SENSOR_TCAL_HEATED
+	sensor_temperature_resume();
+#endif
 	k_thread_resume(&sensor_thread_id);
 	LOG_INF("Resumed sensor thread");
 }
@@ -3165,8 +3355,15 @@ void main_imu_wakeup(void)
 	}
 }
 
-void main_imu_restart(void)
+int main_imu_restart(void)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	int err = sensor_temperature_invalidate();
+	if (err) {
+		return err;
+	}
+	heated_resting = false;
+#endif
 	sensor_calibration_reset_gyro_reference();
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
@@ -3196,6 +3393,10 @@ void main_imu_restart(void)
 			sensor_fusion_set_mag_ref(saved_ref_norm, saved_ref_dip);
 		}
 	}
+#if CONFIG_SENSOR_TCAL_HEATED
+	sensor_temperature_resume();
+#endif
+	return 0;
 }
 
 #if CONFIG_SENSOR_USE_TCAL

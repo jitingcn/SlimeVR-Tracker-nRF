@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def function(source, name):
-    match = re.search(r"^(?:bool|float|void)\s+" + re.escape(name) + r"\s*\(", source, re.M)
+    match = re.search(r"^(?:static\s+)?(?:bool|float|void|int)\s+" + re.escape(name) + r"\s*\(", source, re.M)
     if match is None:
         raise ValueError(f"missing production function {name}")
     opening = source.index("{", match.start())
@@ -25,6 +25,7 @@ def extract(root):
         "#include <float.h>\n#ifndef MAX\n#define MAX(a, b) ((a) > (b) ? (a) : (b))\n#endif",
         *(function(util, name) for name in ("v_finite", "v_epsilon", "v_avg")),
         function(magneto, "mag_bainv_structurally_ok"),
+        function(calibration, "calibration_clear_mag_owned"),
         function(calibration, "sensor_calibration_clear_mag"),
     ]) + "\n"
 

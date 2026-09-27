@@ -12,7 +12,9 @@ ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
 source = (ROOT / "src/sensor/calibration/tcal_runtime.c").read_text()
 
 
-def function(name, text=source):
+def function(name, text=None):
+    if text is None:
+        text = runtime_functions
     match = re.search(rf"^(?:static )?(?:void|int|bool|uint32_t) {name}\([^;{{]*\)\s*\{{", text, re.M)
     if match is None:
         raise ValueError(name)
@@ -34,6 +36,27 @@ constants = "\n".join(line for line in runtime_header.splitlines()
 state = source[source.index("static bool runtime_cal_enabled"):source.index("uint32_t sensor_tcal_reference_generation")]
 calibration = (ROOT / "src/sensor/calibration/calibration.c").read_text()
 reference_state = calibration[calibration.index("static float last_gyro_tcal_offset"):calibration.index("#endif", calibration.index("static float last_gyro_tcal_offset"))]
+
+
+def active_functions(text):
+    """Resolve real C conditionals before counting function braces.
+
+    This lifecycle fixture exercises ordinary T-Cal. Heated admission and
+    accumulation have their own production-code harness. Dependency headers
+    are supplied by this fixture, so strip includes only for preprocessing.
+    """
+    without_includes = re.sub(r"^\s*#\s*include[^\n]*$", "", text, flags=re.M)
+    command = shlex.split(os.environ.get("CC", "cc")) + [
+        "-E", "-P", "-x", "c", "-DCONFIG_SENSOR_USE_TCAL=1",
+        "-DCONFIG_SENSOR_TCAL_HEATED=0", "-DCONFIG_CMSIS_DSP=0",
+        "-DIS_ENABLED(x)=0", "-",
+    ]
+    return subprocess.run(command, input=without_includes, text=True,
+                          capture_output=True, check=True).stdout
+
+
+runtime_functions = active_functions(source)
+calibration_functions = active_functions(calibration)
 preamble = r'''
 #include <assert.h>
 #include <math.h>
@@ -43,6 +66,7 @@ preamble = r'''
 #include <stdlib.h>
 #include <string.h>
 #define CONFIG_SENSOR_USE_TCAL 1
+#define CONFIG_SENSOR_TCAL_HEATED 0
 #include "sensor/calibration/calibration.h"
 #include "sensor/calibration/bias_collect.h"
 #include "sensor/calibration/tcal_mls_lut.h"
@@ -392,7 +416,7 @@ parts.extend(function(name) for name in (
     "sensor_tcal_refresh_model", "sensor_tcal_curve_apply_ready",
     "sensor_tcal_get_auto_calibration", "sensor_tcal_get_enabled", "sensor_tcal_set_enabled",
 ))
-parts.extend(function(name, calibration) for name in (
+parts.extend(function(name, calibration_functions) for name in (
     "sensor_calibration_process_gyro", "sensor_calibration_reset_gyro_reference",
     "sensor_calibration_gyro_reference_pending",
 ))

@@ -205,7 +205,7 @@ void fixture_model(const float value[12])
 }
 void fixture_clear(void)
 {
-	sensor_calibration_clear_mag(NULL, true);
+	assert(sensor_calibration_clear_mag(NULL, true) == 0);
 }
 int fixture_outcome(void)
 {

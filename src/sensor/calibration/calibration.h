@@ -70,7 +70,7 @@ int sensor_calibration_validate_mag(float m_inv[][3], bool write);
 
 /* Candidate initialization only; live coefficients change through commits. */
 void sensor_calibration_identity_accel(float matrix[4][3]);
-void sensor_calibration_clear_mag(float m_inv[][3], bool write); // "request" mag cal
+int sensor_calibration_clear_mag(float m_inv[][3], bool write);
 
 enum sensor_calibration_request_id {
 	CAL_REQUEST_CLEAR = -1,
@@ -82,6 +82,10 @@ enum sensor_calibration_request_id {
 	CAL_REQUEST_GYRO_SENS = 5,
 	/* Occupies the shared request slot throughout manual mag collection. */
 	CAL_REQUEST_MAG = 6,
+#if CONFIG_SENSOR_TCAL_HEATED
+	CAL_REQUEST_TCAL_HEATED = 7,
+	CAL_REQUEST_MAINTENANCE = 8,
+#endif
 };
 
 enum cal_request_origin {
@@ -97,7 +101,7 @@ uint16_t sensor_calibration_current_operation(void);
 
 void sensor_request_calibration(void);
 void sensor_request_calibration_6_side(void);
-void sensor_request_calibration_mag(void);
+int sensor_request_calibration_mag(void);
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions);
 #endif

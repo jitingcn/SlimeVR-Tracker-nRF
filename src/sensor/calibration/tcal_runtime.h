@@ -69,7 +69,19 @@ extern float tcal_direction_ref_temp;
 extern float runtime_cal_last_temp;
 
 void update_tcal_state(void);
+/* Only the sensor owner may reset/mutate directly; other threads advance a
+ * reset generation. Owner consumption never erases publication invalidation. */
 void tcal_accum_reset(void);
+void tcal_accum_request_reset(void);
+void tcal_accum_apply_reset(void);
+#if CONFIG_SENSOR_TCAL_HEATED
+/* Sensor owner, request lock held; finish is normal completion only.
+ * Confirmed bin exits stage once; start-band dwell breaks the initial hold.
+ * These APIs stage RAM points and never publish the live model. Explicit
+ * user stop publishes already staged points, discarding its unfinished bin. */
+void sensor_tcal_heated_accum_feed(const float g[3], float temp);
+void sensor_tcal_heated_accum_finish(void);
+#endif
 void sensor_tcal_runtime_init_from_retained(void);
 /* Caller holds the T-Cal lock across point mutation and publication. */
 void sensor_tcal_refresh_model(void);

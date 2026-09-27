@@ -35,6 +35,11 @@
 #include "power_battery.h"
 #include "clock_control.h"
 #include "connection/tracker_events.h"
+#if CONFIG_SENSOR_TCAL_HEATED
+#include "sensor/calibration/tcal_heated.h"
+#include <zephyr/sys/atomic.h>
+static atomic_t heater_power_terminal;
+#endif
 
 
 enum sys_regulator {
@@ -118,6 +123,13 @@ static const struct gpio_dt_spec clk __attribute__((unused)) = GPIO_DT_SPEC_GET(
 static const struct gpio_dt_spec vcc = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, vcc_gpios);
 #else
 #pragma message "VCC GPIO does not exist"
+#endif
+
+#if CONFIG_SENSOR_TCAL_HEATED
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, plug_gpios)
+static const struct gpio_dt_spec heater_plug = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, plug_gpios);
+static atomic_t heater_plug_ready;
+#endif
 #endif
 
 #define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
@@ -207,23 +219,38 @@ void sys_interface_resume(void)
 // TODO: usually charging, i would flash LED but that will drain the battery while it is charging..
 // TODO: should not really shut off while plugged in
 
-static void configure_system_off(void)
+static bool configure_system_off(void)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	atomic_set(&heater_power_terminal, true);
+	int heater_err = sensor_tcal_heated_abort(TCAL_HEATED_STOP_POWER_DOWN);
+	if (heater_err) {
+		LOG_ERR("Heater shutdown failed: %d (hardware cutoff remains active)", heater_err);
+		return false;
+	}
+#endif
 	if (get_status(SYS_STATUS_SENSOR_ERROR))
 		LOG_WRN("Entering new power state while sensor error is raised");
 	if (get_status(SYS_STATUS_SYSTEM_ERROR))
 		LOG_WRN("Entering new power state while system error is raised");
 	/* Freeze online-mag commits before the final warm-NVS flush. */
 	sensor_calibration_online_mag_prepare_power_down();
+	int sensor_err = main_imu_suspend();
+	if (!sensor_err) {
+		sensor_err = sensor_shutdown();
+	}
+	if (sensor_err) {
+		LOG_ERR("Power transition blocked by sensor shutdown: %d", sensor_err);
+		return false;
+	}
 	clock_pre_shutdown();
-	main_imu_suspend();
 	sensor_calibration_prepare_power_down();
-	sensor_shutdown();
 	led_shutdown();
 	float actual_clock_rate;
 	set_sensor_clock(false, 0, &actual_clock_rate);
 	// Configure interrupts
 	configure_sense_pins();
+	return true;
 }
 
 static void set_regulator(enum sys_regulator regulator)
@@ -458,6 +485,9 @@ static bool sys_WOM(bool force, uint32_t generation)
 	k_mutex_lock(&power_plan_lock, K_FOREVER);
 	bool veto = esb_ota_is_active() || connection_get_ota_suppressed() ||
 		test_mode_get() || get_status(SYS_STATUS_CALIBRATION_RUNNING) || main_imu_is_suspended();
+#if CONFIG_SENSOR_TCAL_HEATED
+	veto = veto || sensor_tcal_heated_busy();
+#endif
 	if (!power_request_wom_claim_current(&power_requests, generation)) {
 		k_mutex_unlock(&power_plan_lock);
 		return true;
@@ -478,11 +508,16 @@ static bool sys_WOM(bool force, uint32_t generation)
 		k_mutex_unlock(&power_plan_lock);
 		return false;
 	}
+#if CONFIG_SENSOR_TCAL_HEATED
+	atomic_set(&heater_power_terminal, true);
+#endif
 	/* The intent is now irrevocable; suspend hooks must not withdraw it. */
 	wom_planned = false;
 	wom_announced = false;
 	k_mutex_unlock(&power_plan_lock);
-	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	if (!configure_system_off()) {
+		return false;
+	}
 	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
 	sensor_calibration_online_mag_retained_save();
 	sensor_record_wom_sleep();
@@ -559,9 +594,14 @@ static bool sys_system_off(void) // TODO: add timeout
 		k_mutex_unlock(&power_plan_lock);
 		return false;
 	}
+#if CONFIG_SENSOR_TCAL_HEATED
+	atomic_set(&heater_power_terminal, true);
+#endif
 	k_mutex_unlock(&power_plan_lock);
 	sys_power_notice(POWER_WILL_SHUTDOWN);
-	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	if (!configure_system_off()) {
+		return false;
+	}
 	sys_flush_warm(); /* persist warm cal before session clear / power loss */
 	sensor_calibration_online_mag_cold_start();
 #if CONFIG_SENSOR_USE_TCAL
@@ -604,9 +644,14 @@ static bool sys_system_reboot(void) // TODO: add timeout
 		k_mutex_unlock(&power_plan_lock);
 		return false;
 	}
+#if CONFIG_SENSOR_TCAL_HEATED
+	atomic_set(&heater_power_terminal, true);
+#endif
 	k_mutex_unlock(&power_plan_lock);
 	sys_power_notice(POWER_WILL_REBOOT);
-	configure_system_off(); // Common subsystem shutdown and prepare sense pins
+	if (!configure_system_off()) {
+		return false;
+	}
 	sys_flush_warm(); /* persist warm cal before reboot (covers OTA reboot path) */
 	sensor_calibration_online_mag_cold_start();
 #if CONFIG_SENSOR_USE_TCAL
@@ -655,6 +700,28 @@ bool vbus_read(void)
 #endif
 }
 
+#if CONFIG_SENSOR_TCAL_HEATED
+bool heater_power_ready(void)
+{
+	return !atomic_get(&heater_power_terminal);
+}
+
+bool heater_external_power_present(void)
+{
+	bool present = false;
+#ifdef POWER_USBREGSTATUS_VBUSDETECT_Msk
+	present = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+#endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, plug_gpios)
+	/* An uninitialized input or a negative GPIO error is not external power. */
+	if (atomic_get(&heater_plug_ready)) {
+		present = present || gpio_pin_get_dt(&heater_plug) > 0;
+	}
+#endif
+	return present;
+}
+#endif
+
 
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
 // TODO: should be separated to be more clear in its function?
@@ -669,6 +736,16 @@ static void power_thread(void)
 #if !DT_NODE_HAS_STATUS(DT_NODELABEL(pmic_charger), okay)
 	int64_t next_battery_sample_ms = 0;
 	uint8_t last_battery_inputs = 0;
+#endif
+#if CONFIG_SENSOR_TCAL_HEATED
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, plug_gpios)
+	int plug_err = gpio_is_ready_dt(&heater_plug)
+		? gpio_pin_configure_dt(&heater_plug, GPIO_INPUT) : -ENODEV;
+	atomic_set(&heater_plug_ready, plug_err == 0);
+	if (plug_err) {
+		LOG_ERR("Heater external-power input unavailable: %d", plug_err);
+	}
+#endif
 #endif
 
 	/* Register power thread with watchdog (watchdog is initialized via SYS_INIT) */
@@ -781,6 +858,9 @@ static void power_thread(void)
 		else if ((plugged && battery_mV <= 4250) || abnormal_reading)
 			plugged = false;
 		bool raw_device_plugged = charging || charged || plugged || usb_plugged || pmic_plugged;
+#if CONFIG_SENSOR_TCAL_HEATED
+		raw_device_plugged = raw_device_plugged || heater_external_power_present();
+#endif
 		bool plug_state_debouncing = power_battery_update_plugged_state(raw_device_plugged, now_ms);
 		bool plug_signal_settling = power_battery_plug_signal_settling(plug_state_debouncing, now_ms);
 		int32_t average_pptt = power_battery_average_pptt();

@@ -24,6 +24,11 @@
 #if CONFIG_CUSTOMER_INFO
 #include "system/customer_info.h"
 #endif
+#if CONFIG_SENSOR_TCAL_HEATED
+#include "sensor/calibration/tcal_heated.h"
+#include "util.h"
+#include <errno.h>
+#endif
 
 #define USB_EXISTS 0
 #if CONFIG_USB_DEVICE_STACK_NEXT
@@ -1287,6 +1292,9 @@ static void print_help(void)
 #if CONFIG_SENSOR_USE_TCAL
 	// Update the help string to show the new command set
 	printk("  tcal <on|off|status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
+#if CONFIG_SENSOR_TCAL_HEATED
+	printk("  tcal heat <start [temp]|stop|status> Closed-loop heated calibration\n");
+#endif
 #endif
 	printk("\n");
 	printk("Connection:\n");
@@ -1611,8 +1619,64 @@ static void console_cmd_sens(size_t argc, char **argv)
 #endif
 
 #if CONFIG_SENSOR_USE_TCAL
+#if CONFIG_SENSOR_TCAL_HEATED
+static void console_cmd_tcal_heat(size_t argc, char **argv)
+{
+	if (argc < 3 || argc > 4) {
+		printk("Error: Use: tcal heat <start [temp]|stop|status>\n");
+		return;
+	}
+	int err;
+	if (strcmp(argv[2], "start") == 0) {
+		float target = CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C;
+		if (argc == 4) {
+			char *end = NULL;
+			errno = 0;
+			target = strtof(argv[3], &end);
+			if (end == argv[3] || *end != '\0' || errno == ERANGE || !v_finite(&target, 1)) {
+				printk("Error: Heated T-Cal target must be a finite temperature in C\n");
+				return;
+			}
+		}
+		err = sensor_tcal_heated_start(target);
+	} else if (strcmp(argv[2], "stop") == 0 && argc == 3) {
+		err = sensor_tcal_heated_stop();
+	} else if (strcmp(argv[2], "status") == 0 && argc == 3) {
+		sensor_tcal_heated_report();
+		return;
+	} else {
+		printk("Error: Use: tcal heat <start [temp]|stop|status>\n");
+		return;
+	}
+	if (err) {
+		const char *reason;
+		switch (err) {
+		case -EBUSY: reason = "calibration or maintenance already owns the sensor"; break;
+		case -EAGAIN: reason = "sensor or fresh temperature not ready"; break;
+		case -ENOTSUP: reason = "required sensor or heater capability unavailable"; break;
+		case -ESHUTDOWN: reason = "sensor or power lifecycle admission closed"; break;
+		case -ENODEV: reason = "heater or external power unavailable"; break;
+		case -ENODATA: reason = "required sensor observations unavailable"; break;
+		case -EINVAL:
+		case -ERANGE: reason = "target temperature outside permitted range"; break;
+		case -EALREADY: reason = "session already completed or inactive"; break;
+		default: reason = "heater/session operation failed; inspect status"; break;
+		}
+		printk("Error: Heated T-Cal %s: %s (%d)\n", argv[2], reason, err);
+	}
+	/* A successful reservation is not a completed calibration or NVS save. */
+	sensor_tcal_heated_report();
+}
+#endif
+
 static void console_cmd_tcal(size_t argc, char **argv)
 {
+#if CONFIG_SENSOR_TCAL_HEATED
+	if (argc > 1 && strcmp(argv[1], "heat") == 0) {
+		console_cmd_tcal_heat(argc, argv);
+		return;
+	}
+#endif
 	char *arg = argc > 1 ? argv[1] : NULL;
 	char *arg2 = argc > 2 ? argv[2] : NULL;
 
@@ -1627,10 +1691,14 @@ static void console_cmd_tcal(size_t argc, char **argv)
 			printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
 		} else if (strcmp(subcmd, "on") == 0) {
 			sensor_tcal_set_enabled(true);
-			printk("T-Cal compensation enabled\n");
+			if (sensor_tcal_get_enabled()) {
+				printk("T-Cal compensation enabled\n");
+			}
 		} else if (strcmp(subcmd, "off") == 0) {
 			sensor_tcal_set_enabled(false);
-			printk("T-Cal compensation disabled (using static gyro bias)\n");
+			if (!sensor_tcal_get_enabled()) {
+				printk("T-Cal compensation disabled (using static gyro bias)\n");
+			}
 		} else if (strcmp(subcmd, "status") == 0) {
 			sensor_tcal_status();
 			printk(
@@ -1647,11 +1715,15 @@ static void console_cmd_tcal(size_t argc, char **argv)
 				printk("Error: Missing argument. Use: tcal auto <on|off>\n");
 			} else if (strcmp(auto_arg, "on") == 0) {
 				sensor_tcal_set_auto_calibration(true);
-				printk("T-Cal auto-calibration enabled. Device will auto-calibrate when resting.\n");
-				printk("Note: Sleep timeout will be prevented during auto-calibration mode.\n");
+				if (sensor_tcal_get_auto_calibration()) {
+					printk("T-Cal auto-calibration enabled. Device will auto-calibrate when resting.\n");
+					printk("Note: Sleep timeout will be prevented during auto-calibration mode.\n");
+				}
 			} else if (strcmp(auto_arg, "off") == 0) {
 				sensor_tcal_set_auto_calibration(false);
-				printk("T-Cal auto-calibration disabled.\n");
+				if (!sensor_tcal_get_auto_calibration()) {
+					printk("T-Cal auto-calibration disabled.\n");
+				}
 			} else {
 				printk("Error: Invalid argument '%s'. Use: tcal auto <on|off>\n", auto_arg);
 			}
@@ -1856,11 +1928,19 @@ static void console_cmd_mag(size_t argc, char **argv)
 				);
 			}
 		} else if (strcmp(subcmd, "clear") == 0) {
-			sensor_calibration_clear_mag(NULL, true);
-			printk("Magnetometer calibration cleared\n");
+			int err = sensor_calibration_clear_mag(NULL, true);
+			if (err) {
+				printk("Error: Magnetometer calibration clear rejected (%d)\n", err);
+			} else {
+				printk("Magnetometer calibration cleared\n");
+			}
 		} else if (strcmp(subcmd, "cal") == 0 || strcmp(subcmd, "calibrate") == 0) {
-			sensor_request_calibration_mag();
-			printk("Magnetometer calibration started\n");
+			int err = sensor_request_calibration_mag();
+			if (err) {
+				printk("Error: Magnetometer calibration request rejected (%d)\n", err);
+			} else {
+				printk("Magnetometer calibration requested\n");
+			}
 		} else {
 			printk("Usage: mag [on|off|clear|cal|auto <on|off>|debug <on|off>]\n");
 		}
@@ -2100,7 +2180,10 @@ static void console_cmd_reset(size_t argc, char **argv)
 	}
 #endif
 	else if (arg && strcmp(arg, "mag") == 0) {
-		sensor_calibration_clear_mag(NULL, true);
+		int err = sensor_calibration_clear_mag(NULL, true);
+		if (err) {
+			printk("Error: Magnetometer calibration reset rejected (%d)\n", err);
+		}
 	}
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	else if (arg && strcmp(arg, "sens") == 0) {

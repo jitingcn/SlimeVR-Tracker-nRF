@@ -24,4 +24,9 @@ void sensor_calibration_apply_accel(float a[3]);
 void sensor_calibration_subtract_gyro_bias(float g[3]);
 void sensor_calibration_gyro_bias(float out[3]);
 
+#if CONFIG_SENSOR_TCAL_HEATED
+int sensor_calibration_imu_reserve_heated(void);
+void sensor_calibration_imu_release_heated(void);
+#endif
+
 #endif

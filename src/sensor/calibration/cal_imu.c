@@ -94,7 +94,13 @@ void sensor_calibrate_imu(void)
 		imu_step(operation_id, CAL_PHASE_SENSOR_RETRIM);
 		uint8_t *sensor_data = sensor_calibration_get_sensor_data();
 		LOG_INF("Suspending sensor thread");
-		main_imu_suspend();
+		int suspend_err = main_imu_suspend();
+		if (suspend_err) {
+			LOG_ERR("Cannot safely suspend for IMU retrim: %d", suspend_err);
+			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
+			imu_failed(operation_id, CAL_PHASE_SENSOR_RETRIM, CAL_REASON_SENSOR_UNAVAILABLE);
+			return;
+		}
 		LOG_INF("Running BMI270 component retrimming");
 		int err = bmi_crt(sensor_data); // will automatically reinitialize // TODO: this blocks sensor!
 		LOG_INF("Resuming sensor thread");

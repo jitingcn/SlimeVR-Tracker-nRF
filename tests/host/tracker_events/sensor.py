@@ -16,8 +16,8 @@ spec.loader.exec_module(leaves)
 source = (ROOT / 'src/sensor/sensor.c').read_text()
 
 
-def function(name):
-    match = re.search(r'^(?:static )?(?:void|bool|float|uint32_t) ' + name + r'\([^;]*?\)\s*\{', source, re.M)
+def function(name, source=source):
+    match = re.search(r'^(?:static )?(?:void|int|bool|float|uint32_t) ' + name + r'\([^;]*?\)\s*\{', source, re.M)
     opening = source.index('{', match.start())
     depth = 0
     for token in re.finditer(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|[{}]', source[opening:], re.S):
@@ -116,7 +116,7 @@ static bool interrupt_acquire;
 static void sensor_loop_acquire(sensor_loop_frame_t *frame) {
     if(interrupt_acquire) {
         detector_pending=true;
-        main_imu_suspend(); assert(!detector_pending);
+        assert(main_imu_suspend()==0); assert(!detector_pending);
         now_ms+=2000; main_imu_resume();
     }
     frame->g_count=frame->a_count=1; detector_pending=true;
@@ -283,7 +283,7 @@ int main(void) {
     drain(700);assert(known==0 && unknown>0);
     interrupt_acquire=false;frame_once();drain(300);assert(known>=2);
     unsigned before=known;
-    main_imu_suspend();
+    assert(main_imu_suspend()==0);
     sensor_loop_frame_t stale={.sensor_epoch=tracker_events_sensor_epoch(),.g_count=1,.a_count=1};
     detector_pending=true;publish_observation(&stale);
     assert(!detector_pending && !local_rest && !cal_rest);
@@ -308,4 +308,95 @@ with tempfile.TemporaryDirectory(prefix='sensor-events-') as tmp:
     c.write_text('#include "leaves.h"\n#include "' + str(ROOT / 'src/connection/tracker_events.c') + '"\n' + fixture + '\n#include "' + str(ROOT / 'src/util.c') + '"\n')
     binary = tmp / 'sensor'
     subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + ['-std=gnu11', '-O0', '-g', '-Wall', '-Wextra', '-Wno-unused-function', '-Wno-unused-variable', '-I', str(tmp), '-I', str(ROOT / 'src'), str(c), str(ROOT / 'src/sensor/motion_state.c'), '-lm', '-o', str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+# The heater consumes a different, coherent temperature observation contract.
+# Exercise production publication/getter/lifecycle bodies independently of the
+# fusion event fixture; physical reads and the core gate are hardware leaves.
+temperature_header = (ROOT / 'src/sensor/sensor.h').read_text()
+observation = re.search(r'struct sensor_temperature_observation \{.*?\};', temperature_header, re.S).group()
+temperature_fixture = r'''
+#include "util.h"
+#define K_FOREVER (-1)
+#define K_MUTEX_DEFINE(name) struct { bool held; } name
+#define k_mutex_lock(lock, timeout) do { (void)(timeout); assert(!(lock)->held); (lock)->held=true; } while(0)
+#define k_mutex_unlock(lock) do { assert((lock)->held); (lock)->held=false; } while(0)
+#define atomic_get(ptr) (*(ptr))
+#define TCAL_HEATED_STOP_SENSOR_STOP 1
+static bool main_ok=true, main_suspended, power_ready=true, ota_active, suppressed, core_ready;
+static int off_error;
+static float sensor_tcal_temp_raw, sensor_tcal_temp;
+static bool heater_power_ready(void) {return power_ready;}
+static bool esb_ota_is_active(void) {return ota_active;}
+static bool connection_get_ota_suppressed(void) {return suppressed;}
+static void sensor_tcal_heated_set_ready(bool ready) {core_ready=ready;}
+static int sensor_tcal_heated_abort(int reason) {(void)reason; core_ready=false; return off_error;}
+'''
+temperature_fixture += observation + '\n'
+temperature_fixture += source[source.index('static struct k_spinlock temperature_observation_lock;'):
+                              source.index('int sensor_get_imu_temperature_observation(')]
+for name in ('sensor_get_imu_temperature_observation', 'sensor_temperature_invalidate',
+             'sensor_temperature_resume', 'sensor_temperature_read_epoch', 'sensor_temperature_publish'):
+    temperature_fixture += function(name) + '\n'
+temperature_fixture += r'''
+int main(void) {
+    struct sensor_temperature_observation sample={0};
+    assert(sensor_get_imu_temperature_observation(NULL,2000)==-EINVAL);
+    assert(sensor_get_imu_temperature_observation(&sample,-1)==-EINVAL);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    now_ms=100; sensor_tcal_temp_raw=25; sensor_tcal_temp=24.5f;
+    sensor_temperature_resume();
+    uint32_t epoch=sensor_temperature_read_epoch();
+    sensor_temperature_publish(epoch,now_ms);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==0);
+    assert(sample.raw_c==25 && sample.filtered_c==24.5f && sample.sequence==1 && sample.sampled_at_ms==100);
+    now_ms=2100;
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==0);
+    now_ms++;
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    now_ms=99;
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    now_ms=2200;
+    sensor_temperature_publish(epoch,now_ms); /* Equal numeric value, new read. */
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==0);
+    assert(sample.sequence==2 && sample.sampled_at_ms==2200);
+    assert(sensor_temperature_invalidate()==0);
+    sensor_temperature_resume();
+    sensor_temperature_publish(epoch,now_ms); /* In-flight read crossing stop. */
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    epoch=sensor_temperature_read_epoch();
+    main_suspended=true;
+    sensor_temperature_publish(epoch,now_ms);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    main_suspended=false; main_ok=false;
+    sensor_temperature_publish(epoch,now_ms);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    main_ok=true; sensor_tcal_temp_raw=NAN;
+    sensor_temperature_publish(epoch,now_ms);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    sensor_tcal_temp_raw=25; sensor_tcal_temp=INFINITY;
+    sensor_temperature_publish(epoch,now_ms);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    sensor_tcal_temp=24.5f;
+    sensor_temperature_publish(epoch,now_ms);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==0 && sample.sequence==3);
+    off_error=-ETIMEDOUT;
+    assert(sensor_temperature_invalidate()==-ETIMEDOUT);
+    assert(sensor_get_imu_temperature_observation(&sample,2000)==-EAGAIN);
+    puts("PASS actual temperature observation freshness, sequence, lifecycle and off-error contracts");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='sensor-temperature-') as tmp:
+    tmp = Path(tmp)
+    (tmp / 'leaves.h').write_text(leaves.LEAVES)
+    c = tmp / 'temperature.c'
+    # v_finite needs only the standard bool/size/int/memcpy declarations
+    # already supplied by leaves.h, not util.c's unrelated Zephyr helpers.
+    c.write_text('#include <math.h>\n#include "leaves.h"\n' + temperature_fixture +
+                 '\n' + function('v_finite', (ROOT / 'src/util.c').read_text()) + '\n')
+    binary = tmp / 'temperature'
+    subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+        '-std=gnu11', '-O2', '-ffast-math', '-g', '-Wall', '-Wextra',
+        '-Wno-unused-function', '-Wno-unused-variable', '-I', str(tmp),
+        '-I', str(ROOT / 'src'), str(c), '-lm', '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

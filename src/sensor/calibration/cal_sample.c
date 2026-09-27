@@ -54,6 +54,9 @@ static struct k_spinlock sample_lock;
 static atomic_t sample_session;
 #define CAL_SAMPLE_CHANNEL_MASK (CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO | CAL_SAMPLE_MAG)
 static bool accel_snapshot_valid;
+#if CONFIG_SENSOR_TCAL_HEATED
+static int64_t accel_snapshot_time;
+#endif
 
 static void publish_sample_locked(struct k_msgq *queue, const float v[3])
 {
@@ -122,6 +125,9 @@ void sensor_sample_accel(const float a[3])
 	k_spinlock_key_t key = k_spin_lock(&sample_lock);
 	memcpy(latest_accel, a, sizeof(latest_accel));
 	accel_snapshot_valid = true;
+	#if CONFIG_SENSOR_TCAL_HEATED
+	accel_snapshot_time = k_uptime_get();
+	#endif
 	if ((session & CAL_SAMPLE_ACCEL) && session == atomic_get(&sample_session)) {
 		publish_sample_locked(&accel_sample_queue, a);
 	}
@@ -146,6 +152,24 @@ bool sensor_peek_accel(float a[3])
 	k_spin_unlock(&sample_lock, key);
 	return valid;
 }
+
+#if CONFIG_SENSOR_TCAL_HEATED
+bool sensor_peek_accel_fresh(float a[3], int64_t max_age_ms)
+{
+	if (a == NULL || max_age_ms < 0) {
+		return false;
+	}
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
+	int64_t age = k_uptime_get() - accel_snapshot_time;
+	bool valid = accel_snapshot_valid && age >= 0 && age <= max_age_ms &&
+	             v_finite(latest_accel, 3);
+	if (valid) {
+		memcpy(a, latest_accel, sizeof(latest_accel));
+	}
+	k_spin_unlock(&sample_lock, key);
+	return valid;
+}
+#endif
 
 void sensor_sample_gyro(const float g[3])
 {

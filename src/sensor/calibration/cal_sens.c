@@ -33,6 +33,9 @@
 #include "calibration.h"
 #include "util.h"
 #include "connection/tracker_events.h"
+#if CONFIG_SENSOR_TCAL_HEATED
+#include "tcal_heated.h"
+#endif
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 /* Serialize explicit replacements with the measurement's final application. */
@@ -93,11 +96,20 @@ int sensor_calibration_set_sensitivity(const float degrees[3])
 			return -EINVAL;
 		}
 	}
+	#if CONFIG_SENSOR_TCAL_HEATED
+	int reserve_err = sensor_calibration_sensitivity_maintenance_begin();
+	if (reserve_err) {
+		return reserve_err;
+	}
+	#endif
 	k_mutex_lock(&sensitivity_lock, K_FOREVER);
 	bool notify = sensitivity_operation != 0;
 	int err = sys_write(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, scales, sizeof(scales));
 	sensitivity_replace_locked(CAL_REASON_REPLACED);
 	k_mutex_unlock(&sensitivity_lock);
+	#if CONFIG_SENSOR_TCAL_HEATED
+	sensor_calibration_sensitivity_maintenance_end();
+	#endif
 	if (notify) {
 		tracker_events_notify();
 	}
@@ -115,11 +127,20 @@ int sensor_calibration_reset_sensitivity(void)
 		return -ENODEV;
 	}
 	float scales[3] = {1.0f, 1.0f, 1.0f};
+	#if CONFIG_SENSOR_TCAL_HEATED
+	int reserve_err = sensor_calibration_sensitivity_maintenance_begin();
+	if (reserve_err) {
+		return reserve_err;
+	}
+	#endif
 	k_mutex_lock(&sensitivity_lock, K_FOREVER);
 	bool notify = sensitivity_operation != 0;
 	int err = sys_write(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, scales, sizeof(scales));
 	sensitivity_replace_locked(CAL_REASON_RESET);
 	k_mutex_unlock(&sensitivity_lock);
+	#if CONFIG_SENSOR_TCAL_HEATED
+	sensor_calibration_sensitivity_maintenance_end();
+	#endif
 	if (notify) {
 		tracker_events_notify();
 	}
