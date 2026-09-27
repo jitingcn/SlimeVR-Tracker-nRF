@@ -845,5 +845,6 @@ config ESB_OTA_FORCE_RAM_ENGINE
         this opt-in test profile is explicitly enabled.
 
 rsource "Kconfig.sensors_drivers"
+rsource "Kconfig.heater"
 
 source "Kconfig.zephyr"

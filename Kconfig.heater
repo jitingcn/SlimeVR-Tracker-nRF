@@ -1,0 +1,97 @@
+menuconfig SENSOR_TCAL_HEATED
+    bool "Experimental closed-loop heated T-Cal"
+    default n
+    depends on SENSOR_USE_TCAL && SOC_NRF52840
+    depends on BOARD_SK_CHEESECAKE_NRF_P00 || BOARD_SK_CHEESECAKE_NRF_P10
+    depends on !PM && !PM_DEVICE_RUNTIME
+    select SYSTEM_IMU_HEATER
+    help
+        Built in by default on P00/P10; heating starts only through the
+        explicit "tcal heat start" console command and requires external power.
+        Electrical/thermal qualification is still required. TIMER4 and PWM1
+        are exclusively reserved. The hardware cutoff repeats STOP; it is
+        not a latched interlock against a delayed CPU restart.
+
+config SYSTEM_IMU_HEATER
+    bool
+    select PWM
+    select NRFX_TIMER
+    select NRFX_GPPI
+
+if SENSOR_TCAL_HEATED
+
+config SYSTEM_IMU_HEATER_MAX_DUTY_PPTT
+    int "Maximum heater duty (1/10000)"
+    range 1 9900
+    default 7000
+    help
+        Conservative software ceiling, not a hardware-qualified power limit.
+        100 percent is forbidden: stopped PWM must fall back to GPIO LOW.
+
+config SENSOR_TCAL_HEATED_DEFAULT_TARGET_C
+    int "Default heated calibration target (C)"
+    range 30 48
+    default 44
+
+config SENSOR_TCAL_HEATED_MAX_TEMP_C
+    int "Absolute raw temperature shutdown threshold (C)"
+    range 40 60
+    default 50
+
+config SENSOR_TCAL_HEATED_RAMP_HALF_DEGREE_MS
+    int "Active ramp time per 0.5 C (ms)"
+    range 5000 500000
+    default 45000
+    help
+        Reference rise of 0.5 C per configured active ramp interval.
+        The default is exactly 0.5 C per 45 seconds (2/3 C per minute).
+        Motion pauses do not accumulate ramp time.
+
+config SENSOR_TCAL_HEATED_STABLE_BAND_MC
+    int "Target stable band (mC)"
+    range 100 1000
+    default 500
+
+config SENSOR_TCAL_HEATED_STABLE_MS
+    int "Stable target dwell (ms)"
+    range 10000 300000
+    default 60000
+
+config SENSOR_TCAL_HEATED_MAX_RISE_MCPS
+    int "Maximum positive raw temperature rise (mC/s)"
+    range 50 1000
+    default 200
+
+config SENSOR_TCAL_HEATED_TIMEOUT_MIN
+    int "Session timeout (minutes)"
+    range 1 90
+    default 90
+
+config SENSOR_TCAL_HEATED_RESUME_STABLE_MS
+    int "Rest dwell before resuming ramp and sampling (ms)"
+    range 1000 30000
+    default 5000
+
+config SENSOR_TCAL_HEATED_SLEW_PPTT_PER_S
+    int "Maximum duty increase per second (1/10000)"
+    range 1 2000
+    default 500
+
+config SENSOR_TCAL_HEATED_DEFAULT_KP
+    int "Proportional gain (1/10000 per C)"
+    range 0 2000
+    default 300
+
+config SENSOR_TCAL_HEATED_DEFAULT_KI
+    int "Integral gain (1/10000 per C-second)"
+    range 0 100
+    default 5
+
+config SENSOR_TCAL_HEATED_DEFAULT_KFF
+    int "Feedforward gain (1/10000 per C)"
+    range 0 2000
+    default 0
+    help
+        Optional feedforward requires physical thermal plant identification.
+
+endif
