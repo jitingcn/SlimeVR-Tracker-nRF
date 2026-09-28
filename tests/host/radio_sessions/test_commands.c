@@ -5,6 +5,11 @@
 #include <string.h>
 #include <errno.h>
 #include <setjmp.h>
+#include <math.h>
+#ifndef CONFIG_SENSOR_TCAL_HEATED
+#define CONFIG_SENSOR_TCAL_HEATED 0
+#endif
+#define CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C 44
 #define CONFIG_CONNECTION_OVER_HID 0
 #define USER_SHUTDOWN_ENABLED 0
 #define ESB_ST_PAIRING 0
@@ -89,6 +94,16 @@ static int sys_request_system_off(void)
     shutdown_calls++;
     return shutdown_calls <= reject_count ? -EBUSY : 0;
 }
+static unsigned heated_calls;
+static int heated_result;
+#if CONFIG_SENSOR_TCAL_HEATED
+static int sensor_tcal_heated_start(float target)
+{
+    assert(isfinite(target) && target == CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C);
+    heated_calls++;
+    return heated_result;
+}
+#endif
 #include "commands.inc"
 
 static void run_shutdown(unsigned rejected)
@@ -106,6 +121,29 @@ static void run_shutdown(unsigned rejected)
     assert(shutdown_calls == rejected + 1);
     assert(acked_remote_command == ESB_PONG_FLAG_SHUTDOWN);
     assert(now_ms - start > 10000);
+}
+
+static void run_heated_request(int result)
+{
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    heated_calls = 0;
+    heated_result = result;
+    receive_control(ESB_PONG_FLAG_TCAL_HEATED_START);
+    now_ms += 100;
+    feeds = 0;
+    stop_after = 3;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(acked_remote_command == ESB_PONG_FLAG_TCAL_HEATED_START);
+    assert(heated_calls == (CONFIG_SENSOR_TCAL_HEATED ? 1U : 0U));
+    /* Busy/OTA refusal must not become a delayed start after conditions clear,
+     * even if the receiver repeats its PONG before observing the echo. */
+    heated_result = 0;
+    receive_control(ESB_PONG_FLAG_TCAL_HEATED_START);
+    now_ms += 100;
+    feeds = 0;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(heated_calls == (CONFIG_SENSOR_TCAL_HEATED ? 1U : 0U));
+    assert(acked_remote_command == ESB_PONG_FLAG_TCAL_HEATED_START);
 }
 int main(void)
 {
@@ -135,5 +173,9 @@ int main(void)
     assert(acked_remote_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF);
     assert(!inject_stop);
     puts("commands: rejected shutdown retries, accepted shutdown keeps feeding; batch rejection propagates");
+    run_heated_request(0);
+    run_heated_request(-EBUSY);
+    run_heated_request(-ENOTSUP);
+    puts("commands: heated start consumed once, including refusal and disabled feature");
     return 0;
 }

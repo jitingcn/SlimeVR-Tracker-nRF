@@ -1257,6 +1257,11 @@ static void print_button_help(void)
 #else
 	printk("  No sw0 button is defined for this board\n");
 #endif
+#if CONFIG_SENSOR_TCAL_HEATED && DT_NODE_HAS_PROP(DT_ALIAS(heater_button), gpios)
+	printk("  Heater button hold (3s):   Start heated T-Cal at %d C (release first)\n",
+	       CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C);
+	printk("                            Ignored during OTA or an active heated session\n");
+#endif
 	printk("\n");
 }
 

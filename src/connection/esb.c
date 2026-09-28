@@ -22,6 +22,7 @@
 */
 #include "globals.h"
 #include "sensor/calibration/calibration.h"
+#include "sensor/calibration/tcal_heated.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
 #include "system/battery_tracker.h"
@@ -269,6 +270,22 @@ static void esb_remote_cmd_tcal_off(void)
 #if CONFIG_SENSOR_USE_TCAL
 	LOG_INF("Executing remote command: TCAL_OFF");
 	sensor_tcal_set_enabled(false);
+#endif
+}
+
+static void esb_remote_cmd_tcal_heated_start(void)
+{
+#if CONFIG_SENSOR_TCAL_HEATED
+	/* Consume this request even on refusal; never retry a rejected start later.
+	 * The radio echo acknowledges delivery, not heater acceptance. */
+	int err = sensor_tcal_heated_start(CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C);
+	if (err) {
+		LOG_WRN("Remote command: TCAL_HEATED_START rejected: %d", err);
+	} else {
+		LOG_INF("Executing remote command: TCAL_HEATED_START");
+	}
+#else
+	LOG_WRN("Remote command: TCAL_HEATED_START unsupported (heated T-Cal disabled)");
 #endif
 }
 
@@ -574,6 +591,7 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_RESET_TCAL, "RESET_TCAL", esb_remote_cmd_reset_tcal},
 	{ESB_PONG_FLAG_TCAL_AUTO_ON, "TCAL_AUTO_ON", esb_remote_cmd_tcal_auto_on},
 	{ESB_PONG_FLAG_TCAL_AUTO_OFF, "TCAL_AUTO_OFF", esb_remote_cmd_tcal_auto_off},
+	{ESB_PONG_FLAG_TCAL_HEATED_START, "TCAL_HEATED_START", esb_remote_cmd_tcal_heated_start},
 	{ESB_PONG_FLAG_PING, "PING", esb_remote_cmd_ping},
 	{ESB_PONG_FLAG_FUSION_RESET, "FUSION_RESET", esb_remote_cmd_fusion_reset},
 	{ESB_PONG_FLAG_TCAL_BOOT_ON, "TCAL_BOOT_ON", esb_remote_cmd_tcal_boot_on},

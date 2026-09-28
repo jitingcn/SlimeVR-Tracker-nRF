@@ -7,6 +7,10 @@
 #include "system/esb_ota.h"
 #include "watchdog.h"
 
+#if CONFIG_SENSOR_TCAL_HEATED
+#include "sensor/calibration/tcal_heated.h"
+#endif
+
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/sys/reboot.h>
@@ -609,6 +613,102 @@ int set_sensor_clock(bool enable, float rate, float *actual_rate)
 	return 0;
 }
 
+#if CONFIG_SENSOR_TCAL_HEATED && DT_NODE_HAS_PROP(DT_ALIAS(heater_button), gpios)
+#define HEATED_BUTTON_EXISTS 1
+static const struct gpio_dt_spec heater_button = GPIO_DT_SPEC_GET(DT_ALIAS(heater_button), gpios);
+static struct gpio_callback heated_button_cb;
+static struct k_spinlock heated_button_lock;
+static bool heated_button_edge;
+static bool heated_button_ready;
+/* Require a debounced release at boot, and after an ambiguous GPIO read. */
+static bool heated_button_handled = true;
+static int heated_button_level = -1;
+static int64_t heated_button_changed_at;
+
+static void heated_button_interrupt(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(cb);
+	ARG_UNUSED(pins);
+	k_spinlock_key_t key = k_spin_lock(&heated_button_lock);
+	heated_button_edge = true;
+	k_spin_unlock(&heated_button_lock, key);
+}
+
+static int sys_heated_button_init(void)
+{
+	if (!gpio_is_ready_dt(&heater_button)) {
+		return -ENODEV;
+	}
+	int err = gpio_pin_configure_dt(&heater_button, GPIO_INPUT);
+	if (err) {
+		return err;
+	}
+	gpio_init_callback(&heated_button_cb, heated_button_interrupt, BIT(heater_button.pin));
+	err = gpio_add_callback(heater_button.port, &heated_button_cb);
+	if (err) {
+		return err;
+	}
+	err = gpio_pin_interrupt_configure_dt(&heater_button, GPIO_INT_EDGE_BOTH);
+	if (err) {
+		gpio_remove_callback(heater_button.port, &heated_button_cb);
+		return err;
+	}
+	heated_button_ready = true;
+	return 0;
+}
+
+SYS_INIT(sys_heated_button_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
+static void heated_button_poll(bool ota_busy)
+{
+	if (!heated_button_ready) {
+		return;
+	}
+	int level = gpio_pin_get_dt(&heater_button);
+	int64_t now = k_uptime_get();
+	/* Serialize the final gesture decision with the ISR, after the GPIO
+	 * sample. An edge during the read invalidates that hold too. The consumed
+	 * gesture linearizes here; never hold this lock across heater admission. */
+	k_spinlock_key_t key = k_spin_lock(&heated_button_lock);
+	bool edge = heated_button_edge;
+	heated_button_edge = false;
+	if (level < 0) {
+		heated_button_level = -1;
+		heated_button_handled = true;
+		k_spin_unlock(&heated_button_lock, key);
+		return;
+	}
+	/* Even a release/repress between polls breaks a continuous hold. */
+	if (edge || level != heated_button_level) {
+		heated_button_level = level;
+		heated_button_changed_at = now;
+	}
+	int64_t elapsed = now - heated_button_changed_at;
+	if (level == 0) {
+		if (elapsed >= 50) {
+			heated_button_handled = false;
+		}
+		k_spin_unlock(&heated_button_lock, key);
+		return;
+	}
+	if (heated_button_handled || elapsed < 3000) {
+		k_spin_unlock(&heated_button_lock, key);
+		return;
+	}
+	/* Consume rejected gestures too: clearing a blocker is not a new press. */
+	heated_button_handled = true;
+	k_spin_unlock(&heated_button_lock, key);
+	if (ota_busy || sensor_tcal_heated_busy()) {
+		return;
+	}
+	int err = sensor_tcal_heated_start(CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C);
+	if (err) {
+		LOG_WRN("Heated T-Cal button start rejected: %d", err);
+	}
+}
+#endif
+
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
 static const struct gpio_dt_spec button0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 static int64_t press_time = 0;
@@ -705,6 +805,9 @@ static void button_thread(void)
 		}
 		/* Block all button actions during OTA (active or suppressed) */
 		bool ota_busy = esb_ota_is_active() || connection_get_ota_suppressed();
+#if HEATED_BUTTON_EXISTS
+		heated_button_poll(ota_busy);
+#endif
 		if (last_press && k_uptime_get() - last_press > 1000) {
 			LOG_INF("Button was pressed %d times", num_presses);
 			last_press = 0;

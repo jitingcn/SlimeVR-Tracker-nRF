@@ -75,7 +75,7 @@ static void host_tx_success(void)
 commands = [constants, block(esb, r"^struct esb_remote_cmd \{", True)]
 commands.extend(re.findall(r"^static (?:bool remote_command_rejected|uint32_t remote_command_generation);", esb, re.MULTILINE))
 registry = block(esb, r"^static const struct esb_remote_cmd esb_remote_cmds\[\] = \{", True)
-actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off")
+actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start")
 for name in actual_handlers:
     commands.append(function(esb, name))
 for name in sorted(set(re.findall(r", (esb_remote_cmd_\w+)\}", registry)) - set(actual_handlers)):
@@ -163,3 +163,6 @@ int main(void) {
         ]
         subprocess.run(command, check=True)
         subprocess.run([str(binary)], check=True)
+        if name == "commands":
+            subprocess.run(command + ["-DCONFIG_SENSOR_TCAL_HEATED=1"], check=True)
+            subprocess.run([str(binary)], check=True)

@@ -78,8 +78,8 @@
 		};
 
 		/*
-		 * Second user button, fitted on the P00 only. No firmware path
-		 * consumes sw1 yet; it is kept for a heated T-Cal entry point.
+		 * Second user button, fitted on the P00 only: hold for three
+		 * seconds to start heated T-Cal when that feature is enabled.
 		 */
 		button1: button_1 {
 			gpios = <&gpio0 13 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
@@ -90,6 +90,7 @@
 	aliases {
 		sw0 = &button0;
 		sw1 = &button1;
+		heater-button = &button1;
 		led-strip = &led_strip;
 	};
 
