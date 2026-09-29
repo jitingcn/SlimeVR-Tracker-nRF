@@ -168,19 +168,19 @@ void vqf_update_sensor_ids(int imu)
 static void set_params()
 {
 	init_params(&params);
-	params.tauAcc = 2.44f;
+	params.tauAcc = 3.08f;
 	params.biasClip = 5.0f;
-	params.biasForgettingTime = 300.0f;
-	params.biasSigmaInit = 8.66f;
-	params.biasSigmaMotion = 0.52f;
-	params.biasSigmaRest = 0.16f;
+	params.biasForgettingTime = 275.0f;
+	params.biasSigmaInit = 1.3f;
+	params.biasSigmaMotion = 0.164f;
+	params.biasSigmaRest = 0.018f;
 	params.biasVerticalForgettingFactor = 0.0001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 2.68f;
-	params.restMinT = 0.1f;
-	params.restThGyr = 0.69f;
-	params.restThAcc = 0.22f;
+	params.restFilterTau = 2.0f;
+	params.restMinT = 0.11f;
+	params.restThGyr = 0.29f;
+	params.restThAcc = 0.18f;
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 9.0f;
 	params.magCurrentTau = 0.20f;
