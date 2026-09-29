@@ -1,7 +1,7 @@
 CC ?= cc
 CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra -Werror
 CFLAGS += -fsanitize=undefined -fno-sanitize-recover=undefined -pthread -I. -I.generated -I../../../src
-CFLAGS += -DCONFIG_SENSOR_USE_6_SIDE_CALIBRATION=1 -DCONFIG_SENSOR_USE_TCAL=1 -DCONFIG_CMSIS_DSP=0 -DCONFIG_SENSOR_USE_SENS_CALIBRATION=0
+CFLAGS += -DCONFIG_SENSOR_USE_ACCEL_CALIBRATION=1 -DCONFIG_SENSOR_USE_TCAL=1 -DCONFIG_CMSIS_DSP=0 -DCONFIG_SENSOR_USE_SENS_CALIBRATION=0
 LDLIBS += -lm -fsanitize=undefined -pthread
 
 SOURCES := test_imu_calibration.c ../../../src/sensor/calibration/imu_calibration.c

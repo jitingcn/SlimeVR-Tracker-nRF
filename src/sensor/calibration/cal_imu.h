@@ -23,10 +23,10 @@
 #ifndef SLIMENRF_CAL_IMU_H
 #define SLIMENRF_CAL_IMU_H
 
-/* Classic IMU zero-rate and 6-side accel calibration (from calibration.c). */
+/* IMU zero-rate and accelerometer matrix calibration in cal_imu.c. */
 void sensor_calibrate_imu(void);
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-void sensor_calibrate_6_side(void);
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+void sensor_calibrate_accel(void);
 #endif
 
 #endif /* SLIMENRF_CAL_IMU_H */

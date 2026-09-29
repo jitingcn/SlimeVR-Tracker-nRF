@@ -117,7 +117,7 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks);
 #define ESB_PONG_FLAG_NORMAL 0x00
 #define ESB_PONG_FLAG_SHUTDOWN 0x01
 #define ESB_PONG_FLAG_CALIBRATE 0x02     // Trigger gyro/accel ZRO calibration
-#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03  // Trigger 6-point accelerometer calibration
+#define ESB_PONG_FLAG_CALIBRATE_ACC 0x03 // Trigger 18-orientation accelerometer calibration
 #define ESB_PONG_FLAG_MEOW 0x04          // Trigger meow output
 #define ESB_PONG_FLAG_SCAN 0x05          // Trigger sensor scan
 #define ESB_PONG_FLAG_MAG_CLEAR 0x06     // Clear magnetometer calibration

@@ -261,8 +261,8 @@ static float magneto_min_dir_range(void)
 	return min_range;
 }
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-// Target number of samples, 6 faces + 12 edges
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+// Collect 18 distinct orientations; no fixed face/edge template is enforced.
 #define CALIB_TARGET_SAMPLES 18
 // Orientation difference threshold (cosine value).
 // cos(25 degrees) ≈ 0.90. If dot product > 0.90, the angle between two directions is less than 25 degrees, considered
@@ -278,7 +278,7 @@ typedef struct {
 	float x, y, z;
 } Vector3;
 
-int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
+int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count_out)
 {
 	const uint16_t op = sensor_calibration_current_operation();
 	int64_t last_motion_event = -1000;
@@ -297,7 +297,7 @@ int sensor_6_sideBias(float a_inv[][3], int *captured_count_out)
 
 	magneto_reset();
 
-	LOG_INF("Starting Multi-Position Calibration (Target: %d poses)", CALIB_TARGET_SAMPLES);
+	LOG_INF("Starting accelerometer calibration (Target: %d orientations)", CALIB_TARGET_SAMPLES);
 	LOG_INF("Please rotate device to random orientations and hold still.");
 
 	// Main loop: until target number of samples collected

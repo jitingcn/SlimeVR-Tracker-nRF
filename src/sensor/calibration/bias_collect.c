@@ -36,7 +36,7 @@
 
 LOG_MODULE_REGISTER(cal_bias_collect, LOG_LEVEL_INF);
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 int isAccRest(float *acc, float *pre_acc, float threshold, int *t, int restdelta)
 {
 	float delta[3];
@@ -324,8 +324,8 @@ int sensor_offsetBias_internal(
 	dest2[1] = (float)(gyro_sum[1] / i);
 	dest2[2] = (float)(gyro_sum[2] / i);
 
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	// In single-side calibration mode, do NOT calculate accelerometer bias.
+#if !CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+	// With accelerometer matrix calibration disabled, leave accelerometer bias zero.
 	dest1[0] = 0.0f;
 	dest1[1] = 0.0f;
 	dest1[2] = 0.0f;

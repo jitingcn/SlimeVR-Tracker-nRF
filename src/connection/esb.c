@@ -236,13 +236,13 @@ static void esb_remote_cmd_calibrate(void)
 	sensor_request_calibration();
 }
 
-static void esb_remote_cmd_six_side_cal(void)
+static void esb_remote_cmd_calibrate_acc(void)
 {
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	LOG_INF("Executing remote command: SIX_SIDE_CAL");
-	sensor_request_calibration_6_side();
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+	LOG_INF("Executing remote command: accelerometer calibration (18 orientations)");
+	sensor_request_calibration_accel();
 #else
-	LOG_WRN("Remote command: SIX_SIDE_CAL not supported (disabled in config)");
+	LOG_WRN("Remote accelerometer calibration not supported (disabled in config)");
 	cal_event_reject(CAL_KIND_ACCEL_POSES, CAL_REASON_UNSUPPORTED);
 	tracker_events_notify();
 #endif
@@ -606,7 +606,7 @@ static void esb_remote_cmd_ota_unsuppress(void)
 static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_SHUTDOWN, "SHUTDOWN", NULL},
 	{ESB_PONG_FLAG_CALIBRATE, "CALIBRATE", esb_remote_cmd_calibrate},
-	{ESB_PONG_FLAG_SIX_SIDE_CAL, "SIX_SIDE_CAL", esb_remote_cmd_six_side_cal},
+	{ESB_PONG_FLAG_CALIBRATE_ACC, "CALIBRATE_ACC", esb_remote_cmd_calibrate_acc},
 	{ESB_PONG_FLAG_MEOW, "MEOW", esb_remote_cmd_meow},
 	{ESB_PONG_FLAG_SCAN, "SCAN", esb_remote_cmd_scan},
 	{ESB_PONG_FLAG_MAG_CLEAR, "MAG_CLEAR", esb_remote_cmd_mag_clear},

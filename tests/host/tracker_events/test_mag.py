@@ -166,23 +166,23 @@ int main(void) {
 
     reset_case(); inject_motion=true;
     float matrix[4][3]; int captured=0;
-    assert(sensor_6_sideBias(matrix,&captured) == -3);
+    assert(sensor_calibration_collect_accel_poses(matrix,&captured) == -3);
     assert(captured == 6 && motion_retries == 1 && ends == 0 && token_reads == 1);
 
     reset_case(); pose_limit=5;
-    sensor_calibrate_6_side();
+    sensor_calibrate_accel();
     assert(ends == 1 && outcome == CAL_OUTCOME_FAILED && reason == CAL_REASON_INSUFFICIENT_SAMPLES);
     assert(commits == 0 && solver_calls == 0);
 
     reset_case(); pose_limit=6;
-    sensor_calibrate_6_side();
+    sensor_calibrate_accel();
     assert(ends == 0 && commits == 1 && solver_calls == 1);
     assert(pending_operation == current_operation && completion_reason == CAL_REASON_PARTIAL);
     /* Applying belongs to imu_calibration's independently tested frame owner;
      * the pose wrapper may queue a partial candidate, never complete it here. */
 
     reset_case(); pose_limit=6; solver_error=-EDOM;
-    sensor_calibrate_6_side();
+    sensor_calibrate_accel();
     assert(ends == 1 && outcome == CAL_OUTCOME_FAILED && reason == CAL_REASON_FIT_ERROR);
     assert(commits == 0);
     puts("manual MAG timeout recovery / 18-pose retry and partial handoff: PASS");
@@ -205,8 +205,8 @@ def main():
         function(util,"v_diff_mag"), function(util,"v_epsilon"),
         function(mag,"magneto_reset"), function(mag,"magneto_min_dir_range"), HELPERS,
         function(mag,"manual_finish"), function(mag,"sensor_calibrate_mag"),
-        function(bias,"isAccRest"), function(mag,"sensor_6_sideBias"),
-        function(imu,"imu_step"), function(imu,"imu_failed"), function(imu,"sensor_calibrate_6_side"), TESTS,
+        function(bias,"isAccRest"), function(mag,"sensor_calibration_collect_accel_poses"),
+        function(imu,"imu_step"), function(imu,"imu_failed"), function(imu,"sensor_calibrate_accel"), TESTS,
     ))
     with tempfile.TemporaryDirectory(prefix="cal-mag-events-") as directory:
         path = Path(directory)

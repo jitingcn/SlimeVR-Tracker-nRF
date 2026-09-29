@@ -320,21 +320,21 @@ void sensor_calibrate_imu(void)
 	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
 }
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-// Minimum poses required for partial calibration save (must be before sensor_calibrate_6_side)
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+// Minimum poses required to save a partial accelerometer calibration.
 #define CALIB_MIN_POSES_FOR_PARTIAL 6
 
-void sensor_calibrate_6_side(void)
+void sensor_calibrate_accel(void)
 {
 	const uint16_t operation_id = sensor_calibration_current_operation();
 	bool partial = false;
 	float a_inv[4][3];
 	int captured_count = 0;
-	LOG_INF("Calibrating main accelerometer 6-side offset");
+	LOG_INF("Calibrating main accelerometer (18 orientations)");
 	LOG_INF("Rest the device on a stable surface");
 
 	sensor_calibration_identity_accel(a_inv);
-	int err = sensor_6_sideBias(a_inv, &captured_count);
+	int err = sensor_calibration_collect_accel_poses(a_inv, &captured_count);
 	if (err) {
 		if (err == -3) {
 			// Timeout occurred - check if we have enough samples for partial calibration

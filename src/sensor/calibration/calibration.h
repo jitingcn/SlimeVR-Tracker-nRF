@@ -76,7 +76,7 @@ enum sensor_calibration_request_id {
 	CAL_REQUEST_CLEAR = -1,
 	CAL_REQUEST_QUERY = 0,
 	CAL_REQUEST_IMU = 1,
-	CAL_REQUEST_ACCEL_6_SIDE = 2,
+	CAL_REQUEST_ACCEL_POSES = 2,
 	CAL_REQUEST_TCAL_BOOT = 3,
 	CAL_REQUEST_TCAL_RUNTIME = 4,
 	CAL_REQUEST_GYRO_SENS = 5,
@@ -100,7 +100,7 @@ int sensor_calibration_request(int id, enum cal_request_origin origin);
 uint16_t sensor_calibration_current_operation(void);
 
 void sensor_request_calibration(void);
-void sensor_request_calibration_6_side(void);
+void sensor_request_calibration_accel(void);
 int sensor_request_calibration_mag(void);
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions);

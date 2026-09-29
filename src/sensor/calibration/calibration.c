@@ -195,7 +195,7 @@ K_THREAD_DEFINE(calibration_thread_id, 4096, calibration_thread, NULL, NULL, NUL
 void sensor_calibration_process_accel(float a[3])
 {
 	sensor_sample_accel(a);
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	sensor_calibration_apply_accel(a);
 #endif
 }
@@ -455,10 +455,10 @@ void sensor_request_calibration(void)
 	sensor_calibration_request(CAL_REQUEST_IMU, CAL_REQUEST_USER);
 }
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-void sensor_request_calibration_6_side(void)
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+void sensor_request_calibration_accel(void)
 {
-	sensor_calibration_request(CAL_REQUEST_ACCEL_6_SIDE, CAL_REQUEST_USER);
+	sensor_calibration_request(CAL_REQUEST_ACCEL_POSES, CAL_REQUEST_USER);
 }
 #endif
 
@@ -541,7 +541,7 @@ static uint8_t calibration_request_kind(int id)
 {
 	switch (id) {
 	case CAL_REQUEST_IMU: return CAL_KIND_IMU_ZRO;
-	case CAL_REQUEST_ACCEL_6_SIDE: return CAL_KIND_ACCEL_POSES;
+	case CAL_REQUEST_ACCEL_POSES: return CAL_KIND_ACCEL_POSES;
 	case CAL_REQUEST_TCAL_BOOT: return CAL_KIND_TCAL_BOOT;
 	case CAL_REQUEST_TCAL_RUNTIME: return CAL_KIND_TCAL_RUNTIME;
 	case CAL_REQUEST_GYRO_SENS: return CAL_KIND_GYRO_SENS;
@@ -696,11 +696,11 @@ static void calibration_thread(void)
 			sensor_calibration_request(CAL_REQUEST_CLEAR, CAL_REQUEST_USER);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-		case CAL_REQUEST_ACCEL_6_SIDE:
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+		case CAL_REQUEST_ACCEL_POSES:
 			sensor_calibration_samples_begin(CAL_SAMPLE_ACCEL);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
-			sensor_calibrate_6_side();
+			sensor_calibrate_accel();
 			sensor_calibration_request(CAL_REQUEST_CLEAR, CAL_REQUEST_USER);
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;

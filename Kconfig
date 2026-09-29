@@ -552,13 +552,13 @@ config VQF_BENCH
         storage. Keep this disabled for normal firmware builds to avoid the
         extra RAM cost from static benchmark buffers.
 
-config SENSOR_USE_6_SIDE_CALIBRATION
-    bool "Use 6-side calibration"
+config SENSOR_USE_ACCEL_CALIBRATION
+    bool "Use 18-orientation accelerometer calibration"
     default y
     depends on USE_SLIMENRF_CONSOLE
     help
-        Use 6-side calibration for accelerometer.
-        Calibration can be completed through the basic console.
+        Use 18-orientation accelerometer matrix calibration.
+        Calibration can be completed through `calibrate acc` in the basic console.
 
 config SENSOR_USE_SENS_CALIBRATION
     bool "Use gyro sensitivity calibration"

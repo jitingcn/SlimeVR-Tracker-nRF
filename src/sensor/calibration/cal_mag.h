@@ -23,16 +23,16 @@
 #ifndef SLIMENRF_CAL_MAG_H
 #define SLIMENRF_CAL_MAG_H
 
-/* Manual magnetometer hard/soft-iron calibration + 6-side accel capture. */
+/* Manual magnetometer hard/soft-iron calibration and accelerometer pose capture. */
 
 void magneto_reset(void);
 int sensor_calibrate_mag(void);
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-int sensor_6_sideBias(float a_inv[][3], int *captured_count_out);
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count_out);
 #endif
 
-/* Magneto ATA accumulator shared with cal_imu partial-save on 6-side timeout. */
+/* Magneto ATA accumulator shared with cal_imu partial-save on accelerometer capture timeout. */
 #include "mag_fit.h"
 extern double norm_sum;
 extern double sample_count;

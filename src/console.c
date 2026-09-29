@@ -960,7 +960,7 @@ static void print_sensor_detail(void)
 		test_mode_effective_tps()
 	);
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	printk("\nAccelerometer matrix:\n");
 	for (int i = 0; i < 3; i++) {
 		printk(
@@ -1280,8 +1280,9 @@ static void print_help(void)
 	printk("Sensor Management:\n");
 	printk("  scan                       Restart sensor scan\n");
 	printk("  calibrate                  Calibrate sensor ZRO\n");
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	printk("  6-side                     Calibrate 6-side accelerometer\n");
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+	printk("  calibrate acc              Calibrate accelerometer (18 orientations)\n");
+	printk("  6-side                     Alias for calibrate acc\n");
 #endif
 	printk("  mag                        Show magnetometer status\n");
 	printk("  mag on|off                 Enable/disable magnetometer\n");
@@ -1343,7 +1344,7 @@ static void print_help(void)
 	printk("\n");
 	printk("Debug Commands:\n");
 	printk("  reset zro                  Reset ZRO calibration\n");
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	printk("  reset acc                  Reset accelerometer calibration\n");
 #endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -1439,7 +1440,7 @@ static void cmd_reset_zro(void)
 	}
 }
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 static void cmd_reset_acc(void)
 {
 	int err = sensor_calibration_reset_accel();
@@ -1568,11 +1569,24 @@ static void console_cmd_scan(size_t argc, char **argv)
 	sensor_request_scan(true);
 }
 
+static void console_calibrate_acc(void)
+{
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+	sensor_request_calibration_accel();
+#else
+	printk("Accelerometer calibration is disabled in this firmware.\n");
+#endif
+}
+
 static void console_cmd_calibrate(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-	sensor_request_calibration();
+	if (argc == 1) {
+		sensor_request_calibration();
+	} else if (argc == 2 && strcmp(argv[1], "acc") == 0) {
+		console_calibrate_acc();
+	} else {
+		printk("Usage: calibrate [acc]\n");
+	}
 }
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
@@ -1867,14 +1881,16 @@ static void console_cmd_tcal(size_t argc, char **argv)
 }
 #endif
 
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-static void console_cmd_6_side(size_t argc, char **argv)
+static void console_cmd_calibrate_acc_alias(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (argc != 1) {
+		printk("Usage: calibrate acc (or 6-side without arguments)\n");
+		return;
+	}
 	ARG_UNUSED(argv);
-	sensor_request_calibration_6_side();
+	printk("'6-side' is an alias; try 'calibrate acc' next time.\n");
+	console_calibrate_acc();
 }
-#endif
 
 static void console_cmd_mag(size_t argc, char **argv)
 {
@@ -2179,7 +2195,7 @@ static void console_cmd_reset(size_t argc, char **argv)
 	if (arg && strcmp(arg, "zro") == 0) {
 		cmd_reset_zro();
 	}
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	else if (arg && strcmp(arg, "acc") == 0) {
 		cmd_reset_acc();
 	}
@@ -2282,9 +2298,7 @@ static const struct console_cmd console_cmds[] = {
 #if CONFIG_SENSOR_USE_TCAL
 	{"tcal", console_cmd_tcal},
 #endif
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
-	{"6-side", console_cmd_6_side},
-#endif
+	{"6-side", console_cmd_calibrate_acc_alias},
 	{"mag", console_cmd_mag},
 	{"set", console_cmd_set},
 	{"pair", console_cmd_pair},

@@ -1272,7 +1272,7 @@ void sensor_scan_clear(void) // TODO: move some of this to sys?
 
 void sensor_retained_read(void) // TODO: move some of this to sys? or move to calibration?
 {
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	LOG_INF("Accelerometer matrix:");
 	for (int i = 0; i < 3; i++) {
 		LOG_INF(

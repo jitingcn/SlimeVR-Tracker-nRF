@@ -88,7 +88,7 @@ void sensor_calibration_imu_load(void)
 	}
 #endif
 	bool heal_matrix = !v_finite(&initial.accel_matrix[0][0], 12);
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	float diagonal[3] = {initial.accel_matrix[1][0], initial.accel_matrix[2][1], initial.accel_matrix[3][2]};
 	float magnitude = v_avg(diagonal);
 	float average[3] = {magnitude, magnitude, magnitude};
@@ -210,7 +210,7 @@ int sensor_calibration_reset_imu(void)
 static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect effect,
 			uint16_t operation_id)
 {
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	float zero[3] = {0};
 	if (!matrix || !v_finite(&matrix[0][0], 12)) {
 		return -EINVAL;
@@ -317,7 +317,7 @@ void sensor_calibration_persist_pending(void)
 	k_spin_unlock(&coefficient_lock, key);
 	int err = 0;
 	if (bias) {
-#if !CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if !CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 		err = sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, next.accel_bias, sizeof(next.accel_bias));
 #endif
 		if (persist_gyro) {
@@ -422,7 +422,7 @@ void sensor_calibration_clear_end(void)
  * or per-sample matrix copy is needed. External readers use snapshot above. */
 void sensor_calibration_apply_accel(float a[3])
 {
-#if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	apply_BAinv(a, applied.accel_matrix);
 #else
 	(void)a;

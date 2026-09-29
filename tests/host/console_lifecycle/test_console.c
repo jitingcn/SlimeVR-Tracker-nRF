@@ -125,12 +125,6 @@ static int uart_fifo_fill(const struct device *dev, const uint8_t *bytes, int si
 }
 
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
-static size_t parse_args(char *line, char **argv, size_t capacity)
-{
-    if (!*line) return 0;
-    argv[0] = line;
-    return 1;
-}
 static void strtolower(char *text)
 {
     for (; *text; text++) *text = (char)tolower((unsigned char)*text);
@@ -145,10 +139,15 @@ static void handle_command(size_t argc, char **argv)
     }
     completed_handlers++;
 }
-static const struct {
+static unsigned zro_requests, accel_requests;
+static void sensor_request_calibration(void) { zro_requests++; }
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+static void sensor_request_calibration_accel(void) { accel_requests++; }
+#endif
+struct console_cmd {
     const char *name;
     void (*fn)(size_t, char **);
-} console_cmds[] = {{"info", handle_command}, {"help", handle_command}};
+};
 #include "production.inc"
 
 /* Run the actual worker until its next empty blocking queue wait. */
@@ -265,6 +264,33 @@ int main(void)
     receive("help\n");
     run_worker();
     assert(completed_handlers == 3);
+
+    /* Actual UART editor, tokenizer, registration and worker: malformed
+     * calibration requests must never fall through to the bare ZRO action. */
+    const char *invalid[] = {
+        "calibrate typo\n", "calibrate acc extra\n", "calibrate gyro\n",
+        "calibrate acc a b c d e f g h\n", "6-side extra\n"
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(invalid); i++) {
+        receive(invalid[i]);
+        run_worker();
+        assert(zro_requests == 0 && accel_requests == 0);
+    }
+    receive("calibrate\n");
+    run_worker();
+    assert(zro_requests == 1 && accel_requests == 0);
+    receive("calibrate acc\n");
+    run_worker();
+    assert(zro_requests == 1 && accel_requests == CONFIG_SENSOR_USE_ACCEL_CALIBRATION);
+    receive("6-side\n");
+    run_worker();
+    assert(zro_requests == 1 && accel_requests == 2 * CONFIG_SENSOR_USE_ACCEL_CALIBRATION);
+    receive("  CALIBRATE   ACC  \n");
+    run_worker();
+    assert(zro_requests == 1 && accel_requests == 3 * CONFIG_SENSOR_USE_ACCEL_CALIBRATION);
+    receive("calibrate\n");
+    run_worker();
+    assert(zro_requests == 2 && accel_requests == 3 * CONFIG_SENSOR_USE_ACCEL_CALIBRATION);
     puts("tracker production console lifecycle: PASS");
     return 0;
 }
