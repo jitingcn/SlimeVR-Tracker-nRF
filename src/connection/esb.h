@@ -71,6 +71,11 @@ int esb_initialize(bool);
 void esb_deinitialize(void);
 /* Quiesce TX then re-init PTX (channel/NVS already applied in esb_initialize). */
 int esb_reinitialize(void);
+/* Channel control holds this boundary across storage and radio reinit. */
+void esb_channel_control_begin(void);
+void esb_channel_control_end(void);
+/* Connection-owner rendezvous service; true reserves this iteration. */
+bool esb_channel_search_poll(bool blocked);
 
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);

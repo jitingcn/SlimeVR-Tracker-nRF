@@ -6,6 +6,12 @@
 #include <errno.h>
 #include <stdlib.h>
 
+#define K_FOREVER 0
+static int esb_radio_lock;
+static void k_mutex_lock(int *lock, int timeout) { ++*lock; }
+static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
+static bool channel_wait_normal;
+static bool esb_ota_is_active(void) { return false; }
 typedef int atomic_t;
 static inline int atomic_get(const atomic_t *value)
 {
@@ -462,5 +468,14 @@ int main(void)
 	clock_lifetime();
 	cold_ping();
 	clock_errors();
+	reset();
+	channel_wait_normal = true;
+	assert(esb_write(ordinary, true, sizeof(ordinary)) == -EAGAIN);
+	assert(queue_calls == 0);
+	assert(esb_write_ping(ping, true) == 0);
+	channel_wait_normal = false;
+	reset();
+	assert(esb_write(ordinary, true, sizeof(ordinary)) == 0);
+	assert_original(0, ordinary, sizeof(ordinary), true);
 	return 0;
 }

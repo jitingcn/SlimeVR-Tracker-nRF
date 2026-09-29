@@ -17,6 +17,10 @@ static bool ping_pending, ping_failed, shutdown_requested;
 static uint32_t ping_failures, ping_success_streak;
 static int esb_conn_state;
 static int64_t connection_error_start_time;
+static bool channel_search, channel_wait_normal, channel_heard;
+static uint8_t ping_ctr_sent;
+static uint32_t own_pong_time;
+static int64_t k_uptime_get(void) { return 1000; }
 
 /* Status publication is the hardware leaf; the getter and enum are real. */
 void set_status(enum sys_status status, bool set)

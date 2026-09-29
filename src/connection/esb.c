@@ -97,6 +97,44 @@ static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS[] = {
 	36, 38, 40, 42, 58, 60, 62, 64, 66,
 };
 #define ESB_ALLOWED_CHANNELS_COUNT ARRAY_SIZE(ESB_ALLOWED_CHANNELS)
+
+/* Shared producer/lifecycle admission; recursive for owner-driven probes. */
+K_MUTEX_DEFINE(esb_radio_lock);
+static uint8_t radio_channel;
+static uint8_t paired_channel_found;
+static uint32_t own_pong_time;
+static uint32_t radio_session_generation;
+static uint8_t search_home;
+static uint8_t search_index;
+static bool channel_search;
+static bool channel_wait_normal;
+static volatile bool channel_found;
+static volatile bool channel_heard;
+static int64_t search_deadline;
+static int64_t search_probe_at;
+
+static uint8_t channel_candidate(uint8_t home, unsigned index)
+{
+	if (index == 0) {
+		return home;
+	}
+	for (unsigned i = 0; i < ESB_ALLOWED_CHANNELS_COUNT; ++i) {
+		uint8_t ch = ESB_ALLOWED_CHANNELS[i];
+		if (ch != home && --index == 0) {
+			return ch;
+		}
+	}
+	for (unsigned ch = 0; ch <= 100; ++ch) {
+		bool preferred = ch == home;
+		for (unsigned i = 0; i < ESB_ALLOWED_CHANNELS_COUNT; ++i) {
+			preferred |= ESB_ALLOWED_CHANNELS[i] == ch;
+		}
+		if (!preferred && --index == 0) {
+			return ch;
+		}
+	}
+	return home;
+}
 #define TX_ERROR_THRESHOLD 300
 #define RADIO_RETRANSMIT_DELAY CONFIG_RADIO_RETRANSMIT_DELAY
 #define RADIO_RF_CHANNEL CONFIG_RADIO_RF_CHANNEL
@@ -162,6 +200,7 @@ static uint16_t acked_test_rate_tps = 0; // TEST_MODE_ON payload at ack time
 static uint16_t executing_test_rate_tps = 0; // Snapshot for the in-flight TEST_MODE_ON execution
 static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
+static uint32_t executing_channel_value;
 static uint32_t received_test_rate_tps = 0; // Optional target TPS riding on TEST_MODE_ON (data[8-9])
 static uint8_t received_batch_rate_hz;
 static uint8_t acked_batch_rate_hz;
@@ -367,12 +406,12 @@ static void esb_remote_cmd_dfu_ota(void)
 
 static void esb_remote_cmd_set_channel(void)
 {
-	LOG_INF("Executing remote command: SET_CHANNEL to %u", received_channel_value);
-	int err = channel_control_set(received_channel_value);
+	LOG_INF("Executing remote command: SET_CHANNEL to %u", executing_channel_value);
+	int err = channel_control_set(executing_channel_value);
 	if (err) {
 		LOG_ERR("Channel update failed: %d (RAM/radio may already be updated)", err);
 	} else {
-		LOG_INF("RF channel saved and ESB reinitialized with channel %u", received_channel_value);
+		LOG_INF("RF channel saved and ESB reinitialized with channel %u", executing_channel_value);
 	}
 }
 
@@ -1182,6 +1221,7 @@ void event_handler(struct esb_evt const *event)
 					break;
 				}
 				memcpy(paired_addr, rx_payload.data, sizeof(paired_addr));
+				paired_channel_found = radio_channel;
 				pair_ack_pending = false;
 			}
 		} else {
@@ -1195,6 +1235,18 @@ void event_handler(struct esb_evt const *event)
 						break;
 					}
 					uint8_t rx_id = rx_payload.data[1];
+					if (rx_id == tracker_id && ping_pending
+					    && rx_payload.data[2] == ping_ctr_sent) {
+						own_pong_time = k_uptime_get();
+					}
+					if ((channel_search || channel_wait_normal)
+					    && (rx_id != tracker_id || !ping_pending
+					        || rx_payload.data[2] != ping_ctr_sent)) {
+						break;
+					}
+					if (channel_search || channel_wait_normal) {
+						channel_heard = true;
+					}
 					if (rx_id != tracker_id) {
 						// When using >7 trackers, multiple trackers share the same pipe
 						// This causes PONG responses to have mismatched IDs until TDMA is implemented
@@ -1483,9 +1535,14 @@ void event_handler(struct esb_evt const *event)
 						uint8_t tdma_sticks = rx_payload.data[10];
 						uint8_t tdma_epoch  = rx_payload.data[11];
 
-						if (tdma_slot != 0xFF && tdma_total > 0 && tdma_sticks > 0 &&
-						    tdma_epoch != tdma_get_config_epoch()) {
+						bool valid_schedule = tdma_total > 0 && tdma_slot < tdma_total
+							&& tdma_sticks >= 16;
+						if (valid_schedule &&
+						    (channel_wait_normal || tdma_epoch != tdma_get_config_epoch())) {
 							tdma_update_config(tdma_slot, tdma_total, tdma_sticks, tdma_epoch);
+						}
+						if (valid_schedule && server_time_synced && channel_wait_normal) {
+							channel_found = true;
 						}
 					}
 
@@ -1507,10 +1564,15 @@ void event_handler(struct esb_evt const *event)
 							&& pong_test_rate_tps != received_test_rate_tps;
 						bool batch_rate_changed = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
 							&& pong_batch_rate_hz != received_batch_rate_hz;
+						bool channel_changed = pong_flags == ESB_PONG_FLAG_SET_CHANNEL
+							&& sys_get_be32(&rx_payload.data[8]) != received_channel_value;
 						if (received_remote_command == ESB_PONG_FLAG_NORMAL
-						    || test_rate_changed || batch_rate_changed
+						    || test_rate_changed || batch_rate_changed || channel_changed
 						    || ((received_remote_command == acked_remote_command || remote_command_rejected)
 						        && pong_flags != received_remote_command)) {
+							if (channel_changed && acked_remote_command == ESB_PONG_FLAG_SET_CHANNEL) {
+								acked_remote_command = ESB_PONG_FLAG_NORMAL;
+							}
 							received_remote_command = pong_flags;
 							remote_command_rejected = false;
 							remote_command_generation++;
@@ -1595,6 +1657,7 @@ static uint8_t base_addr_0[4], base_addr_1[4], addr_prefix[8] = {0};
 
 int esb_initialize(bool tx)
 {
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
 	int err;
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
@@ -1641,6 +1704,7 @@ int esb_initialize(bool tx)
 	if (!err) {
 		// Read and apply RF channel from retained/NVS (stored value is encoded).
 		uint8_t ch = esb_rf_channel_decode(retained->rf_channel);
+		radio_channel = ch == ESB_RF_CHANNEL_DEFAULT ? RADIO_RF_CHANNEL : ch;
 		if (ch != ESB_RF_CHANNEL_DEFAULT) {
 			LOG_INF("Restoring RF channel from NVS: %u", ch);
 			esb_set_rf_channel(ch);
@@ -1669,24 +1733,37 @@ int esb_initialize(bool tx)
 	if (err) {
 		LOG_ERR("ESB initialization failed: %d", err);
 		set_status(SYS_STATUS_CONNECTION_ERROR, true);
+		k_mutex_unlock(&esb_radio_lock);
 		return err;
 	}
 	LOG_INF("ESB initialized, %sX mode", tx ? "T" : "R");
 	esb_initialized = true;
+	own_pong_time = k_uptime_get();
+	++radio_session_generation;
+	k_mutex_unlock(&esb_radio_lock);
 	return 0;
 }
 
 void esb_deinitialize(void)
 {
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	channel_search = false;
+	channel_wait_normal = true;
+	channel_found = false;
+	channel_heard = false;
+	ping_pending = false;
+	esb_clear_time_sync_state();
+	tdma_set_enabled(false);
 	if (esb_initialized) {
 		esb_initialized = false;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 		radio_capture_deinit();
 #endif
-		k_msleep(5); // wait for in-flight writers to observe flag + drain TX
+		/* Writers cannot enqueue across this disable/init boundary. */
 		esb_disable();
 	}
 	esb_initialized = false;
+	k_mutex_unlock(&esb_radio_lock);
 }
 
 int esb_reinitialize(void)
@@ -1800,14 +1877,43 @@ void esb_pair(void)
 		tx_payload_pair.data[0] = checksum; // Use checksum to make sure packet is for this device
 		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 		int64_t pair_start_time = k_uptime_get();
-		while (paired_addr[0] != checksum && ((*(uint64_t *)&paired_addr[0] >> 16) & 0xFFFFFFFFFFFF) != *addr) {
+		uint8_t pair_home = radio_channel;
+		unsigned pair_index = 0;
+		unsigned pair_bursts = 0;
+		uint32_t pair_generation = radio_session_generation;
+		while (paired_addr[0] != checksum) {
+			k_mutex_lock(&esb_radio_lock, K_FOREVER);
 			if (!esb_initialized) {
 				esb_set_addr_discovery();
 				esb_initialize(true);
 			}
+			if (pair_generation != radio_session_generation) {
+				pair_generation = radio_session_generation;
+				pair_home = radio_channel;
+				pair_index = 0;
+				pair_bursts = 0;
+			}
 			if (!clock_status) {
 				clocks_start();
 			}
+			if (!esb_is_idle()) {
+				k_mutex_unlock(&esb_radio_lock);
+				k_msleep(5);
+				continue;
+			}
+			if (pair_bursts >= 3) {
+				pair_ack_pending = false;
+				esb_flush_tx();
+				esb_flush_rx();
+				unsigned next = (pair_index + 1) % 101;
+				uint8_t ch = channel_candidate(pair_home, next);
+				if (esb_set_rf_channel(ch) == 0) {
+					radio_channel = ch;
+					pair_index = next;
+				}
+				pair_bursts = 0;
+			}
+			++pair_bursts;
 
 #if USER_SHUTDOWN_ENABLED
 			// During pairing, only use connection timeout to decide shutdown
@@ -1828,19 +1934,22 @@ void esb_pair(void)
 			watchdog_feed(WDT_CHANNEL_ESB);
 
 			if (esb_send_pair_step(0)) {
+				k_mutex_unlock(&esb_radio_lock);
 				k_msleep(100);
 				continue;
 			}
-			k_msleep(2);
+			k_msleep(20); /* Deferred receiver registration may miss the first burst. */
 			pair_ack_pending = true; // Set before step 1 which expects receiver response
 			if (esb_send_pair_step(1)) {
 				pair_ack_pending = false;
+				k_mutex_unlock(&esb_radio_lock);
 				k_msleep(100);
 				continue;
 			}
 			k_msleep(2);
 			esb_send_pair_step(2); // "acknowledge" pairing from receiver
-			k_msleep(996);
+			k_msleep(60 + (k_cycle_get_32() % 23));
+			k_mutex_unlock(&esb_radio_lock);
 		}
 		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_CONNECTION);
 		LOG_INF("Paired");
@@ -1853,6 +1962,8 @@ void esb_pair(void)
 			paired_addr,
 			sizeof(paired_addr)
 		); // Write new address and tracker id
+		uint8_t paired_channel = esb_rf_channel_encode(paired_channel_found);
+		sys_write(RF_CHANNEL_ID, &retained->rf_channel, &paired_channel, sizeof(paired_channel));
 		esb_deinitialize();
 		k_msleep(1600); // wait for led pattern
 	}
@@ -1905,6 +2016,10 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 {
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
 		return -EACCES;
+	}
+	if (channel_wait_normal && !esb_ota_is_active()
+	    && data_length > 0 && data[0] != ESB_PING_TYPE) {
+		return -EAGAIN;
 	}
 	drop_failed_tx_payload_if_pending();
 	if (data_length < 1) {
@@ -2178,12 +2293,14 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
 		return -EACCES;
 	}
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
 	atomic_inc(&tx_clock_users);
 	int err = clocks_start();
 	if (err == 0) {
 		err = esb_write_clocked(data, no_ack, data_length);
 	}
 	esb_release_tx_clock(false);
+	k_mutex_unlock(&esb_radio_lock);
 	return err;
 }
 
@@ -2192,6 +2309,7 @@ int esb_write_ping(uint8_t *data, bool force_resync)
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
 		return -EACCES;
 	}
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
 	atomic_inc(&tx_clock_users);
 	int err = clocks_start();
 	if (err == 0) {
@@ -2206,7 +2324,137 @@ int esb_write_ping(uint8_t *data, bool force_resync)
 	 * ownership; TX completion or an explicit lifecycle stop can release it. */
 	bool keep_clock_warm = err == -EAGAIN;
 	esb_release_tx_clock(keep_clock_warm);
+	k_mutex_unlock(&esb_radio_lock);
 	return err;
+}
+
+/* Called only by the connection TX owner, never by an ISR/second producer.
+ * Returns true while ordinary producer work must yield to rendezvous. */
+bool esb_channel_search_poll(bool blocked)
+{
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
+		k_mutex_unlock(&esb_radio_lock);
+		return false;
+	}
+	int64_t now = k_uptime_get();
+	blocked |= esb_ota_is_active() || ota_rx_head != ota_rx_tail;
+	if (blocked) {
+		/* OTA owns this physical channel. Freeze, never flush its exchange. */
+		search_deadline = now + 300;
+		search_probe_at = now + 80;
+		k_mutex_unlock(&esb_radio_lock);
+		return false;
+	}
+	if (channel_found) {
+		if (channel_search && radio_channel != search_home) {
+			uint8_t stored = esb_rf_channel_encode(radio_channel);
+			int err = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &stored, sizeof(stored));
+			if (err < 0) {
+				LOG_WRN("Recovered channel persistence failed: %d", err);
+			}
+		}
+		channel_found = false;
+		channel_search = false;
+		channel_wait_normal = false;
+		channel_heard = false;
+		set_status(SYS_STATUS_CONNECTION_ERROR, false);
+		connection_error_start_time = 0;
+		shutdown_requested = false;
+		ping_success_streak = 0;
+		k_mutex_unlock(&esb_radio_lock);
+		return false;
+	}
+	if (!channel_search && ping_failures < 3
+	    && (uint32_t)((uint32_t)now - own_pong_time) < 4500) {
+		k_mutex_unlock(&esb_radio_lock);
+		return false;
+	}
+	/* Fast probes replace ping_send_time: retain legacy loss accounting
+	 * independently of their cadence, including configured shutdown. */
+	uint32_t lost_ms = (uint32_t)((uint32_t)now - own_pong_time);
+	uint32_t missed = lost_ms / get_ping_interval_ms();
+	if (missed > ping_failures) {
+		ping_failures = missed;
+	}
+	if (ping_failures >= TX_ERROR_THRESHOLD && connection_error_start_time == 0) {
+		connection_error_start_time = now;
+		esb_conn_state = ESB_ST_RECOVERING;
+		set_status(SYS_STATUS_CONNECTION_ERROR, true);
+	}
+	/* MANUAL_START drains the FIFO: only idle + locked admission permits
+	 * changing physical channel. No queued pose or OTA frame crosses it. */
+	if (!esb_is_idle()) {
+		k_mutex_unlock(&esb_radio_lock);
+		return channel_search;
+	}
+	drop_failed_tx_payload_if_pending();
+	if (!channel_search) {
+		search_home = radio_channel;
+		search_index = 0;
+		unsigned key = irq_lock();
+		channel_search = true;
+		channel_wait_normal = true;
+		channel_heard = false;
+		channel_found = false;
+		ping_pending = false;
+		irq_unlock(key);
+		search_deadline = now + 240 + (k_cycle_get_32() % 61);
+		search_probe_at = now;
+		esb_flush_tx();
+		esb_flush_rx();
+		esb_clear_time_sync_state();
+		tdma_set_enabled(false);
+	}
+	if (now >= search_deadline) {
+		/* A matching control response holds this candidate long enough for
+		 * deferred commands and a subsequent NORMAL schedule. */
+		/* Invalidate the old outstanding probe atomically with the final
+		 * RX result check; a late ISR must never confirm the next channel. */
+		unsigned key = irq_lock();
+		bool heard = channel_heard || channel_found;
+		channel_heard = false;
+		if (!heard) {
+			ping_pending = false;
+		}
+		irq_unlock(key);
+		if (heard) {
+			search_deadline = now + 1000;
+		} else {
+			uint8_t next_index = (search_index + 1) % 101;
+			uint8_t candidate = channel_candidate(search_home, next_index);
+			esb_flush_tx();
+			esb_flush_rx();
+			if (esb_set_rf_channel(candidate) == 0) {
+				radio_channel = candidate;
+				search_index = next_index;
+			}
+			esb_clear_time_sync_state();
+			tdma_set_enabled(false);
+			search_deadline = now + 240 + (k_cycle_get_32() % 61);
+			search_probe_at = now;
+		}
+	}
+	if (now >= search_probe_at) {
+		uint8_t ping[ESB_PING_LEN] = {ESB_PING_TYPE};
+		ping[1] = tracker_id;
+		ping[7] = esb_get_ping_ack_flag();
+		(void)esb_write_ping(ping, true);
+		search_probe_at = now + 80 + (k_cycle_get_32() % 23);
+	}
+	k_mutex_unlock(&esb_radio_lock);
+	return true;
+}
+
+void esb_channel_control_begin(void)
+{
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+}
+
+void esb_channel_control_end(void)
+{
+	connection_request_ping_resync();
+	k_mutex_unlock(&esb_radio_lock);
 }
 
 bool esb_ready(void)
@@ -2406,6 +2654,7 @@ static void esb_thread(void)
 				uint32_t executing_generation = remote_command_generation;
 				if (executing_command == ESB_PONG_FLAG_TEST_MODE_ON) executing_test_rate_tps = received_test_rate_tps;
 				else if (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) executing_batch_rate_hz = received_batch_rate_hz;
+				else if (executing_command == ESB_PONG_FLAG_SET_CHANNEL) executing_channel_value = received_channel_value;
 				irq_unlock(key);
 				int err = esb_remote_command_execute(executing_command);
 				key = irq_lock();

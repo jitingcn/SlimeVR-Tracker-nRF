@@ -32,9 +32,16 @@ static uint8_t received_metadata_mask, received_metadata_chunk, received_sens_au
 static uint16_t received_metadata_token, received_sens_auto_revolutions;
 static bool metadata_echo_pending;
 static uint32_t received_channel_value;
+static uint32_t executing_channel_value, applied_channel;
+static unsigned channel_calls;
+static int channel_control_set(int channel) { applied_channel = channel; ++channel_calls; return 0; }
 static float received_sens_data[3];
 static struct { uint8_t data[13], length; } rx_payload = {.length = 13};
 static uint16_t sys_get_be16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
+static uint32_t sys_get_be32(const uint8_t *p)
+{
+	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
 static void connection_request_raw_metadata(uint8_t mask, uint8_t chunk, uint16_t token) {}
 static inline unsigned irq_lock(void) { return 0; }
 static inline void irq_unlock(unsigned key) {}
@@ -177,5 +184,29 @@ int main(void)
     run_heated_request(-EBUSY);
     run_heated_request(-ENOTSUP);
     puts("commands: heated start consumed once, including refusal and disabled feature");
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    memset(&rx_payload.data[8], 0, 4);
+    rx_payload.data[11] = 51;
+    receive_control(ESB_PONG_FLAG_SET_CHANNEL);
+    uint32_t generation = remote_command_generation;
+    assert(received_channel_value == 51);
+    now_ms += 100; feeds = 0; stop_after = 3;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(channel_calls == 1 && applied_channel == 51);
+    assert(acked_remote_command == ESB_PONG_FLAG_SET_CHANNEL);
+    receive_control(ESB_PONG_FLAG_SET_CHANNEL);
+    assert(remote_command_generation == generation);
+    rx_payload.data[11] = 100;
+    receive_control(ESB_PONG_FLAG_SET_CHANNEL);
+    assert(received_channel_value == 100 && remote_command_generation == generation + 1);
+    now_ms += 100; feeds = 0;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(channel_calls == 2 && applied_channel == 100);
+    rx_payload.data[11] = 0;
+    receive_control(ESB_PONG_FLAG_SET_CHANNEL);
+    assert(received_channel_value == 0 && remote_command_generation == generation + 2);
+    now_ms += 100; feeds = 0;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(channel_calls == 3 && applied_channel == 0);
     return 0;
 }

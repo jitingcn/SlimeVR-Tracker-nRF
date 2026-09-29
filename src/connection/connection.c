@@ -1622,6 +1622,10 @@ void connection_thread(void)
 		}
 
 		esb_process_ota_rx_queue();
+		if (esb_channel_search_poll(ota_suppressed)) {
+			k_msleep(5);
+			continue;
+		}
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 		radio_capture_process();
 #endif

@@ -16,8 +16,10 @@ static int channel_control_apply(uint8_t stored)
 		return -ENODEV;
 	}
 
+	esb_channel_control_begin();
 	int storage_error = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &stored, sizeof(stored));
 	int radio_error = esb_reinitialize();
+	esb_channel_control_end();
 	k_mutex_unlock(&channel_control_lock);
 	return storage_error < 0 ? storage_error : radio_error;
 }

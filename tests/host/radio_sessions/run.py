@@ -75,7 +75,7 @@ static void host_tx_success(void)
 commands = [constants, block(esb, r"^struct esb_remote_cmd \{", True)]
 commands.extend(re.findall(r"^static (?:bool remote_command_rejected|uint32_t remote_command_generation);", esb, re.MULTILINE))
 registry = block(esb, r"^static const struct esb_remote_cmd esb_remote_cmds\[\] = \{", True)
-actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start")
+actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start", "esb_remote_cmd_set_channel")
 for name in actual_handlers:
     commands.append(function(esb, name))
 for name in sorted(set(re.findall(r", (esb_remote_cmd_\w+)\}", registry)) - set(actual_handlers)):
@@ -106,11 +106,29 @@ recovery = constants + "\n" + function(status, "get_status")
 recovery += "\n" + "\n".join(re.findall(r"^#define PING_RECOVERY_THRESHOLD[^\n]*", esb, re.MULTILINE))
 recovery += "\nstatic void receive_valid_pong(void) { do {\n" + esb[start:end] + "\n(void)counter_diff;\n} while (0); }\n"
 
+channels = constants + "\n" + block(esb, r"^static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS\[\] = \{", True)
+channels += "\n#define ESB_ALLOWED_CHANNELS_COUNT (sizeof(ESB_ALLOWED_CHANNELS))\n"
+channels += esb[esb.index("K_MUTEX_DEFINE(esb_radio_lock);"):esb.index("#define TX_ERROR_THRESHOLD")]
+channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_encode\(", False)
+channels += "\n" + function(esb, "esb_channel_search_poll")
+channels += "\n" + function(esb, "esb_deinitialize")
+start = esb.index("\t\t\t\tif (rx_payload.data[0] == ESB_PONG_TYPE)")
+end = esb.index("\n\t\t\t\t\tif (rx_id != tracker_id)", start)
+channels += "\nstatic bool accept_pong(void) { if (rx_payload.length != ESB_PONG_LEN) return false; do {\n" + esb[start:end] + "\nreturn true;\n}\n} while (0); return false; }\n"
+start = esb.index("\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_NORMAL)")
+end = esb.index("\n\n\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA)", start)
+channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\n" + esb[start:end] + "\n}\n"
+channels += "\n" + function(esb, "esb_send_pair_step")
+channels += "\n" + function(esb, "esb_pair")
+start = esb.index("\t\tif (!paired_addr[0]) // zero, not paired")
+end = esb.index("\n\t\t} else {\n\t\t\tswitch (rx_payload.length)", start)
+channels += "\nstatic void receive_pair(void) { do {\n" + esb[start:end] + "\n}\n} while (0); }\n"
+
 with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     temporary = Path(directory)
     (temporary / "connection").mkdir()
     (temporary / "connection/connection.h").write_text((SOURCE / "connection/connection.h").read_text())
-    for name, parts in (("payload", payload), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery)):
+    for name, parts in (("payload", payload), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery), ("channels", channels)):
         (temporary / f"{name}.inc").write_text(parts)
     # Keep hardware leaves in the established fixture; exercise the new private
     # packet through the same extracted production ESB dispatch.
@@ -151,7 +169,7 @@ int main(void) {
     return 0;
 }
 ''')
-    for name in ("payload", "commands", "collection", "recovery"):
+    for name in ("payload", "commands", "collection", "recovery", "channels"):
         if os.environ.get("RADIO_CASE") not in (None, name):
             continue
         binary = temporary / name
