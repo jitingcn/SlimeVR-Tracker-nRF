@@ -52,7 +52,7 @@ PREFIX = r'''
 static bool radio=true, usb=true, test_enabled, ota, error, event_due=true, raw, raw_pending;
 static bool pose_pending, mag_pending, sensor_ids_set;
 static bool ota_suppressed;
-static int64_t ota_suppress_start_time, dc_conn_error_start;
+static int64_t ota_suppress_start_time;
 static uint8_t tracker_id=2, packet_sequence=19;
 static bool no_ack=true;
 static uint32_t now_ms=10000;
@@ -113,9 +113,6 @@ static void esb_ota_check_timeout(void) {}
 static void esb_ota_periodic_status(void) {}
 static void connection_set_ota_suppressed(bool x) { ota_suppressed=x; }
 static bool connection_raw_collection_active(void) { return raw; }
-static void connection_set_data_collection(bool x) { raw=x; }
-static int connection_set_data_collection_batch(bool x,uint16_t y) { (void)y;raw=x;return 0; }
-static void test_mode_set(bool x) { test_enabled=x; }
 static bool connection_process_raw_data(void) { raw_calls++; return raw_pending; }
 static int sensor_data_snapshot;
 static bool sensor_data_snapshot_qa_pending(void *p) { (void)p;return pose_pending; }

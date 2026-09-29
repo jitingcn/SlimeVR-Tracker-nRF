@@ -1616,6 +1616,24 @@ void connection_thread(void)
 			ping_interval_ms = PING_INTERVAL_MS;
 		}
 
+		/* Collection lifetime is independent of transport admission: channel
+		 * search, PING retries and OTA can all bypass the sending path. */
+		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
+			if (connection_raw_collection_active()) {
+				if (dc_conn_error_start == 0) {
+					dc_conn_error_start = now;
+				} else if (now - dc_conn_error_start > 60000) {
+					connection_set_data_collection(false);
+					connection_set_data_collection_batch(false, 0);
+					test_mode_set(false);
+					dc_conn_error_start = 0;
+					LOG_WRN("Data collection auto-stopped (connection error for 60s)");
+				}
+			}
+		} else {
+			dc_conn_error_start = 0;
+		}
+
 		if (!radio_ready && !hid_ready) {
 			k_msleep(100);
 			continue;
@@ -1737,23 +1755,11 @@ void connection_thread(void)
 				}
 			}
 
-			/* Connection-loss shutdown is independent of metadata repair. */
+			/* Disconnected radios must not send collection or sensor data. */
 			if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-				if (connection_raw_collection_active()) {
-					if (dc_conn_error_start == 0) {
-						dc_conn_error_start = now;
-					} else if (now - dc_conn_error_start > 60000) {
-						connection_set_data_collection(false);
-						connection_set_data_collection_batch(false, 0);
-						test_mode_set(false);
-						dc_conn_error_start = 0;
-						LOG_WRN("Data collection auto-stopped (connection error for 60s)");
-					}
-				}
 				k_msleep(100);
 				continue;
 			}
-			dc_conn_error_start = 0;
 
 			/* Raw streams yield one admission to a due event; test mode may
 			 * only carry events on its scheduled real pose packet. */
