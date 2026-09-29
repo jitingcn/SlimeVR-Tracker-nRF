@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-SRC = HERE.parents[2] / "src"
+SRC = Path(os.environ.get("TRACKER_SOURCE_ROOT", HERE.parents[2] / "src"))
 
 
 def block(source, pattern, semicolon=False):
@@ -38,6 +38,8 @@ power = (SRC / "system/power.c").read_text()
 ota = (SRC / "system/esb_ota.c").read_text()
 sensor = (SRC / "sensor/sensor.c").read_text()
 ota_header = (SRC / "system/esb_ota.h").read_text()
+tcal = (SRC / "sensor/calibration/tcal_runtime.c").read_text()
+radio = (SRC / "connection/esb.c").read_text()
 constants = "\n".join(re.findall(r"^#define OTA_.*$", ota_header, re.MULTILINE))
 parts = [constants, block(ota, r"^enum ota_state \{", True),
          block(ota, r"^struct ota_context \{", True), "static struct ota_context ota;"]
@@ -52,6 +54,12 @@ parts.append("#if CONFIG_SENSOR_TCAL_HEATED\n" +
              re.search(r"^static atomic_t heater_power_terminal;", power, re.MULTILINE).group() +
              "\n" + function(power, "heater_power_ready") + "\n#endif")
 parts.append(function(sensor, "main_imu_is_suspended"))
+parts.append("#if CONFIG_SENSOR_USE_TCAL\n" +
+             re.search(r"^static (?:bool|atomic_t) tcal_auto_calibration_enabled[^;]*;", tcal, re.MULTILINE).group() +
+             "\n" + re.search(r"^static bool tcal_compensation_enabled[^;]*;", tcal, re.MULTILINE).group() +
+             "\n" + function(tcal, "sensor_tcal_get_enabled") +
+             "\n" + function(tcal, "sensor_tcal_get_auto_calibration") +
+             "\n" + function(tcal, "sensor_tcal_set_auto_calibration") + "\n#endif")
 for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_wom_ready", "sys_plan_WOM",
              "sys_power_state_request", "sys_request_system_off", "sys_request_system_reboot",
              "sys_ota_reboot_reserve", "sys_ota_reboot_resolve", "sys_power_notice",
@@ -85,6 +93,17 @@ start = power.index("\t\tuint32_t generation = 0;")
 end = power.index("power_request_finish(&power_requests, requested, generation, consumed);", start)
 end += len("power_request_finish(&power_requests, requested, generation, consumed);")
 parts.append("static void power_iteration(void) {\n" + power[start:end] + "\n}")
+for name in ("esb_remote_cmd_tcal_auto_on", "esb_remote_cmd_tcal_auto_off"):
+    parts.append(function(radio, name))
+start = radio.index("\t\t// Check for shutdown timeout if connection errors persist")
+end = radio.index("\t\tint64_t now_idle", start)
+parts.append("static void lost_link_timeout(void) {\n" + radio[start:end] + "\n}")
+start = radio.index("\t\t\t// During pairing, only use connection timeout")
+end = radio.index("#endif", start)
+# The outer USER_SHUTDOWN_ENABLED block encloses the calibration feature guard.
+end = radio.index("\n\t\t\tif (paired_addr[0])", end)
+parts.append("static void pairing_timeout(void) {\n#if USER_SHUTDOWN_ENABLED\n" +
+             radio[start:end] + "\n}")
 
 with tempfile.TemporaryDirectory(prefix="tracker-ota-power-") as directory:
     temporary = Path(directory)
@@ -142,15 +161,16 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
     (void)key; assert(lock->locked); lock->locked = false;
 }
 """)
-    for variant in range(64):
+    for variant in range(128):
         mcuboot, imu_int = (variant // 2) % 2, variant % 2
         low_power_2 = (variant // 4) % 2
         active_delay = 5000 if (variant // 8) % 2 else 90000
         heated = (variant // 16) % 2
-        forced_ram = variant // 32
+        forced_ram = (variant // 32) % 2
+        tcal_enabled = variant // 64
         if forced_ram and mcuboot:
             continue
-        binary = temporary / f"ota-power-{mcuboot}-{imu_int}-{low_power_2}-{active_delay}-{heated}-{forced_ram}"
+        binary = temporary / f"ota-power-{mcuboot}-{imu_int}-{low_power_2}-{active_delay}-{heated}-{forced_ram}-{tcal_enabled}"
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-g", "-O1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
@@ -159,6 +179,7 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
             f"-DCONFIG_SENSOR_USE_LOW_POWER_2={low_power_2}",
             f"-DCONFIG_ACTIVE_TIMEOUT_DELAY={active_delay}",
             f"-DCONFIG_SENSOR_TCAL_HEATED={heated}",
+            f"-DCONFIG_SENSOR_USE_TCAL={tcal_enabled}",
             "-DCONFIG_SOC_NRF52840=1",
             f"-DCONFIG_ESB_OTA_FORCE_RAM_ENGINE={forced_ram}",
             f"-DOTA_USE_RAM_ENGINE={forced_ram}",

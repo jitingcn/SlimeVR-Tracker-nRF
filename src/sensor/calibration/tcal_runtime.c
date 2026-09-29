@@ -24,12 +24,14 @@
 #include "connection/tracker_events.h"
 #include "sensor/sensor.h"
 #include "system/system.h"
+#include "system/power.h"
 #include "system/uptime.h"
 #include "system/watchdog.h"
 #include "util.h"
 
 #include <math.h>
 #include <string.h>
+#include <zephyr/sys/atomic.h>
 
 #include "bias_collect.h"
 #include "calibration.h"
@@ -37,7 +39,6 @@
 #include "tcal_runtime.h"
 #if CONFIG_SENSOR_TCAL_HEATED
 #include "tcal_heated.h"
-#include <zephyr/sys/atomic.h>
 #endif
 
 #if CONFIG_SENSOR_USE_TCAL
@@ -70,7 +71,7 @@ static int64_t runtime_cal_rest_start = 0;
 static bool runtime_cal_rest_tracking = false;
 float runtime_cal_last_temp = NAN;
 
-static bool tcal_auto_calibration_enabled = false;
+static atomic_t tcal_auto_calibration_enabled;
 static bool tcal_compensation_enabled = true; /* until init_from_retained */
 /* Hot-path cache: avoid count/enable re-check every gyro sample. */
 static bool tcal_curve_apply_ready;
@@ -317,21 +318,26 @@ void sensor_tcal_set_auto_calibration(bool enabled)
 		return;
 	}
 #endif
-	tcal_auto_calibration_enabled = enabled;
-	/* This mode does not imply blocking calibration or prevent WoM. */
+	atomic_set(&tcal_auto_calibration_enabled, enabled);
 	if (!enabled) {
 		tcal_accum_request_reset();
 	}
 #if CONFIG_SENSOR_TCAL_HEATED
 	sensor_calibration_maintenance_end();
 #endif
+	/* Publish before cancelling reversible sleep; never hold the calibration
+	 * maintenance lock while acquiring the power policy mutex. A physical
+	 * shutdown that already committed cannot be withdrawn. */
+	if (enabled) {
+		sys_cancel_WOM();
+	}
 	LOG_INF("T-Cal Auto-calibration %s", enabled ? "enabled" : "disabled");
 }
 
 // Get auto-calibration enabled status
 bool sensor_tcal_get_auto_calibration(void)
 {
-	return tcal_auto_calibration_enabled;
+	return atomic_get(&tcal_auto_calibration_enabled) != 0;
 }
 
 // =============================================================================
@@ -915,7 +921,7 @@ static void tcal_accum_feed(const float g[3], float temp, bool heated)
 void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
 {
 	tcal_accum_apply_reset();
-	if (tcal_auto_calibration_enabled) {
+	if (sensor_tcal_get_auto_calibration()) {
 		tcal_accum_feed(g, temp, false);
 	}
 }
@@ -969,7 +975,7 @@ void sensor_tcal_check_auto_calibration(float current_temp)
 
 	int64_t now = k_uptime_get();
 
-	if (!tcal_auto_calibration_enabled) {
+	if (!sensor_tcal_get_auto_calibration()) {
 		return;
 	}
 

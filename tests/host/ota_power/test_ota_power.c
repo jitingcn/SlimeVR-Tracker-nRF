@@ -15,7 +15,6 @@
 #define LOG_WRN(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
 #define CONFIG_BUILD_OUTPUT_UF2 1
-#define CONFIG_SENSOR_USE_TCAL 0
 #define CONFIG_DELAY_SLEEP_ON_STATUS 1
 #define ADAFRUIT_BOOTLOADER 0
 #define CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN 0
@@ -37,6 +36,28 @@
 #define CONFIG_ACTIVE_TIMEOUT_THRESHOLD 15000
 #define CONFIG_SLEEP_ON_ACTIVE_TIMEOUT 1
 #define SYS_STATUS_CALIBRATION_RUNNING 1
+#define SYS_STATUS_CONNECTION_ERROR 2
+#define USER_SHUTDOWN_ENABLED 1
+#define CONFIG_CONNECTION_TIMEOUT_DELAY 60000
+#define TX_ERROR_THRESHOLD 5
+static bool shutdown_requested, connection_error;
+static int ping_failures;
+static int64_t connection_error_start_time, pair_start_time;
+static void set_status(int status, bool value) { assert(status == SYS_STATUS_CONNECTION_ERROR); connection_error = value; }
+#if CONFIG_SENSOR_USE_TCAL
+static unsigned accum_resets;
+static void sensor_tcal_lock(void) {}
+static void sensor_tcal_unlock(void) {}
+static void tcal_accum_request_reset(void) { accum_resets++; }
+static void sensor_boot_cal_reset(void) {}
+static void sensor_request_fusion_reset(void) {}
+#if CONFIG_SENSOR_TCAL_HEATED
+static bool maintenance_busy;
+static int sensor_calibration_maintenance_begin(void) { return maintenance_busy ? -EBUSY : 0; }
+static void sensor_calibration_maintenance_end(void) {}
+#define printk(...) ((void)0)
+#endif
+#endif
 static bool test_active, calibration_active, ota_suppressed;
 #if CONFIG_SENSOR_TCAL_HEATED
 static bool heated_pending;
@@ -45,7 +66,7 @@ static bool sensor_tcal_heated_busy(void) { return heated_pending; }
 static atomic_t main_suspended;
 static int64_t last_data_time, last_suspend_attempt_time;
 static bool test_mode_get(void) { return test_active; }
-static bool get_status(int status) { (void)status; return calibration_active; }
+static bool get_status(int status) { return status == SYS_STATUS_CONNECTION_ERROR ? connection_error : calibration_active; }
 #define ADAFRUIT_DFU_MAGIC_UF2_RESET 0x57
 static struct { uint32_t GPREGRET; } power_registers;
 #define NRF_POWER (&power_registers)
@@ -218,6 +239,16 @@ static void fixture(void)
 	wom_planned = wom_announced = wom_ready_timeout_initialized = false;
 	wom_deadline = wom_commit_at = wom_ready_timeout = wom_last_eligible = 0;
 	test_active = calibration_active = ota_suppressed = false;
+	shutdown_requested = connection_error = false;
+	ping_failures = 0;
+	connection_error_start_time = pair_start_time = 0;
+#if CONFIG_SENSOR_USE_TCAL
+	atomic_set(&tcal_auto_calibration_enabled, false);
+	accum_resets = 0;
+#if CONFIG_SENSOR_TCAL_HEATED
+	maintenance_busy = false;
+#endif
+#endif
 	shutdown_allowed = true;
 	suspend_result = shutdown_result = sensor_shutdown_calls = 0;
 	ram_launches = 0;
@@ -767,8 +798,102 @@ static void ota_requires_safe_sensor_shutdown(void)
 #endif
 }
 
+static void tcal_sleep_policy(void)
+{
+	/* A deliberate local/remote collection session must not require test mode. */
+	fixture(); memset(&ota, 0, sizeof(ota));
+	now_ms = CONFIG_CONNECTION_TIMEOUT_DELAY + CONFIG_ACTIVE_TIMEOUT_DELAY + 10000;
+	esb_remote_cmd_tcal_auto_on();
+	assert(!test_mode_get());
+#if CONFIG_SENSOR_USE_TCAL
+	assert(sensor_tcal_get_auto_calibration());
+	sensor_update_sensor_state(true);
+	assert(sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE && !wom_planned);
+#endif
+	ping_failures = TX_ERROR_THRESHOLD;
+	connection_error_start_time = pair_start_time = 1;
+	lost_link_timeout();
+#if CONFIG_SENSOR_USE_TCAL
+	assert(!shutdown_requested);
+	pairing_timeout();
+	assert(!shutdown_requested);
+	esb_remote_cmd_tcal_auto_off();
+	assert(!sensor_tcal_get_auto_calibration() && accum_resets == 1);
+	lost_link_timeout();
+#else
+	esb_remote_cmd_tcal_auto_off();
+#endif
+	assert(shutdown_requested); /* disabled feature / auto off restores timeout */
+	power_iteration();
+	assert(physical_offs == 1);
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	now_ms = CONFIG_CONNECTION_TIMEOUT_DELAY + 1;
+	esb_remote_cmd_tcal_auto_on();
+#if CONFIG_SENSOR_USE_TCAL
+	pairing_timeout();
+	assert(!shutdown_requested);
+	sensor_tcal_set_auto_calibration(false);
+#endif
+	pairing_timeout();
+	assert(shutdown_requested);
+	power_iteration();
+	assert(physical_offs == 1);
+
+#if CONFIG_SENSOR_USE_TCAL
+	/* Ordinary explicit shutdown and the owner's battery/dock safety path win. */
+	for (int safety = 0; safety < 2; safety++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		sensor_tcal_set_auto_calibration(true);
+		if (safety) {
+			assert(sys_system_off());
+		} else {
+			assert(sys_request_system_off() == 0);
+			power_iteration();
+		}
+		assert(physical_offs == 1);
+	}
+#if IMU_INT_EXISTS
+	for (int forced = 0; forced < 2; forced++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		assert(sys_plan_WOM(forced, now_ms + 5000) == 0);
+		uint32_t generation;
+		enum sys_power_request claimed = power_request_begin(&power_requests, &generation);
+		sensor_tcal_set_auto_calibration(true);
+		assert(!wom_planned && notice_phase == POWER_WOM_CANCELLED);
+		assert(sys_WOM(forced, generation));
+		power_request_finish(&power_requests, claimed, generation, true);
+		for (int i = 0; i < 100; i++) {
+			now_ms += 1000;
+			sensor_update_sensor_state(true);
+			power_iteration();
+			assert(!wom_planned && physical_offs == 0);
+			assert(sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE);
+		}
+		/* Even a stale producer's new forced plan cannot bypass final veto. */
+		assert(sys_plan_WOM(forced, now_ms) == 0);
+		power_iteration();
+		assert(!wom_planned && physical_offs == 0);
+		sensor_tcal_set_auto_calibration(false);
+		assert(sensor_tcal_get_enabled()); /* compensation alone is not a veto */
+		sensor_update_sensor_state(true);
+		assert(wom_planned);
+		idle_until(now_ms + 5000);
+		assert(physical_offs == 1);
+	}
+#endif
+#if CONFIG_SENSOR_TCAL_HEATED
+	fixture(); memset(&ota, 0, sizeof(ota));
+	maintenance_busy = true;
+	sensor_tcal_set_auto_calibration(true);
+	assert(!sensor_tcal_get_auto_calibration());
+#endif
+#endif
+}
+
 int main(void)
 {
+	tcal_sleep_policy();
 	activation_with_competitor(SYS_POWER_REQ_NONE, 0);
 	for (int phase = 0; phase < 4; phase++) {
 		activation_with_competitor(SYS_POWER_REQ_SYSTEM_OFF, phase);

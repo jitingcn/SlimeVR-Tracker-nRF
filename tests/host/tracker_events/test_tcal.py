@@ -65,6 +65,9 @@ preamble = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
+typedef atomic_long atomic_t;
+#define atomic_get(value) atomic_load(value)
 #define CONFIG_SENSOR_USE_TCAL 1
 #define CONFIG_SENSOR_TCAL_HEATED 0
 #include "sensor/calibration/calibration.h"

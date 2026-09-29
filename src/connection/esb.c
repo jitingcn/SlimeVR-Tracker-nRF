@@ -1917,7 +1917,11 @@ void esb_pair(void)
 
 #if USER_SHUTDOWN_ENABLED
 			// During pairing, only use connection timeout to decide shutdown
-			if (!shutdown_requested && (k_uptime_get() - pair_start_time) > CONFIG_CONNECTION_TIMEOUT_DELAY) {
+			if (!shutdown_requested
+#if CONFIG_SENSOR_USE_TCAL
+				&& !sensor_tcal_get_auto_calibration()
+#endif
+				&& (k_uptime_get() - pair_start_time) > CONFIG_CONNECTION_TIMEOUT_DELAY) {
 				LOG_WRN("Pairing timeout after %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
 				shutdown_requested = sys_request_system_off() == 0;
 			}
@@ -2621,6 +2625,9 @@ static void esb_thread(void)
 #if USER_SHUTDOWN_ENABLED
 			if (!shutdown_requested && connection_error_start_time > 0
 				&& !connection_get_ota_suppressed()
+#if CONFIG_SENSOR_USE_TCAL
+				&& !sensor_tcal_get_auto_calibration()
+#endif
 				&& k_uptime_get() - connection_error_start_time
 					   > CONFIG_CONNECTION_TIMEOUT_DELAY && get_status(SYS_STATUS_CALIBRATION_RUNNING) == false) // shutdown if receiver is not detected and not in calibrating
 			{

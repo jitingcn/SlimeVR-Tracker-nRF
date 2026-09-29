@@ -1705,6 +1705,9 @@ static void sensor_update_session_motion(float angular_speed_dps, float lin_acce
 static void sensor_update_sensor_state(bool resting)
 {
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
+#if CONFIG_SENSOR_USE_TCAL
+	calibrating = calibrating || sensor_tcal_get_auto_calibration();
+#endif
 #if CONFIG_SENSOR_TCAL_HEATED
 	calibrating = calibrating || sensor_tcal_heated_busy();
 #endif
@@ -3005,13 +3008,6 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 		float current_temp = temp;
 		if (!isnan(current_temp)) {
 			sensor_tcal_check_auto_calibration(current_temp);
-			// If auto-calibration is enabled, reset last_data_time to prevent sleep
-			if (sensor_tcal_get_auto_calibration()) {
-				last_data_time = now;
-				/* The idle planner ran earlier in this frame. Withdraw now:
-				 * waiting until its next pass leaves a physical-gate window. */
-				sys_cancel_WOM();
-			}
 		}
 	}
 #endif

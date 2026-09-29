@@ -485,6 +485,9 @@ static bool sys_WOM(bool force, uint32_t generation)
 	k_mutex_lock(&power_plan_lock, K_FOREVER);
 	bool veto = esb_ota_is_active() || connection_get_ota_suppressed() ||
 		test_mode_get() || get_status(SYS_STATUS_CALIBRATION_RUNNING) || main_imu_is_suspended();
+#if CONFIG_SENSOR_USE_TCAL
+	veto = veto || sensor_tcal_get_auto_calibration();
+#endif
 #if CONFIG_SENSOR_TCAL_HEATED
 	veto = veto || sensor_tcal_heated_busy();
 #endif
