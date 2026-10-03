@@ -7,14 +7,18 @@
 .cache
 compile_commands.json
 
-# Host harness outputs (extensionless test_* binaries only; keep sources and directories)
-/tests/host/**/*.o
-/tests/host/**/*.so
+# Host harness snippets and dependency stamp (regenerated from production sources)
 /tests/host/**/.generated/
 /tests/host/**/.generated.stamp
+
+# Host harness binaries (keep sources and directories)
 /tests/host/**/test_*
 !/tests/host/**/test_*.*
 !/tests/host/**/test_*/
+
+# Compiled objects and shared libraries (after source-preserving exceptions)
+*.o
+*.so
 
 # python-generated files
 __pycache__/
