@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <limits.h>
-#define CONFIG_LED_THREAD_STACK_SIZE 512
+#define CONFIG_LED_THREAD_STACK_SIZE 1024
 #ifndef CONFIG_SYS_CLOCK_TICKS_PER_SEC
 #define CONFIG_SYS_CLOCK_TICKS_PER_SEC 32768
 #endif

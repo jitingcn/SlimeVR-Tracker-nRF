@@ -157,10 +157,13 @@ menu "Thread stack sizes"
 
 config LED_THREAD_STACK_SIZE
     int "LED thread stack size"
+    default 1024 if LED_STRIP
     default 512
     help
-        Stack size of the LED thread. LED strip drivers run the update path in
-        the caller's context, so this size also has to cover the strip driver.
+        Stack size of the LED thread. Strip updates run in the caller's
+        context. The linked I2S path measures at least 488 bytes before
+        omitted kernel/context costs; reserve headroom rather than fitting
+        that lower bound into 512 bytes. GPIO/PWM retain the smaller budget.
 
 config STATUS_THREAD_STACK_SIZE
     int "Status thread stack size"
