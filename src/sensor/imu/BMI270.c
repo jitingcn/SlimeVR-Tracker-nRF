@@ -217,8 +217,11 @@ uint16_t bmi_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 		if (packet_count > packet_capacity) {
 			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", packet_count - packet_capacity);
 			packet_count = packet_capacity;
-			byte_count = packet_count * PACKET_SIZE;
 		}
+		if (!packet_count) {
+			break;
+		}
+		byte_count = packet_count * PACKET_SIZE;
 		err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, BMI270_FIFO_DATA, data, byte_count, PACKET_SIZE);
 		if (err) {
 			LOG_ERR("Communication error");
