@@ -1030,10 +1030,14 @@ static void print_connection(void)
 {
 	bool paired = retained->paired_addr[0];
 	printk(paired ? "Tracker ID: %u\n" : "\nTracker ID: None\n", retained->paired_addr[1]);
-	printk("Device address: %012llX\n", *(uint64_t *)NRF_FICR->DEVICEADDR & 0xFFFFFFFFFFFF);
+	uint64_t device_address = (uint64_t)NRF_FICR->DEVICEADDR[0] |
+		((uint64_t)NRF_FICR->DEVICEADDR[1] << 32);
+	printk("Device address: %012llX\n", device_address & 0xFFFFFFFFFFFF);
+	uint64_t receiver_address;
+	memcpy(&receiver_address, retained->paired_addr, sizeof(receiver_address));
 	printk(
 		paired ? "Receiver address: %012llX\n" : "Receiver address: None\n",
-		(*(uint64_t *)&retained->paired_addr[0] >> 16) & 0xFFFFFFFFFFFF
+		(receiver_address >> 16) & 0xFFFFFFFFFFFF
 	);
 
 	// Display RF channel info (stored value is encoded)
