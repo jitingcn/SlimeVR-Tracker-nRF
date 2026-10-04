@@ -45,7 +45,8 @@ void sensor_retained_write(void);
 void sensor_record_wom_sleep(void);
 
 int sensor_shutdown(void);
-uint8_t sensor_setup_WOM(void);
+/* Return GPIO pull/sense configuration, or a negative lifecycle error. */
+int sensor_setup_WOM(void);
 
 int sensor_set_mag_enabled(bool enabled);
 bool sensor_get_mag_enabled(void);

@@ -867,9 +867,16 @@ void sensor_scan_thread(void)
 		return;
 	}
 
-	sys_interface_resume(); // make sure interfaces are enabled
-	(void)sensor_scan();    // IMUs discovery
-	sys_interface_suspend();
+	int err = sys_interface_resume();
+	if (!err) {
+		err = sensor_scan();
+	}
+	int suspend_err = sys_interface_suspend();
+	if (err || suspend_err) {
+		sensor_sensor_init = false;
+		set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
+		sensor_life_mark_scan_done();
+	}
 
 	/* Handoff: sensor_loop re-registers WDT_CHANNEL_SENSOR. Remove this
 	 * one-shot channel so a later boot/rescan starts from a clean slot. */
@@ -1415,27 +1422,33 @@ int sensor_shutdown(void) // Communicate all imus to shut down
 		return 0;
 	}
 
-	sys_interface_resume();
+	int resume_err = sys_interface_resume();
+	if (resume_err) {
+		return resume_err;
+	}
 	if (mag_available && mag_enabled && sensor_mag != NULL && sensor_mag != &sensor_mag_none) {
 		sensor_mag->shutdown();
 	}
 	sensor_imu->shutdown();
-	sys_interface_suspend();
-	return 0;
+	return sys_interface_suspend();
 }
 
-uint8_t sensor_setup_WOM(void)
+int sensor_setup_WOM(void)
 {
 	int err = sensor_request_scan(false, false);
-	if (!err) {
-		sys_interface_resume();
-		err = sensor_imu->setup_WOM();
-		sys_interface_suspend();
+	if (err) {
 		return err;
 	}
-	LOG_ERR("Failed to configure IMU wake up");
-	/* 0xFF is not a valid nRF GPIO pull/sense pack; callers must fail closed. */
-	return 0xFF;
+	err = sys_interface_resume();
+	if (err) {
+		return err;
+	}
+	int pin_config = sensor_imu->setup_WOM();
+	err = sys_interface_suspend();
+	if (err) {
+		return err;
+	}
+	return pin_config == 0xFF ? -EIO : pin_config;
 }
 
 static bool sensor_mag_uses_i2c_passthrough(void)
@@ -1532,16 +1545,21 @@ int sensor_set_mag_enabled(bool enabled)
 		LOG_ERR("Magnetometer change blocked by heater shutdown: %d", suspend_err);
 		return sensor_operation_result(LED_OWNER_MAG, suspend_err, false);
 	}
-	sys_interface_resume();
-
-	int err = 0;
+	int err = sys_interface_resume();
+	if (err) {
+		main_imu_resume();
+		return sensor_operation_result(LED_OWNER_MAG, err, false);
+	}
 	if (enabled) {
 		err = sensor_mag_runtime_enable();
 	} else {
 		sensor_mag_runtime_disable();
 	}
 
-	sys_interface_suspend();
+	int pm_err = sys_interface_suspend();
+	if (!err) {
+		err = pm_err;
+	}
 
 	if (err < 0) {
 		LOG_ERR("Magnetometer enable failed; leaving disabled");
@@ -2519,7 +2537,11 @@ static void feed_accel_sample(
 static void sensor_loop_handle_data_collection(bool *dc_active)
 {
 	if (sensor_raw_collection_begin_frame(dc_active)) {
-		sys_interface_resume();
+		if (sys_interface_resume()) {
+			main_ok = false;
+			set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
+			return;
+		}
 		sensor_send_raw_metadata();
 		LOG_INF("Data collection activated: metadata snapshot queued");
 	}
@@ -2535,7 +2557,11 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 #endif
 	// Resume devices
 	int64_t resume_begin_ticks = k_uptime_ticks();
-	sys_interface_resume();
+	if (sys_interface_resume()) {
+		main_ok = false;
+		set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
+		return;
+	}
 	uint64_t resume_us = k_ticks_to_us_near64(k_uptime_ticks() - resume_begin_ticks);
 	if (resume_us > sensor_window_resume_max_us) {
 		sensor_window_resume_max_us = resume_us;
@@ -3284,9 +3310,10 @@ void sensor_loop(void)
 		sys_reboot(SYS_REBOOT_COLD);
 		return;
 	}
-	sys_interface_resume(); // make sure interfaces are enabled
-
-	int err = sensor_init(); // Initialize IMUs and Fusion // TODO: run as thread before loop
+	int err = sys_interface_resume();
+	if (!err) {
+		err = sensor_init();
+	}
 	// TODO: handle imu init error, maybe restart device?
 	// TODO: on failure to init, disable sensor interface
 	if (err) {
@@ -3318,8 +3345,16 @@ void sensor_loop(void)
 			sensor_apply_calibration_frame();
 			frame.sensor_epoch = tracker_events_sensor_epoch();
 			sensor_loop_handle_data_collection(&frame.dc_active);
+			if (!main_ok) {
+				sensor_loop_wait(time_begin);
+				continue;
+			}
 			int64_t acq_begin_ticks = k_uptime_ticks();
 			sensor_loop_acquire(&frame);
+			if (!main_ok) {
+				sensor_loop_wait(time_begin);
+				continue;
+			}
 			uint64_t acq_us = k_ticks_to_us_near64(k_uptime_ticks() - acq_begin_ticks);
 			sensor_window_acq_us += acq_us;
 			if (acq_us > sensor_window_acq_max_us) {

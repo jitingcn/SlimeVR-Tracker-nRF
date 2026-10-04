@@ -90,14 +90,15 @@ static unsigned ram_launches;
 #if OTA_USE_RAM_ENGINE
 static void ota_launch_ram_engine(void) { ram_launches++; }
 #endif
-static uint8_t notice_phase, notice_detail, wom_pin;
+static uint8_t notice_phase, notice_detail;
+static int wom_pin;
 static bool link_ready = true;
 static bool esb_ready(void) { return link_ready; }
 static bool status_ready(void) { return link_ready; }
 #if IMU_INT_EXISTS
 static void sensor_calibration_online_mag_retained_save(void) {}
 static void sensor_record_wom_sleep(void) {}
-static uint8_t sensor_setup_WOM(void) { return wom_pin; }
+static int sensor_setup_WOM(void) { return wom_pin; }
 #define NRF_DT_GPIOS_TO_PSEL(a,b) 0
 #define NRF_GPIO_PIN_DIR_INPUT 0
 #define NRF_GPIO_PIN_INPUT_DISCONNECT 0
@@ -645,7 +646,7 @@ static void wom_supersession_and_failure(void)
 		assert(physical_offs == (replacement == 0));
 		assert(physical_reboots == (replacement != 0));
 	}
-	fixture(); memset(&ota, 0, sizeof(ota)); wom_pin = 255;
+	fixture(); memset(&ota, 0, sizeof(ota)); wom_pin = -EIO;
 	sensor_update_sensor_state(true);
 	idle_until(now_ms + 5000);
 	assert(physical_offs == 0 && physical_reboots == 1);

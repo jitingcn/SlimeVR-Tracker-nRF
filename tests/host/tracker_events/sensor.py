@@ -101,7 +101,16 @@ static void sensor_tcal_check_auto_calibration(float t) {(void)t;auto_calibratio
 static bool sensor_tcal_get_auto_calibration(void) {return false;}
 typedef struct {uint32_t sensor_epoch; bool dc_active; int g_count,a_count;} sensor_loop_frame_t;
 static void sensor_apply_calibration_frame(void) {}
-static void sensor_loop_handle_data_collection(bool *active) {(void)active;}
+static bool collection_failure, acquisition_failure;
+static unsigned frame_waits, frame_acquires, frame_publishes;
+static void sensor_loop_handle_data_collection(bool *active) {
+    (void)active;
+    if(collection_failure) main_ok=false;
+}
+static void sensor_loop_wait(int64_t time_begin) {
+    assert(time_begin<=now_ms);
+    frame_waits++;
+}
 '''
 fixture += dwell + rest + function('feed_calibrated_gyro') + function('sensor_update_session_motion')
 fixture += function('main_imu_suspend') + function('main_imu_resume')
@@ -110,6 +119,8 @@ static uint64_t sensor_window_acq_us, sensor_window_acq_max_us;
 #define k_ticks_to_us_near64(x) (x)
 static bool interrupt_acquire;
 static void sensor_loop_acquire(sensor_loop_frame_t *frame) {
+    frame_acquires++;
+    if(acquisition_failure) {main_ok=false;return;}
     if(interrupt_acquire) {
         detector_pending=true;
         assert(main_imu_suspend()==0); assert(!detector_pending);
@@ -118,14 +129,17 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame) {
     frame->g_count=frame->a_count=1; detector_pending=true;
 }
 static void publish_observation(sensor_loop_frame_t *frame) {
+    frame_publishes++;
 '''
 fixture += publish_policy + calibration_policy + '\n}\n'
-fixture += 'static void frame_once(void) { sensor_loop_frame_t frame={0};\n' + acquire
+fixture += 'static void frame_once(void) { for(unsigned iteration=0;iteration<1;iteration++) { int64_t time_begin=now_ms; sensor_loop_frame_t frame={0};\n' + acquire
 fixture += r'''
     (void)acq_begin_ticks;
     sensor_motion_prepare(frame.sensor_epoch,now_ms);
     sensor_rest_detector_update_accel(&rest_detector,sensor_loop_avg_a,accel_actual_time);
     publish_observation(&frame);
+    sensor_loop_wait(time_begin);
+    }
 }
 static unsigned known,unknown,unavailable;
 static void drain(unsigned duration) {
@@ -271,6 +285,18 @@ static void angular_window_contracts(void) {
     assert(sensor_motion_observe(tracker_events_sensor_epoch(),1,1,pose,lin,now_ms,&rest,&rate,&linear));
     assert(!rest && rate<0);
 }
+static void pm_frame_failure_contracts(void) {
+    unsigned waits=frame_waits, acquires=frame_acquires, publishes=frame_publishes;
+    collection_failure=true;
+    frame_once();
+    assert(!main_ok && frame_waits==waits+1 && frame_acquires==acquires && frame_publishes==publishes);
+    collection_failure=false; main_ok=true; acquisition_failure=true;
+    frame_once();
+    assert(!main_ok && frame_waits==waits+2 && frame_acquires==acquires+1 && frame_publishes==publishes);
+    acquisition_failure=false; main_ok=true;
+    frame_once();
+    assert(frame_waits==waits+3 && frame_acquires==acquires+2 && frame_publishes==publishes+1);
+}
 int main(void) {
     assert(host_init()==0);
     interrupt_acquire=true;frame_once();
@@ -290,6 +316,7 @@ int main(void) {
     assert(unavailable>0 && known>before);
     backend.take_rest_observation=take_observation;
     rest_motion_contracts();freshness_contracts();angular_window_contracts();
+    pm_frame_failure_contracts();
     puts("PASS actual sensor rest/activity/freshness/local eligibility and epoch publication contracts");
 }
 '''

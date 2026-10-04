@@ -4,8 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void sys_interface_suspend(void);
-void sys_interface_resume(void);
+/* Return the first bus PM error; already-in-state is successful. */
+int sys_interface_suspend(void);
+int sys_interface_resume(void);
 
 /* Sensor-owned reversible WOM plan. Refresh while continuously eligible and
  * cancel on interruption. Deadline is the original absolute idle deadline;

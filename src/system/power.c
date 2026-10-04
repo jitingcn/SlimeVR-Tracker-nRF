@@ -169,44 +169,56 @@ static void sys_disconnect_interface_pins(void)
 #endif
 }
 
-void sys_interface_suspend(void)
+static int sys_interface_action(enum pm_device_action action)
 {
+	/* IMU and magnetometer may share one controller. Operate each bus once. */
+	static const struct device *const buses[] = {
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
-	const struct device *const pm_spi_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi)));
-	pm_device_action_run(pm_spi_imu, PM_DEVICE_ACTION_SUSPEND);
+		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi))),
 #endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
-	const struct device *const pm_i2c_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu)));
-	pm_device_action_run(pm_i2c_imu, PM_DEVICE_ACTION_SUSPEND);
+		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu))),
 #endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
-	const struct device *const pm_spi_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi)));
-	pm_device_action_run(pm_spi_mag, PM_DEVICE_ACTION_SUSPEND);
+		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi))),
 #endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
-	const struct device *const pm_i2c_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag)));
-	pm_device_action_run(pm_i2c_mag, PM_DEVICE_ACTION_SUSPEND);
+		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag))),
 #endif
+		NULL
+	};
+	int first_err = 0;
+	for (size_t i = 0; buses[i] != NULL; i++) {
+		bool duplicate = false;
+		for (size_t j = 0; j < i; j++) {
+			if (buses[j] == buses[i]) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (duplicate) {
+			continue;
+		}
+		int err = pm_device_action_run(buses[i], action);
+		/* Repeated resume/suspend is part of the interface lifecycle. */
+		if (err && err != -EALREADY) {
+			LOG_ERR("Bus PM action %d failed: %d", action, err);
+			if (!first_err) {
+				first_err = err;
+			}
+		}
+	}
+	return first_err;
 }
 
-void sys_interface_resume(void)
+int sys_interface_suspend(void)
 {
-#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
-	const struct device *const pm_spi_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi)));
-	pm_device_action_run(pm_spi_imu, PM_DEVICE_ACTION_RESUME);
-#endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
-	const struct device *const pm_i2c_imu = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu)));
-	pm_device_action_run(pm_i2c_imu, PM_DEVICE_ACTION_RESUME);
-#endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
-	const struct device *const pm_spi_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi)));
-	pm_device_action_run(pm_spi_mag, PM_DEVICE_ACTION_RESUME);
-#endif
-#if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
-	const struct device *const pm_i2c_mag = DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag)));
-	pm_device_action_run(pm_i2c_mag, PM_DEVICE_ACTION_RESUME);
-#endif
+	return sys_interface_action(PM_DEVICE_ACTION_SUSPEND);
+}
+
+int sys_interface_resume(void)
+{
+	return sys_interface_action(PM_DEVICE_ACTION_RESUME);
 }
 
 // TODO: the gpio sense is weird, maybe the device will turn back on immediately after shutdown or after (attempting to) enter WOM
@@ -555,8 +567,8 @@ static bool sys_WOM(bool force, uint32_t generation)
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
 #endif
 	// Set system off
-	uint8_t pin_config = sensor_setup_WOM(); // enable WOM feature
-	if (pin_config == 0xFF) {
+	int pin_config = sensor_setup_WOM(); // enable WOM feature
+	if (pin_config < 0) {
 		/* Already past configure_system_off; cannot restore cleanly. */
 		LOG_ERR("IMU wake up setup failed after shutdown prep, rebooting");
 		tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WOM_CANCELLED,

@@ -80,7 +80,7 @@ sensor_fault_production += scan[decision_start:decision_end] + "\n\treturn 0;\n}
 sensor_fault_production += "static int host_sensor_scan_success(void) {\n"
 sensor_fault_production += scan[scan.index("\tsensor_sensor_init = true;"):] + "\n"
 loop = function(sensor, "sensor_loop")
-error_start = loop.index("\tif (err) {", loop.index("\tint err = sensor_init();"))
+error_start = loop.index("\tif (err) {", loop.index("\terr = sensor_init();"))
 error_end = loop.index("\t} else {", error_start)
 sensor_fault_production += "static void host_sensor_outer_init_failure(int err) {\n"
 sensor_fault_production += loop[error_start:error_end] + "\t}\n}\n"
