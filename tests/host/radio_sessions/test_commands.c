@@ -52,7 +52,7 @@ static int64_t remote_command_receive_time = 1, now_ms = 1000;
 static uint8_t paired_addr[8];
 static struct { uint8_t paired_addr[8]; } retained_state, *retained = &retained_state;
 static int esb_conn_state = 1;
-static unsigned ping_failures, ping_success_streak;
+static uint32_t ping_failures, ping_success_streak;
 static bool ping_pending, ping_failed;
 static int64_t ping_send_time, connection_error_start_time;
 static unsigned feeds, registrations, shutdown_calls, test_mode_changes;

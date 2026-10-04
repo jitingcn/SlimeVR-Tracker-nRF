@@ -8,6 +8,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
+
 HERE = Path(__file__).resolve().parent
 root = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
 connection = (root / "src/connection/connection.c").read_text()
@@ -15,20 +18,7 @@ tdma = (root / "src/connection/tdma.c").read_text()
 
 
 def function(source, name):
-    match = re.search(rf"^(?:static )?(?:enum tdma_ping_admission|void|bool|int64_t|uint32_t) {name}\([^;{{]*\)\s*\{{", source, re.MULTILINE)
-    if match is None:
-        raise ValueError(name)
-    start = source.index("{", match.start())
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.DOTALL)
-    depth = 0
-    for token in tokens.finditer(source, start):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start():token.end()]
-    raise ValueError(f"Unclosed: {name}")
+    return extract_block(source, rf"^(?:static )?(?:enum tdma_ping_admission|void|bool|int64_t|uint32_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
 
 prefix = r'''
 #include <assert.h>

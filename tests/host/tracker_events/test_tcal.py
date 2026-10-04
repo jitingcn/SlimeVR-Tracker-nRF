@@ -5,7 +5,11 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
@@ -15,19 +19,7 @@ source = (ROOT / "src/sensor/calibration/tcal_runtime.c").read_text()
 def function(name, text=None):
     if text is None:
         text = runtime_functions
-    match = re.search(rf"^(?:static )?(?:void|int|bool|uint32_t) {name}\([^;{{]*\)\s*\{{", text, re.M)
-    if match is None:
-        raise ValueError(name)
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.S)
-    depth = 0
-    for token in tokens.finditer(text, text.index("{", match.start())):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return text[match.start():token.end()]
-    raise ValueError(name)
+    return extract_block(text, rf"^(?:static )?(?:void|int|bool|uint32_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
 
 
 runtime_header = (ROOT / "src/sensor/calibration/tcal_runtime.h").read_text()

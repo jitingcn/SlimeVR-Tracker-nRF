@@ -5,7 +5,11 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parents[2] / "src/connection"
@@ -14,11 +18,7 @@ tdma = (SRC / "tdma.c").read_text()
 
 
 def function(source, name):
-    match = re.search(r"^[\w *]+\b" + name + r"\([^;]*?\n\{", source, re.M)
-    if match is None:
-        raise ValueError(name)
-    end = source.index("\n}", match.end()) + 2
-    return source[match.start():end]
+    return extract_block(source, r"^[\w *]+\b" + re.escape(name) + r"\([^;]*?\n\{")
 
 
 macros = []

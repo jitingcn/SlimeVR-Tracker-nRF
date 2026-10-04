@@ -6,7 +6,11 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get('SOURCE_ROOT', HERE.parents[2]))
@@ -17,17 +21,7 @@ source = (ROOT / 'src/sensor/sensor.c').read_text()
 
 
 def function(name, source=source):
-    match = re.search(r'^(?:static )?(?:void|int|bool|float|uint32_t) ' + name + r'\([^;]*?\)\s*\{', source, re.M)
-    opening = source.index('{', match.start())
-    depth = 0
-    for token in re.finditer(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|[{}]', source[opening:], re.S):
-        if token.group() == '{':
-            depth += 1
-        elif token.group() == '}':
-            depth -= 1
-            if depth == 0:
-                return source[match.start():opening + token.end()]
-    raise ValueError(name)
+    return extract_block(source, r'^(?:static )?(?:void|int|bool|float|uint32_t) ' + re.escape(name) + r'\([^;]*?\)\s*\{')
 
 
 loop = function('sensor_loop')
@@ -314,7 +308,7 @@ with tempfile.TemporaryDirectory(prefix='sensor-events-') as tmp:
 # Exercise production publication/getter/lifecycle bodies independently of the
 # fusion event fixture; physical reads and the core gate are hardware leaves.
 temperature_header = (ROOT / 'src/sensor/sensor.h').read_text()
-observation = re.search(r'struct sensor_temperature_observation \{.*?\};', temperature_header, re.S).group()
+observation = extract_block(temperature_header, r'struct sensor_temperature_observation \{', semicolon=True)
 temperature_fixture = r'''
 #include "util.h"
 #define K_FOREVER (-1)

@@ -10,27 +10,18 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 SRC = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2])) / "src"
 
 
 def function(source, name):
-    match = re.search(rf"^(?:static )?(?:inline )?(?:bool|int|void|uint8_t|uint32_t) {name}\([^;\n]*\)[^\n]*\n\{{", source, re.MULTILINE)
-    if match is None:
-        raise ValueError(f"Missing production function: {name}")
-    start = source.index("{", match.start())
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.DOTALL)
-    depth = 0
-    for token in tokens.finditer(source, start):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start():token.end()]
-    raise ValueError(f"Unclosed production function: {name}")
+    return extract_block(source, rf"^(?:static )?(?:inline )?(?:bool|int|void|uint8_t|uint32_t) {re.escape(name)}\([^;\n]*\)[^\n]*\n\{{")
 
 
 def registration(source, name):

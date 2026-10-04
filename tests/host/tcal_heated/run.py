@@ -5,7 +5,11 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2])).resolve()
@@ -143,20 +147,8 @@ SCENARIOS += tuple(f"robust_{mode}_{case}" for mode in ("ordinary", "heated")
 
 
 def function(name, source):
-    """Extract exact definitions, following tracker_events/test_tcal.py."""
-    match = re.search(rf"^(?:static )?(?:void|int|bool|float|uint32_t) {name}\([^;{{]*\)\s*\{{", source, re.M)
-    if match is None:
-        raise ValueError(name)
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.S)
-    depth = 0
-    for token in tokens.finditer(source, source.index("{", match.start())):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start():token.end()]
-    raise ValueError(name)
+    """Extract the exact production definition."""
+    return extract_block(source, rf"^(?:static )?(?:void|int|bool|float|uint32_t|sensor_tcal_apply_mode_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
 
 
 def accumulator_source():

@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "globals.h"
-#include "../../../src/sensor/calibration/online_mag.c"
+#include "sensor/calibration/online_mag.c"
 
 static struct retained_fixture storage;
 struct retained_fixture *retained = &storage;

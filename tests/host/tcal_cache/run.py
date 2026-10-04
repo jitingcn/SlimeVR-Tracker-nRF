@@ -4,10 +4,13 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2])).resolve()
+sys.path.insert(0, str(HERE.parent / "harness/python"))
+from c_extract import extract_block
 
 GLOBALS = r'''
 #pragma once

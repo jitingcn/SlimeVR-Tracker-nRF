@@ -6,32 +6,18 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block as block
 
 HERE = Path(__file__).resolve().parent
 SRC = Path(os.environ.get("TRACKER_SOURCE_ROOT", HERE.parents[2] / "src"))
 
 
-def block(source, pattern, semicolon=False):
-    """Extract a named C construct; ignore braces inside comments and literals."""
-    match = re.search(pattern, source, re.MULTILINE)
-    if match is None:
-        raise ValueError(f"Production construct not found: {pattern}")
-    start = source.index("{", match.start())
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.DOTALL)
-    depth = 0
-    for token in tokens.finditer(source, start):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start():token.end() + int(semicolon)]
-    raise ValueError(f"Unclosed production construct: {pattern}")
-
-
 def function(source, name):
-    return block(source, rf"^(?:static )?(?:bool|int|int64_t|void|uint8_t) {name}\([^;\n]*\)[^\n]*\n\{{")
+    return block(source, rf"^(?:static )?(?:bool|int|int64_t|void|uint8_t) {re.escape(name)}\([^;\n]*\)[^\n]*\n\{{")
 
 
 power = (SRC / "system/power.c").read_text()

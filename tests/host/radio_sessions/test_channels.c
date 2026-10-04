@@ -44,7 +44,8 @@ static void k_mutex_lock(int *lock, int timeout) { (void)timeout; ++*lock; }
 static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
 static bool esb_initialized = true, ota_active, idle = true, server_time_synced;
 static int esb_conn_state = 1, status_state;
-static unsigned ping_failures, ping_success_streak, ota_rx_head, ota_rx_tail;
+static uint32_t ping_failures, ping_success_streak;
+static unsigned ota_rx_head, ota_rx_tail;
 static bool ping_pending, shutdown_requested;
 static int64_t connection_error_start_time, now;
 static uint8_t tracker_id = 3, ping_ctr_sent, epoch;

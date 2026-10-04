@@ -5,27 +5,18 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get('SOURCE_ROOT', HERE.parents[2]))
 source = (ROOT / 'src/sensor/sensor.c').read_text()
 
 def function(name):
-    match = re.search(rf'^(?:static )?(?:void|int|float|bool) {name}\([^;{{]*\)\s*\{{', source, re.MULTILINE)
-    if match is None:
-        raise ValueError(name)
-    start = source.index('{', match.start())
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.DOTALL)
-    depth = 0
-    for token in tokens.finditer(source, start):
-        if token.group() == '{':
-            depth += 1
-        elif token.group() == '}':
-            depth -= 1
-            if depth == 0:
-                return source[match.start():token.end()]
-    raise ValueError(name)
+    return extract_block(source, rf'^(?:static )?(?:void|int|float|bool) {re.escape(name)}\([^;{{]*\)\s*\{{')
 
 preamble = r'''
 #include <assert.h>

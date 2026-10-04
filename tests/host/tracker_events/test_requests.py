@@ -3,7 +3,11 @@ from pathlib import Path
 import os
 import re
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 ROOT = Path(os.environ.get("SOURCE_ROOT", Path(__file__).resolve().parents[3]))
 
@@ -11,18 +15,7 @@ ROOT = Path(os.environ.get("SOURCE_ROOT", Path(__file__).resolve().parents[3]))
 def function(name, source=None):
     if source is None:
         source = (ROOT / "src/sensor/calibration/calibration.c").read_text()
-    match = re.search(rf"^(?:static )?(?:void|int|bool|uint8_t|uint16_t) {name}\([^;]*?\)\s*\{{", source, re.M)
-    if not match:
-        raise RuntimeError(name)
-    depth = 0
-    for token in re.finditer(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', source[source.index("{", match.start()):], re.S):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start():source.index("{", match.start()) + token.end()] + "\n"
-    raise RuntimeError(name)
+    return extract_block(source, rf"^(?:static )?(?:void|int|bool|uint8_t|uint16_t|uint32_t|enum led_owner|struct led_token) {re.escape(name)}\([^;]*?\)\s*\{{") + "\n"
 
 
 PRELUDE = r'''

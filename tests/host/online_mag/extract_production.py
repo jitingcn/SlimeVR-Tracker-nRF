@@ -3,18 +3,12 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
+
 
 def function(source, name):
-    match = re.search(r"^(?:static\s+)?(?:bool|float|void|int)\s+" + re.escape(name) + r"\s*\(", source, re.M)
-    if match is None:
-        raise ValueError(f"missing production function {name}")
-    opening = source.index("{", match.start())
-    depth = 1
-    end = opening + 1
-    while depth:
-        depth += (source[end] == "{") - (source[end] == "}")
-        end += 1
-    return source[match.start():end]
+    return extract_block(source, r"^(?:static\s+)?(?:bool|float|void|int)\s+" + re.escape(name) + r"\s*\([^;{}]*\)\s*\{")
 
 
 def extract(root):

@@ -5,24 +5,19 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
+
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get('SOURCE_ROOT', HERE.parents[2]))
 # Baseline trees may contain only saved changed files; unchanged headers come from HEADER_ROOT.
 HEADERS = Path(os.environ.get('HEADER_ROOT', HERE.parents[2]))
 
 def function(source, name):
-    match = re.search(rf'^(?:static )?(?:void|int|float|uint16_t) {name}\([^;{{]*\)\s*\{{', source, re.MULTILINE)
-    if match is None: raise ValueError(name)
-    start = source.index('{', match.start())
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.DOTALL)
-    depth = 0
-    for token in tokens.finditer(source, start):
-        if token.group() == '{': depth += 1
-        elif token.group() == '}':
-            depth -= 1
-            if depth == 0: return source[match.start():token.end()]
-    raise ValueError(name)
+    return extract_block(source, rf'^(?:static )?(?:void|int|float|uint16_t) {re.escape(name)}\([^;{{]*\)\s*\{{')
 
 preamble = r'''
 #include <assert.h>

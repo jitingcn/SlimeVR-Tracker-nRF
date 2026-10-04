@@ -5,7 +5,11 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 SRC = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2])) / "src"
@@ -13,18 +17,7 @@ source = (SRC / "console.c").read_text()
 
 
 def function(name, text=source):
-    match = re.search(rf"^(?:static )?(?:void|int|size_t) {name}\([^;{{]*\)\s*\{{", text, re.MULTILINE)
-    start = text.index("{", match.start())
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.DOTALL)
-    depth = 0
-    for token in tokens.finditer(text, start):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return text[match.start():token.end()]
-    raise ValueError(f"Unclosed function: {name}")
+    return extract_block(text, rf"^(?:static )?(?:(?:void|bool|int|size_t) |const struct console_cmd \*){re.escape(name)}\([^;{{]*\)\s*\{{")
 
 
 parts = ["static void console_thread(void);",

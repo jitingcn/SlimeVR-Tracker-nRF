@@ -6,11 +6,13 @@ code. CRC is independently pinned to standard and frozen upstream vectors.
 """
 import os
 from pathlib import Path
-import re
 import shlex
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parents[2] / "src/system"
@@ -82,38 +84,17 @@ def board_hook(board, temporary):
     """Compile the actual CUSTOMER hook, not a reimplementation of its logic."""
     source = BOARDS / f"sk_cheesecake_nrf_{board}" / "board.c"
     text = source.read_text()
-    match = re.search(
-        r"^void\s+customer_info_read_board_variant\s*\([^;{}]*\)\s*\{",
+    hook = extract_block(
         text,
-        re.MULTILINE,
+        r"^void\s+customer_info_read_board_variant\s*\([^;{}]*\)\s*\{",
     )
-    if match is None:
-        raise RuntimeError(f"Cannot locate CUSTOMER hook in {source}")
-    depth = 0
-    end = None
-    # Ignore braces in comments/string literals; preserve the original bytes.
-    tokens = re.finditer(
-        r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]',
-        text[match.end() - 1:],
-        re.DOTALL,
-    )
-    for token in tokens:
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                end = match.end() - 1 + token.end()
-                break
-    if end is None:
-        raise RuntimeError(f"Unterminated CUSTOMER hook in {source}")
     target = temporary / f"board-{board}.c"
     target.write_text(
         '#include <hal/nrf_uicr.h>\n'
         '#include <zephyr/sys/byteorder.h>\n'
         '#include "customer_info.h"\n'
         '#include "customer_info_skt0.h"\n'
-        + text[match.start():end] + "\n"
+        + hook + "\n"
     )
     return str(target)
 

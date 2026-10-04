@@ -5,32 +5,19 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block as block
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parents[2] / "src"
 SOURCE = Path(os.environ.get("RADIO_SOURCE_ROOT", SRC))
 
 
-def block(source, pattern, semicolon=False):
-    match = re.search(pattern, source, re.MULTILINE)
-    if match is None:
-        raise ValueError(f"Production construct not found: {pattern}")
-    start = source.index("{", match.start())
-    tokens = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', re.DOTALL)
-    depth = 0
-    for token in tokens.finditer(source, start):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start():token.end() + int(semicolon)]
-    raise ValueError(f"Unclosed production construct: {pattern}")
-
-
 def function(source, name):
-    return block(source, rf"^(?:static )?(?:bool|int|void|uint8_t|uint16_t) {name}\([^;]*?\)\n\{{")
+    return block(source, rf"^(?:static )?(?:bool|int|void|uint8_t|uint16_t) {re.escape(name)}\([^;]*?\)\n\{{")
 
 esb = (SOURCE / "connection/esb.c").read_text()
 connection = (SOURCE / "connection/connection.c").read_text()
@@ -109,7 +96,7 @@ recovery += "\nstatic void receive_valid_pong(void) { do {\n" + esb[start:end] +
 channels = constants + "\n" + block(esb, r"^static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS\[\] = \{", True)
 channels += "\n#define ESB_ALLOWED_CHANNELS_COUNT (sizeof(ESB_ALLOWED_CHANNELS))\n"
 channels += esb[esb.index("K_MUTEX_DEFINE(esb_radio_lock);"):esb.index("#define TX_ERROR_THRESHOLD")]
-channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_encode\(", False)
+channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_encode\([^;{]*\)\s*\{", False)
 channels += "\n" + function(esb, "esb_channel_search_poll")
 channels += "\n" + function(esb, "esb_deinitialize")
 start = esb.index("\t\t\t\tif (rx_payload.data[0] == ESB_PONG_TYPE)")

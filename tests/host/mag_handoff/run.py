@@ -5,24 +5,16 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
 
 ROOT = Path(os.environ.get('SOURCE_ROOT', Path(__file__).resolve().parents[3]))
 
 def function(source, name):
-    match = re.search(rf'^(?:static )?(?:ALWAYS_INLINE )?(?:void|bool|float) {name}\([^;{{]*\)\s*\{{', source, re.M)
-    if not match:
-        raise ValueError(name)
-    depth = 0
-    start = source.index('{', match.start())
-    for token in re.finditer(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|[{}]', source[start:], re.S):
-        if token.group() == '{':
-            depth += 1
-        elif token.group() == '}':
-            depth -= 1
-            if not depth:
-                return source[match.start():start + token.end()]
-    raise ValueError(name)
+    return extract_block(source, rf'^(?:static )?(?:ALWAYS_INLINE )?(?:void|bool|float) {re.escape(name)}\([^;{{]*\)\s*\{{')
 
 preamble = '''
 #include <assert.h>

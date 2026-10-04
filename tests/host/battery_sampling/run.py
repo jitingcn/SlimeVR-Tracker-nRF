@@ -5,10 +5,15 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block
+
 HERE = Path(__file__).resolve().parent
-SRC = HERE.parents[2] / "src/system"
+ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
+SRC = ROOT / "src/system"
 power = (SRC / "power.c").read_text()
 filter_source = (SRC / "power_battery.c").read_text()
 # Keep the filter's real state, functions, and configuration branches.

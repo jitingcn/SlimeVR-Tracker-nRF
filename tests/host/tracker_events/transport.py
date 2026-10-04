@@ -5,29 +5,17 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/python'))
+from c_extract import extract_block as block
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def block(source, pattern, semicolon=False):
-    match = re.search(pattern, source, re.MULTILINE)
-    if match is None:
-        raise ValueError(f"Missing production construct: {pattern}")
-    start = source.index("{", match.start())
-    depth = 0
-    for token in re.finditer(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{}]', source[start:], re.DOTALL):
-        if token.group() == "{":
-            depth += 1
-        elif token.group() == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.start():start + token.end() + int(semicolon)]
-    raise ValueError(pattern)
-
-
 def function(source, name):
-    return block(source, rf"^(?:static\s+)?(?:const struct sub_packet_desc \*|bool|void|int|uint32_t)\s*{name}\([^;{{]*\)\s*\{{")
+    return block(source, rf"^(?:static\s+)?(?:const struct sub_packet_desc \*|bool|void|int|uint32_t)\s*{re.escape(name)}\([^;{{]*\)\s*\{{")
 
 
 PREFIX = r'''
@@ -307,7 +295,7 @@ def run():
               block(source, r"^static const struct sub_packet_desc sub_packet_table\[\] = \{", True)]
     for name in ("sub_packet_get", "sub_data_len", "connection_hid_output_ready", "fill_normal_packet", "write_normal_packet", "write_hid_packet_type", "write_hid_composite_as_normal_packets", "connection_write_packet_type", "send_composite", "composite_builder_reset", "composite_try_add", "composite_try_add_due", "composite_commit_timestamps", "send_composite_or_single", "connection_send_retry_ms", "connection_send_tracker_event"):
         parts.append(function(source, name))
-    parts.append(block(source, r"^static struct \{\n\s*uint64_t next_due_us;", True)
+    parts.append(block(source, r"^static struct \{(?=\n\s*uint64_t next_due_us;)")
                  + " test_rate_schedule;")
     for name in ("test_rate_schedule_sync", "test_rate_due", "test_rate_advance"):
         parts.append(function(source, name))
