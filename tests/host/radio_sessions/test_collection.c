@@ -37,7 +37,15 @@ static unsigned sample_count, calibration_captures;
 static void raw_retx_reset(int *requests) { *requests = 0; }
 static void k_msgq_purge(int *queue) { sample_count = 0; }
 static void test_mode_set_target_tps(unsigned tps) {}
-static void connection_capture_calibration_snapshot(bool capture) { calibration_captures++; }
+struct raw_cal_snapshot { unsigned generation; };
+static struct raw_cal_snapshot raw_cal_snapshot;
+static void (*capture_hook)(void);
+static void connection_capture_calibration_snapshot(struct raw_cal_snapshot *snapshot)
+{
+    assert(!raw_request_lock.locked);
+    snapshot->generation = ++calibration_captures;
+    if (capture_hook) capture_hook();
+}
 void connection_signal_wake(void) {}
 void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 {
@@ -65,6 +73,12 @@ static void sample(void)
     sensor_raw_collection_on_sample(accel, gyro, 25, true);
 }
 static void near(float actual, float expected) { assert(fabsf(actual - expected) < 0.00001f); }
+static void restart_during_capture(void)
+{
+    capture_hook = NULL;
+    assert(batch_request(false, 0) == 0);
+    assert(batch_request(true, 2) == 0);
+}
 int main(void)
 {
     assert(batch_request(true, 5) == 0);
@@ -104,6 +118,18 @@ int main(void)
     assert(sample_count == 1);
     near(samples[0].gyr_quat[0], cosf(0.3926990817f));
     near(samples[0].gyr_quat[3], sinf(0.3926990817f));
+    /* The mutex wait may allow stop/start. An old producer must neither
+     * mark the new session ready nor overwrite its immutable calibration. */
+    assert(batch_request(false, 0) == 0);
+    assert(batch_request(true, 2) == 0);
+    unsigned published = raw_cal_snapshot.generation;
+    capture_hook = restart_during_capture;
+    connection_send_raw_metadata(1, 2, 3, 4, 5, 6, 7, 8, 9);
+    assert(!atomic_get(&raw_snapshot_ready));
+    assert(raw_cal_snapshot.generation == published);
+    connection_send_raw_metadata(1, 2, 3, 4, 5, 6, 7, 8, 9);
+    assert(atomic_get(&raw_snapshot_ready));
+    assert(raw_cal_snapshot.generation == published + 2);
     puts("collection: rejected/same-rate starts preserve metadata, queued data and partial integration");
     return 0;
 }

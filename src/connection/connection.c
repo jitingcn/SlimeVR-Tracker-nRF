@@ -766,49 +766,35 @@ static void connection_schedule_calibration(uint8_t mask, uint8_t chunk)
 	}
 	raw_cal_pending = raw_cal_pending_mask != 0;
 }
-#if CONFIG_SENSOR_USE_TCAL
-static bool connection_tcal_point_valid(const struct TempCalPoint *point)
-{
-	return point->temp != 0.0f;
-}
-#endif
 
-static void connection_capture_calibration_snapshot(bool include_tcal)
+static void connection_capture_calibration_snapshot(struct raw_cal_snapshot *snapshot)
 {
 	sensor_imu_calibration_t calibration;
 	sensor_calibration_snapshot(&calibration);
-	memcpy(raw_cal_snapshot.acc_BAinv, calibration.accel_matrix, sizeof(raw_cal_snapshot.acc_BAinv));
-	memcpy(raw_cal_snapshot.gyro_bias, calibration.gyro_bias, sizeof(raw_cal_snapshot.gyro_bias));
-	memcpy(raw_cal_snapshot.gyro_scale, retained->gyroSensScale, sizeof(raw_cal_snapshot.gyro_scale));
+	memcpy(snapshot->acc_BAinv, calibration.accel_matrix, sizeof(snapshot->acc_BAinv));
+	memcpy(snapshot->gyro_bias, calibration.gyro_bias, sizeof(snapshot->gyro_bias));
+	memcpy(snapshot->gyro_scale, retained->gyroSensScale, sizeof(snapshot->gyro_scale));
 	float mag_BAinv[4][3];
-	float mag_body_BAinv[4][3];
 	magneto_online_snapshot_BAinv(mag_BAinv);
-	connection_align_mag_BAinv_body(mag_body_BAinv, mag_BAinv);
-	memcpy(raw_cal_snapshot.mag_BAinv, mag_body_BAinv, sizeof(raw_cal_snapshot.mag_BAinv));
-	raw_cal_snapshot.tcal_flags = 0;
-	raw_cal_snapshot.tcal_count = 0;
-	raw_cal_snapshot.tcal_temp_min = 0.0f;
-	raw_cal_snapshot.tcal_temp_max = 0.0f;
-	raw_cal_snapshot.tcal_apply_mode = 0;
+	connection_align_mag_BAinv_body(snapshot->mag_BAinv, mag_BAinv);
+	snapshot->tcal_flags = 0;
+	snapshot->tcal_count = 0;
+	snapshot->tcal_temp_min = 0.0f;
+	snapshot->tcal_temp_max = 0.0f;
+	snapshot->tcal_apply_mode = 0;
 #if CONFIG_SENSOR_USE_TCAL
-	if (include_tcal) {
-		if (retained->tcal_enabled) raw_cal_snapshot.tcal_flags |= 0x01;
-		switch (sensor_tcal_get_apply_mode()) {
-		case SENSOR_TCAL_APPLY_CURVE: raw_cal_snapshot.tcal_flags |= 0x02; break;
-		case SENSOR_TCAL_APPLY_ZRO_FALLBACK: raw_cal_snapshot.tcal_flags |= 0x04; break;
-		default: break;
-		}
-		raw_cal_snapshot.tcal_apply_mode = (uint8_t)sensor_tcal_get_apply_mode();
-	raw_cal_snapshot.tcal_temp_min = (float)CONFIG_SENSOR_POLY_TEMP_MIN;
-	raw_cal_snapshot.tcal_temp_max = (float)CONFIG_SENSOR_POLY_TEMP_MAX;
-		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
-			if (connection_tcal_point_valid(&retained->tempCalPoints[i])) {
-				raw_cal_snapshot.tcal_points[raw_cal_snapshot.tcal_count++] = retained->tempCalPoints[i];
-			}
-		}
+	bool enabled;
+	sensor_tcal_apply_mode_t mode = sensor_tcal_snapshot(
+		&enabled, snapshot->tcal_points, &snapshot->tcal_count);
+	if (enabled) snapshot->tcal_flags |= 0x01;
+	switch (mode) {
+	case SENSOR_TCAL_APPLY_CURVE: snapshot->tcal_flags |= 0x02; break;
+	case SENSOR_TCAL_APPLY_ZRO_FALLBACK: snapshot->tcal_flags |= 0x04; break;
+	default: break;
 	}
-#else
-	(void)include_tcal;
+	snapshot->tcal_apply_mode = (uint8_t)mode;
+	snapshot->tcal_temp_min = (float)CONFIG_SENSOR_POLY_TEMP_MIN;
+	snapshot->tcal_temp_max = (float)CONFIG_SENSOR_POLY_TEMP_MAX;
 #endif
 }
 
@@ -1051,6 +1037,21 @@ void connection_send_raw_metadata(
 		k_spin_unlock(&raw_request_lock, key);
 		return;
 	}
+	uint32_t session = (uint32_t)atomic_get(&raw_collection_session);
+	k_spin_unlock(&raw_request_lock, key);
+
+	/* T-Cal may block on its mutex. Never capture with interrupts disabled;
+	 * a stop/restart while waiting must not publish into the new session. */
+	/* Sensor-owner-only staging keeps the point table off its 2 KiB stack. */
+	static struct raw_cal_snapshot snapshot;
+	connection_capture_calibration_snapshot(&snapshot);
+
+	key = k_spin_lock(&raw_request_lock);
+	if (!connection_raw_collection_active() || atomic_get(&raw_snapshot_ready)
+	    || session != (uint32_t)atomic_get(&raw_collection_session)) {
+		k_spin_unlock(&raw_request_lock, key);
+		return;
+	}
 	memset(raw_metadata_buf, 0, sizeof(raw_metadata_buf));
 	raw_metadata_buf[0] = ESB_RAW_META_TYPE;
 	raw_metadata_buf[1] = tracker_id;
@@ -1063,7 +1064,7 @@ void connection_send_raw_metadata(
 	raw_metadata_buf[23] = mag;
 	memcpy(&raw_metadata_buf[24], &chip_gyro_hz, 4);
 	memcpy(&raw_metadata_buf[28], &fusion_gyro_hz, 4);
-	connection_capture_calibration_snapshot(true);
+	raw_cal_snapshot = snapshot;
 	raw_request_mask = RAW_META_MASK_ALL;
 	raw_request_chunk = 255;
 	atomic_set(&raw_snapshot_ready, 1);

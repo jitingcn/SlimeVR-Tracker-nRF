@@ -205,6 +205,23 @@ sensor_tcal_apply_mode_t sensor_tcal_get_apply_mode(void)
 	return mode;
 }
 
+sensor_tcal_apply_mode_t sensor_tcal_snapshot(bool *enabled, struct TempCalPoint *points,
+					    uint16_t *count)
+{
+	sensor_tcal_lock();
+	*enabled = tcal_compensation_enabled;
+	sensor_tcal_apply_mode_t mode = !tcal_compensation_enabled ? SENSOR_TCAL_APPLY_DISABLED :
+		tcal_curve_apply_ready ? SENSOR_TCAL_APPLY_CURVE : SENSOR_TCAL_APPLY_ZRO_FALLBACK;
+	*count = 0;
+	for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		if (retained->tempCalPoints[i].temp != 0.0f) {
+			points[(*count)++] = retained->tempCalPoints[i];
+		}
+	}
+	sensor_tcal_unlock();
+	return mode;
+}
+
 const char *sensor_tcal_get_apply_mode_name(void)
 {
 	switch (sensor_tcal_get_apply_mode()) {

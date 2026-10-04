@@ -153,6 +153,10 @@ typedef enum {
 } sensor_tcal_apply_mode_t;
 
 sensor_tcal_apply_mode_t sensor_tcal_get_apply_mode(void);
+/* Copies mode and up to TCAL_BUFFER_SIZE compact points under one mutex. */
+struct TempCalPoint;
+sensor_tcal_apply_mode_t sensor_tcal_snapshot(bool *enabled, struct TempCalPoint *points,
+					    uint16_t *count);
 const char *sensor_tcal_get_apply_mode_name(void);
 /* Hot-path: cached (enabled && points>=min). Updated on enable/point changes. */
 bool sensor_tcal_curve_apply_ready(void);
