@@ -308,14 +308,26 @@ static int sys_retained_init(void)
 
 SYS_INIT(sys_retained_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
+/* Once flash fails, keep this boot's counter in RAM; never reread stale NVS
+ * over a newer RAM write. This flag deliberately is not retained. */
+static bool reboot_counter_ram_only;
+
 // read from retained
 uint8_t reboot_counter_read(void)
 {
 	k_mutex_lock(&sys_storage_lock, K_FOREVER);
-	if (!ram_retention_valid) // system cannot trust retained state, read from nvs
-	{
-		sys_nvs_init();
-		nvs_read(&fs, RBT_CNT_ID, &retained->reboot_counter, sizeof(retained->reboot_counter));
+	if (!ram_retention_valid && !reboot_counter_ram_only) {
+		uint8_t stored_counter;
+		int err = sys_nvs_init()
+			? nvs_read(&fs, RBT_CNT_ID, &stored_counter, sizeof(stored_counter)) : -EIO;
+		if (err == (int)sizeof(stored_counter)) {
+			retained->reboot_counter = stored_counter;
+		} else if (err == -ENOENT) {
+			retained->reboot_counter = 0;
+		} else {
+			LOG_ERR("Reboot counter read failed: %d; using RAM", err);
+			reboot_counter_ram_only = true;
+		}
 		retained_update();
 	}
 	uint8_t reboot_counter = retained->reboot_counter;
@@ -328,10 +340,14 @@ void reboot_counter_write(uint8_t reboot_counter)
 {
 	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	retained->reboot_counter = reboot_counter;
-	if (!ram_retention_valid) // system cannot trust retained state, write to nvs
-	{
-		sys_nvs_init();
-		nvs_write(&fs, RBT_CNT_ID, &retained->reboot_counter, sizeof(retained->reboot_counter));
+	if (!ram_retention_valid && !reboot_counter_ram_only) {
+		int err = sys_nvs_init()
+			? nvs_write(&fs, RBT_CNT_ID, &reboot_counter, sizeof(reboot_counter)) : -EIO;
+		/* NVS returns zero for an unchanged value. */
+		if (err != 0 && err != (int)sizeof(reboot_counter)) {
+			LOG_ERR("Reboot counter write failed: %d; using RAM", err);
+			reboot_counter_ram_only = true;
+		}
 	}
 	retained_update();
 	k_mutex_unlock(&sys_storage_lock);
