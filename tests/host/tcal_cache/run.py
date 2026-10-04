@@ -26,11 +26,17 @@ GLOBALS = r'''
 #define LOG_INF(...) ((void)0)
 #define LOG_DBG(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
+#define LOG_WRN(...) ((void)0)
 static struct {
-    struct { unsigned count; } tempCalState;
+    struct { unsigned count; bool valid; unsigned degree; } tempCalState;
     struct { float temp, bias[3]; } tempCalPoints[TCAL_BUFFER_SIZE];
+    float tempCalCoeffs[3][4];
+    bool tcal_enabled;
 } retained_data;
 static typeof(retained_data) *retained = &retained_data;
+static bool tcal_compensation_enabled, tcal_curve_apply_ready;
+static void retained_update(void) {}
+static void sensor_calibration_reset_gyro_reference(void) {}
 '''
 KERNEL = r'''
 #pragma once
@@ -192,6 +198,41 @@ int main(int argc, char **argv) {
         assert(sensor_tcal_lut_lookup(INFINITY, bias) == -1);
         sensor_tcal_build_lut_priority(-INFINITY);
         expect(25.0f, 25.0f, 0, true);
+    } else if (!strcmp(scenario, "boot_recovery")) {
+        /* Finite point write survived, STATE did not: count==1 used to turn
+         * every lookup into the first-point constant (20 instead of 25). */
+        retained->tempCalState.count = 1;
+        retained->tempCalState.valid = false;
+        retained->tempCalState.degree = 3;
+        retained->tempCalCoeffs[0][0] = 999;
+        retained->tcal_enabled = true;
+        sensor_tcal_runtime_init_from_retained();
+        assert(retained->tempCalState.count == 4);
+        assert(retained->tempCalState.valid && retained->tempCalState.degree == 0);
+        assert(tcal_curve_apply_ready);
+        expect(25.0f, 25.0f, 0, false);
+        sensor_tcal_build_lut_priority(25.0f);
+        finish();
+        expect(25.0f, 25.0f, 0, true);
+        /* A subsequent boot restores the same table with zero legacy
+         * coefficients; volatile MLS/LUT caches start empty again. */
+        sensor_tcal_cache_invalidate();
+        sensor_tcal_runtime_init_from_retained();
+        expect(25.0f, 25.0f, 0, false);
+    } else if (!strcmp(scenario, "boot_clear")) {
+        /* Clear POINTS persisted, old nonempty STATE/COEFFS survived. */
+        memset(retained->tempCalPoints, 0, sizeof(retained->tempCalPoints));
+        retained->tempCalState.valid = true;
+        retained->tempCalState.degree = 3;
+        retained->tempCalCoeffs[0][0] = 999;
+        retained->tcal_enabled = true;
+        sensor_tcal_runtime_init_from_retained();
+        assert(retained->tempCalState.count == 0 && !retained->tempCalState.valid);
+        assert(!tcal_curve_apply_ready);
+        float bias[3] = {123, 456, 789};
+        assert(sensor_tcal_mls_lookup(25.0f, bias) == -1);
+        sensor_tcal_build_lut_priority(25.0f);
+        assert(sensor_tcal_lut_lookup(25.0f, bias) == -1);
     } else {
         assert(!"unknown scenario");
     }
@@ -210,10 +251,15 @@ with tempfile.TemporaryDirectory(prefix="tcal-cache-") as directory:
         destination.write_text(content)
     source = ROOT / "src/sensor/calibration/tcal_mls_lut.c"
     harness = work / "main.c"
-    harness.write_text(f'#include "{source.as_posix()}"\n' + MAIN)
+    runtime = (ROOT / "src/sensor/calibration/tcal_runtime.c").read_text()
+    startup = "\n\n".join(extract_block(
+        runtime, rf"^void {name}\([^;{{]*\)\s*\{{") for name in (
+        "sensor_tcal_refresh_apply_cache", "sensor_tcal_runtime_init_from_retained"))
+    harness.write_text(f'#include "{source.as_posix()}"\n' + startup + "\n" + MAIN)
     executable = work / "tcal-cache"
     compiler = shlex.split(os.environ.get("CC", "cc"))
     subprocess.run(compiler + ["-D_GNU_SOURCE", "-std=gnu11", "-O2", "-pthread",
                               "-I", str(work), str(harness), "-lm", "-o", str(executable)], check=True)
-    for scenario in ("same_count", "rebuild", "restart", "interleaving", "nonfinite"):
+    for scenario in ("same_count", "rebuild", "restart", "interleaving", "nonfinite",
+                     "boot_recovery", "boot_clear"):
         subprocess.run([str(executable), scenario], check=True)

@@ -306,11 +306,19 @@ void sensor_tcal_runtime_init_from_retained(void)
 			valid_points++;
 		}
 	}
-	if (healed_points > 0) {
-		retained->tempCalState.count = valid_points;
-		retained->tempCalState.valid = false;
-		retained_update();
+	/* POINTS, COEFFS and STATE are separate storage writes. The table is
+	 * authoritative even when power failed with an entirely finite table. */
+	bool repaired = healed_points > 0 || retained->tempCalState.count != valid_points
+		|| retained->tempCalState.valid != (valid_points != 0)
+		|| retained->tempCalState.degree != 0;
+	retained->tempCalState.count = valid_points;
+	retained->tempCalState.valid = valid_points != 0;
+	retained->tempCalState.degree = 0;
+	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
+	if (repaired) {
+		LOG_WRN("T-Cal: reconstructed state from %u surviving points", valid_points);
 	}
+	retained_update();
 
 	tcal_compensation_enabled = retained->tcal_enabled;
 	sensor_calibration_reset_gyro_reference();
