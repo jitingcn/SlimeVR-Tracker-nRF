@@ -345,6 +345,39 @@ int main(void)
     run_worker();
     assert(zro_requests == 2 && accel_requests == 3 * CONFIG_SENSOR_USE_ACCEL_CALIBRATION);
 
+    /* Production reset handler/worker, real DTR-close and hard-reset entrypoints. */
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 0);
+    now_ms = CONSOLE_RESET_CONFIRM_MS;
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 0); /* exact deadline expired; re-arm */
+    now_ms++;
+    receive("RESET ALL\n"); run_worker();
+    assert(clear_calls == 1);
+    receive("reset all\nhelp\nreset all\n"); run_worker();
+    assert(clear_calls == 1); /* unrelated command cancels */
+    receive("reset all extra\nreset all\n"); run_worker();
+    assert(clear_calls == 1); /* malformed confirmation cancels */
+    receive("\nreset all\n"); run_worker();
+    assert(clear_calls == 1); /* blank input cancels */
+    console_serial_close();
+    console_serial_start();
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 1); /* reconnect cannot confirm */
+    console_serial_stop();
+    console_serial_start();
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 1);
+    /* Queued old-session requests are never allowed to arm or confirm. */
+    receive("reset all\nreset all\n");
+    console_serial_close();
+    console_serial_start();
+    run_worker();
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 1);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 2);
+
     /* Real retained layout: paired_addr is deliberately NOT padded/aligned.
      * printk evaluates the actual production diagnostic arguments under UBSan. */
     assert((uintptr_t)retained->paired_addr % _Alignof(uint64_t) != 0);

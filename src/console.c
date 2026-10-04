@@ -1451,6 +1451,16 @@ static void console_reject(void)
 	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
 }
 
+static bool console_require_args(size_t argc, size_t minimum, size_t maximum)
+{
+	if (argc >= minimum && argc <= maximum) {
+		return true;
+	}
+	printk("Invalid number of arguments\n");
+	console_reject();
+	return false;
+}
+
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 static void cmd_sens_set(float x, float y, float z)
 {
@@ -1638,14 +1648,18 @@ static void console_cmd_uptime(size_t argc, char **argv)
 
 static void console_cmd_shutdown(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 1, 1)) {
+		return;
+	}
 	ARG_UNUSED(argv);
 	cmd_shutdown();
 }
 
 static void console_cmd_reboot(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 1, 1)) {
+		return;
+	}
 	ARG_UNUSED(argv);
 	int err = sys_user_reboot();
 	if (err) {
@@ -1662,7 +1676,9 @@ static void console_cmd_battery(size_t argc, char **argv)
 
 static void console_cmd_scan(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 1, 1)) {
+		return;
+	}
 	ARG_UNUSED(argv);
 	sensor_request_scan(true, true);
 }
@@ -1712,8 +1728,13 @@ static void console_cmd_sens(size_t argc, char **argv)
 	}
 	// check if the argument is "reset"
 	else if (strcmp(arg, "reset") == 0) {
-		cmd_sens_reset();
+		if (console_require_args(argc, 2, 2)) {
+			cmd_sens_reset();
+		}
 	} else {
+		if (!console_require_args(argc, 2, 2)) {
+			return;
+		}
 		char *token;
 		char *endptr;
 		int token_count = 0;
@@ -1804,6 +1825,21 @@ static void console_cmd_tcal(size_t argc, char **argv)
 #endif
 	char *arg = argc > 1 ? argv[1] : NULL;
 	char *arg2 = argc > 2 ? argv[2] : NULL;
+	if (arg != NULL) {
+		bool query = strcmp(arg, "status") == 0 || strcmp(arg, "dump") == 0 ||
+			strcmp(arg, "check") == 0 || strcmp(arg, "test") == 0 ||
+			(strcmp(arg, "boot") == 0 && arg2 == NULL);
+		size_t minimum = (strcmp(arg, "auto") == 0 || strcmp(arg, "remove") == 0) ? 3 : 2;
+		size_t maximum = (strcmp(arg, "auto") == 0 || strcmp(arg, "remove") == 0 ||
+			strcmp(arg, "test") == 0 || strcmp(arg, "boot") == 0) ? 3 : 2;
+		if (argc < minimum || argc > maximum) {
+			printk("Invalid number of arguments\n");
+			if (!query) {
+				console_reject();
+			}
+			return;
+		}
+	}
 
 	// check if there are any arguments
 	if (arg == NULL) {
@@ -2013,6 +2049,13 @@ static void console_cmd_mag(size_t argc, char **argv)
 	char *arg = argc > 1 ? argv[1] : NULL;
 	char *arg2 = argc > 2 ? argv[2] : NULL;
 	char *arg3 = argc > 3 ? argv[3] : NULL;
+	if (arg != NULL) {
+		size_t expected = (strcmp(arg, "auto") == 0 || strcmp(arg, "online") == 0 ||
+			strcmp(arg, "debug") == 0) ? 3 : 2;
+		if (!console_require_args(argc, expected, expected)) {
+			return;
+		}
+	}
 
 	if (arg == NULL) {
 		// No argument: show status
@@ -2110,14 +2153,18 @@ static void console_cmd_set(size_t argc, char **argv)
 
 static void console_cmd_pair(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 1, 1)) {
+		return;
+	}
 	ARG_UNUSED(argv);
 	esb_user_pair();
 }
 
 static void console_cmd_clear(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 1, 1)) {
+		return;
+	}
 	ARG_UNUSED(argv);
 	esb_clear_pair();
 }
@@ -2125,6 +2172,9 @@ static void console_cmd_clear(size_t argc, char **argv)
 static void console_cmd_channel(size_t argc, char **argv)
 {
 	char *arg = argc > 1 ? argv[1] : NULL;
+	if (!console_require_args(argc, 2, 2)) {
+		return;
+	}
 
 	if (!arg) {
 		printk("Usage: channel <0-100>\n");
@@ -2151,7 +2201,9 @@ static void console_cmd_channel(size_t argc, char **argv)
 
 static void console_cmd_clearchannel(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 1, 1)) {
+		return;
+	}
 	ARG_UNUSED(argv);
 	printk("Clearing RF channel setting (restore default)\n");
 	int err = channel_control_reset();
@@ -2164,7 +2216,9 @@ static void console_cmd_clearchannel(size_t argc, char **argv)
 
 static void console_cmd_radio(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 2, 2)) {
+		return;
+	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	if (!arg) {
@@ -2196,7 +2250,9 @@ static void console_cmd_radio(size_t argc, char **argv)
 #if DFU_EXISTS
 static void console_cmd_dfu(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
+	if (!console_require_args(argc, 1, 2)) {
+		return;
+	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 	bool ota = false;
 
@@ -2232,6 +2288,13 @@ static void console_cmd_dfu(size_t argc, char **argv)
 
 static void console_cmd_ping(size_t argc, char **argv)
 {
+	if (argc != 1 && !(argc == 2 && strcmp(argv[1], "stats") == 0)) {
+		printk("Usage: ping [stats]\n");
+		if (argc < 2 || strcmp(argv[1], "stats") != 0) {
+			console_reject();
+		}
+		return;
+	}
 	if (argc > 1 && strcmp(argv[1], "stats") == 0) {
 		connection_print_ping_stats();
 		return;
@@ -2266,6 +2329,9 @@ static void console_cmd_meow(size_t argc, char **argv)
 
 static void console_cmd_debug(size_t argc, char **argv)
 {
+	if (!console_require_args(argc, 1, 2)) {
+		return;
+	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	uint32_t duration = 1; // Default 1 second
@@ -2288,6 +2354,13 @@ static void console_cmd_debug(size_t argc, char **argv)
 static void console_cmd_range(size_t argc, char **argv)
 {
 	char *arg = argc > 1 ? argv[1] : NULL;
+	if (arg != NULL && strcmp(arg, "reset") != 0) {
+		printk("Usage: range [reset]\n");
+		return;
+	}
+	if (arg != NULL && !console_require_args(argc, 2, 2)) {
+		return;
+	}
 
 #if CONFIG_SENSOR_RANGE_STATS
 	if (arg && strcmp(arg, "reset") == 0) {
@@ -2312,6 +2385,9 @@ static void console_cmd_range(size_t argc, char **argv)
 #if CONFIG_VQF_BENCH
 static void console_cmd_vqfbench(size_t argc, char **argv)
 {
+	if (!console_require_args(argc, 1, 2)) {
+		return;
+	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	uint32_t iterations = 1000;
@@ -2336,6 +2412,9 @@ static void console_cmd_vqfbench(size_t argc, char **argv)
 
 static void console_cmd_reset(size_t argc, char **argv)
 {
+	if (!console_require_args(argc, 2, 2)) {
+		return;
+	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	if (arg && strcmp(arg, "zro") == 0) {
@@ -2381,6 +2460,9 @@ static void console_cmd_tdma(size_t argc, char **argv)
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	if (arg && strcmp(arg, "on") == 0) {
+		if (!console_require_args(argc, 2, 2)) {
+			return;
+		}
 		int err = tdma_user_set_enabled(true);
 		if (err) {
 			printk("TDMA enable rejected: %d.\n", err);
@@ -2388,6 +2470,9 @@ static void console_cmd_tdma(size_t argc, char **argv)
 			printk("TDMA enabled\n");
 		}
 	} else if (arg && strcmp(arg, "off") == 0) {
+		if (!console_require_args(argc, 2, 2)) {
+			return;
+		}
 		int err = tdma_user_set_enabled(false);
 		if (err) {
 			printk("TDMA disable rejected: %d.\n", err);
@@ -2397,6 +2482,11 @@ static void console_cmd_tdma(size_t argc, char **argv)
 	} else if (arg && strcmp(arg, "capture") == 0) {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 		char *state = argc > 2 ? argv[2] : NULL;
+		if (argc > 3 || (state != NULL && strcmp(state, "on") != 0 && strcmp(state, "off") != 0)) {
+			printk("Usage: tdma capture [on|off]\n");
+			console_reject();
+			return;
+		}
 		if (state && strcmp(state, "on") == 0) {
 			int err = radio_capture_user_set_enabled(true);
 			if (err) {
@@ -2417,6 +2507,9 @@ static void console_cmd_tdma(size_t argc, char **argv)
 		}
 #else
 		printk("tdma capture requires CONFIG_TDMA_DIAGNOSTICS=y\n");
+		if (argc > 2) {
+			console_reject();
+		}
 #endif
 	} else if (arg && strcmp(arg, "stats") == 0) {
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -2425,6 +2518,11 @@ static void console_cmd_tdma(size_t argc, char **argv)
 		printk("tdma stats requires CONFIG_TDMA_DIAGNOSTICS=y\n");
 #endif
 	} else {
+		if (argc != 1) {
+			printk("Usage: tdma [on|off|stats|capture [on|off]]\n");
+			console_reject();
+			return;
+		}
 		printk("TDMA: %s\n", tdma_is_enabled() ? "enabled" : "disabled");
 	}
 }
@@ -2434,12 +2532,23 @@ static void console_cmd_test(size_t argc, char **argv)
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	if (arg && strcmp(arg, "on") == 0) {
+		if (!console_require_args(argc, 2, 2)) {
+			return;
+		}
 		test_mode_user_set(true);
 		printk("Test mode enabled\n");
 	} else if (arg && strcmp(arg, "off") == 0) {
+		if (!console_require_args(argc, 2, 2)) {
+			return;
+		}
 		test_mode_user_set(false);
 		printk("Test mode disabled\n");
 	} else {
+		if (argc != 1) {
+			printk("Usage: test [on|off]\n");
+			console_reject();
+			return;
+		}
 		printk("Test mode: %s\n", test_mode_get() ? "enabled" : "disabled");
 	}
 }
