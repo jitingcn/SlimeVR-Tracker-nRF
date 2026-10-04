@@ -48,6 +48,7 @@
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/reboot.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
 static uint8_t tracker_svr_status = SVR_STATUS_OK;
@@ -1596,7 +1597,11 @@ static void connection_idle_wait(int64_t now)
 void connection_thread(void)
 {
 	/* Register connection thread with watchdog */
-	watchdog_register_thread(WDT_CHANNEL_CONNECTION, 0);
+	if (watchdog_register_thread(WDT_CHANNEL_CONNECTION, 0) < 0) {
+		LOG_ERR("Connection watchdog registration failed");
+		sys_reboot(SYS_REBOOT_COLD);
+		return;
+	}
 	atomic_set(
 		&next_ping_deadline_ms,
 		(atomic_val_t)(k_uptime_get_32() + ping_phase_ms(PING_INTERVAL_MS))

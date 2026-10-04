@@ -61,7 +61,9 @@ static int batch_result;
 static jmp_buf thread_stop;
 typedef void (*esb_remote_cmd_fn)(void);
 static int64_t k_uptime_get(void) { return now_ms; }
-static void watchdog_register_thread(int channel, int timeout) { registrations++; }
+static int watchdog_register_thread(int channel, int timeout) { registrations++; return 0; }
+#define SYS_REBOOT_COLD 0
+static void sys_reboot(int reason) { assert(!"unexpected watchdog reboot"); }
 static void watchdog_feed(int channel)
 {
     assert(channel == WDT_CHANNEL_ESB);

@@ -29,6 +29,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <zephyr/sys/reboot.h>
 
 #if CONFIG_CMSIS_DSP
 #include <arm_math.h>
@@ -612,7 +613,11 @@ int sensor_calibration_request(int id, enum cal_request_origin origin)
 static void calibration_thread(void)
 {
 	/* Register calibration thread with watchdog - use long timeout for lengthy operations */
-	watchdog_register_thread(WDT_CHANNEL_CALIBRATION, 0);
+	if (watchdog_register_thread(WDT_CHANNEL_CALIBRATION, 0) < 0) {
+		LOG_ERR("Calibration watchdog registration failed");
+		sys_reboot(SYS_REBOOT_COLD);
+		return;
+	}
 
 	sensor_calibration_read();
 

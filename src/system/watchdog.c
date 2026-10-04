@@ -265,19 +265,17 @@ int watchdog_init(void)
 	/* Get the hardware WDT device */
 	const struct device *wdt_dev = DEVICE_DT_GET(WATCHDOG_NODE);
 	if (!device_is_ready(wdt_dev)) {
-		LOG_WRN("WDT device not ready, watchdog disabled");
-		/* Don't fail - allow system to boot without watchdog */
+		LOG_ERR("WDT device not ready");
 		watchdog_initialized = false;
-		return 0;
+		return -ENODEV;
 	}
 
 	/* Initialize Task WDT with the hardware WDT device */
 	int err = task_wdt_init(wdt_dev);
 	if (err < 0) {
 		LOG_ERR("Failed to initialize task WDT: %d", err);
-		/* Don't fail - allow system to boot without watchdog */
 		watchdog_initialized = false;
-		return 0;
+		return err;
 	}
 
 	watchdog_initialized = true;
@@ -308,12 +306,11 @@ SYS_INIT(watchdog_sys_init, APPLICATION, 99);
 int watchdog_register_thread(wdt_channel_id_t channel, uint32_t timeout_ms)
 {
 	if (!watchdog_initialized) {
-		/* Silently skip if watchdog not initialized - may be called before init */
-		LOG_WRN("%s: Watchdog not initialized, skipping", __func__);
-		return 0;
+		LOG_ERR("%s: Watchdog not initialized", __func__);
+		return -ENODEV;
 	}
 
-	if (channel >= WDT_CHANNEL_COUNT) {
+	if ((unsigned int)channel >= WDT_CHANNEL_COUNT) {
 		return -EINVAL;
 	}
 
@@ -322,8 +319,10 @@ int watchdog_register_thread(wdt_channel_id_t channel, uint32_t timeout_ms)
 		timeout_ms = default_timeouts[channel];
 	}
 
-	/* Save timeout for pause/resume functionality */
-	channel_timeouts[channel] = timeout_ms;
+	/* An already registered channel must not leak another task WDT slot. */
+	if (channel_ids[channel] >= 0) {
+		return channel_ids[channel];
+	}
 
 	int id = task_wdt_add(timeout_ms, watchdog_timeout_callback,
 			      (void *)(intptr_t)channel);
@@ -333,6 +332,7 @@ int watchdog_register_thread(wdt_channel_id_t channel, uint32_t timeout_ms)
 	}
 
 	channel_ids[channel] = id;
+	channel_timeouts[channel] = timeout_ms;
 
 	/* Feed immediately after registration to reset the timeout counter */
 	task_wdt_feed(id);
@@ -344,14 +344,14 @@ int watchdog_register_thread(wdt_channel_id_t channel, uint32_t timeout_ms)
 
 void watchdog_feed(wdt_channel_id_t channel)
 {
-	if (channel < WDT_CHANNEL_COUNT && channel_ids[channel] >= 0) {
+	if (watchdog_initialized && (unsigned int)channel < WDT_CHANNEL_COUNT && channel_ids[channel] >= 0) {
 		task_wdt_feed(channel_ids[channel]);
 	}
 }
 
 void watchdog_pause(wdt_channel_id_t channel)
 {
-	if (channel < WDT_CHANNEL_COUNT && channel_ids[channel] >= 0) {
+	if (watchdog_initialized && (unsigned int)channel < WDT_CHANNEL_COUNT && channel_ids[channel] >= 0) {
 		/* Task WDT doesn't directly support pause, so we delete and re-add later */
 		int err = task_wdt_delete(channel_ids[channel]);
 		if (err == 0) {
@@ -364,13 +364,17 @@ void watchdog_pause(wdt_channel_id_t channel)
 
 void watchdog_resume(wdt_channel_id_t channel)
 {
-	if (channel < WDT_CHANNEL_COUNT && channel_ids[channel] < 0) {
+	if ((unsigned int)channel < WDT_CHANNEL_COUNT && (!watchdog_initialized || channel_ids[channel] < 0)) {
 		/* Re-register the channel with saved timeout (or default if not set) */
 		uint32_t timeout = channel_timeouts[channel];
 		if (timeout == 0) {
 			timeout = default_timeouts[channel];
 		}
-		watchdog_register_thread(channel, timeout);
+		if (watchdog_register_thread(channel, timeout) < 0) {
+			LOG_ERR("Failed to resume watchdog channel %s", channel_names[channel]);
+			sys_reboot(SYS_REBOOT_COLD);
+			return;
+		}
 		LOG_DBG("Watchdog channel %s resumed with %u ms timeout",
 			channel_names[channel], timeout);
 	}

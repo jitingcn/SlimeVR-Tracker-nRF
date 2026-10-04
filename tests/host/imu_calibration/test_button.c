@@ -18,6 +18,9 @@
 #define SYS_LED_PRIORITY_HIGHEST 0
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
+#define LOG_ERR(...) ((void)0)
+#define SYS_REBOOT_COLD 0
+static void sys_reboot(int mode) { (void)mode; assert(!"unexpected reboot"); }
 
 static int64_t now, press_time, last_press_duration;
 static int button_thread_id;
@@ -43,7 +46,7 @@ static void set_status(int id, bool value) { (void)id; button_status = value; }
 static bool get_status(int id) { (void)id; return button_status; }
 static void set_led(int pattern, int priority) { (void)pattern; (void)priority; }
 static void led_shutdown(void) {}
-static void watchdog_register_thread(int channel, int timeout) { (void)channel; (void)timeout; }
+static int watchdog_register_thread(int channel, int timeout) { (void)channel; (void)timeout; return 0; }
 static void watchdog_feed(int channel) { (void)channel; feeds++; }
 static void reboot_counter_write(int value) { (void)value; }
 static bool esb_ota_is_active(void) { return ota_busy; }

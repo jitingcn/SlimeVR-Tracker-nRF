@@ -782,7 +782,11 @@ static void button_thread(void)
 	int64_t last_press = 0;
 
 	/* Register button thread with watchdog */
-	watchdog_register_thread(WDT_CHANNEL_BUTTON, 0);
+	if (watchdog_register_thread(WDT_CHANNEL_BUTTON, 0) < 0) {
+		LOG_ERR("Button watchdog registration failed");
+		sys_reboot(SYS_REBOOT_COLD);
+		return;
+	}
 
 	while (1) {
 		if (press_time && k_uptime_get() - press_time > 50) // debounce

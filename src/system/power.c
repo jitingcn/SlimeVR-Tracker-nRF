@@ -753,8 +753,12 @@ static void power_thread(void)
 
 	/* Register power thread with watchdog (watchdog is initialized via SYS_INIT) */
 	if (!watchdog_registered) {
+		if (watchdog_register_thread(WDT_CHANNEL_POWER, 0) < 0) {
+			LOG_ERR("Power watchdog registration failed");
+			sys_reboot(SYS_REBOOT_COLD);
+			return;
+		}
 		watchdog_registered = true;
-		watchdog_register_thread(WDT_CHANNEL_POWER, 0);
 	}
 
 	while (1)

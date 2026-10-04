@@ -4,6 +4,7 @@
 #include "test_collection.c"
 #undef main
 #include <setjmp.h>
+#define LOG_ERR(...) ((void)0)
 
 #define WDT_CHANNEL_CONNECTION 0
 #define PING_INTERVAL_MS 1000
@@ -43,7 +44,9 @@ static uint64_t k_uptime_ticks(void) { return (uint64_t)now_ms * 1000; }
 static uint64_t k_ticks_to_us_near64(uint64_t ticks) { return ticks; }
 static void k_msleep(unsigned ms) {}
 static void k_usleep(unsigned us) {}
-static void watchdog_register_thread(int channel, int flags) {}
+static int watchdog_register_thread(int channel, int flags) { return 0; }
+#define SYS_REBOOT_COLD 0
+static void sys_reboot(int reason) { assert(!"unexpected watchdog reboot"); }
 static void watchdog_feed(int channel) { if (iterations++) longjmp(iteration_done, 1); }
 static uint32_t ping_phase_ms(uint32_t interval) { return 0; }
 static bool esb_ready(void) { return radio_available; }

@@ -20,7 +20,7 @@ filter_source = (SRC / "power_battery.c").read_text()
 filter_source = re.sub(r'^#include[^\n]*\n', '', filter_source, flags=re.MULTILINE)
 # Thread-lifetime locals live at translation-unit scope in this single-thread harness.
 start = power.index('\tint battery_mV =')
-end = power.index('\n\t/* Register power thread', start)
+end = power.index('\n#if CONFIG_SENSOR_TCAL_HEATED', start)
 locals_source = power[start:end]
 start = power.index('\t\tbool docked = dock_read();')
 end = power.index('\n\t}', power.index('(void)k_sem_take(&power_wake_sem, K_MSEC(100));', start))

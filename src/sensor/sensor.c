@@ -38,10 +38,11 @@
 #endif
 #if CONFIG_SENSOR_TCAL_HEATED
 #include "calibration/tcal_heated.h"
-#include <errno.h>
 #endif
 #include "motion_state.h"
 #include "zephyr/logging/log.h"
+#include <errno.h>
+#include <zephyr/sys/reboot.h>
 
 #include <math.h>
 #include <hal/nrf_gpio.h>
@@ -849,7 +850,11 @@ void sensor_scan_thread(void)
 	/* The sensor loop only registers WDT_CHANNEL_SENSOR after sensor_init()
 	 * succeeds; discovery/init itself was previously unmonitored. Cover this
 	 * phase so a blocked sensor bus reboots instead of freezing forever. */
-	watchdog_register_thread(WDT_CHANNEL_SCAN, 0);
+	if (watchdog_register_thread(WDT_CHANNEL_SCAN, 0) < 0) {
+		LOG_ERR("Scan watchdog registration failed");
+		sys_reboot(SYS_REBOOT_COLD);
+		return;
+	}
 
 	sys_interface_resume(); // make sure interfaces are enabled
 	(void)sensor_scan();    // IMUs discovery
@@ -3195,10 +3200,13 @@ void sensor_loop(void)
 		return;
 	}
 	sensor_life_mark_busy();
+	/* Register before bus operations so a blocked initialization is covered. */
+	if (watchdog_register_thread(WDT_CHANNEL_SENSOR, 0) < 0) {
+		LOG_ERR("Sensor watchdog registration failed");
+		sys_reboot(SYS_REBOOT_COLD);
+		return;
+	}
 	sys_interface_resume(); // make sure interfaces are enabled
-
-	/* Register sensor thread with watchdog */
-	watchdog_register_thread(WDT_CHANNEL_SENSOR, 0);
 
 	int err = sensor_init(); // Initialize IMUs and Fusion // TODO: run as thread before loop
 	// TODO: handle imu init error, maybe restart device?

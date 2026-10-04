@@ -40,6 +40,7 @@
 #include <zephyr/sys/crc.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
 
 #include <stdlib.h>
 #include "esb.h"
@@ -2583,7 +2584,11 @@ static void esb_thread(void)
 #endif
 
 	/* Register ESB thread with watchdog */
-	watchdog_register_thread(WDT_CHANNEL_ESB, 0);
+	if (watchdog_register_thread(WDT_CHANNEL_ESB, 0) < 0) {
+		LOG_ERR("ESB watchdog registration failed");
+		sys_reboot(SYS_REBOOT_COLD);
+		return;
+	}
 
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
