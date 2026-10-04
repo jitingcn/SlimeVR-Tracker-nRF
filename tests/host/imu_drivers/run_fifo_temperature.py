@@ -31,6 +31,11 @@ preamble = r'''
 #define LOG_ERR(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 #define LOG_INF(...) ((void)0)
+#define NRF_GPIO_PIN_PULLUP 1
+#define NRF_GPIO_PIN_SENSE_LOW 2
+static int ssi_burst_write(int dev, uint8_t reg, const uint8_t *buf, uint32_t len) {
+    (void)dev;(void)reg;(void)buf;(void)len;return 0;
+}
 static uint8_t fifo_model[80];
 static uint16_t available, next_chunk_available;
 static unsigned model_offset, data_reads;
@@ -141,8 +146,10 @@ with tempfile.TemporaryDirectory(prefix='sensor-temp-') as directory:
         aliases='\n'.join(f'#define {key} {value}' for key,value in names.items())
         state=source[source.index('static uint8_t last_accel_odr'):source.index('LOG_MODULE_REGISTER')]
         decoder=(ROOT/'src/sensor/imu/icm426xx_hires.h').read_text()
+        io_path = ROOT/'src/sensor/imu/icm426xx_io.h'
+        io = io_path.read_text().replace('#include "icm426xx_hires.h"', '') if io_path.exists() else ''
         unit=tmp/f'{model}.c'
-        unit.write_text(defines+'\n'+aliases+'\n'+preamble+'\n'+decoder+'\n#define PACKET_SIZE ICM426XX_HIRES_PACKET_SIZE\n'+state+'\n'+'\n'.join(function(source,names[key]) for key in ('INIT','SHUTDOWN','FIFO_READ','TEMP_READ'))+main)
+        unit.write_text(defines+'\n'+aliases+'\n'+preamble+'\n'+decoder+'\n'+io+'\n#define PACKET_SIZE ICM426XX_HIRES_PACKET_SIZE\n'+state+'\n'+'\n'.join(function(source,names[key]) for key in ('INIT','SHUTDOWN','FIFO_READ','TEMP_READ'))+main)
         binary=tmp/model
         subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie',str(unit),'-lm','-o',str(binary)],check=True)
         subprocess.run([str(binary)],check=True)

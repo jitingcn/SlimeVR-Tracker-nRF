@@ -64,6 +64,8 @@ static bool fifo_temp_valid;
 
 LOG_MODULE_REGISTER(ICM42688, LOG_LEVEL_DBG);
 
+#include "icm426xx_io.h"
+
 int icm_init(
 	float clock_rate,
 	float accel_period_s,
@@ -293,44 +295,8 @@ int icm_update_odr(float accel_period_s, float gyro_period_s, float *accel_actua
 
 uint16_t icm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 {
-	fifo_temp_valid = false;
-	uint16_t total_packets = 0;
-	uint16_t packet_count = UINT16_MAX;
-	while (packet_count > 0 && capacity_bytes >= PACKET_SIZE) {
-		uint8_t raw_count[2];
-		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_COUNTH, &raw_count[0], 2);
-		if (err) {
-			fifo_temp_valid = false;
-			LOG_ERR("Failed to read FIFO count");
-			return total_packets;
-		}
-		packet_count = (uint16_t)(raw_count[0] << 8 | raw_count[1]); // Big-endian record count.
-		if (!packet_count) {                                         // nothing to do
-			break;
-		}
-		float extra_read_packets = packet_count * fifo_multiplier;
-		packet_count += extra_read_packets;
-		uint16_t byte_count = packet_count * PACKET_SIZE;
-		uint16_t packet_capacity = capacity_bytes / PACKET_SIZE;
-		if (packet_count > packet_capacity) {
-			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", packet_count - packet_capacity);
-			packet_count = packet_capacity;
-			byte_count = packet_count * PACKET_SIZE;
-		}
-		err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_DATA, data, byte_count, PACKET_SIZE);
-		if (err) {
-			fifo_temp_valid = false;
-			LOG_ERR("Communication error");
-			return total_packets;
-		}
-		if (!icm426xx_hires_temperature(data, packet_count, &fifo_temp)) {
-			fifo_temp_valid = true;
-		}
-		data += packet_count * PACKET_SIZE;
-		capacity_bytes -= packet_count * PACKET_SIZE;
-		total_packets += packet_count;
-	}
-	return total_packets;
+	return icm426xx_fifo_read(ICM42688_FIFO_COUNTH, ICM42688_FIFO_DATA, fifo_multiplier,
+		data, capacity_bytes, &fifo_temp, &fifo_temp_valid);
 }
 
 int icm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
@@ -342,66 +308,22 @@ int icm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 
 void icm_accel_read(float a[3])
 {
-	uint8_t raw_accel[6];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_ACCEL_DATA_X1, &raw_accel[0], 6);
-	if (err) {
-		LOG_ERR("Communication error");
-		memset(a, 0, 3 * sizeof(*a));
-		return;
-	}
-	for (int i = 0; i < 3; i++) // x, y, z
-	{
-		a[i] = (int16_t)((((uint16_t)raw_accel[i * 2]) << 8) | raw_accel[1 + (i * 2)]);
-		a[i] *= accel_sensitivity;
-	}
+	icm426xx_vector_read(ICM42688_ACCEL_DATA_X1, accel_sensitivity, a);
 }
 
 void icm_gyro_read(float g[3])
 {
-	uint8_t raw_gyro[6];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_GYRO_DATA_X1, &raw_gyro[0], 6);
-	if (err) {
-		LOG_ERR("Communication error");
-		memset(g, 0, 3 * sizeof(*g));
-		return;
-	}
-	for (int i = 0; i < 3; i++) // x, y, z
-	{
-		g[i] = (int16_t)((((uint16_t)raw_gyro[i * 2]) << 8) | raw_gyro[1 + (i * 2)]);
-		g[i] *= gyro_sensitivity;
-	}
+	icm426xx_vector_read(ICM42688_GYRO_DATA_X1, gyro_sensitivity, g);
 }
 
 float icm_temp_read(void)
 {
-	if (fifo_temp_valid) {
-		return fifo_temp;
-	}
-
-	uint8_t raw_temp[2];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_TEMP_DATA1, &raw_temp[0], 2);
-	if (err) {
-		LOG_ERR("Communication error");
-		return NAN;
-	}
-	// Temperature in Degrees Centigrade = (TEMP_DATA / 132.48) + 25
-	float temp = (int16_t)((((uint16_t)raw_temp[0]) << 8) | raw_temp[1]);
-	temp /= 132.48f;
-	temp += 25;
-	return temp;
+	return icm426xx_temp_read(ICM42688_TEMP_DATA1, fifo_temp, fifo_temp_valid);
 }
 
 uint8_t icm_setup_DRDY(uint16_t threshold)
 {
-	uint8_t buf[2];
-	buf[0] = threshold & 0xFF;
-	buf[1] = (threshold >> 8) & 0x0F;
-	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_CONFIG2, buf, 2);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_INT_SOURCE0, 0x04); // FIFO threshold interrupt
-	if (err) {
-		LOG_ERR("Communication error");
-	}
-	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
+	return icm426xx_setup_DRDY(ICM42688_FIFO_CONFIG2, ICM42688_INT_SOURCE0, threshold);
 }
 
 uint8_t icm_setup_WOM(void)

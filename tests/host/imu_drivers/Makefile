@@ -11,7 +11,7 @@ IMU_SOURCES := \
 	../../../src/sensor/imu/ICM45686.c
 
 IMU_HEADERS := $(IMU_SOURCES:.c=.h) ../../../src/sensor/imu/BMI270_firmware.h \
-	../../../src/sensor/imu/icm426xx_hires.h
+	../../../src/sensor/imu/icm426xx_hires.h ../../../src/sensor/imu/icm426xx_io.h
 COMMON_HEADERS := ../../../src/sensor/sensor.h ../../../src/sensor/sensor_none.h \
 	../../../src/sensor/interface.h ../../../src/sensor/diagnostics.h
 HOST_HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h hal/*.h)
