@@ -4,15 +4,19 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #include "system/status.h"
 #include "../led_feedback_stub.h"
 #define __maybe_unused
 #define K_MUTEX_DEFINE(name) static int name
 #define K_FOREVER 0
 #define ESB_ST_PAIRING 0
-#define LOG_WRN(...) ((void)0)
-#define LOG_INF(...) ((void)0)
-#define LOG_DBG(...) ((void)0)
+static void warning_log(const char *format, ...);
+#define LOG_WRN(...) warning_log(__VA_ARGS__)
+#define LOG_INF(...) debug_log(__VA_ARGS__)
+static void debug_log(const char *format, ...) { (void)format; }
+#define LOG_DBG(...) debug_log(__VA_ARGS__)
 #define LOG_ERR(...) ((void)0)
 #define USER_SHUTDOWN_ENABLED 1
 #define CONFIG_CONNECTION_TIMEOUT_DELAY 120000
@@ -49,7 +53,29 @@ static uint32_t ping_failures, ping_success_streak;
 static unsigned ota_rx_head, ota_rx_tail;
 static bool ping_pending, shutdown_requested;
 static int64_t connection_error_start_time, now;
-static uint8_t tracker_id = 3, ping_ctr_sent, epoch;
+static uint8_t tracker_id = 3, ping_counter, epoch;
+static uint32_t ping_ctr_sent;
+static int64_t ping_send_time;
+#define PING_HISTORY_SIZE 8
+static struct { uint8_t counter; uint32_t ping_ticks, ping_ticks_kernel; } ping_history[PING_HISTORY_SIZE];
+static unsigned ping_history_idx;
+static uint64_t k_uptime_ticks(void) { return (uint64_t)now; }
+static uint64_t net_ticks_from_kernel64(uint64_t ticks) { return ticks; }
+static void record_ping_admission(uint8_t counter);
+static int64_t warning_times[256];
+static uint32_t warning_failures[256];
+static unsigned warning_count;
+static bool trace_warnings;
+static void warning_log(const char *format, ...) {
+    if (!strstr(format, "total")) return;
+    assert(warning_count < 256);
+    va_list args; va_start(args, format);
+    uint32_t failures = va_arg(args, unsigned);
+    va_end(args);
+    warning_times[warning_count] = now;
+    warning_failures[warning_count++] = failures;
+    if (trace_warnings) printf("ping-warning t=%lldms failures=%u\n", (long long)now, failures);
+}
 static unsigned probes, writes, changes, disables;
 static struct { uint8_t rf_channel, paired_addr[8]; } storage, *retained = &storage;
 static struct { uint8_t data[13], length; } rx_payload;
@@ -68,7 +94,7 @@ static int esb_set_rf_channel(uint8_t ch) { assert(idle && ch <= 100); ++changes
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
 static int esb_write_ping(uint8_t *ping, bool force) {
     assert(force && ping[0] == 0xf0 && ping[1] == tracker_id);
-    ++probes; ++ping_ctr_sent; ping_pending = true; return 0;
+    ++probes; record_ping_admission(ping_counter); return 0;
 }
 static void clocks_start(void) { clock_status = true; }
 static void clocks_stop(void) { clock_status = false; }
@@ -121,7 +147,20 @@ static void tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8
 void set_status(enum sys_status status, bool value) {
     if (value) status_state |= status; else status_state &= ~status;
 }
+int get_status(enum sys_status status) { return status_state & status; }
 #include "channels.inc"
+enum { ESB_EVENT_TX_SUCCESS, ESB_EVENT_TX_FAILED };
+struct esb_evt { int evt_id; unsigned tx_attempts; };
+static int consecutive_enomem_errors;
+static struct { uint8_t type, length; bool noack; int64_t timestamp; } last_tx;
+static bool connection_get_data_collection(void) { return false; }
+static void drop_failed_tx_payload(void) {}
+static void esb_start_queued_tx(void) {}
+#include "tx_failures.inc"
+static void failed_tx(void) {
+    struct esb_evt event = {ESB_EVENT_TX_FAILED, 2};
+    host_tx_event(&event);
+}
 static void late_pong(void) {
     rx_payload.length = 13; rx_payload.data[0] = ESB_PONG_TYPE;
     rx_payload.data[1] = tracker_id; rx_payload.data[2] = ping_ctr_sent;
@@ -130,6 +169,11 @@ static void late_pong(void) {
 }
 
 static void reset(uint8_t home) {
+    ++radio_session_generation;
+    esb_conn_state = ESB_ST_PAIRED; connection_error_start_time = 0;
+    ping_pending = ping_failed = false; ping_send_time = 0;
+    ping_success_streak = 0; ping_counter = 0; ping_ctr_sent = 0;
+    warning_count = 0; last_tx.type = ESB_PING_TYPE;
     esb_initialized = true; idle = true; ota_active = false;
     ota_rx_head = ota_rx_tail = 0; ping_failures = 3;
     channel_search = channel_wait_normal = channel_found = channel_heard = false;
@@ -139,6 +183,123 @@ static void reset(uint8_t home) {
     memset(storage.paired_addr, 0x5a, sizeof(storage.paired_addr));
     status_state = SYS_STATUS_CONNECTION_ERROR | SYS_STATUS_USB_CONNECTED;
 }
+
+/* One owner tick uses production maintenance, search, admission and callback. */
+static void owner_tick(void) {
+    maintenance_timeout();
+    unsigned before = probes;
+    (void)esb_channel_search_poll(false);
+    if (probes != before) {
+        assert(ping_send_time == now && ping_pending);
+        failed_tx();
+        assert(ping_pending); /* Fresh probes are not aged losses. */
+    }
+}
+static void initial_losses(void) {
+    ping_failures = 0;
+    for (unsigned i = 0; i < 3; ++i) {
+        record_ping_admission(ping_counter);
+        now += get_ping_interval_ms() - 99;
+        if (i == 1) maintenance_timeout(); else failed_tx();
+        assert(ping_failures == i + 1 && !ping_pending && ping_failed);
+        if (i < 2) {
+            (void)esb_channel_search_poll(false);
+            assert(warning_count == 0);
+        }
+    }
+}
+static void cadence(void) {
+    reset(2); initial_losses();
+    int64_t start = now;
+    owner_tick();
+    assert(warning_count == 1 && warning_failures[0] == 3);
+    unsigned fast_probes = 0;
+    for (++now; now <= start + 120000; ++now) {
+        unsigned before = probes;
+        int64_t previous = ping_send_time;
+        owner_tick();
+        if (probes != before && now - previous >= 80 && now - previous <= 102)
+            ++fast_probes;
+    }
+    assert(fast_probes > 800 && probes > 1000);
+    assert(warning_count == 13);
+    int64_t minimum = INT64_MAX, maximum = 0;
+    for (unsigned i = 1; i < warning_count; ++i) {
+        int64_t spacing = warning_times[i] - warning_times[i - 1];
+        if (spacing < minimum) minimum = spacing;
+        if (spacing > maximum) maximum = spacing;
+        assert(warning_failures[i] > warning_failures[i - 1]);
+    }
+    assert(minimum >= 10000 && maximum <= 10001);
+    assert(ping_failures == (uint32_t)((now - 1 - own_pong_time) / get_ping_interval_ms()));
+    /* Accepted own PONG plus NORMAL completes search and resets throttling. */
+    rx_payload.length = ESB_PONG_LEN; rx_payload.data[0] = ESB_PONG_TYPE;
+    rx_payload.data[1] = tracker_id; rx_payload.data[2] = ping_ctr_sent;
+    rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
+    assert(accept_pong() && ping_failures == 0 && !ping_pending);
+    server_time_synced = true;
+    rx_payload.data[8] = 0; rx_payload.data[9] = 1; rx_payload.data[10] = 16;
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(channel_found && !esb_channel_search_poll(false));
+    unsigned recovered_count = warning_count;
+    now += 100; owner_tick(); assert(warning_count == recovered_count);
+    warning_count = 0;
+    initial_losses(); owner_tick();
+    assert(warning_count == 1 && warning_failures[0] == 3);
+    /* Counter jumps and busy radio cannot starve the warning owner. */
+    reset(2); idle = false;
+    now += 123456; owner_tick();
+    assert(warning_count == 1 && warning_failures[0] > 80 && probes == 0);
+    uint32_t jumped = ping_failures;
+    now += 10000; owner_tick();
+    assert(warning_count == 2 && ping_failures > jumped && changes == 0);
+}
+static void warning_lifecycle(void) {
+    reset(2); owner_tick(); assert(warning_count == 1);
+    /* No inactive poll occurs between the radio generations. */
+    esb_initialized = false; ++radio_session_generation;
+    now += 1; esb_initialized = true; owner_tick();
+    assert(warning_count == 2);
+    for (unsigned mode = 0; mode < 2; ++mode) {
+        if (mode == 0) esb_initialized = false; else esb_conn_state = ESB_ST_PAIRING;
+        now += 1; (void)esb_channel_search_poll(false);
+        assert(warning_count == 2 + mode);
+        esb_initialized = true; esb_conn_state = ESB_ST_PAIRED;
+        now += 1; owner_tick(); assert(warning_count == 3 + mode);
+    }
+    channel_search = false; ping_failures = 0; own_pong_time = now;
+    now += 1; owner_tick(); assert(warning_count == 4);
+    ping_failures = 3; now += 1; owner_tick(); assert(warning_count == 5);
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        reset(2); owner_tick();
+        int64_t start = now;
+        /* Short alternating holds must not reset the deadline and burst. */
+        for (now = start + 1; now <= start + 25000; ++now) {
+            bool held = (now - start) % 200 < 100;
+            ota_active = mode == 1 && held;
+            ota_rx_head = mode == 2 && held;
+            unsigned before = warning_count;
+            (void)esb_channel_search_poll(mode == 0 && held);
+            if (held) assert(warning_count == before);
+        }
+        assert(warning_count == 3);
+        for (unsigned i = 1; i < warning_count; ++i) {
+            int64_t spacing = warning_times[i] - warning_times[i - 1];
+            assert(spacing >= 10000 && spacing <= 10100);
+        }
+        /* Long suppression: one release warning, never catch-up. */
+        ota_active = mode == 1; ota_rx_head = mode == 2;
+        now += 30000;
+        unsigned before = warning_count, old_probes = probes;
+        (void)esb_channel_search_poll(mode == 0);
+        assert(warning_count == before && probes == old_probes);
+        ota_active = false; ota_rx_head = 0;
+        (void)esb_channel_search_poll(false);
+        assert(warning_count == before + 1);
+        ++now; (void)esb_channel_search_poll(false);
+        assert(warning_count == before + 1);
+    }
+}
 static void visit(uint8_t target) {
     assert(esb_channel_search_poll(false));
     for (unsigned i = 0; radio_channel != target && i < 101; ++i) {
@@ -147,6 +308,11 @@ static void visit(uint8_t target) {
     assert(radio_channel == target && writes == 0);
 }
 int main(void) {
+    trace_warnings = getenv("RADIO_PING_TRACE") != NULL;
+    cadence();
+    warning_lifecycle();
+    puts("channels: 120s production-path ping cadence, recovery and suppression PASS");
+    if (getenv("RADIO_PING_ONLY")) return 0;
     for (unsigned home = 0; home <= 100; ++home) {
         bool seen[101] = {0};
         assert(channel_candidate(home, 0) == home);

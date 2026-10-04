@@ -1191,21 +1191,17 @@ void event_handler(struct esb_evt const *event)
 			ping_pending = false;    // Clear the pending flag
 			ping_success_streak = 0; // Reset recovery streak on any failure
 			ping_failures++;
-		}
 
-		if (ping_failures > 0 && ping_failures % 10 == 0 && last_tx.type == ESB_PING_TYPE) // Log every 10 failures
-		{
-			LOG_WRN("Ping failed, total failures: %d", ping_failures);
-		}
-		if (ping_failures == TX_ERROR_THRESHOLD) // consecutive ping failures
-		{
-			connection_error_start_time = k_uptime_get(); // Mark when connection errors started
-			esb_conn_state = ESB_ST_RECOVERING;
-			LOG_WRN(
-				"Ping failure threshold reached (%d failures), starting "
-				"timeout timer",
-				TX_ERROR_THRESHOLD
-			);
+			if (ping_failures == TX_ERROR_THRESHOLD) // consecutive ping failures
+			{
+				connection_error_start_time = k_uptime_get(); // Mark when connection errors started
+				esb_conn_state = ESB_ST_RECOVERING;
+				LOG_WRN(
+					"Ping failure threshold reached (%d failures), starting "
+					"timeout timer",
+					TX_ERROR_THRESHOLD
+				);
+			}
 		}
 
 		if (esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() && esb_is_idle()) {
@@ -2422,8 +2418,16 @@ int esb_write_ping(uint8_t *data, bool force_resync)
  * Returns true while ordinary producer work must yield to rendezvous. */
 bool esb_channel_search_poll(bool blocked)
 {
+	static int64_t ping_warning_at;
+	static uint32_t ping_warning_session;
+
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	if (ping_warning_session != radio_session_generation) {
+		ping_warning_session = radio_session_generation;
+		ping_warning_at = 0;
+	}
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
+		ping_warning_at = 0;
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
 	}
@@ -2448,6 +2452,7 @@ bool esb_channel_search_poll(bool blocked)
 		channel_search = false;
 		channel_wait_normal = false;
 		channel_heard = false;
+		ping_warning_at = 0;
 		set_status(SYS_STATUS_CONNECTION_ERROR, false);
 		connection_error_start_time = 0;
 		shutdown_requested = false;
@@ -2457,6 +2462,7 @@ bool esb_channel_search_poll(bool blocked)
 	}
 	if (!channel_search && ping_failures < 3
 	    && (uint32_t)((uint32_t)now - own_pong_time) < 4500) {
+		ping_warning_at = 0;
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
 	}
@@ -2466,6 +2472,13 @@ bool esb_channel_search_poll(bool blocked)
 	uint32_t missed = lost_ms / get_ping_interval_ms();
 	if (missed > ping_failures) {
 		ping_failures = missed;
+	}
+	/* Search probes refresh ping_send_time, so neither callback failures nor
+	 * pending-PONG timeouts reliably report sustained loss. This owner reports
+	 * progress by elapsed time, including counter jumps and a busy radio. */
+	if (ping_failures >= 3 && now >= ping_warning_at) {
+		LOG_WRN("Ping failed, total failures: %u", ping_failures);
+		ping_warning_at = now + 10000;
 	}
 	if (ping_failures >= TX_ERROR_THRESHOLD && connection_error_start_time == 0) {
 		connection_error_start_time = now;
@@ -2789,7 +2802,6 @@ static void esb_thread(void)
 			ping_pending = false;
 			ping_success_streak = 0;
 			ping_failures++;
-			LOG_WRN("PING timeout, failures=%u", ping_failures);
 			if (ping_failures == TX_ERROR_THRESHOLD) {
 				connection_error_start_time = now_idle;
 				esb_conn_state = ESB_ST_RECOVERING;
