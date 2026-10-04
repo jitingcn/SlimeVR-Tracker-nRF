@@ -25,11 +25,16 @@
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <hal/nrf_clock.h>
 #include <zephyr/logging/log.h>
+#include <lib/nrfx_coredep.h>
+#include <zephyr/sys/reboot.h>
+#include <errno.h>
 
 // clock_control already has a log module defined in nrf_clock_control, so we define our own for this file
 LOG_MODULE_REGISTER(clock_switch, LOG_LEVEL_INF);
 
 #define LFCLK_WAIT_STEP_US 300
+#define LFCLK_STOP_TIMEOUT_US 10000
+#define LFCLK_START_TIMEOUT_US 1000000
 
 /* Helper to normalize XTAL variants for comparison.
  * XTAL_FULL_SWING and XTAL_LOW_SWING report as XTAL in the actual source. */
@@ -53,6 +58,37 @@ static bool lfclk_running_source_get(nrf_clock_lfclk_t *source)
 	}
 
 	return running;
+}
+/* CPU-loop delays remain usable while the LFCLK-backed system timer is stopped. */
+static int lfclk_start_source(nrf_clock_lfclk_t source)
+{
+	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
+	for (uint32_t waited = 0; ; waited += LFCLK_WAIT_STEP_US) {
+		nrf_clock_lfclk_t actual;
+		bool running = lfclk_running_source_get(&actual);
+		/* WDT can keep LFRC running after STOP clears the software START request.
+		 * Wait for that request to clear and any old non-RC source to settle. */
+		if (!nrf_clock_start_task_check(NRF_CLOCK, NRF_CLOCK_DOMAIN_LFCLK)
+			&& (!running || actual == NRF_CLOCK_LFCLK_RC)) {
+			break;
+		}
+		if (waited >= LFCLK_STOP_TIMEOUT_US) {
+			return -ETIMEDOUT;
+		}
+		nrfx_coredep_delay_us(LFCLK_WAIT_STEP_US);
+	}
+	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
+	nrf_clock_lf_src_set(NRF_CLOCK, source);
+	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
+	for (uint32_t waited = 0; waited < LFCLK_START_TIMEOUT_US; waited += LFCLK_WAIT_STEP_US) {
+		nrf_clock_lfclk_t actual;
+		if (nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)
+			&& lfclk_running_source_get(&actual) && actual == normalize_source(source)) {
+			return 0;
+		}
+		nrfx_coredep_delay_us(LFCLK_WAIT_STEP_US);
+	}
+	return -ETIMEDOUT;
 }
 
 // Safely switch LF clock source
@@ -90,45 +126,22 @@ void clock_switch(nrf_clock_lfclk_t source)
 
 	/* Keep the stop-to-start transition atomic while the system timer is stopped. */
 	unsigned int key = irq_lock();
-	if (running) {
-		nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
-
-		do {
-			running = lfclk_running_source_get(&current_source);
-		} while (running && current_source != NRF_CLOCK_LFCLK_RC);
+	int err = lfclk_start_source(source);
+	if (err && normalized_requested != NRF_CLOCK_LFCLK_RC) {
+		err = lfclk_start_source(NRF_CLOCK_LFCLK_RC);
+		if (!err) {
+			irq_unlock(key);
+			LOG_ERR("LFCLK source %d failed; using RC fallback", source);
+			return;
+		}
 	}
-
-	/*
-	 * Start and wait for LFCLKSTARTED event, as used in sdk-nrf board init hooks.
-	 * This avoids returning early before the LF clock has actually started.
-	 */
-	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
-	nrf_clock_lf_src_set(NRF_CLOCK, source);
-	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
 	irq_unlock(key);
-
-	if (source == NRF_CLOCK_LFCLK_RC) {
-		// RC starts very quickly, just wait for the event without sleeping
-		while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {}
-	} else {
-		uint32_t waited_us = 0;
-		while (!nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)) {
-			k_usleep(LFCLK_WAIT_STEP_US);
-			waited_us += LFCLK_WAIT_STEP_US;
-		}
-		if (waited_us > 1000) {
-			LOG_INF("clock_switch: LFCLK start waited %u us", waited_us);
-		}
+	if (err) {
+		LOG_ERR("LFCLK unavailable: %d", err);
+		sys_reboot(SYS_REBOOT_COLD);
+		return;
 	}
-
-	/* Verify the actual clock source matches what we requested */
-	nrf_clock_lfclk_t actual_source;
-	bool actual_running = lfclk_running_source_get(&actual_source);
-	if (!actual_running || actual_source != normalized_requested) {
-		LOG_ERR("clock_switch: source mismatch! requested=%d, actual=%d", normalized_requested, actual_source);
-	} else {
-		LOG_INF("clock_switch: switched to source=%d successfully", actual_source);
-	}
+	LOG_INF("clock_switch: switched to source=%d successfully", normalized_requested);
 }
 
 // Switch to RC clock before shut down to avoid any problems with the bootloader
