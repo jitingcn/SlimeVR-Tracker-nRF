@@ -183,12 +183,9 @@ int esb_ota_flash_request_mcuboot_upgrade(void)
 }
 
 /*
- * RAM-resident flash copier: copies image from staging area to final location.
- * This function is copied to RAM before execution because it erases the flash
- * pages containing the running firmware (including itself).
- *
+ * RAM-resident flash copier, linked and initialized by Zephyr exactly like
+ * ota_ram_engine. No runtime code copying or guessed function extent.
  * Must be self-contained — no calls to external functions.
- * Parameters passed via a struct to keep the interface simple.
  */
 struct flash_copy_params {
 	uint32_t src_addr;      /* Staging area start (flash offset) */
@@ -201,7 +198,7 @@ struct flash_copy_params {
 };
 
 #if defined(CONFIG_SOC_NRF52840)
-__attribute__((noinline))
+__ramfunc __attribute__((noinline))
 static void ota_flash_copy_from_ram(const struct flash_copy_params *p)
 {
 	uint32_t pages = (p->size + p->page_size - 1) / p->page_size;
@@ -311,13 +308,6 @@ void esb_ota_flash_copy_and_reset(uint32_t staging_base, uint32_t target_base,
 		image_size, staging_base, target_base);
 	k_msleep(500); /* Flush logs */
 
-	/* Copy the flash copier function to RAM */
-	static uint8_t __aligned(4) ram_func_buf[768]; /* Generous size for the copier + settings write */
-	uintptr_t func_addr = (uintptr_t)ota_flash_copy_from_ram;
-	/* Thumb functions have bit 0 set; clear it for copy, set it for call */
-	uintptr_t func_start = func_addr & ~1U;
-	memcpy(ram_func_buf, (void *)func_start, sizeof(ram_func_buf));
-
 	/* Prepare params */
 	static struct flash_copy_params params;
 	params.src_addr = staging_base;
@@ -338,10 +328,6 @@ void esb_ota_flash_copy_and_reset(uint32_t staging_base, uint32_t target_base,
 		params.settings_words = 0;
 	}
 
-	/* Call the RAM copy with IRQs disabled */
-	typedef void (*flash_copy_fn)(const struct flash_copy_params *);
-	flash_copy_fn ram_copy = (flash_copy_fn)((uintptr_t)ram_func_buf | 1U); /* Thumb bit */
-
 	__disable_irq();
 
 	/* Disable MPU so we can execute code from RAM (SRAM is XN by default with Zephyr's MPU config) */
@@ -349,7 +335,7 @@ void esb_ota_flash_copy_and_reset(uint32_t staging_base, uint32_t target_base,
 	__DSB();
 	__ISB();
 
-	ram_copy(&params);
+	ota_flash_copy_from_ram(&params);
 	/* Never reached */
 #else
 	ARG_UNUSED(staging_base);
