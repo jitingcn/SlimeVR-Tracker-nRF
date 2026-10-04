@@ -201,7 +201,7 @@ static void reset_tracker(int16_t pptt)
 		LOG_DBG("Reset battery tracker");
 }
 
-static void update_interval(int16_t pptt)
+static bool update_interval(int16_t pptt)
 {
 	update_runtime(); // update battery_runtime_sum before saving
 
@@ -220,7 +220,7 @@ static void update_interval(int16_t pptt)
 	if (runtime < CONFIG_SYS_CLOCK_TICKS_PER_SEC * 60 * 5)
 	{
 		LOG_ERR("Interval %u: %llu us is too short (min 5 min active time)", interval_id, k_ticks_to_us_floor64(runtime));
-		return;
+		return false;
 	}
 
 	struct battery_tracker_interval interval = {0};
@@ -233,11 +233,17 @@ static void update_interval(int16_t pptt)
 		interval.runtime_min = runtime;
 	if (runtime > interval.runtime_max)
 		interval.runtime_max = runtime;
-	sys_write(BATT_STATS_INTERVAL_0 + interval_id, NULL, &interval, sizeof(interval));
+	int err = sys_write(BATT_STATS_INTERVAL_0 + interval_id, NULL, &interval, sizeof(interval));
+	if (err)
+	{
+		LOG_ERR("Interval %u not saved: %d", interval_id, err);
+		return false;
+	}
 	valid_cache_mask = 0; // invalidate all
 	LOG_INF("Interval %u saved: %u cycles, %llu us total (current: %llu us, min: %llu us, max: %llu us)",
 		interval_id, interval.cycles, k_ticks_to_us_floor64(interval.runtime),
 		k_ticks_to_us_floor64(runtime), k_ticks_to_us_floor64(interval.runtime_min), k_ticks_to_us_floor64(interval.runtime_max));
+	return true;
 }
 
 static void update_tracker(int16_t pptt)
@@ -253,7 +259,8 @@ static void update_tracker(int16_t pptt)
 			if (pptt <= retained->max_battery_pptt - 800) // valid interval
 			{
 				LOG_INF("Update interval: %.2f%%", (double)pptt / 100.0);
-				update_interval(pptt);
+				if (!update_interval(pptt))
+					return; // Keep the checkpoint so a later sample can retry.
 			}
 			retained->battery_runtime_saved = retained->battery_runtime_sum;
 			retained->battery_pptt_saved -= 500;
