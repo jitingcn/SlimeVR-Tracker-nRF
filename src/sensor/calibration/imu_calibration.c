@@ -81,6 +81,48 @@ void sensor_calibration_identity_accel(float matrix[4][3])
 	}
 }
 
+static bool accel_matrix_valid(const float matrix[4][3])
+{
+	if (!matrix || !v_finite(&matrix[0][0], 12)) {
+		return false;
+	}
+	float zero[3] = {0};
+	float diagonal[3] = {matrix[1][0], matrix[2][1], matrix[3][2]};
+	float magnitude = v_avg(diagonal);
+	float average[3] = {magnitude, magnitude, magnitude};
+	if (!v_epsilon(matrix[0], zero, 0.5f)
+	    || !v_epsilon(diagonal, average, magnitude * 0.1f)) {
+		return false;
+	}
+	/* Calibration corrects a sensor already reporting g. Allow broad legacy
+	 * gains (0.5..2), but never an axis collapse or extreme amplification. */
+	float norm_sq = 0.0f;
+	float cofactor_sq = 0.0f;
+	float determinant = 0.0f;
+	for (int row = 0; row < 3; row++) {
+		float gain_sq = 0.0f;
+		for (int col = 0; col < 3; col++) {
+			float value = matrix[row + 1][col];
+			gain_sq += value * value;
+			float cofactor =
+				matrix[(row + 1) % 3 + 1][(col + 1) % 3] *
+				matrix[(row + 2) % 3 + 1][(col + 2) % 3] -
+				matrix[(row + 1) % 3 + 1][(col + 2) % 3] *
+				matrix[(row + 2) % 3 + 1][(col + 1) % 3];
+			cofactor_sq += cofactor * cofactor;
+			if (row == 0) determinant += value * cofactor;
+		}
+		if (!v_finite(&gain_sq, 1) || gain_sq < 0.25f || gain_sq > 4.0f) {
+			return false;
+		}
+		norm_sq += gain_sq;
+	}
+	/* ||A||F * ||A^-1||F <= 10 (identity is 3), without division.
+	 * The cofactor norm also avoids assuming symmetry of legacy matrices. */
+	return v_finite(&determinant, 1) && fabsf(determinant) > 1e-6f
+		&& norm_sq * cofactor_sq <= 100.0f * determinant * determinant;
+}
+
 void sensor_calibration_imu_load(void)
 {
 	k_mutex_lock(&persistence_lock, K_FOREVER);
@@ -112,14 +154,7 @@ void sensor_calibration_imu_load(void)
 		memset(retained->bootCalState.doffset, 0, sizeof(retained->bootCalState.doffset));
 	}
 #endif
-	bool heal_matrix = !v_finite(&initial.accel_matrix[0][0], 12);
-#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-	float diagonal[3] = {initial.accel_matrix[1][0], initial.accel_matrix[2][1], initial.accel_matrix[3][2]};
-	float magnitude = v_avg(diagonal);
-	float average[3] = {magnitude, magnitude, magnitude};
-	heal_matrix |= !v_epsilon(initial.accel_matrix[0], zero, 0.5f)
-		|| !v_epsilon(diagonal, average, magnitude * 0.1f);
-#endif
+	bool heal_matrix = !accel_matrix_valid(initial.accel_matrix);
 	if (heal_matrix) {
 		sensor_calibration_identity_accel(initial.accel_matrix);
 		sys_write(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, initial.accel_matrix, sizeof(initial.accel_matrix));
@@ -263,14 +298,7 @@ static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect
 			uint16_t operation_id, struct led_token feedback, bool partial, uint32_t generation)
 {
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-	float zero[3] = {0};
-	if (!matrix || !v_finite(&matrix[0][0], 12)) {
-		return -EINVAL;
-	}
-	float diagonal[3] = {matrix[1][0], matrix[2][1], matrix[3][2]};
-	float magnitude = v_avg(diagonal);
-	float average[3] = {magnitude, magnitude, magnitude};
-	if (!v_epsilon(matrix[0], zero, 0.5f) || !v_epsilon(diagonal, average, magnitude * 0.1f)) {
+	if (!accel_matrix_valid(matrix)) {
 		return -EINVAL;
 	}
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);

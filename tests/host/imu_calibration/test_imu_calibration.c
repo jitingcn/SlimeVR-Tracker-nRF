@@ -281,6 +281,38 @@ static void baseline(void)
 	led_invalidations = 0;
 }
 
+static const float matrix_cases[][4][3] = {
+	{{0}, {1, 1, 1}, {1, 1, 1}, {1, 1, 1}},
+	{{0}, {1, .99999f, 0}, {.99999f, 1, 0}, {0, 0, 1}},
+	{{0}, {100, 0, 0}, {0, 100, 0}, {0, 0, 100}},
+	{{.1f, -.2f, .05f}, {1.1f, .2f, 0}, {0, 1.1f, -.1f}, {.03f, 0, 1.1f}},
+};
+
+static void test_stored_matrix_sanity(void)
+{
+	/* Each child starts before the load-once owner is initialized. */
+	for (unsigned c = 0; c < sizeof(matrix_cases) / sizeof(matrix_cases[0]); c++) {
+		pid_t child = fork();
+		assert(child >= 0);
+		if (child == 0) {
+			memcpy(retained->accBAinv, matrix_cases[c], sizeof(retained->accBAinv));
+			sensor_calibration_imu_load();
+			sensor_imu_calibration_t actual = snapshot();
+			float expected[4][3];
+			sensor_calibration_identity_accel(expected);
+			if (c == 3) memcpy(expected, matrix_cases[c], sizeof(expected));
+			for (unsigned row = 0; row < 4; row++) {
+				vector_equal(actual.accel_matrix[row], expected[row]);
+				vector_equal(retained->accBAinv[row], expected[row]);
+			}
+			_exit(0);
+		}
+		int status;
+		assert(waitpid(child, &status, 0) == child);
+		assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	}
+}
+
 static void test_startup_and_load_once(void)
 {
 	float identity[4][3];
@@ -421,6 +453,10 @@ static void test_invalid_candidates_leave_applied_unchanged(void)
 	memcpy(matrix, before.accel_matrix, sizeof(matrix));
 	matrix[2][1] = 1.5f;
 	assert(sensor_calibration_commit_accel(matrix, 0, (struct led_token){0}, false, 0) == -EINVAL);
+	for (unsigned c = 0; c < 3; c++) {
+		assert(sensor_calibration_commit_accel(matrix_cases[c], 0,
+			(struct led_token){0}, false, 0) == -EINVAL);
+	}
 	assert(sensor_calibration_commit_accel(NULL, 0, (struct led_token){0}, false, 0) == -EINVAL);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
 	assert(!sensor_calibration_fusion_stale());
@@ -768,6 +804,7 @@ static void run_isolated(void (*test)(void))
 
 int main(void)
 {
+	test_stored_matrix_sanity();
 	run_isolated(test_nonfinite_startup);
 	run_isolated(test_out_of_bounds_startup);
 	test_startup_and_load_once();
