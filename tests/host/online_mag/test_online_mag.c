@@ -386,6 +386,10 @@ uint32_t fixture_now(void)
 {
 	return clock_ms;
 }
+unsigned fixture_operations(void)
+{
+	return next_operation;
+}
 float fixture_old_rms(void)
 {
 	struct online_mag_diagnostics d;
@@ -493,6 +497,95 @@ static void trial(void)
 	assert(fixture_phase() == PROBATION);
 	assert(!dirty_marks && !memcmp(storage.magBAinv, previous, sizeof(previous)));
 }
+static void stationary_noise(unsigned count, const float center[3])
+{
+	const float up[3] = {0, 0, 1};
+	for (unsigned i = 0; i < count; ++i) {
+		float raw[3];
+		for (unsigned j = 0; j < 3; ++j) {
+			raw[j] = center[j] + .0001f * (float)((int)((i * (7 + 2 * j)) % 11) - 5);
+		}
+		fixture_feed(raw, up, 0, 40);
+		if (i % 25 == 0) {
+			fixture_check();
+		}
+	}
+}
+
+static void test_stationary_novelty(void)
+{
+	const float rest[3] = {.08f, -.04f, .03f};
+	fixture_reset(1000, 0);
+	stationary_noise(2200, rest); /* Empty pool recentres onto sensor noise. */
+	assert(!next_operation && !solver_calls && !dirty_marks);
+	assert(online.admitted_since_fit == 1);
+
+	samples(900, false, true);
+	fixture_check();
+	assert(next_operation == 1 && fixture_phase() == VALIDATION_READY);
+	/* Near the training center, raw noise becomes large angular excursions.
+	 * Invalid radial holdout rejects this candidate, retaining the raw pool. */
+	stationary_noise(2200, rest);
+	assert(fixture_phase() == TRAINING && next_operation == 1 && solver_calls == 1);
+	assert(!dirty_marks && online.admitted_since_fit < 32);
+	assert(!memcmp(magBAinv, storage.magBAinv, sizeof(magBAinv)));
+	samples(900, false, true);
+	fixture_check();
+	assert(next_operation == 2 && solver_calls == 2 && fixture_phase() == VALIDATION_READY);
+
+	/* Explicit reset discards admission history, unlike an internal outcome. */
+	magneto_online_reset();
+	fixture_feed(rest, last_up, 0, 40);
+	assert(dot3(online.last_dir, online.last_dir) == 0);
+	fixture_feed(rest, last_up, 0, ONLINE_SUPPRESS_MS);
+	assert(online.admitted_since_fit == 1);
+
+	fixture_reset(1000, 0);
+	const float up[3] = {0, 0, 1};
+	float raw[3] = {1, 0, 0};
+	fixture_feed(raw, up, 0, 40); /* Service explicit reset. */
+	fixture_feed(raw, up, 0, ONLINE_SUPPRESS_MS);
+	assert(online.admitted_since_fit == 1);
+	/* Natural summary puts the center on the admitted point. Direction now
+	 * flips, but sub-threshold steps must accumulate from the admission,
+	 * not from the last observed (rejected) vector. */
+	raw[0] = .981f;
+	fixture_feed(raw, up, 0, 1000);
+	raw[0] = .9801f;
+	fixture_feed(raw, up, 0, 40);
+	assert(online.admitted_since_fit == 1);
+	raw[0] = .979f;
+	fixture_feed(raw, up, 0, 40);
+	assert(online.admitted_since_fit == 2);
+}
+
+static void test_partial_radial_metrics(void)
+{
+	fixture_reset(1000, 0);
+	for (unsigned phase = VALIDATING; phase <= PROBATION; ++phase) {
+		online.phase = phase;
+		/* Ten cells, two complete opposite-axis pairs; reliable but narrow
+		 * gravity evidence must not turn into a qualified reference dip. */
+		memset(directions, 0, sizeof(directions));
+		for (unsigned i = 0; i < 10; ++i) {
+			directions[i].count = directions[i].dip_count = 12;
+			directions[i].norm_sum = 6;
+		}
+		/* First eight are +/-X; indices 8 and 10 provide +/-Y. */
+		directions[10] = directions[9];
+		memset(&directions[9], 0, sizeof(directions[9]));
+		struct evidence e;
+		assert(metrics_pass(false, false, &e));
+		assert(e.diagnostics.radial_cells == 10 && !e.dip_known);
+		/* Four poles alone are unsafe: +/-X, +Y, +Z has only one pair. */
+		directions[16] = directions[10];
+		memset(&directions[10], 0, sizeof(directions[10]));
+		assert(!metrics_pass(false, false, &e));
+		assert(__builtin_popcount(e.diagnostics.radial_poles) == 4);
+		assert(e.diagnostics.rejection == ONLINE_MAG_REJECT_COVERAGE);
+	}
+}
+
 static void test_debug_logging(void)
 {
 	fixture_reset(1000, 0);
@@ -785,6 +878,8 @@ int main(void)
 {
 	assert(!sensor_calibration_get_online_mag_debug()); /* Static boot default. */
 	test_debug_logging();
+	test_stationary_novelty();
+	test_partial_radial_metrics();
 	test_window_minimums();
 	test_cancel_frozen();
 	test_holdout_and_confirmation();

@@ -211,8 +211,82 @@ def unstable_environment():
     assert matrix() == before == matrix("fixture_live") and lib.fixture_dirty() == 0
 
 
+def stationary():
+    reset()
+    rest = [.08, -.04, .03]
+
+    def noise(count):
+        for i in range(count):
+            raw = [v + .0001*((i*(7+2*j)) % 11 - 5) for j, v in enumerate(rest)]
+            lib.fixture_feed(Vec(*raw), Vec(0, 0, 1), False, 40)
+            if i % 25 == 0:
+                lib.fixture_check()
+
+    noise(2200)
+    assert lib.fixture_operations() == 0 and lib.fixture_dirty() == 0
+    # Populate and fit, then allow actual recentering and TTL expiry at rest.
+    for i in range(2400):
+        feed(i)
+        if i % 25 == 0:
+            lib.fixture_check()
+        if lib.fixture_phase() == VALIDATING:
+            break
+    assert lib.fixture_operations() == 1 and lib.fixture_phase() == VALIDATING
+    before = matrix()
+    noise(2200)
+    assert lib.fixture_operations() == 1 and lib.fixture_dirty() == 0
+    assert matrix() == before == matrix("fixture_live")
+    for i in range(2400):
+        feed(i)
+        if i % 25 == 0:
+            lib.fixture_check()
+        if lib.fixture_phase() == VALIDATING:
+            break
+    assert lib.fixture_operations() == 2 and lib.fixture_phase() == VALIDATING
+
+
+def torso():
+    # Independent Earth-frame field/gravity, rotated by Rz(yaw)Ry(pitch)Rx(roll).
+    # 25-degree pitch/roll excursions, full yaw; not a pure-yaw observability claim.
+    reset()
+    distortion = [[1.04, .025, -.015], [.025, .96, .02], [-.015, .02, 1.01]]
+
+    def raw_field(unit):
+        return [BASE[j] + .5*sum(distortion[j][k]*unit[k] for k in range(3))
+                for j in range(3)]
+
+    for i in range(12000):
+        t = i*.04
+        r = math.radians(25)*math.sin(.71*t)
+        p = math.radians(25)*math.sin(.47*t + .8)
+        y = .63*t
+        cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+        up = [-sp, cp*sr, cp*cr]
+        north = [cy*cp, cy*sp*sr-sy*cr, cy*sp*cr+sy*sr]
+        unit = [math.sqrt(1-.15**2)*n + .15*g for n, g in zip(north, up)]
+        lib.fixture_feed(Vec(*raw_field(unit)), Vec(*up), True, 40)
+        if i % 25 == 0:
+            lib.fixture_check()
+        if lib.fixture_dirty():
+            break
+    assert lib.fixture_dirty() == 1, (lib.fixture_phase(), lib.fixture_rejection())
+    fitted = matrix()
+    assert fitted == matrix("fixture_live")
+    errors = []
+    for i in range(4096):
+        z = 1 - 2*(i+.5)/4096
+        a = i*math.pi*(3-math.sqrt(5))
+        unit = [math.sqrt(1-z*z)*math.cos(a), math.sqrt(1-z*z)*math.sin(a), z]
+        raw = raw_field(unit)
+        centered = [raw[j]-fitted[j] for j in range(3)]
+        corrected = [sum(fitted[3+3*j+k]*centered[j] for j in range(3)) for k in range(3)]
+        errors.append(math.sqrt(sum(v*v for v in corrected))/.5-1)
+    rms, maximum = math.sqrt(sum(e*e for e in errors)/len(errors)), max(map(abs, errors))
+    assert rms <= .012 and maximum <= .03, (rms, maximum)
+
+
 CASES = {fn.__name__: fn for fn in (continuous_pool, continuous_shift, no_benefit,
-          bad_quality, five_poles, dip_transition, unstable_environment)}
+          bad_quality, five_poles, dip_transition, unstable_environment, stationary, torso)}
 for name in sys.argv[1:] or CASES:
     CASES[name]()
     print(f"online_mag usability: {name} passed")
