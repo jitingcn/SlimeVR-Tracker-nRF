@@ -321,7 +321,10 @@ bool sys_migrate_battery_curve(void)
 
 static void update_curve(void)
 {
-	uint64_t* intervals = (uint64_t*)k_malloc(sizeof(uint64_t) * 19);
+	// Only the power thread reaches this function (including shutdown paths).
+	// Keep its bounded scratch off the 1024-byte power stack.
+	static uint64_t intervals[19];
+	static int16_t curve[18];
 	uint64_t curve_runtime = 0;
 
 	int32_t first_valid = -1;
@@ -356,12 +359,10 @@ static void update_curve(void)
 	if (valid_intervals < 2 || first_valid < 0) // not enough data
 	{
 		LOG_WRN("Not enough data to calculate discharge curve");
-		k_free(intervals);
 		return;
 	}
 
-	int16_t* curve = (int16_t*)k_malloc(sizeof(int16_t) * 18);
-	memset(curve, 0, sizeof(int16_t) * 18);
+	memset(curve, 0, sizeof(curve));
 
 	int32_t lo_cal = (first_valid > 0) ? default_battery_pptt_curve[first_valid - 1] : 0;
 	int32_t hi_cal = (last_valid < 17) ? default_battery_pptt_curve[last_valid] : 10000;
@@ -370,8 +371,6 @@ static void update_curve(void)
 	if (cal_span <= 0)
 	{
 		LOG_ERR("Invalid discharge curve span");
-		k_free(intervals);
-		k_free(curve);
 		return;
 	}
 
@@ -388,10 +387,8 @@ static void update_curve(void)
 		LOG_DBG("Map %5.2f%% -> %5.2f%%, %llu us", (i + 1) * 5.0, (double)curve[i] / 100.0, k_ticks_to_us_floor64(intervals[i]));
 #endif
 	}
-	k_free(intervals);
 
-	sys_write(BATT_STATS_CURVE_ID, retained->battery_pptt_curve, curve, sizeof(int16_t) * 18);
-	k_free(curve);
+	sys_write(BATT_STATS_CURVE_ID, retained->battery_pptt_curve, curve, sizeof(curve));
 	valid_cache_mask &= (uint8_t)~BATTERY_CACHE_REMAINING_TIME_ESTIMATE; // invalidate remaining runtime (curve changed)
 }
 

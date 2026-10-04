@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 void sys_update_battery_tracker_voltage(int mV, bool plugged);
+/* Power-thread owner only, including its shutdown/reboot paths. */
 void sys_update_battery_tracker(int16_t pptt, bool plugged);
 
 bool sys_migrate_battery_curve(void);
