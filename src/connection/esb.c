@@ -1659,6 +1659,10 @@ static uint8_t base_addr_0[4], base_addr_1[4], addr_prefix[8] = {0};
 int esb_initialize(bool tx)
 {
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	/* Retire an earlier instance before starting a new configuration. */
+	if (esb_initialized) {
+		esb_deinitialize();
+	}
 	int err;
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
@@ -1693,6 +1697,7 @@ int esb_initialize(bool tx)
 #endif
 
 	err = esb_init(&config);
+	bool driver_initialized = err == 0;
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	if (!err) {
 		int capture_err = radio_capture_init();
@@ -1705,33 +1710,44 @@ int esb_initialize(bool tx)
 	if (!err) {
 		// Read and apply RF channel from retained/NVS (stored value is encoded).
 		uint8_t ch = esb_rf_channel_decode(retained->rf_channel);
-		radio_channel = ch == ESB_RF_CHANNEL_DEFAULT ? RADIO_RF_CHANNEL : ch;
+		uint8_t configured_channel = ch == ESB_RF_CHANNEL_DEFAULT ? RADIO_RF_CHANNEL : ch;
 		if (ch != ESB_RF_CHANNEL_DEFAULT) {
 			LOG_INF("Restoring RF channel from NVS: %u", ch);
-			esb_set_rf_channel(ch);
+			err = esb_set_rf_channel(ch);
 		} else {
 			LOG_INF("Using default RF channel: %u", RADIO_RF_CHANNEL);
-			esb_set_rf_channel(RADIO_RF_CHANNEL);
+			err = esb_set_rf_channel(RADIO_RF_CHANNEL);
 			if (retained->rf_channel != ESB_RF_CHANNEL_DEFAULT) {
 				retained->rf_channel = ESB_RF_CHANNEL_DEFAULT;
 				retained_update();
 			}
 		}
+		if (!err) {
+			radio_channel = configured_channel;
+		}
 	}
 
 	if (!err) {
-		esb_set_base_address_0(base_addr_0);
+		err = esb_set_base_address_0(base_addr_0);
 	}
 
 	if (!err) {
-		esb_set_base_address_1(base_addr_1);
+		err = esb_set_base_address_1(base_addr_1);
 	}
 
 	if (!err) {
-		esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
+		err = esb_set_prefixes(addr_prefix, ARRAY_SIZE(addr_prefix));
 	}
 
 	if (err) {
+		/* The driver is live after esb_init even if address setup failed. */
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		radio_capture_deinit();
+#endif
+		if (driver_initialized) {
+			esb_disable();
+		}
+		esb_deinitialize();
 		LOG_ERR("ESB initialization failed: %d", err);
 		set_status(SYS_STATUS_CONNECTION_ERROR, true);
 		k_mutex_unlock(&esb_radio_lock);
