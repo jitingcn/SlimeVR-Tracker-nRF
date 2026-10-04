@@ -372,7 +372,8 @@ int esb_ota_flash_compute_crc32(uint32_t addr, uint32_t size, uint8_t *scratch,
  * Compute the Nordic SDK CRC-16 used by the Adafruit bootloader
  * for application validation (bank_0_crc field).
  */
-uint16_t esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_t *scratch)
+int esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_t *scratch,
+				     uint16_t *result)
 {
 	uint16_t crc = 0xFFFF;
 	uint32_t remaining = size;
@@ -383,8 +384,7 @@ uint16_t esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_
 		int err = flash_read(flash_dev, offset, scratch, chunk);
 		if (err) {
 			LOG_ERR("OTA: Flash read failed at 0x%05X (err %d)", offset, err);
-			/* 0 means "skip CRC" in Adafruit BL — never return it on I/O fail. */
-			return 0xFFFF;
+			return err;
 		}
 
 		for (size_t i = 0; i < chunk; i++) {
@@ -399,7 +399,8 @@ uint16_t esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_
 		remaining -= chunk;
 	}
 
-	return crc;
+	*result = crc;
+	return 0;
 }
 
 int esb_ota_flash_prepare_bootloader_settings(uint32_t staging_base, uint32_t image_size,
@@ -421,13 +422,14 @@ int esb_ota_flash_prepare_bootloader_settings(uint32_t staging_base, uint32_t im
 		.sd_image_start = 0,
 	};
 
-	settings.bank_0_crc = esb_ota_flash_compute_crc16_nordic(staging_base, image_size,
-								scratch);
-	if (settings.bank_0_crc == 0xFFFF) {
+	uint16_t crc;
+	int err = esb_ota_flash_compute_crc16_nordic(staging_base, image_size, scratch, &crc);
+	if (err) {
 		LOG_ERR("OTA: CRC-16 read failed, refusing activate");
 		bl_settings_prepared = false;
-		return -EIO;
+		return err;
 	}
+	settings.bank_0_crc = crc;
 	if (settings.bank_0_crc == 0) {
 		/* Legitimate zero is rare; still refuse skip-check activate. */
 		LOG_ERR("OTA: CRC-16 is 0; refusing activate (bootloader would skip check)");

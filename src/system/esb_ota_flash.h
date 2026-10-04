@@ -31,7 +31,8 @@ int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb);
  * scratch must hold OTA_FLASH_PAGE_SIZE bytes. All uint32_t CRC values are valid. */
 int esb_ota_flash_compute_crc32(uint32_t addr, uint32_t size, uint8_t *scratch,
 			      uint32_t *result);
-uint16_t esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_t *scratch);
+int esb_ota_flash_compute_crc16_nordic(uint32_t addr, uint32_t size, uint8_t *scratch,
+				     uint16_t *result);
 
 int esb_ota_flash_prepare_bootloader_settings(uint32_t staging_base, uint32_t image_size,
 					      uint8_t *scratch);
