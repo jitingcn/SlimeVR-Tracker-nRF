@@ -6,6 +6,8 @@
 
 #include "esb.h"
 #include "tdma.h"
+#include "system/led.h"
+#include "connection.h"
 
 #include <errno.h>
 #include <hal/nrf_radio.h>
@@ -100,6 +102,7 @@ static uint8_t ping_transaction_slot_index;
 static uint8_t ping_transaction_slot_ticks;
 static bool ping_transaction_schedule_valid;
 static atomic_t ping_transaction_pending;
+static bool user_capture_active;
 static bool capture_initialized;
 K_MUTEX_DEFINE(capture_metrics_lock);
 
@@ -354,6 +357,24 @@ void radio_capture_set_enabled(bool enabled)
 		capture_platform_rearm();
 	}
 #endif
+}
+
+int radio_capture_user_set_enabled(bool enabled)
+{
+	if (!capture_initialized) {
+		led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
+		return -ENODEV;
+	}
+	radio_capture_set_enabled(enabled);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_SUCCESS);
+	user_capture_active = enabled;
+	connection_feedback_maintenance_update();
+	return 0;
+}
+
+bool radio_capture_user_active(void)
+{
+	return user_capture_active && radio_capture_is_enabled();
 }
 
 bool radio_capture_is_enabled(void)

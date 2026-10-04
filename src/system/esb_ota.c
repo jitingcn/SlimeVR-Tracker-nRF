@@ -185,6 +185,10 @@ static struct ota_context ota;
 /* Terminal handoff survives clearing the session on abort. Publish before any
  * IDLE/ERROR/COMPLETE transition so another thread cannot admit a new BEGIN. */
 static atomic_t ota_reboot_pending;
+static struct led_token ota_feedback;
+static uint32_t ota_feedback_revision;
+static bool ota_feedback_terminal;
+static enum led_semantic ota_feedback_state;
 
 BUILD_ASSERT(offsetof(struct ota_context, page_buf) % __alignof__(uint32_t) == 0,
 	     "OTA page buffer member must be word-aligned");
@@ -228,7 +232,7 @@ void esb_ota_handle_query_info(void)
 	ota_send_fw_info();
 }
 
-int esb_ota_handle_begin(const uint8_t *data, size_t len)
+static int ota_begin_impl(const uint8_t *data, size_t len, uint32_t request)
 {
 	if (len < OTA_BEGIN_PACKET_SIZE) {
 		LOG_ERR("OTA BEGIN: packet too short (%zu)", len);
@@ -391,6 +395,13 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	ota.target_flash_base = OTA_USE_MCUBOOT ? 0 :
 		((flash_base != 0) ? flash_base : OTA_FLASH_BASE);
 	strncpy(ota.expected_board, board_target, OTA_BOARD_TARGET_MAX - 1);
+	ota_feedback = led_begin(LED_OWNER_RADIO, request);
+	ota_feedback_revision = 1;
+	ota_feedback_terminal = false;
+	ota_feedback_state = LED_OTA_ACTIVE;
+	led_result(ota_feedback, led_event_id(), LED_ACCEPTED);
+	led_state(ota_feedback, ota_feedback_revision, LED_OTA_ACTIVE);
+	led_operation_publish(LED_OWNER_RADIO, true, false);
 
 	if (!OTA_USE_MCUBOOT && ota.target_flash_base != OTA_FLASH_BASE) {
 		LOG_WRN("OTA: Cross-base update: running at 0x%X, target at 0x%X",
@@ -500,6 +511,16 @@ int esb_ota_handle_begin(const uint8_t *data, size_t len)
 	ota_send_status();
 	return 0;
 #endif /* OTA_USE_RAM_ENGINE */
+}
+
+int esb_ota_handle_begin(const uint8_t *data, size_t len)
+{
+	uint32_t request = led_request_id();
+	int err = ota_begin_impl(data, len, request);
+	if (err && ota_feedback.request_id != request) {
+		led_request_event(LED_OWNER_RADIO, request, led_event_id(), LED_REJECTED);
+	}
+	return err;
 }
 
 int esb_ota_handle_data(const uint8_t *data, size_t len)
@@ -634,6 +655,7 @@ int esb_ota_handle_verify(void)
 			ota.image_size
 		);
 		ota_send_status();
+		led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
 		return -EINVAL;
 	}
 	/* A valid session may be re-verified after a prior success. Clear the
@@ -669,8 +691,9 @@ int esb_ota_handle_verify(void)
 	return 0;
 }
 
-int esb_ota_handle_activate(void)
+static int ota_activate_impl(bool *admitted)
 {
+	*admitted = false;
 	k_msleep(100);
 	if (atomic_get(&ota_reboot_pending) ||
 	    ota.state != OTA_STATE_VERIFYING || ota.error_code != OTA_STATUS_VERIFY_OK) {
@@ -683,6 +706,7 @@ int esb_ota_handle_activate(void)
 	if (err) {
 		return err;
 	}
+	*admitted = true;
 	LOG_WRN("OTA: Activating new firmware...");
 	ota.state = OTA_STATE_ACTIVATING;
 	ota_send_status();
@@ -722,6 +746,8 @@ int esb_ota_handle_activate(void)
 	k_msleep(200);
 
 	/* Copy from staging to final location (with IRQs disabled) and reset */
+	led_quiesce();
+	led_shutdown();
 	esb_ota_flash_copy_and_reset(ota.staging_base, ota.target_flash_base, ota.image_size);
 
 	/* If first page wasn't deferred, reboot via the reserved power owner. */
@@ -730,13 +756,25 @@ int esb_ota_handle_activate(void)
 	return 0;
 }
 
+int esb_ota_handle_activate(void)
+{
+	bool admitted;
+	int err = ota_activate_impl(&admitted);
+	if (err && !admitted) {
+		led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
+	}
+	return err;
+}
+
 void esb_ota_handle_abort(void)
 {
 	if (atomic_get(&ota_reboot_pending) || ota.state == OTA_STATE_IDLE) {
 		return;
 	}
 
-	if (sys_ota_reboot_reserve()) {
+	int reserve_err = sys_ota_reboot_reserve();
+	if (reserve_err) {
+		led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
 		return; /* Physical shutdown already owns the hardware. */
 	}
 
@@ -745,6 +783,10 @@ void esb_ota_handle_abort(void)
 
 	atomic_set(&ota_reboot_pending, 1);
 	memset(&ota, 0, sizeof(ota));
+	if (!ota_feedback_terminal && ota_feedback.session) {
+		led_result(ota_feedback, led_event_id(), LED_CANCELLED);
+		ota_feedback_terminal = true;
+	}
 	/* Preserve the wire-level IDLE status without admitting sleep or a new
 	 * session before the reserved recovery reboot has actually executed. */
 	ota_send_status();
@@ -832,20 +874,22 @@ void esb_ota_process_rx_packet(const uint8_t *data, size_t len)
 	}
 }
 
-/* Keep the connection-priority LED synchronized with OTA session state.
- * State reports are emitted for every transition and periodic status, so the
- * edge guard avoids restarting the pulse on repeated reports. */
+/* Process truth includes recovery reboot locks after wire IDLE/error. Results
+ * describe this update attempt, never claim a new image has booted. */
 static void ota_update_led(void)
 {
-	static bool led_active;
-	bool active = ota.state != OTA_STATE_IDLE && ota.state != OTA_STATE_ERROR;
-
-	if (active == led_active) {
-		return;
+	bool pending = atomic_get(&ota_reboot_pending) != 0;
+	bool active = pending || (ota.state != OTA_STATE_IDLE && ota.state != OTA_STATE_ERROR);
+	led_operation_publish(LED_OWNER_RADIO, esb_ota_is_active(), false);
+	if (ota.state == OTA_STATE_ERROR && ota_feedback.session && !ota_feedback_terminal) {
+		led_result(ota_feedback, led_event_id(), LED_FAILED);
+		ota_feedback_terminal = true;
 	}
-	led_active = active;
-	set_led(active ? SYS_LED_PATTERN_DFU : SYS_LED_PATTERN_OFF,
-		SYS_LED_PRIORITY_CONNECTION);
+	enum led_semantic state = active ? LED_OTA_ACTIVE : LED_NONE;
+	if (ota_feedback.session && state != ota_feedback_state) {
+		ota_feedback_state = state;
+		led_state(ota_feedback, ++ota_feedback_revision, state);
+	}
 }
 
 static void ota_send_status(void)
@@ -998,6 +1042,8 @@ static void ota_launch_ram_engine(void)
 	k_msleep(200);
 
 	/* Jump to the linked RAM engine with IRQs disabled. */
+	led_quiesce();
+	led_shutdown();
 	__disable_irq();
 
 	/* Disable MPU (SRAM is XN by default with Zephyr's MPU config). */

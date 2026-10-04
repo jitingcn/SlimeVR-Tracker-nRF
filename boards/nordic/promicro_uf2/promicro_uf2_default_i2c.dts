@@ -96,8 +96,11 @@
 	};
 
 	zephyr,user {
+		led-capability = "mono-pwm";
+		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+		led-channel-colors = <0>; /* Physical color unspecified. */
+		led-channel-weights = <10000>;
 		int0-gpios = <&gpio0 17 0>;
-		led-gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
 		clk-gpios = <&gpio0 20 GPIO_OPEN_DRAIN>; // Uncomment and set to correct pin if using an external clock (crystal oscillator)
 		vcc-gpios = <&gpio0 31 0>;
 	};

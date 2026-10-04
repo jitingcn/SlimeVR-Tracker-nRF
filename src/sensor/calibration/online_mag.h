@@ -25,6 +25,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "system/led.h"
 
 enum online_mag_phase {
 	TRAINING,
@@ -76,7 +77,7 @@ void sensor_calibration_online_mag_diagnostics(struct online_mag_diagnostics *ou
 bool sensor_calibration_online_mag_check(void);
 /* Runtime-only lifecycle logging, off at boot; unaffected by calibration resets. */
 bool sensor_calibration_get_online_mag_debug(void);
-void sensor_calibration_set_online_mag_debug(bool enabled);
+int sensor_calibration_set_online_mag_debug(bool enabled);
 
 /* Runtime state helpers used by calibration.c glue (read / mag request). */
 void magneto_online_reset(void);
@@ -88,7 +89,11 @@ int cal_online_mag_update_count(void);
 uint32_t cal_online_mag_norm_count(void);
 
 void magneto_online_snapshot_BAinv(float out[4][3]);
-void magneto_online_replace_BAinv_and_reset(const float replacement[4][3], uint16_t operation_id);
+void magneto_online_replace_BAinv_and_reset(const float replacement[4][3], uint16_t operation_id,
+	struct led_token feedback);
+void magneto_online_feedback_storage(struct led_token feedback, int result);
+/* Sensor frame owner: replacement application does not require magnetic data. */
+void magneto_online_apply_pending(void);
 /* Sensor-only, consumed after sample service and before applying/fusing mag.
  * norm > 0 supplies validated calibrated-domain norm/dip; zero reacquires.
  * Bootstrap/manual replacement also emits this notification on warm startup. */

@@ -61,6 +61,7 @@ static void host_tx_success(void)
 """
 commands = [constants, block(esb, r"^struct esb_remote_cmd \{", True)]
 commands.extend(re.findall(r"^static (?:bool remote_command_rejected|uint32_t remote_command_generation);", esb, re.MULTILINE))
+commands.extend(re.findall(r"^static uint32_t (?:executing_shutdown_generation|shutdown_feedback_generation, shutdown_feedback_request|shutdown_accepted_event, shutdown_terminal_event);", esb, re.MULTILINE))
 registry = block(esb, r"^static const struct esb_remote_cmd esb_remote_cmds\[\] = \{", True)
 actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start", "esb_remote_cmd_set_channel")
 for name in actual_handlers:
@@ -68,6 +69,7 @@ for name in actual_handlers:
 for name in sorted(set(re.findall(r", (esb_remote_cmd_\w+)\}", registry)) - set(actual_handlers)):
     commands.append(f"static void {name}(void) {{ }}")
 commands.append(function((SRC / "system/system.c").read_text(), "sys_command_shutdown"))
+commands.insert(0, function((SRC / "system/system.c").read_text(), "sys_command_shutdown_request"))
 commands += [registry, function(esb, "esb_remote_command_execute"), function(esb, "esb_thread")]
 # Exercise the production control-admission tail after PONG validation.
 start = esb.index("\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA)")
@@ -77,7 +79,7 @@ commands.append("static void receive_control(uint8_t pong_flags) {\n"
                 + esb[start:end] + "\n}")
 commands.append("static void receive_stop(void) { receive_control(ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF); }")
 collection = []
-for name in ("connection_raw_collection_active", "connection_reset_raw_collection", "connection_set_data_collection", "connection_get_data_collection", "connection_set_data_collection_batch", "connection_get_data_collection_batch", "connection_get_data_collection_batch_rate", "connection_send_raw_metadata"):
+for name in ("connection_raw_collection_active", "connection_feedback_maintenance_update", "connection_reset_raw_collection", "connection_set_data_collection", "connection_get_data_collection", "connection_set_data_collection_batch", "connection_get_data_collection_batch", "connection_get_data_collection_batch_rate", "connection_send_raw_metadata"):
     collection.append(function(connection, name))
 # Old API snapshots return void. Adapt only the test observation, not production
 # control flow, so pre-fix comparison fails on behavior rather than compilation.
@@ -107,6 +109,7 @@ end = esb.index("\n\n\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_META
 channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\n" + esb[start:end] + "\n}\n"
 channels += "\n" + function(esb, "esb_send_pair_step")
 channels += "\n" + function(esb, "esb_pair")
+channels += "\n" + function(esb, "esb_led_connection_facts")
 start = esb.index("\t\tif (!paired_addr[0]) // zero, not paired")
 end = esb.index("\n\t\t} else {\n\t\t\tswitch (rx_payload.length)", start)
 channels += "\nstatic void receive_pair(void) { do {\n" + esb[start:end] + "\n}\n} while (0); }\n"

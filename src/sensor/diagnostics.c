@@ -22,6 +22,8 @@
 */
 #include "diagnostics.h"
 #include "sensor.h"
+#include "calibration/calibration.h"
+#include "connection/connection.h"
 
 #include <math.h>
 #include <string.h>
@@ -50,6 +52,9 @@ static sensor_debug_state_t debug_state = {
 	.enabled = false,
 	.output_every_n = 4 // Default: output every 4 accel samples
 };
+#if CONFIG_VQF_BENCH
+static bool benchmark_active;
+#endif
 static struct k_spinlock debug_lock;
 
 /* Reset at the FIFO processing boundary, then retained through publish. */
@@ -432,7 +437,7 @@ void sensor_diagnostics_output(
 }
 
 // Debug mode control functions
-void sensor_debug_start(uint32_t duration_sec)
+int sensor_debug_start(uint32_t duration_sec)
 {
 	if (duration_sec == 0 || duration_sec > SENSOR_DEBUG_MAX_DURATION_SEC) {
 		duration_sec = 10; // Default to 10 seconds
@@ -449,7 +454,9 @@ void sensor_debug_start(uint32_t duration_sec)
 	debug_state.accel_count = 0;
 	debug_state.output_count = 0;
 	uint32_t output_every_n = debug_state.output_every_n;
+	sensor_operation_result(LED_OWNER_SENSOR, 0, true);
 	k_spin_unlock(&debug_lock, key);
+	connection_feedback_maintenance_update();
 
 	float accel_odr = sensor_get_accel_odr();
 	LOG_INF(
@@ -458,24 +465,49 @@ void sensor_debug_start(uint32_t duration_sec)
 		(double)accel_odr,
 		output_every_n
 	);
+	return 0;
 }
 
-void sensor_debug_stop(void)
+int sensor_debug_stop(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&debug_lock);
 	bool enabled = debug_state.enabled;
 	debug_state.enabled = false;
 	uint32_t output_count = debug_state.output_count;
+	sensor_operation_result(LED_OWNER_SENSOR, 0, true);
 	k_spin_unlock(&debug_lock, key);
+	connection_feedback_maintenance_update();
 	if (enabled) {
 		LOG_INF("Debug mode stopped. %u outputs generated", output_count);
 	}
+	return 0;
 }
 
 bool sensor_debug_is_active(void)
 {
 	return sensor_debug_session() != 0;
 }
+
+bool sensor_diagnostics_maintenance_active(void)
+{
+	bool active = sensor_debug_is_active();
+#if CONFIG_VQF_BENCH
+	k_spinlock_key_t key = k_spin_lock(&debug_lock);
+	active |= benchmark_active;
+	k_spin_unlock(&debug_lock, key);
+#endif
+	return active;
+}
+
+#if CONFIG_VQF_BENCH
+void sensor_benchmark_active(bool active)
+{
+	k_spinlock_key_t key = k_spin_lock(&debug_lock);
+	benchmark_active = active;
+	k_spin_unlock(&debug_lock, key);
+	connection_feedback_maintenance_update();
+}
+#endif
 
 #if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking functions
@@ -484,7 +516,7 @@ const sensor_range_stats_t *sensor_get_range_stats(void)
 	return &range_stats;
 }
 
-void sensor_reset_range_stats(void)
+int sensor_reset_range_stats(void)
 {
 	for (int i = 0; i < 3; i++) {
 		range_stats.gyro_max[i] = -INFINITY;
@@ -495,6 +527,7 @@ void sensor_reset_range_stats(void)
 	range_stats.sample_count = 0;
 	range_stats.initialized = false;
 	LOG_INF("Range statistics reset");
+	return sensor_operation_result(LED_OWNER_SENSOR, 0, true);
 }
 
 // Internal function to update range statistics with new gyro data

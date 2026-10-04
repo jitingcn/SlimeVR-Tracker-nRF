@@ -5,6 +5,7 @@
 #include <string.h>
 #include <errno.h>
 #include "system/status.h"
+#include "../led_feedback_stub.h"
 #define __maybe_unused
 #define K_MUTEX_DEFINE(name) static int name
 #define K_FOREVER 0
@@ -16,9 +17,6 @@
 #define USER_SHUTDOWN_ENABLED 1
 #define CONFIG_CONNECTION_TIMEOUT_DELAY 120000
 #define WDT_CHANNEL_ESB 0
-#define SYS_LED_PATTERN_SHORT 0
-#define SYS_LED_PATTERN_ONESHOT_COMPLETE 1
-#define SYS_LED_PRIORITY_CONNECTION 0
 #define ESB_ST_RECOVERING 2
 #define TX_ERROR_THRESHOLD 300
 #define ESB_ST_PAIRED 1
@@ -28,6 +26,9 @@ static struct { uint64_t DEVICEADDR[1]; } ficr = {{0x123456789abc}};
 static uint8_t paired_addr[8], radio_channel, paired_channel_found;
 static uint32_t radio_session_generation;
 static bool pair_ack_pending, clock_status, ping_failed;
+static bool own_pong_seen, pairing_search_active, radio_user_disabled;
+static uint32_t pairing_request;
+static int persistence_error;
 static struct esb_payload { uint8_t data[8]; bool noack; } tx_payload_pair;
 static uint8_t pair_target, pair_step;
 static void receive_pair(void);
@@ -54,6 +55,7 @@ static struct { uint8_t rf_channel, paired_addr[8]; } storage, *retained = &stor
 static struct { uint8_t data[13], length; } rx_payload;
 #define RF_CHANNEL_ID 31
 static int64_t k_uptime_get(void) { return now; }
+static uint32_t k_uptime_get_32(void) { return (uint32_t)now; }
 static uint32_t k_cycle_get_32(void) { return (uint32_t)now; }
 static bool esb_ota_is_active(void) { return ota_active; }
 static bool esb_is_idle(void) { return idle; }
@@ -72,7 +74,6 @@ static void clocks_start(void) { clock_status = true; }
 static void clocks_stop(void) { clock_status = false; }
 static void esb_set_addr_discovery(void) {}
 static void esb_set_addr_paired(void) {}
-static void set_led(int pattern, int priority) { (void)pattern; (void)priority; }
 static void tracker_events_session_changed(void) {}
 static void connection_set_id(uint8_t id) { tracker_id = id; }
 static void set_tracker_id(uint8_t id) { tracker_id = id; }
@@ -110,7 +111,7 @@ static int esb_start_tx(void) {
 }
 static int sys_write(unsigned id, void *dst, const void *src, size_t len) {
     assert(id == RF_CHANNEL_ID || id == PAIRED_ID);
-    memcpy(dst, src, len); if (id == RF_CHANNEL_ID) ++writes; return 0;
+    memcpy(dst, src, len); if (id == RF_CHANNEL_ID) ++writes; return persistence_error;
 }
 static void esb_disable(void) { ++disables; }
 static uint8_t tdma_get_config_epoch(void) { return epoch; }
@@ -210,11 +211,34 @@ int main(void) {
         reset(2); memset(paired_addr, 0, sizeof(paired_addr));
         pair_target = destinations[i]; registered_at = -1;
         esb_pair();
+        assert(led_test_events[LED_SUCCESS] == i + 1 && led_test_events[LED_PARTIAL] == 0);
         assert(storage.rf_channel == esb_rf_channel_encode(pair_target));
         assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
         assert(paired_addr[1] == 3 && esb_conn_state == ESB_ST_PAIRED);
         assert(writes == 1 && !esb_initialized);
     }
+    reset(2); memset(paired_addr, 0, sizeof(paired_addr)); pair_target = 2;
+    registered_at = -1; persistence_error = -EIO;
+    unsigned successes = led_test_events[LED_SUCCESS];
+    esb_pair();
+    assert(led_test_events[LED_PARTIAL] == 1 && led_test_events[LED_SUCCESS] == successes);
+    persistence_error = 0;
+    struct led_connection_facts facts = {0};
+    reset(2); memcpy(paired_addr, storage.paired_addr, sizeof(paired_addr));
+    esb_conn_state = ESB_ST_PAIRED; ping_failures = 0; own_pong_seen = false;
+    status_state = 0; /* Suppressed status alone is not a health witness. */
+    esb_led_connection_facts(&facts); assert(!facts.healthy);
+    own_pong_seen = true; own_pong_time = (uint32_t)now;
+    esb_led_connection_facts(&facts); assert(facts.healthy);
+    ota_active = true;
+    esb_led_connection_facts(&facts); assert(!facts.healthy);
+    ota_active = false;
+    channel_wait_normal = true;
+    esb_led_connection_facts(&facts); assert(!facts.healthy);
+    channel_wait_normal = false; ping_failures = 3;
+    esb_led_connection_facts(&facts); assert(!facts.healthy);
+    ping_failures = 0; now += 4500;
+    esb_led_connection_facts(&facts); assert(!facts.healthy);
     puts("channels: exhaustive coverage, strict own probes, NORMAL gate, persistence, OTA and interruption PASS");
     return 0;
 }

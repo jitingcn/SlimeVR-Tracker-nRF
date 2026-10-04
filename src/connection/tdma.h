@@ -106,6 +106,7 @@ void tdma_print_stats(void);
  * Enable or disable TDMA at runtime.
  */
 void tdma_set_enabled(bool enabled);
+int tdma_user_set_enabled(bool enabled);
 
 /**
  * Check if TDMA is currently active (compiled in AND runtime enabled).

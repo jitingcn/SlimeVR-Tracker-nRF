@@ -211,6 +211,10 @@ static int divider_setup(void) {
 #endif
 
 static bool battery_ok;
+#if USE_PMIC_CHARGER
+static int64_t charger_sample_ms;
+static bool charger_sample_valid;
+#endif
 
 static int battery_setup() {
 #if USE_PMIC_CHARGER
@@ -253,6 +257,7 @@ int battery_measure_enable(bool enable) {
 
 int battery_sample(void) {
 #if USE_PMIC_CHARGER
+	charger_sample_valid = false;
 	if (!battery_ok) {
 		return -ENODEV;
 	}
@@ -264,6 +269,10 @@ int battery_sample(void) {
 
 	struct sensor_value voltage;
 	rc = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage);
+	if (rc == 0) {
+		charger_sample_ms = k_uptime_get();
+		charger_sample_valid = true;
+	}
 	return rc == 0 ? sensor_value_to_milli(&voltage) : rc;
 #else
 	int rc = -ENOENT;
@@ -323,6 +332,27 @@ int battery_charger_state(bool *plugged, bool *charging, bool *charged)
 	}
 	*charged = (value.val1 & BIT(1)) != 0;
 	*charging = (value.val1 & (BIT(2) | BIT(3) | BIT(4))) != 0;
+	return 0;
+#else
+	ARG_UNUSED(plugged);
+	ARG_UNUSED(charging);
+	ARG_UNUSED(charged);
+	return -ENOTSUP;
+#endif
+}
+
+int battery_charger_snapshot(bool *plugged, bool *charging, bool *charged)
+{
+#if USE_PMIC_CHARGER
+	/* The power owner fetches each 100 ms iteration. Preserve the 1500 ms
+	 * freshness allowance, but reject stopped or incompletely read samples. */
+	if (!charger_sample_valid || k_uptime_get() - charger_sample_ms > 1500) return -EAGAIN;
+	bool external, active, full;
+	int err = battery_charger_state(&external, &active, &full);
+	if (err) return err;
+	*plugged = external;
+	*charging = active;
+	*charged = full && !active;
 	return 0;
 #else
 	ARG_UNUSED(plugged);

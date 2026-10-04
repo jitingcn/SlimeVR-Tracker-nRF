@@ -89,6 +89,10 @@ uint32_t sensor_tcal_reference_generation(void);
 bool sensor_tcal_take_bias_reset(void);
 void sensor_tcal_clear_doffset(void);
 void sensor_tcal_mark_measured_bias(void);
+/* Sensor owner holds the T-Cal lock; receipt follows real gyro subtraction.
+ * Reset-all cancels the deferred user receipt independently of request CLEAR. */
+void sensor_tcal_feedback_applied(uint32_t reference_generation, bool offset_applied);
+void sensor_tcal_feedback_cancel(void);
 
 /* calibration_thread entry points (were file-local) */
 int sensor_perform_boot_calibration(void);

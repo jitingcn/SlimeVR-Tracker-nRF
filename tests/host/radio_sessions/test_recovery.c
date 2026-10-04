@@ -8,6 +8,7 @@
 #define LOG_WRN(...) ((void)0)
 #define ESB_ST_PAIRED 1
 #define ESB_ST_RECOVERING 2
+#define atomic_get(value) (*(value))
 
 static int status_state;
 static uint8_t tracker_id = 3;
@@ -20,6 +21,7 @@ static int64_t connection_error_start_time;
 static bool channel_search, channel_wait_normal, channel_heard;
 static uint8_t ping_ctr_sent;
 static uint32_t own_pong_time;
+static bool own_pong_seen;
 static int64_t k_uptime_get(void) { return 1000; }
 
 /* Status publication is the hardware leaf; the getter and enum are real. */

@@ -7,8 +7,52 @@
 #define SLIMENRF_SENSOR
 #define CONFIG_SENSOR_USE_VQF 0
 #define CONFIG_SENSOR_RANGE_STATS 0
+#define CONFIG_VQF_BENCH 0
 float sensor_get_accel_odr(void);
 #include "../../../src/sensor/diagnostics.c"
+
+/* Maintenance facts belong to the single connection owner; the fixture records
+ * only that the sensor side re-announced them. */
+static unsigned maintenance_updates;
+
+void connection_feedback_maintenance_update(void)
+{
+	maintenance_updates++;
+}
+
+/* Semantic LED leaves used by the shared owner helper (system/led.h types). */
+static uint32_t led_identity;
+static unsigned led_requests[LED_SEMANTIC_COUNT];
+
+uint32_t led_request_id(void) { return ++led_identity; }
+uint32_t led_event_id(void) { return ++led_identity; }
+struct led_token led_begin(enum led_owner owner, uint32_t request_id)
+{
+	return (struct led_token){ .owner = owner, .session = ++led_identity, .request_id = request_id };
+}
+enum led_admission led_state(struct led_token token, uint32_t revision, enum led_semantic semantic)
+{
+	(void)token;
+	(void)revision;
+	(void)semantic;
+	return LED_ADMITTED;
+}
+enum led_admission led_result(struct led_token token, uint32_t event_id, enum led_semantic semantic)
+{
+	(void)token;
+	(void)event_id;
+	(void)semantic;
+	return LED_ADMITTED;
+}
+enum led_admission led_request_event(enum led_owner owner, uint32_t request_id, uint32_t event_id,
+				     enum led_semantic semantic)
+{
+	(void)owner;
+	(void)request_id;
+	(void)event_id;
+	led_requests[semantic]++;
+	return LED_ADMITTED;
+}
 
 static int64_t now_ms;
 static unsigned int lock_depth;
@@ -257,6 +301,22 @@ static void test_deadline_rejects_unreserved_output(void)
 	assert(!sensor_debug_is_active());
 }
 
+static void test_maintenance_notifies_connection_and_led(void)
+{
+	reset_observations();
+	led_requests[LED_SUCCESS] = 0;
+	unsigned int before = maintenance_updates;
+	now_ms = 1000;
+	sensor_debug_start(2);
+	/* Applying a maintenance/raw session re-announces facts to the connection
+	 * owner and submits the owner's own semantic receipt. */
+	assert(maintenance_updates == before + 1);
+	assert(led_requests[LED_SUCCESS] == 1);
+	sensor_debug_stop();
+	assert(maintenance_updates == before + 2);
+	assert(led_requests[LED_SUCCESS] == 2);
+}
+
 int main(void)
 {
 	test_restart_at_expiry();
@@ -265,6 +325,7 @@ int main(void)
 	test_reserved_output_keeps_its_session();
 	test_stop_report_snapshot();
 	test_deadline_rejects_unreserved_output();
+	test_maintenance_notifies_connection_and_led();
 	puts("diagnostics sessions: PASS");
 	return 0;
 }

@@ -51,6 +51,12 @@ static void watchdog_feed(int channel) { if (iterations++) longjmp(iteration_don
 static uint32_t ping_phase_ms(uint32_t interval) { return 0; }
 static bool esb_ready(void) { return radio_available; }
 static bool connection_hid_output_ready(void) { return false; }
+static bool sensor_output_ready(void) { return true; }
+static void esb_led_connection_facts(struct led_connection_facts *facts)
+{
+    facts->healthy = radio_available && !disconnected && !searching && !ota_active;
+    facts->radio_required = true;
+}
 static int get_status(int mask) { return disconnected ? mask : 0; }
 static void esb_process_ota_rx_queue(void) {}
 static bool esb_channel_search_poll(bool suppressed) { search_calls++; return searching; }

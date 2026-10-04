@@ -47,6 +47,87 @@ static bool expected_model_matches(void)
 }
 
 int64_t k_uptime_get(void) { return now_ms; }
+
+/* Semantic LED boundary. Submission is observed per semantic; hardware
+ * ownership is asserted where the owner publishes protection facts. */
+static unsigned led_results[LED_SEMANTIC_COUNT];
+static unsigned led_states[LED_SEMANTIC_COUNT];
+static unsigned led_requests[LED_SEMANTIC_COUNT];
+static unsigned led_faults, led_operations;
+static bool led_fault_safety;
+static uint32_t led_identity;
+static uint32_t warm_armed;
+static unsigned warm_arms;
+
+uint32_t led_request_id(void) { return ++led_identity; }
+uint32_t led_event_id(void) { return ++led_identity; }
+struct led_token led_begin(enum led_owner owner, uint32_t request_id)
+{
+	return (struct led_token){ .owner = owner, .session = ++led_identity, .request_id = request_id };
+}
+enum led_admission led_state(struct led_token token, uint32_t revision, enum led_semantic semantic)
+{
+	(void)token;
+	(void)revision;
+	led_states[semantic]++;
+	return LED_ADMITTED;
+}
+enum led_admission led_result(struct led_token token, uint32_t event_id, enum led_semantic semantic)
+{
+	(void)event_id;
+	if (token.session) {
+		led_results[semantic]++;
+	}
+	return LED_ADMITTED;
+}
+enum led_admission led_request_event(enum led_owner owner, uint32_t request_id, uint32_t event_id,
+				     enum led_semantic semantic)
+{
+	(void)owner;
+	(void)request_id;
+	(void)event_id;
+	led_requests[semantic]++;
+	return LED_ADMITTED;
+}
+void led_fault_publish(enum led_owner owner, enum led_fault_kind fault, uint32_t protection_id)
+{
+	(void)owner;
+	bool safety = fault == LED_FAULT_SAFETY;
+	(void)protection_id;
+	/* A non-safety protection record is only legitimate once the heater
+	 * hardware is actually off; a failed off must be published as safety. */
+	assert(safety || output_duty == 0);
+	led_faults++;
+	led_fault_safety = safety;
+}
+void led_operation_publish(enum led_owner owner, bool ota_active, bool heated_active)
+{
+	(void)owner;
+	(void)ota_active;
+	(void)heated_active;
+	led_operations++;
+}
+/* Warm storage owner hands the immutable receipt identity back to the owner. */
+void sys_warm_feedback_arm(uint32_t identity)
+{
+	assert(gate_depth == 1 && identity != 0);
+	warm_armed = identity;
+	warm_arms++;
+}
+
+/* Request-generation guard from the request owner (calibration.c, not built
+ * here); the linked IMU owner validates every queued candidate against it. */
+static uint32_t tcal_generation = 1;
+
+uint32_t sensor_calibration_current_generation(void) { return tcal_generation; }
+bool sensor_calibration_generation_valid(uint32_t generation)
+{
+	return generation == 0 || generation == tcal_generation;
+}
+void sensor_calibration_invalidate_requests(void) { tcal_generation++; }
+/* Accepted reset admission clears one request kind atomically. */
+void sensor_calibration_invalidate_kind(int kind) { (void)kind; }
+
 bool heater_external_power_present(void) { return external_power; }
 bool heater_power_ready(void) { return power_ready; }
 bool esb_ota_is_active(void) { return ota_active; }
@@ -595,15 +676,15 @@ int main(int argc, char **argv)
 		admission();
 	} else if (!strcmp(which, "imu_exclusion")) {
 		start();
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		assert(sensor_calibration_reset_imu() == -EBUSY);
 		assert(sensor_calibration_reset_accel() == -EBUSY);
-		assert(sensor_calibration_commit_accel(retained->accBAinv, 0) == -EBUSY);
+		assert(sensor_calibration_commit_accel(retained->accBAinv, 0, (struct led_token){0}, false, 0) == -EBUSY);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
 		stop_hook();
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0) == 0);
+		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 	} else if (!strcmp(which, "pending_candidate")) {
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0) == 0);
+		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
 		assert(!arms && !sensor_tcal_heated_busy());
 		assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
@@ -616,7 +697,7 @@ int main(int argc, char **argv)
 		sensor_calibration_clear_begin();
 		stopped(TCAL_HEATED_STOP_SENSOR_STOP);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		sensor_tcal_heated_set_ready(true);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
 		sensor_calibration_clear_end();
@@ -792,7 +873,7 @@ int main(int argc, char **argv)
 		assert(heat.reason == TCAL_HEATED_STOP_USER && imu_reserved);
 		assert(reset_requested && resets == before && !partial_finishes);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		/* Owner may consume the reset without changing the frozen stage. */
 		assert(sensor_tcal_heated_feed(bias, 44));
 		unchanged();
@@ -967,13 +1048,13 @@ int main(int argc, char **argv)
 		assert(heat.state == HEAT_OFF_FAILED && !heat.sampling && !heat.applied);
 		assert(sensor_tcal_heated_busy() && imu_reserved && output_duty > 0);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		sensor_tcal_heated_finalize();
 		unchanged();
 		off_error = 0;
 		stop_hook();
 		stopped(TCAL_HEATED_STOP_USER);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0) == 0);
+		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 	} else if (!strcmp(which, "accum_minimum")) {
 		resting();
 		feed_samples(1999, bias, 25);
@@ -1262,6 +1343,35 @@ int main(int argc, char **argv)
 		stop_hook();
 		sensor_tcal_heated_finalize();
 		stopped(rise ? TCAL_HEATED_STOP_RISE_FAST : TCAL_HEATED_STOP_STALE_TEMP);
+	} else if (!strcmp(which, "warm_receipt")) {
+		/* Completion belongs to the warm storage receipt, not to the RAM
+		 * publication: only the armed identity may release the session, once. */
+		qualified_stage();
+		feed_samples(2000, bias, 30);
+		stop_hook();
+		unchanged();
+		assert(!output_duty && heat.state == HEAT_FINALIZING && !heat.applied);
+		expect_merge();
+		sensor_tcal_heated_finalize();
+		published();
+		assert(heat.reason == TCAL_HEATED_STOP_USER && !partial_finishes);
+		assert(heat.warm_pending && warm_arms == 1 && warm_armed == heat.feedback.session);
+		led_results[LED_PARTIAL] = 0;
+		led_results[LED_SUCCESS] = 0;
+		/* A receipt for another transaction cannot complete this session. */
+		sensor_tcal_feedback_persisted(warm_armed + 1, 0b1111, 0);
+		assert(heat.warm_pending && led_results[LED_PARTIAL] == 0 && led_results[LED_SUCCESS] == 0);
+		/* The three model writes cannot complete without gyroTemp. */
+		sensor_tcal_feedback_persisted(warm_armed, 0b111, 0);
+		assert(heat.warm_pending && led_results[LED_PARTIAL] == 0 && led_results[LED_SUCCESS] == 0);
+		/* The fourth receipt completes exactly once as PARTIAL. */
+		sensor_tcal_feedback_persisted(warm_armed, 0b1000, 0);
+		assert(!heat.warm_pending && heat.feedback.session == 0);
+		assert(led_results[LED_PARTIAL] == 1 && led_results[LED_SUCCESS] == 0);
+		sensor_tcal_feedback_persisted(warm_armed, 0b1111, 0);
+		assert(led_results[LED_PARTIAL] == 1);
+		assert(led_states[LED_HEATED_ACTIVE] > 0 && led_operations >= 2);
+		assert(led_faults == 1 && !led_fault_safety);
 	} else if (!strcmp(which, "stop_pending_reset") || !strcmp(which, "stop_pending_abort") ||
 		   !strcmp(which, "stop_pending_power") || !strcmp(which, "stop_pending_ota") ||
 		   !strcmp(which, "stop_pending_generation") || !strcmp(which, "stop_pending_stale") ||

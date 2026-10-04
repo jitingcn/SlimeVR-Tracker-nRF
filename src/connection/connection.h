@@ -31,6 +31,8 @@ void connection_print_ping_stats(void);
 void connection_request_ping_resync(void);
 /** Wake the single connection owner for newly due event work. */
 void connection_tracker_event_wake(void);
+/* Recompute maintenance facts after applied raw/debug/bench/capture changes. */
+void connection_feedback_maintenance_update(void);
 void connection_clocks_request_start(void);
 void connection_clocks_request_start_delay_us(uint32_t delay_us);
 void connection_clocks_request_stop(void);

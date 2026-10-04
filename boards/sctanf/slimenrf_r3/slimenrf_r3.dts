@@ -79,9 +79,12 @@
 	};
 
 	zephyr,user {
+		led-capability = "mono-pwm";
+		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_INVERTED>;
+		led-channel-colors = <0>; /* Physical color unspecified. */
+		led-channel-weights = <10000>;
 		dock-gpios = <&gpio0 4 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		int0-gpios = <&gpio0 8 0>;
-		led-gpios = <&gpio0 7 (GPIO_OPEN_DRAIN|GPIO_ACTIVE_LOW)>;
 		clk-gpios = <&gpio0 28 GPIO_OPEN_DRAIN>;
 		chg-gpios = <&gpio1 13 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		stby-gpios = <&gpio0 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;

@@ -237,6 +237,10 @@ static float accel_actual_range; // Actual accelerometer full scale range (g)
 static float gyro_actual_range;  // Actual gyroscope full scale range (deg/s)
 
 static atomic_t fusion_requests;
+static atomic_t output_ready;
+static struct k_spinlock fusion_feedback_lock;
+static struct led_token fusion_feedback;
+static struct led_token initialization_feedback;
 #define FUSION_REQUEST_BIAS BIT(0)
 #define FUSION_REQUEST_RESET BIT(1)
 
@@ -300,6 +304,7 @@ static void sensor_life_mark_scan_done(void)
 static bool mag_available;
 static bool mag_enabled;    // initialized from retained->mag_enabled in sensor_scan()
 static bool mag_calibrated; // true if magnetometer calibration data is valid
+static atomic_t mag_persistence_error;
 // set when mag toggle reboot is pending, prevents sensor_retained_write from saving fusion state
 static bool skip_fusion_save;
 
@@ -808,6 +813,12 @@ bool sensor_is_initialized(void)
 	return sensor_sensor_init;
 }
 
+bool sensor_output_ready(void)
+{
+	return atomic_get(&output_ready) && main_ok && sensor_fusion_init &&
+		!atomic_get(&main_suspended) && sensor_calibration_imu_ready();
+}
+
 static const char *sensor_mag_display_name(int mag_id, uint16_t addr)
 {
 	if (mag_id == MAG_QMC6309 && (addr & 0x7f) == 0x0c) {
@@ -963,7 +974,7 @@ int sensor_scan(void)
 			sensor_imu = &sensor_imu_none;
 			sensor_life_mark_scan_done();
 			LOG_ERR("IMU not supported");
-			set_status(SYS_STATUS_SENSOR_ERROR, true);
+			set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
 			return -1; // an IMU was detected but not supported
 		} else {
 			sensor_imu = sensor_imus[imu_id];
@@ -972,7 +983,7 @@ int sensor_scan(void)
 		sensor_scan_clear(); // clear invalid sensor data
 		sensor_imu = &sensor_imu_none;
 		sensor_life_mark_scan_done();
-		set_status(SYS_STATUS_SENSOR_ERROR, true);
+		set_sensor_fault(SYS_SENSOR_FAULT_MISSING);
 		return -1; // no IMU detected! something is very wrong
 	}
 
@@ -1118,13 +1129,16 @@ int sensor_scan(void)
 
 	sensor_sensor_init = true; // successfully initialized
 	sensor_life_mark_scan_done();
-	set_status(SYS_STATUS_SENSOR_ERROR, false); // clear error
+	set_sensor_fault(SYS_SENSOR_FAULT_NONE); // clear scan error and its local cause
 	return 0;
 }
 
-int sensor_request_scan(bool force)
+int sensor_request_scan(bool force, bool user_feedback)
 {
 	if (sensor_sensor_init && !force) {
+		if (user_feedback) {
+			sensor_operation_result(LED_OWNER_SENSOR, 0, true);
+		}
 		return 0; // already initialized
 	}
 
@@ -1173,6 +1187,9 @@ int sensor_request_scan(bool force)
 					"Forced scan requested but sensor loop is healthy (last send %lldms ago), skipping",
 					(long long)since_last_send
 				);
+				if (user_feedback) {
+					sensor_operation_result(LED_OWNER_SENSOR, 0, true);
+				}
 				return 0;
 			}
 		}
@@ -1181,8 +1198,17 @@ int sensor_request_scan(bool force)
 	int suspend_err = main_imu_suspend();
 	if (suspend_err) {
 		LOG_ERR("Sensor scan blocked by heater shutdown: %d", suspend_err);
-		return suspend_err;
+		return user_feedback ? sensor_operation_result(LED_OWNER_SENSOR, suspend_err, false) : suspend_err;
 	}
+	struct led_token feedback = led_begin(LED_OWNER_SENSOR, led_request_id());
+	if (user_feedback) {
+		sensor_calibration_result(feedback, LED_ACCEPTED);
+		sensor_calibration_stage(feedback, LED_MAINTENANCE);
+	} else {
+		initialization_feedback = feedback;
+		sensor_calibration_stage(feedback, LED_INITIALIZING);
+	}
+	atomic_clear(&output_ready);
 
 	/* Pause watchdog before aborting thread to prevent timeout */
 	watchdog_pause(WDT_CHANNEL_SENSOR);
@@ -1233,7 +1259,14 @@ int sensor_request_scan(bool force)
 		);
 		LOG_INF("Started sensor loop");
 	}
-	return !sensor_sensor_init;
+	int result = !sensor_sensor_init;
+	if (user_feedback) {
+		sensor_calibration_result(feedback, result ? LED_FAILED : LED_SUCCESS);
+	} else if (result) {
+		sensor_calibration_stage(initialization_feedback, LED_NONE);
+		initialization_feedback = (struct led_token){0};
+	}
+	return result;
 }
 
 void sensor_scan_read(void) // TODO: move some of this to sys?
@@ -1393,7 +1426,7 @@ int sensor_shutdown(void) // Communicate all imus to shut down
 
 uint8_t sensor_setup_WOM(void)
 {
-	int err = sensor_request_scan(false); // try initialization if possible
+	int err = sensor_request_scan(false, false);
 	if (!err) {
 		sys_interface_resume();
 		err = sensor_imu->setup_WOM();
@@ -1450,41 +1483,54 @@ static void sensor_mag_runtime_disable(void)
 	mag_calibrated = false;
 }
 
-void sensor_set_mag_enabled(bool enabled)
+int sensor_set_mag_enabled(bool enabled)
 {
 	if (mag_enabled == enabled) {
 		LOG_INF("Magnetometer already %s", enabled ? "enabled" : "disabled");
-		return;
+		int storage_err = atomic_get(&mag_persistence_error);
+		if (enabled && (!mag_available || !main_ok || !sensor_sensor_init || main_suspended)) {
+			led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(), LED_PARTIAL);
+			return storage_err;
+		}
+		return sensor_operation_result(LED_OWNER_MAG, storage_err, true);
 	}
 
 	if (magneto_progress & 0x80) {
 		LOG_WRN("Magnetometer toggle blocked: mag calibration in progress");
-		return;
+		return sensor_operation_result(LED_OWNER_MAG, -EBUSY, false);
 	}
 
 	if (!sensor_sensor_init || !main_ok) {
 		LOG_INF("%s magnetometer, rebooting (sensor not ready)...", enabled ? "Enabling" : "Disabling");
 		bool val = enabled;
-		sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+		int storage_err = sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+		atomic_set(&mag_persistence_error, storage_err);
 		skip_fusion_save = true;
-		sys_request_system_reboot();
-		return;
+		int reboot_err = sys_request_system_reboot();
+		int result = storage_err < 0 ? storage_err : reboot_err;
+		/* Durable intent is not proof that the missing live consumer applied it. */
+		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(),
+			result < 0 ? LED_PARTIAL : LED_ACCEPTED);
+		return result;
 	}
 
 	if (enabled && !mag_available) {
 		LOG_WRN("No magnetometer hardware; persisting enabled for next boot");
 		bool val = true;
-		sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+		int storage_err = sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+		atomic_set(&mag_persistence_error, storage_err);
 		mag_enabled = true;
 		sensor_refresh_sensor_ids();
-		return;
+		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(),
+			storage_err < 0 ? LED_APPLIED_NOT_SAVED : LED_PARTIAL);
+		return storage_err;
 	}
 
 	LOG_INF("%s magnetometer (runtime)...", enabled ? "Enabling" : "Disabling");
 	int suspend_err = main_imu_suspend();
 	if (suspend_err) {
 		LOG_ERR("Magnetometer change blocked by heater shutdown: %d", suspend_err);
-		return;
+		return sensor_operation_result(LED_OWNER_MAG, suspend_err, false);
 	}
 	sys_interface_resume();
 
@@ -1500,18 +1546,20 @@ void sensor_set_mag_enabled(bool enabled)
 	if (err < 0) {
 		LOG_ERR("Magnetometer enable failed; leaving disabled");
 		main_imu_resume();
-		return;
+		return sensor_operation_result(LED_OWNER_MAG, err, false);
 	}
 
 	bool val = enabled;
-	sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+	int storage_err = sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+	atomic_set(&mag_persistence_error, storage_err);
 	mag_enabled = enabled;
 
 	skip_fusion_save = true;
 	int restart_err = main_imu_restart();
 	if (restart_err) {
 		LOG_ERR("Fusion restart failed; sensor left suspended: %d", restart_err);
-		return;
+		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(), LED_PARTIAL);
+		return restart_err;
 	}
 	sensor_mag_ref_reset();
 	sensor_refresh_sensor_ids();
@@ -1522,6 +1570,7 @@ void sensor_set_mag_enabled(bool enabled)
 
 	main_imu_resume();
 	LOG_INF("Magnetometer %s", enabled ? "enabled" : "disabled");
+	return sensor_operation_result(LED_OWNER_MAG, storage_err, true);
 }
 
 bool sensor_get_mag_enabled(void)
@@ -1544,9 +1593,20 @@ void sensor_refresh_sensor_ids(void)
 	connection_update_sensor_ids(sensor_imu_id, sensor_mag_id);
 }
 
-void sensor_request_fusion_reset(void)
+int sensor_request_fusion_reset(bool user_feedback)
 {
+	if (user_feedback && (!main_ok || !sensor_fusion_init || atomic_get(&main_suspended))) {
+		return sensor_operation_result(LED_OWNER_SENSOR, -EAGAIN, false);
+	}
+	k_spinlock_key_t key = k_spin_lock(&fusion_feedback_lock);
+	if (user_feedback && !fusion_feedback.session) {
+		fusion_feedback = led_begin(LED_OWNER_SENSOR, led_request_id());
+		sensor_calibration_result(fusion_feedback, LED_ACCEPTED);
+		sensor_calibration_stage(fusion_feedback, LED_MAINTENANCE);
+	}
 	atomic_or(&fusion_requests, FUSION_REQUEST_RESET);
+	k_spin_unlock(&fusion_feedback_lock, key);
+	return 0;
 }
 
 void sensor_request_fusion_bias_reset(void)
@@ -1558,8 +1618,12 @@ void sensor_request_fusion_bias_reset(void)
  * calibration: BMI retrim, power and rescan can have it suspended. */
 static void sensor_apply_calibration_frame(void)
 {
+	magneto_online_apply_pending();
 	enum sensor_calibration_effect effect = sensor_calibration_apply_pending();
+	k_spinlock_key_t key = k_spin_lock(&fusion_feedback_lock);
 	atomic_val_t requests = atomic_set(&fusion_requests, 0);
+	struct led_token feedback = fusion_feedback;
+	k_spin_unlock(&fusion_feedback_lock, key);
 	if (effect == SENSOR_CALIBRATION_SAVE_FUSION && !requests) {
 		sensor_retained_write();
 		return;
@@ -1594,6 +1658,14 @@ static void sensor_apply_calibration_frame(void)
 	}
 	sensor_calibration_fusion_applied();
 	sensor_retained_write();
+	if (requests & FUSION_REQUEST_RESET) {
+		key = k_spin_lock(&fusion_feedback_lock);
+		if (feedback.session == fusion_feedback.session) {
+			sensor_calibration_result(feedback, LED_SUCCESS);
+			fusion_feedback = (struct led_token){0};
+		}
+		k_spin_unlock(&fusion_feedback_lock, key);
+	}
 }
 
 
@@ -2790,14 +2862,14 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 				}
 				if (!no_packets_timeout_logged && (now_ms - no_packets_since_ms) >= NO_PACKETS_TIMEOUT_MS) {
 					LOG_ERR("No packets in buffer for %lldms", (long long)(now_ms - no_packets_since_ms));
-					set_status(SYS_STATUS_SENSOR_ERROR, true);
+					set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
 					no_packets_timeout_logged = true;
 				}
 			}
 		}
 		if (!sensor_int_during_loop && ++packet_errors == 10) {
 			LOG_ERR("Packet error threshold exceeded");
-			set_status(SYS_STATUS_SENSOR_ERROR, true);
+			set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
 			if (frame->packets) {
 				sensor_retained_write(); // keep the fusion state
 				if (sys_request_system_reboot() < 0) {
@@ -2948,12 +3020,14 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	}
 	sensor_update_sensor_state(resting);
 	if (!valid_q || !sensor_motion_frame_current(frame->sensor_epoch)) {
+		atomic_clear(&output_ready);
 #if CONFIG_SENSOR_USE_TCAL
 		sensor_runtime_calibration_check(false);
 		sensor_tcal_continuous_motion_detected();
 #endif
 		return;
 	}
+	atomic_set(&output_ready, v_finite(lin_a, 3));
 
 	sensor_diagnostics_output(q, lin_a, sensor_loop_avg_a, temp, mag_enabled);
 
@@ -3190,6 +3264,8 @@ void sensor_loop(void)
 	int heater_err = sensor_temperature_invalidate();
 	if (heater_err) {
 		LOG_ERR("Sensor initialization blocked by heater shutdown: %d", heater_err);
+		sensor_calibration_stage(initialization_feedback, LED_NONE);
+		initialization_feedback = (struct led_token){0};
 		return;
 	}
 	heated_resting = false;
@@ -3197,6 +3273,8 @@ void sensor_loop(void)
 	sensor_calibration_set_consumer_ready(false);
 	main_ok = false;
 	if (!sensor_sensor_init) {
+		sensor_calibration_stage(initialization_feedback, LED_NONE);
+		initialization_feedback = (struct led_token){0};
 		return;
 	}
 	sensor_life_mark_busy();
@@ -3212,7 +3290,7 @@ void sensor_loop(void)
 	// TODO: handle imu init error, maybe restart device?
 	// TODO: on failure to init, disable sensor interface
 	if (err) {
-		set_status(SYS_STATUS_SENSOR_ERROR, true); // TODO: only handles general init error
+		set_sensor_fault_if_unset(SYS_SENSOR_FAULT_OTHER);
 	} else {
 		main_ok = true;
 		sensor_calibration_set_consumer_ready(!atomic_get(&main_suspended));
@@ -3222,6 +3300,8 @@ void sensor_loop(void)
 		sensor_startup_discard_until_ms = k_uptime_get() + CONFIG_SENSOR_STARTUP_DISCARD_MS;
 		sensor_startup_discard_logged = false;
 	}
+	sensor_calibration_stage(initialization_feedback, LED_NONE);
+	initialization_feedback = (struct led_token){0};
 	while (1) {
 		int64_t time_begin = k_uptime_get();
 		sensor_window_iters++;
@@ -3306,6 +3386,7 @@ int main_imu_suspend(void)
 	}
 #endif
 	atomic_set(&main_suspended, true);
+	atomic_clear(&output_ready);
 	sensor_calibration_set_consumer_ready(false);
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_SUSPENDED);
@@ -3368,6 +3449,7 @@ int main_imu_restart(void)
 	}
 	heated_resting = false;
 #endif
+	atomic_clear(&output_ready);
 	sensor_calibration_reset_gyro_reference();
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_RESET);

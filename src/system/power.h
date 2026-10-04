@@ -21,6 +21,8 @@ void sys_cancel_WOM(void);
  * owner or an in-flight irreversible physical transition. */
 int sys_request_system_off(void);
 int sys_request_system_reboot(void);
+int sys_user_reboot(void); /* Explicit nonbutton outcome; no reversible animation wait. */
+bool sys_exit_feedback_allowed(bool reboot); /* Read-only UI eligibility; never business admission. */
 
 /* OTA-only two-phase reboot handoff. Reserve BEFORE preparing bootloader state;
  * -EBUSY means another reservation or irreversible physical shutdown has begun.

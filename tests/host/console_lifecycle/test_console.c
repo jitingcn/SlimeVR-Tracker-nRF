@@ -6,10 +6,58 @@
 #include <stdio.h>
 #include <string.h>
 #include <setjmp.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include "retained.h"
+#define CONFIG_SENSOR_USE_SENS_CALIBRATION 1
+static struct retained_data retained_storage;
+struct retained_data *retained = &retained_storage;
+static struct { uint32_t DEVICEADDR[2]; } ficr;
+#define NRF_FICR (&ficr)
+#define ESB_RF_CHANNEL_DEFAULT 255
+#define CONFIG_RADIO_RF_CHANNEL 40
+static uint8_t esb_rf_channel_decode(uint8_t channel) { return channel; }
+static char printed[4096];
+static void test_printk(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    size_t used = strlen(printed);
+    vsnprintf(printed + used, sizeof(printed) - used, format, args);
+    va_end(args);
+}
+static int64_t now_ms;
+static int64_t k_uptime_get(void) { return now_ms; }
+static unsigned clear_calls, sensitivity_writes, channel_writes;
+static float saved_sensitivity[3];
+static int saved_channel;
+static int sys_clear(void) { clear_calls++; return 0; }
+static int sensor_calibration_set_sensitivity(const float values[3])
+{
+    sensitivity_writes++;
+    memcpy(saved_sensitivity, values, sizeof(saved_sensitivity));
+    return 0;
+}
+static int channel_control_set(int channel)
+{
+    channel_writes++;
+    saved_channel = channel;
+    return 0;
+}
+static void cmd_reset_zro(void) {}
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+static void cmd_reset_acc(void) {}
+#endif
+static void cmd_reset_bat(void) {}
+static void cmd_fusion_reset(void) {}
+static void cmd_sens_reset(void) {}
+static void cmd_sens_auto(const char *axis, const char *revolutions) {}
+static int sensor_calibration_clear_mag(void *unused, bool a, bool b) { return 0; }
 #define CONFIG_USE_SLIMENRF_CONSOLE 1
 #define USB_EXISTS 1
 #define UART_CONSOLE_EXISTS 0
 #include "console.h"
+#include "system/led.h"
 static jmp_buf worker_idle;
 
 /* Only Zephyr/UART leaves are modeled; production.inc is extracted verbatim. */
@@ -30,7 +78,7 @@ static jmp_buf worker_idle;
 #define DEVICE_DT_GET(node) (&uart_device)
 #define DT_CHOSEN(node) 0
 #define LOG_ERR(...) ((void)0)
-#define printk(...) ((void)0)
+#define printk test_printk
 struct device { int unused; };
 static const struct device uart_device;
 struct k_thread { int unused; };
@@ -140,14 +188,19 @@ static void handle_command(size_t argc, char **argv)
     completed_handlers++;
 }
 static unsigned zro_requests, accel_requests;
-static void sensor_request_calibration(void) { zro_requests++; }
+static int sensor_request_calibration(void) { zro_requests++; return 0; }
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-static void sensor_request_calibration_accel(void) { accel_requests++; }
+static int sensor_request_calibration_accel(void) { accel_requests++; return 0; }
 #endif
-struct console_cmd {
-    const char *name;
-    void (*fn)(size_t, char **);
-};
+/* This editor/lifecycle fixture does not drive a physical LED worker. */
+uint32_t led_request_id(void) { return 1; }
+uint32_t led_event_id(void) { return 1; }
+enum led_admission led_request_event(enum led_owner owner, uint32_t request, uint32_t event,
+                                    enum led_semantic semantic)
+{
+    (void)owner; (void)request; (void)event; (void)semantic;
+    return LED_ADMITTED;
+}
 #include "production.inc"
 
 /* Run the actual worker until its next empty blocking queue wait. */
@@ -291,6 +344,18 @@ int main(void)
     receive("calibrate\n");
     run_worker();
     assert(zro_requests == 2 && accel_requests == 3 * CONFIG_SENSOR_USE_ACCEL_CALIBRATION);
+
+    /* Real retained layout: paired_addr is deliberately NOT padded/aligned.
+     * printk evaluates the actual production diagnostic arguments under UBSan. */
+    assert((uintptr_t)retained->paired_addr % _Alignof(uint64_t) != 0);
+    const uint8_t address[8] = {1, 7, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+    memcpy(retained->paired_addr, address, sizeof(address));
+    ficr.DEVICEADDR[0] = 0x44332211;
+    ficr.DEVICEADDR[1] = 0x6655;
+    printed[0] = '\0';
+    print_connection();
+    assert(strstr(printed, "Receiver address: 665544332211") != NULL);
+    assert(strstr(printed, "Device address: 665544332211") != NULL);
     puts("tracker production console lifecycle: PASS");
     return 0;
 }

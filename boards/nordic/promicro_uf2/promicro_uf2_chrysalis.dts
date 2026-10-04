@@ -61,8 +61,14 @@
 	};
 
 	zephyr,user {
+		led-capability = "rgb-pwm";
+		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_INVERTED>,
+			<&pwm0 1 PWM_MSEC(1) PWM_POLARITY_INVERTED>,
+			<&pwm0 2 PWM_MSEC(1) PWM_POLARITY_INVERTED>;
+		led-channel-colors = <1 2 3>;
+		led-channel-weights = <10000 10000 10000>;
+		led-primary-channel = <1>;
 		clk-gpios = <&gpio0 20 GPIO_OPEN_DRAIN>;
-		/delete-property/ led-gpios;
 	};
 };
 

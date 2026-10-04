@@ -80,11 +80,13 @@ bool esb_channel_search_poll(bool blocked);
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);
 
-void esb_set_pair(uint64_t addr);
+int esb_set_pair(uint64_t addr);
 
 void esb_pair(void);
 void esb_reset_pair(void);
-void esb_clear_pair(void);
+int esb_clear_pair(void);
+int esb_user_pair(void);
+int esb_user_set_enabled(bool enabled);
 
 void esb_process_ota_rx_queue(void);
 int esb_write(uint8_t *data, bool no_ack, size_t data_length);
@@ -192,6 +194,8 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks);
 #define ESB_OTA_ACTIVATE_TYPE   0x25  // Activate new firmware (receiver → tracker)
 
 bool esb_ready(void);
+struct led_connection_facts;
+void esb_led_connection_facts(struct led_connection_facts *facts);
 
 // Get remote command flag to echo back in PING
 void esb_get_ping_request_data(uint8_t out[4]);

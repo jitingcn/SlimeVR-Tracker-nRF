@@ -9,6 +9,9 @@
 #include "system/power_request.h"
 #include <zephyr/sys/atomic.h>
 #include "connection/tracker_event_protocol.h"
+#include "../led_feedback_stub.h"
+static struct led_token pairing;
+static bool timeout_reported;
 
 #define LOG_INF(...) ((void)0)
 #define LOG_DBG(...) ((void)0)
@@ -50,7 +53,7 @@ static void sensor_tcal_lock(void) {}
 static void sensor_tcal_unlock(void) {}
 static void tcal_accum_request_reset(void) { accum_resets++; }
 static void sensor_boot_cal_reset(void) {}
-static void sensor_request_fusion_reset(void) {}
+static int sensor_request_fusion_reset(bool feedback) { (void)feedback; return 0; }
 #if CONFIG_SENSOR_TCAL_HEATED
 static bool maintenance_busy;
 static int sensor_calibration_maintenance_begin(void) { return maintenance_busy ? -EBUSY : 0; }
@@ -144,7 +147,7 @@ static bool configure_system_off(void)
 	assert(notices == before_cancel);
 	return true;
 }
-static void sys_flush_warm(void) {}
+static int sys_flush_warm(void) { return 0; }
 static void sensor_calibration_online_mag_cold_start(void) {}
 static void sensor_retained_write(void) {}
 static void set_regulator(int regulator) { (void)regulator; }
@@ -176,7 +179,8 @@ static int esb_ota_flash_compute_crc32(uint32_t base, uint32_t size, uint8_t *bu
 	*result = 0x12345678;
 	return 0;
 }
-static void ota_send_status(void) { status_sends++; }
+static void ota_update_led(void);
+static void ota_send_status(void) { status_sends++; ota_update_led(); }
 
 #define memset observe_memset
 #include "production.inc"
@@ -242,6 +246,13 @@ static void fixture(void)
 	shutdown_requested = connection_error = false;
 	ping_failures = 0;
 	connection_error_start_time = pair_start_time = 0;
+	timeout_reported = false;
+	memset(led_test_events, 0, sizeof(led_test_events));
+	led_test_quiesced = false;
+	ota_feedback = led_begin(LED_OWNER_RADIO, led_request_id());
+	ota_feedback_revision = 1;
+	ota_feedback_terminal = false;
+	ota_feedback_state = LED_NONE;
 #if CONFIG_SENSOR_USE_TCAL
 	atomic_set(&tcal_auto_calibration_enabled, false);
 	accum_resets = 0;
@@ -270,6 +281,7 @@ static void fixture(void)
 	ota.last_data_time = now_ms;
 	assert(esb_ota_handle_verify() == 0);
 	assert(esb_ota_get_status() == OTA_STATUS_VERIFY_OK);
+	assert(led_test_events[LED_SUCCESS] == 0 && ota_feedback_state == LED_OTA_ACTIVE);
 }
 
 static void activation_with_competitor(enum sys_power_request request, int phase)
@@ -314,6 +326,7 @@ static void recovery_after_preparation_failure(void)
 	preparation_result = -EIO;
 	assert(esb_ota_handle_activate() == -EIO);
 	assert(esb_ota_get_status() == OTA_STATUS_FLASH_ERROR);
+	assert(led_test_events[LED_FAILED] == 1 && led_test_events[LED_SUCCESS] == 0);
 	assert(physical_reboots == 0 && copies == 0);
 	/* Failed preparation cancels its reservation, preserving ordinary work. */
 	assert(sys_request_system_off() == 0);
@@ -323,6 +336,7 @@ static void recovery_after_preparation_failure(void)
 	esb_ota_check_timeout();
 	assert(esb_ota_get_status() == OTA_STATUS_TIMEOUT);
 	assert(esb_ota_is_active());
+	assert(ota_feedback_state == LED_OTA_ACTIVE && led_test_events[LED_SUCCESS] == 0);
 	power_iteration();
 	assert(physical_reboots == 1 && physical_offs == 0);
 }
@@ -338,6 +352,8 @@ static void abort_preserves_recovery_ownership(void)
 	assert(abort_gap_observations == 1);
 	assert(esb_ota_get_status() == OTA_STATUS_IDLE); /* Existing wire status. */
 	assert(esb_ota_is_active()); /* But no premature physical OFF admission. */
+	assert(ota_feedback_state == LED_OTA_ACTIVE && led_test_events[LED_CANCELLED] == 1);
+	assert(led_test_events[LED_SUCCESS] == 0);
 	assert(!sys_system_off());
 	power_iteration();
 	assert(physical_reboots == 1 && physical_offs == 0);
@@ -353,6 +369,7 @@ static void physical_shutdown_wins(void)
 	assert(esb_ota_handle_activate() == -EBUSY);
 	assert(preparations == 0);
 	assert(esb_ota_get_status() == OTA_STATUS_VERIFY_OK);
+	assert(led_test_events[LED_REJECTED] == 1 && ota_feedback_state == LED_OTA_ACTIVE);
 	esb_ota_handle_abort();
 	assert(esb_ota_get_status() == OTA_STATUS_VERIFY_OK);
 	now_ms += OTA_TIMEOUT_MS + 1;
@@ -395,6 +412,7 @@ static void power_notices(void)
 	power_iteration();
 	assert(notices == 1 && notice_phase == POWER_WILL_REBOOT);
 	assert(physical_reboots == 1 && now_ms - before == TRACKER_EVENT_POWER_FLUSH_MS);
+	assert(led_test_quiesced);
 	/* Owner-private battery/dock entry must use the same pre-teardown window. */
 	fixture(); memset(&ota, 0, sizeof(ota));
 	sleep_observer = observe_airtime;

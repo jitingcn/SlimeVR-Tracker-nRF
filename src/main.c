@@ -76,7 +76,8 @@ int main(void)
 #endif
 #endif
 
-	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_BOOT); // Boot LED
+	/* Boot is not a new button input. Initialization/link/readiness owners
+	 * publish their real states without an extra startup ACK color change. */
 
 	uint8_t reboot_counter = reboot_counter_read();
 	bool booting_from_shutdown
@@ -84,9 +85,6 @@ int main(void)
 
 	if (button_read()) {
 		while (button_read()) {
-			if (system_uptime_since_boot_ms() > 1000) {
-				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
-			}
 			if (system_uptime_since_boot_ms() > 5000) {
 #if CONFIG_USER_EXTRA_ACTIONS
 				LOG_INF("Button long hold timeout, continuing boot");
@@ -98,13 +96,6 @@ int main(void)
 			}
 			k_msleep(1);
 		}
-		if (system_uptime_since_boot_ms() <= 5000) {
-			set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);
-		} else {
-			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-		}
-	} else if (booting_from_shutdown) {
-		set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_BOOT);
 	}
 
 	bool docked = dock_read();
@@ -146,9 +137,8 @@ int main(void)
 	}
 #endif
 
-	if (!booting_from_shutdown) { // ONESHOT_POWERON automatically sets LED off
+	if (!booting_from_shutdown) {
 		k_usleep(60);
-		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_BOOT);
 	}
 
 	sys_reset_mode(reset_mode);

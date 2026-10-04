@@ -26,6 +26,7 @@
 #include "system/system.h"
 #include "system/watchdog.h"
 #include "util.h"
+#include <errno.h>
 
 #include <math.h>
 #include <string.h>
@@ -70,26 +71,42 @@ static void magneto_update_dir_range(const float v[3]);
 static float magneto_min_dir_range(void);
 static void sensor_sample_mag_magneto_sample(const float m[3]);
 
-static void manual_finish(uint16_t op, uint8_t phase, uint8_t reason)
+static void manual_finish(uint16_t op, struct led_token feedback, uint8_t phase, uint8_t reason)
 {
 	sensor_calibration_samples_end();
 	magneto_reset();
 	set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
-	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 	if (reason != CAL_REASON_NONE) {
+		sensor_calibration_result(feedback, LED_FAILED);
 		cal_event_end(op, CAL_OUTCOME_FAILED, phase, reason);
 	}
+	tracker_events_notify();
+}
+
+static void manual_cancelled(uint16_t op, struct led_token feedback)
+{
+	sensor_calibration_samples_end();
+	magneto_reset();
+	set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
+	cal_event_end(op, CAL_OUTCOME_CANCELLED, CAL_PHASE_APPLY_PENDING, CAL_REASON_RESET);
+	sensor_calibration_result(feedback, LED_CANCELLED);
 	tracker_events_notify();
 }
 
 int sensor_calibrate_mag(void)
 {
 	const uint16_t op = sensor_calibration_current_operation();
+	const struct led_token feedback = sensor_calibration_current_feedback();
+	const uint32_t generation = sensor_calibration_current_generation();
+	if (!sensor_calibration_generation_valid(generation)) {
+		manual_cancelled(op, feedback);
+		return -ECANCELED;
+	}
 	float zero[3] = {0};
 	float live_snapshot[4][3];
 	magneto_online_snapshot_BAinv(live_snapshot);
 	if (v_diff_mag(live_snapshot[0], zero) != 0) {
-		manual_finish(op, CAL_PHASE_COLLECT, CAL_REASON_REPLACED);
+		manual_finish(op, feedback, CAL_PHASE_COLLECT, CAL_REASON_REPLACED);
 		return -1; // magnetometer calibration already exists
 	}
 
@@ -99,7 +116,7 @@ int sensor_calibrate_mag(void)
 
 	float m[3];
 	if (sensor_wait_mag(m, K_MSEC(1000))) {
-		manual_finish(op, CAL_PHASE_COLLECT, CAL_REASON_SAMPLE_TIMEOUT);
+		manual_finish(op, feedback, CAL_PHASE_COLLECT, CAL_REASON_SAMPLE_TIMEOUT);
 		return -1; // Timeout
 	}
 	sensor_sample_mag_magneto_sample(m); // 400us
@@ -124,6 +141,7 @@ int sensor_calibrate_mag(void)
 	float m_inv[4][3];
 	LOG_INF("Calibrating magnetometer hard/soft iron offset");
 	cal_event_step(op, CAL_PHASE_FIT, 0);
+	sensor_calibration_stage(feedback, LED_PROCESSING);
 	tracker_events_notify();
 
 #if DEBUG
@@ -152,7 +170,7 @@ int sensor_calibrate_mag(void)
 	magneto_reset();
 	if (err) {
 		LOG_WRN("Magnetometer calibration failed: %d; previous calibration unchanged", err);
-		manual_finish(op, CAL_PHASE_FIT, CAL_REASON_FIT_ERROR);
+		manual_finish(op, feedback, CAL_PHASE_FIT, CAL_REASON_FIT_ERROR);
 		return err;
 	}
 
@@ -166,8 +184,13 @@ int sensor_calibrate_mag(void)
 			(double)m_inv[3][i]
 		);
 	}
+	sys_warm_transaction_begin();
+	if (!sensor_calibration_generation_valid(generation)) {
+		sys_warm_transaction_end(false);
+		manual_cancelled(op, feedback);
+		return -ECANCELED;
+	}
 	if (sensor_calibration_validate_mag(m_inv, false)) {
-		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		LOG_INF("Restoring previous calibration");
 		LOG_INF("Magnetometer matrix:");
 		magneto_online_snapshot_BAinv(live_snapshot);
@@ -181,26 +204,29 @@ int sensor_calibrate_mag(void)
 			);
 		}
 		sensor_calibration_validate_mag(NULL, true); // additionally verify old calibration
-		manual_finish(op, CAL_PHASE_FIT, CAL_REASON_INVALID_MODEL);
+		manual_finish(op, feedback, CAL_PHASE_FIT, CAL_REASON_INVALID_MODEL);
+		sys_warm_transaction_end(false);
 		return -1;
 	} else {
 		LOG_INF("Applying calibration");
 		cal_event_step(op, CAL_PHASE_APPLY_PENDING, 0);
 		tracker_events_notify();
-		magneto_online_replace_BAinv_and_reset(m_inv, op);
+		magneto_online_replace_BAinv_and_reset(m_inv, op, feedback);
 		sensor_fusion_reset_mag_ref();
 		sensor_mag_ref_reset(); // Recompute magRef from new calibration
 								// fusion invalidation not necessary
 	}
 	int storage_err = sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(retained->magBAinv));
+	magneto_online_feedback_storage(feedback,
+		storage_err < 0 ? storage_err : sensor_calibration_current_storage_error());
 	if (storage_err) {
 		cal_event_step(op, CAL_PHASE_STORAGE, CAL_REASON_STORAGE_ERROR);
 		tracker_events_notify();
 	}
+	sys_warm_transaction_end(false);
 
 	LOG_INF("Finished calibration");
-	manual_finish(op, CAL_PHASE_APPLY_PENDING, CAL_REASON_NONE);
-	set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_SENSOR);
+	manual_finish(op, feedback, CAL_PHASE_APPLY_PENDING, CAL_REASON_NONE);
 	sensor_refresh_sensor_ids(); // Refresh reported mag status after calibration
 	return 0;
 }
@@ -281,6 +307,7 @@ typedef struct {
 int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count_out)
 {
 	const uint16_t op = sensor_calibration_current_operation();
+	const struct led_token feedback = sensor_calibration_current_feedback();
 	int64_t last_motion_event = -1000;
 	float rawData[3];
 	float pre_acc[3] = {0};
@@ -306,7 +333,7 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 		cal_event_step(op, CAL_PHASE_WAIT_POSE, captured_count + 1);
 		tracker_events_notify();
 		// 1. Wait for device to be stationary
-		set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR); // Indicate searching for stationary state
+		sensor_calibration_stage(feedback, LED_WAIT_MOVE);
 		bool pose_timeout = false;
 		while (1) {
 			/* Feed watchdog during user interaction wait */
@@ -371,8 +398,8 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 					captured_dirs[captured_count].z = curr_dir_z;
 					break;
 				} else {
-					// Duplicate pose detected, briefly flash LED to prompt user to change orientation, but do not error
-					set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
+					// Repeated orientations are normal attempts, not failures.
+					sensor_calibration_stage(feedback, LED_WAIT_MOVE);
 					k_msleep(100); // Debounce slightly
 				}
 			}
@@ -394,7 +421,7 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 		LOG_INF("Capturing pose %d/%d...", captured_count + 1, CALIB_TARGET_SAMPLES);
 		cal_event_step(op, CAL_PHASE_CAPTURE_POSE, captured_count + 1);
 		tracker_events_notify();
-		set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
+		sensor_calibration_stage(feedback, LED_COLLECT_STILL);
 
 		int sample_idx = 0;
 		while (sample_idx < SAMPLES_PER_ORIENTATION) {
@@ -435,7 +462,8 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 		captured_count++;
 		cal_event_step(op, CAL_PHASE_POSE_DONE, captured_count);
 		tracker_events_notify();
-		set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
+		sensor_calibration_result(feedback, LED_STAGE_ACK);
+		sensor_calibration_stage(feedback, LED_WAIT_MOVE);
 		LOG_INF("Pose %d saved!", captured_count);
 
 		k_msleep(500);
@@ -447,6 +475,7 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 
 	LOG_INF("Calculating calibration matrix...");
 	cal_event_step(op, CAL_PHASE_FIT, 0);
+	sensor_calibration_stage(feedback, LED_PROCESSING);
 	tracker_events_notify();
 
 	wait_for_threads();
@@ -556,17 +585,17 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 		// Require minimum directional coverage before attempting calibration
 		if (min_range < MAG_CAL_MIN_DIR_RANGE || raw_range < MAG_CAL_MIN_RAW_AXIS_RANGE) {
 			LOG_INF("Mag cal: need more rotation, keep turning");
-			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 			return;
 		}
 
 		if (magneto_quality_check(mag_cal_workspace.ata, norm_sum, sample_count, NULL)) {
 			magneto_progress |= 0b01111111;
 			LOG_INF("Mag cal ready: %d samples, min_range=%.2f", (int)sample_count, (double)min_range);
-			set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_SENSOR);
+			struct led_token feedback = sensor_calibration_current_feedback();
+			sensor_calibration_result(feedback, LED_STAGE_ACK);
+			sensor_calibration_stage(feedback, LED_PROCESSING);
 		} else {
 			LOG_INF("Mag cal: not ready yet, keep rotating (%d samples)", (int)sample_count);
-			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
 		}
 	}
 }

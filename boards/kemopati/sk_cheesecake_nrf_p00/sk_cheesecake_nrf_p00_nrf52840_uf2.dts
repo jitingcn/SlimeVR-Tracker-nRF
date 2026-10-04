@@ -103,6 +103,11 @@
 	};
 
 	zephyr,user {
+		led-capability = "rgb-pixel";
+		led-pixel = <&led_strip>;
+		led-channel-colors = <1 2 3>; /* API RGB; strip color-mapping is wire GRB. */
+		led-channel-weights = <10000 10000 10000>;
+		led-primary-channel = <1>;
 		int0-gpios = <&gpio0 26 0>;
 		pwr-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
 		heat-en-gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;
@@ -111,6 +116,7 @@
 		led-en-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
 		plug-gpios = <&gpio1 15 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		chg-gpios = <&gpio0 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		charger-full-on-plug; /* Upstream PLUG && !CHG completion heuristic. */
 		sysoff-gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;
 	};
 };

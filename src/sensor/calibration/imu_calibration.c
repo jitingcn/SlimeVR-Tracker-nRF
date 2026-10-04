@@ -46,7 +46,32 @@ static struct {
 	bool clear_boot_offset;
 	bool persist;
 	bool fusion_changed;
+	struct led_token feedback;
+	bool partial;
+	int storage_error;
+	uint32_t generation;
 } pending;
+/* Persistence can finish while the sensor is still applying fusion. Admission
+ * historically reopens at that point; retain the old receipt independently so
+ * a newly queued candidate cannot steal its eventual frame acknowledgement. */
+static struct {
+	struct led_token token;
+	bool partial;
+	int storage_error;
+} frame_completion;
+
+/* Completion spans the actual frame consumer and promised writes. The token
+ * belongs to the immutable transaction, never whichever request is now active. */
+static void feedback_complete_locked(void)
+{
+	if (pending.feedback.session && pending.effect == SENSOR_CALIBRATION_UNCHANGED &&
+	    !pending.persist && !fusion_stale) {
+		struct led_token token = pending.feedback;
+		pending.feedback = (struct led_token){0};
+		sensor_calibration_result(token, pending.storage_error < 0 ? LED_APPLIED_NOT_SAVED :
+			pending.partial ? LED_PARTIAL : LED_SUCCESS);
+	}
+}
 
 void sensor_calibration_identity_accel(float matrix[4][3])
 {
@@ -171,7 +196,7 @@ void sensor_calibration_imu_release_heated(void)
 #endif
 
 static int submit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro, bool reset,
-		       uint16_t operation_id)
+		       uint16_t operation_id, struct led_token feedback, int prior_error, uint32_t generation)
 {
 	float zero[3] = {0};
 	if (!a_bias || !g_bias || !v_finite(a_bias, 3) || !v_finite(g_bias, 3)
@@ -179,8 +204,11 @@ static int submit_bias(const float a_bias[3], const float g_bias[3], bool persis
 		return -EINVAL;
 	}
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
-	int err = reserve_candidate();
+	int err = sensor_calibration_generation_valid(generation) ? reserve_candidate() : -ECANCELED;
 	if (!err) {
+		if (reset) {
+			sensor_calibration_invalidate_kind(CAL_REQUEST_IMU);
+		}
 		pending.coefficients = applied;
 		memcpy(pending.coefficients.accel_bias, a_bias, sizeof(applied.accel_bias));
 		memcpy(pending.coefficients.gyro_bias, g_bias, sizeof(applied.gyro_bias));
@@ -190,25 +218,49 @@ static int submit_bias(const float a_bias[3], const float g_bias[3], bool persis
 		pending.clear_boot_offset = true;
 		pending.effect = reset ? SENSOR_CALIBRATION_FRAME_CHANGED : SENSOR_CALIBRATION_BIAS_CHANGED;
 		pending.operation_id = operation_id;
+		pending.feedback = reset ? led_begin(LED_OWNER_IMU, led_request_id()) : feedback;
+		pending.partial = false;
+		pending.storage_error = prior_error;
+		pending.generation = generation;
+		if (reset) {
+			sensor_calibration_result(pending.feedback, LED_ACCEPTED);
+			sensor_calibration_stage(pending.feedback, LED_MAINTENANCE);
+		}
 	}
 	k_spin_unlock(&coefficient_lock, key);
 	return err;
 }
 
 int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro,
-				   uint16_t operation_id)
+				   uint16_t operation_id, struct led_token feedback, int prior_error, uint32_t generation)
 {
-	return submit_bias(a_bias, g_bias, persist_gyro, false, operation_id);
+	return submit_bias(a_bias, g_bias, persist_gyro, false, operation_id, feedback, prior_error, generation);
 }
 
+
+/* The collector calls under its storage transaction before releasing the
+ * bookkeeping barrier; power persistence cannot overtake this receipt. */
+void sensor_calibration_record_storage_error(uint32_t generation, int error)
+{
+	if (error >= 0) {
+		return;
+	}
+	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
+	if (pending.generation == generation &&
+	    (pending.effect != SENSOR_CALIBRATION_UNCHANGED || pending.persist)) {
+		pending.storage_error = error;
+	}
+	k_spin_unlock(&coefficient_lock, key);
+}
 int sensor_calibration_reset_imu(void)
 {
 	float zero[3] = {0};
-	return submit_bias(zero, zero, true, true, 0);
+	int err = submit_bias(zero, zero, true, true, 0, (struct led_token){0}, 0, 0);
+	return err ? sensor_operation_result(LED_OWNER_IMU, err, false) : 0;
 }
 
 static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect effect,
-			uint16_t operation_id)
+			uint16_t operation_id, struct led_token feedback, bool partial, uint32_t generation)
 {
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	float zero[3] = {0};
@@ -222,8 +274,11 @@ static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect
 		return -EINVAL;
 	}
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
-	int err = reserve_candidate();
+	int err = sensor_calibration_generation_valid(generation) ? reserve_candidate() : -ECANCELED;
 	if (!err) {
+		if (effect == SENSOR_CALIBRATION_COEFFICIENTS_CHANGED) {
+			sensor_calibration_invalidate_kind(CAL_REQUEST_ACCEL_POSES);
+		}
 		pending.coefficients = applied;
 		memcpy(pending.coefficients.accel_matrix, matrix, sizeof(applied.accel_matrix));
 		pending.bias = false;
@@ -231,6 +286,15 @@ static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect
 		pending.clear_boot_offset = false;
 		pending.effect = effect;
 		pending.operation_id = operation_id;
+		pending.feedback = effect == SENSOR_CALIBRATION_COEFFICIENTS_CHANGED ?
+			led_begin(LED_OWNER_ACC, led_request_id()) : feedback;
+		pending.partial = partial;
+		pending.storage_error = 0;
+		pending.generation = generation;
+		if (effect == SENSOR_CALIBRATION_COEFFICIENTS_CHANGED) {
+			sensor_calibration_result(pending.feedback, LED_ACCEPTED);
+			sensor_calibration_stage(pending.feedback, LED_MAINTENANCE);
+		}
 	}
 	k_spin_unlock(&coefficient_lock, key);
 	return err;
@@ -238,20 +302,25 @@ static int submit_accel(const float matrix[4][3], enum sensor_calibration_effect
 	(void)matrix;
 	(void)effect;
 	(void)operation_id;
+	(void)feedback;
+	(void)partial;
+	(void)generation;
 	return -ENOTSUP;
 #endif
 }
 
-int sensor_calibration_commit_accel(const float matrix[4][3], uint16_t operation_id)
+int sensor_calibration_commit_accel(const float matrix[4][3], uint16_t operation_id,
+	struct led_token feedback, bool partial, uint32_t generation)
 {
-	return submit_accel(matrix, SENSOR_CALIBRATION_FRAME_CHANGED, operation_id);
+	return submit_accel(matrix, SENSOR_CALIBRATION_FRAME_CHANGED, operation_id, feedback, partial, generation);
 }
 
 int sensor_calibration_reset_accel(void)
 {
 	float identity[4][3];
 	sensor_calibration_identity_accel(identity);
-	return submit_accel(identity, SENSOR_CALIBRATION_COEFFICIENTS_CHANGED, 0);
+	int err = submit_accel(identity, SENSOR_CALIBRATION_COEFFICIENTS_CHANGED, 0, (struct led_token){0}, false, 0);
+	return err ? sensor_operation_result(LED_OWNER_ACC, err, false) : 0;
 }
 
 /* Called by the sensor at a frame boundary, or by power after suspension.
@@ -315,6 +384,7 @@ void sensor_calibration_persist_pending(void)
 	bool persist_gyro = pending.persist_gyro;
 	uint16_t operation_id = pending.operation_id;
 	k_spin_unlock(&coefficient_lock, key);
+	sys_warm_transaction_begin();
 	int err = 0;
 	if (bias) {
 #if !CONFIG_SENSOR_USE_ACCEL_CALIBRATION
@@ -336,13 +406,22 @@ void sensor_calibration_persist_pending(void)
 	}
 	key = k_spin_lock(&coefficient_lock);
 	if (err < 0) {
+		pending.storage_error = err;
 		cal_event_step(operation_id, CAL_PHASE_STORAGE, CAL_REASON_STORAGE_ERROR);
 	}
 	pending.persist = false;
 	pending.operation_id = 0;
 	fusion_save_pending |= pending.fusion_changed;
+	if (pending.feedback.session && fusion_stale && pending.fusion_changed) {
+		frame_completion.token = pending.feedback;
+		frame_completion.partial = pending.partial;
+		frame_completion.storage_error = pending.storage_error;
+		pending.feedback = (struct led_token){0};
+	}
+	feedback_complete_locked();
 	k_spin_unlock(&coefficient_lock, key);
 	k_mutex_unlock(&persistence_lock);
+	sys_warm_transaction_end(false);
 	if (err < 0 && operation_id) {
 		tracker_events_notify();
 	}
@@ -362,6 +441,10 @@ void sensor_calibration_fusion_applied(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
 	fusion_stale = false;
+	sensor_calibration_result(frame_completion.token, frame_completion.storage_error < 0 ? LED_APPLIED_NOT_SAVED :
+		frame_completion.partial ? LED_PARTIAL : LED_SUCCESS);
+	frame_completion.token = (struct led_token){0};
+	feedback_complete_locked();
 	k_spin_unlock(&coefficient_lock, key);
 }
 
@@ -391,12 +474,18 @@ void sensor_calibration_clear_begin(void)
 	sensor_tcal_heated_clear_begin();
 #endif
 	k_mutex_lock(&persistence_lock, K_FOREVER);
+	sensor_calibration_invalidate_requests();
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
 	clearing = true;
 	if (pending.effect != SENSOR_CALIBRATION_UNCHANGED) {
 		cal_event_end(pending.operation_id, CAL_OUTCOME_CANCELLED, CAL_PHASE_APPLY_PENDING, CAL_REASON_RESET);
 		clear_event_pending = pending.operation_id != 0;
 	}
+	if (pending.feedback.session) {
+		sensor_calibration_result(pending.feedback, LED_CANCELLED);
+	}
+	sensor_calibration_result(frame_completion.token, LED_CANCELLED);
+	memset(&frame_completion, 0, sizeof(frame_completion));
 	memset(&pending, 0, sizeof(pending));
 	fusion_save_pending = false;
 	k_spin_unlock(&coefficient_lock, key);

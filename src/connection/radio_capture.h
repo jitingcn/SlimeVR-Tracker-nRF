@@ -10,7 +10,9 @@
 int radio_capture_init(void);
 void radio_capture_deinit(void);
 void radio_capture_set_enabled(bool enabled);
+int radio_capture_user_set_enabled(bool enabled);
 bool radio_capture_is_enabled(void);
+bool radio_capture_user_active(void);
 void radio_capture_record(
 	uint8_t packet_type,
 	uint8_t payload_length,

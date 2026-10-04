@@ -29,10 +29,12 @@ const char *sensor_get_sensor_imu_name(void);
 const char *sensor_get_sensor_mag_name(void);
 const char *sensor_get_sensor_fusion_name(void);
 bool sensor_is_initialized(void);
+/* True only after a valid current fusion frame, not merely driver discovery. */
+bool sensor_output_ready(void);
 
 int sensor_get_sensor_temperature(float *);
 
-int sensor_request_scan(bool force);
+int sensor_request_scan(bool force, bool user_feedback);
 
 void sensor_scan_read(void);
 void sensor_scan_write(void);
@@ -45,7 +47,7 @@ void sensor_record_wom_sleep(void);
 int sensor_shutdown(void);
 uint8_t sensor_setup_WOM(void);
 
-void sensor_set_mag_enabled(bool enabled);
+int sensor_set_mag_enabled(bool enabled);
 bool sensor_get_mag_enabled(void);
 bool sensor_get_mag_available(void);
 bool sensor_get_mag_calibrated(void);
@@ -61,7 +63,7 @@ void sensor_fusion_set_mag_ref(float norm, float dip);
 bool sensor_fusion_get_mag_ref(float *norm, float *dip);
 
 /* Nonblocking requests consumed by the sensor at the next frame boundary. */
-void sensor_request_fusion_reset(void);
+int sensor_request_fusion_reset(bool user_feedback);
 void sensor_request_fusion_bias_reset(void);
 
 void wait_for_threads(void);

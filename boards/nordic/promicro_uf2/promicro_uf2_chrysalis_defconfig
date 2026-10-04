@@ -9,7 +9,6 @@ CONFIG_SLIMEVR_USB_DEVICE_PRODUCT="SlimeNRF Tracker ProMicro"
 
 CONFIG_BATTERY_USE_REG_LDO_MAPPING=y
 
-CONFIG_LED_RGB_COLOR=y
 CONFIG_SENSOR_ROTATION_0=y
 
 #generate for adafruit uf2 bootloader flashing

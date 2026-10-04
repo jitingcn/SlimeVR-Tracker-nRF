@@ -1,4 +1,5 @@
 #include "test_mode.h"
+#include "led.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -22,9 +23,22 @@ bool test_mode_get(void)
 void test_mode_set(bool enable)
 {
 	bool was_enabled = atomic_set(&test_mode_active, enable ? 1 : 0) != 0;
+	led_maintenance_publish(LED_OWNER_SYSTEM, enable);
 	if (was_enabled != enable) {
 		LOG_INF("Test mode %s", enable ? "ENABLED" : "DISABLED");
 	}
+}
+
+void test_mode_user_set(bool enable)
+{
+	test_mode_set(enable);
+	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_SUCCESS);
+}
+
+void test_mode_user_set_target_tps(uint16_t tps)
+{
+	test_mode_set_target_tps(tps);
+	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_SUCCESS);
 }
 
 void test_mode_set_target_tps(uint16_t tps)

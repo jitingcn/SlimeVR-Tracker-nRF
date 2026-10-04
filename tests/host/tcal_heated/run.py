@@ -91,6 +91,7 @@ int sys_write(uint16_t id, void *ptr, const void *data, size_t size);
 void sys_warm_transaction_begin(void);
 void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size);
 void sys_warm_transaction_end(bool schedule);
+void sys_warm_feedback_arm(uint32_t identity);
 '''
 
 UTIL = r'''
@@ -132,6 +133,7 @@ SCENARIOS = (
     "stop_merge_existing", "stop_fault", "stop_rise_fault", "stop_pending_reset", "stop_pending_abort",
     "stop_pending_power", "stop_pending_ota", "stop_pending_generation",
     "stop_pending_stale", "stop_pending_overtemp", "stop_pending_timeout",
+    "warm_receipt",
     "ramp_trajectory", "ramp_jitter_pause", "ramp_target_clamp", "default_ramp_budget",
 )
 

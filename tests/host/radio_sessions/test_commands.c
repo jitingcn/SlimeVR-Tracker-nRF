@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <setjmp.h>
 #include <math.h>
+#include "../led_feedback_stub.h"
 #ifndef CONFIG_SENSOR_TCAL_HEATED
 #define CONFIG_SENSOR_TCAL_HEATED 0
 #endif
@@ -23,8 +24,6 @@
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
-#define SYS_LED_PATTERN_ONESHOT_POWEROFF 1
-#define SYS_LED_PRIORITY_HIGHEST 1
 static uint8_t received_remote_command, acked_remote_command;
 static uint16_t received_test_rate_tps, executing_test_rate_tps, acked_test_rate_tps;
 static uint8_t received_batch_rate_hz, executing_batch_rate_hz, acked_batch_rate_hz;
@@ -97,7 +96,7 @@ static int connection_set_data_collection_batch(bool enabled, uint16_t rate)
 }
 static void test_mode_set(bool active) { test_mode_changes++; }
 static void reboot_counter_write(int count) {}
-static void set_led(int pattern, int priority) {}
+static bool sys_exit_feedback_allowed(bool reboot) { (void)reboot; return false; }
 static int sys_request_system_off(void)
 {
     shutdown_calls++;

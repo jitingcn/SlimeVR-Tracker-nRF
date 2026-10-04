@@ -246,6 +246,7 @@ static bool configure_system_off(void)
 	clock_pre_shutdown();
 	sensor_calibration_prepare_power_down();
 	led_shutdown();
+	led_quiesce(); /* Final physical ownership, never an animation wait. */
 	float actual_clock_rate;
 	set_sensor_clock(false, 0, &actual_clock_rate);
 	// Configure interrupts
@@ -461,6 +462,28 @@ int sys_request_system_reboot(void)
 	return sys_power_state_request(SYS_POWER_REQ_REBOOT);
 }
 
+int sys_user_reboot(void)
+{
+	int err = sys_request_system_reboot();
+	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(),
+		err ? LED_REJECTED : LED_ACCEPTED);
+	return err;
+}
+
+bool sys_exit_feedback_allowed(bool reboot)
+{
+	/* Read-only eligibility for the existing reversible UI window. This does
+	 * not reserve hardware, cancel WOM, or change mailbox admission/timing. */
+	if (esb_ota_is_active() || connection_get_ota_suppressed()) return false;
+	k_spinlock_key_t key = k_spin_lock(&power_requests.lock);
+	enum sys_power_request requested = reboot ? SYS_POWER_REQ_REBOOT : SYS_POWER_REQ_SYSTEM_OFF;
+	bool allowed = !power_requests.physical_started && power_requests.ota_reboot == POWER_OTA_REBOOT_NONE
+		&& (power_requests.state == POWER_REQUEST_EMPTY || power_requests.request == requested
+			|| power_requests.request == SYS_POWER_REQ_WOM || power_requests.request == SYS_POWER_REQ_WOM_FORCE);
+	k_spin_unlock(&power_requests.lock, key);
+	return allowed;
+}
+
 int sys_ota_reboot_reserve(void)
 {
 	k_mutex_lock(&power_plan_lock, K_FOREVER);
@@ -518,6 +541,7 @@ static bool sys_WOM(bool force, uint32_t generation)
 	wom_planned = false;
 	wom_announced = false;
 	k_mutex_unlock(&power_plan_lock);
+	led_quiesce();
 	if (!configure_system_off()) {
 		return false;
 	}
@@ -601,6 +625,7 @@ static bool sys_system_off(void) // TODO: add timeout
 	atomic_set(&heater_power_terminal, true);
 #endif
 	k_mutex_unlock(&power_plan_lock);
+	led_quiesce();
 	sys_power_notice(POWER_WILL_SHUTDOWN);
 	if (!configure_system_off()) {
 		return false;
@@ -610,7 +635,7 @@ static bool sys_system_off(void) // TODO: add timeout
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
-	sensor_request_fusion_reset();
+	sensor_request_fusion_reset(false);
 	sensor_retained_write(); /* sensor is suspended: persist pending reset before power-off */
 #endif
 	set_regulator(SYS_REGULATOR_LDO); // Switch to LDO
@@ -651,6 +676,7 @@ static bool sys_system_reboot(void) // TODO: add timeout
 	atomic_set(&heater_power_terminal, true);
 #endif
 	k_mutex_unlock(&power_plan_lock);
+	led_quiesce();
 	sys_power_notice(POWER_WILL_REBOOT);
 	if (!configure_system_off()) {
 		return false;
@@ -821,10 +847,23 @@ static void power_thread(void)
 		power_request_finish(&power_requests, requested, generation, consumed);
 
 		bool docked = dock_read();
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug)
+		bool charging = false, charged = false;
+#else
 		bool charging = chg_read();
 		bool charged = stby_read();
+#endif
 		bool pmic_plugged = false;
 		int charger_state_err = battery_charger_state(&pmic_plugged, &charging, &charged);
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug)
+		int gpio_charge_err = -ENOTSUP;
+		if (charger_state_err == -ENOTSUP) {
+			/* Share one complete board-authorized tuple with battery telemetry
+			 * and LED feedback. Failed reads cannot retain a stale full fact. */
+			gpio_charge_err = sys_charger_snapshot(&charging, &charged);
+			charger_state_err = gpio_charge_err;
+		}
+#endif
 		if (charger_state_err != 0 && charger_state_err != -ENOTSUP) {
 			LOG_WRN("Failed to read charger state: %d", charger_state_err);
 		}
@@ -874,7 +913,7 @@ static void power_thread(void)
 		bool battery_discharged = !plug_signal_settling && battery_available
 			&& (average_pptt >= 0 ? average_pptt : battery_pptt) == 0;
 
-		power_battery_set_charged(charged); // TODO: timer on device_plugged could be used to infer charged state
+		power_battery_set_charged(charged);
 		bool device_plugged = power_battery_device_plugged();
 		bool device_charged = power_battery_device_charged();
 
@@ -917,17 +956,27 @@ static void power_thread(void)
 			battery_mV
 		);
 
-		if (charging)
-			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (charged)
-			set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (plugged || usb_plugged || pmic_plugged)
-			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (power_battery_is_low())
-			set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else
-			set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-//			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SYSTEM);
+		/* Complete feedback tuple; reuse the opted-in GPIO owner's facts. */
+		bool led_plugged = false, led_charging = false, led_charged = false;
+		int led_charge_err = battery_charger_snapshot(&led_plugged, &led_charging, &led_charged);
+		if (led_charge_err == -ENOTSUP) {
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug)
+			led_charge_err = gpio_charge_err;
+			led_charging = charging;
+			led_charged = charged;
+#else
+			led_charge_err = sys_charger_snapshot(&led_charging, &led_charged);
+#endif
+		}
+		enum led_power_state led_power = LED_POWER_BATTERY;
+		if (led_charge_err == 0 && led_charging) {
+			led_power = LED_POWER_CHARGING;
+		} else if (led_charge_err == 0 && led_charged) {
+			led_power = LED_POWER_CHARGED;
+		} else if (raw_device_plugged || led_plugged) {
+			led_power = LED_POWER_EXTERNAL_UNKNOWN;
+		}
+		led_power_publish(led_power, power_battery_is_low());
 
 		/* Feed watchdog at end of each loop iteration */
 		watchdog_feed(WDT_CHANNEL_POWER);

@@ -123,12 +123,17 @@
     };
 
     zephyr,user {
+        /* Intended RGB; electrical colors come from the PWM pin declarations. */
+        led-capability = "rgb-pwm";
+        pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
+            <&pwm0 1 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
+            <&pwm0 2 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+        led-channel-colors = <1 2 3>;
+        led-channel-weights = <10000 10000 10000>;
+        led-primary-channel = <1>;
         int0-gpios = <&gpio0 3 0>;
         chg_gpios = <&gpio0 15 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;   // P0.15 = CHRG
         stby_gpios = <&gpio0 17 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;  // P0.17 = STDBY
-        led0-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;   /* 红色 P0.05 */
-        led1-gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;  /* 绿色 P0.11 */
-        led2-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;   /* 蓝色 P1.09 */
         pwr-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;    /* IMU & MAG 电源使能 P0.04 高电平启动 */
     };
 };

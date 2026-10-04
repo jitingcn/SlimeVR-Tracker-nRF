@@ -744,32 +744,35 @@ uint64_t sys_get_last_cycle_runtime(void)
 	return tracker.last_battery_runtime;
 }
 
-void sys_reset_battery_tracker(void)
+int sys_reset_battery_tracker(void)
 {
 	static bool reset_confirm = false;
 	if (!reset_confirm)
 	{
 		printk("Resetting battery tracker will clear all battery calibration data. Are you sure?\n");
 		reset_confirm = true;
-		return;
+		led_request_event(LED_OWNER_POWER, led_request_id(), led_event_id(), LED_INPUT_ACK);
+		return 1;
 	}
 	printk("Resetting battery tracker\n");
 
 	reset_tracker(-1);
 	struct battery_tracker tracker = {0};
-	sys_write(BATT_STATS_LAST_RUN_ID, NULL, &tracker, sizeof(tracker));
+	int result = sys_write(BATT_STATS_LAST_RUN_ID, NULL, &tracker, sizeof(tracker));
 	for (uint8_t i = 0; i < 19; i++)
 	{
 		struct battery_tracker_interval interval = {0};
-		sys_write(BATT_STATS_INTERVAL_0 + i, NULL, &interval, sizeof(interval));
+		int err = sys_write(BATT_STATS_INTERVAL_0 + i, NULL, &interval, sizeof(interval));
+		if (err && !result) result = err;
 	}
-	int16_t* curve = (int16_t*)k_malloc(sizeof(int16_t) * 18);
-	memset(curve, 0, sizeof(int16_t) * 18);
-	sys_write(BATT_STATS_CURVE_ID, retained->battery_pptt_curve, curve, sizeof(int16_t) * 18); // updates retained
-	k_free(curve);
+	int16_t curve[18] = {0};
+	int curve_err = sys_write(BATT_STATS_CURVE_ID, retained->battery_pptt_curve, curve, sizeof(curve));
+	if (curve_err && !result) result = curve_err;
 	valid_cache_mask = 0; // invalidate all
 	reset_confirm = false;
 	LOG_INF("Battery tracker reset");
+	led_request_event(LED_OWNER_POWER, led_request_id(), led_event_id(), result ? LED_PARTIAL : LED_SUCCESS);
+	return result;
 }
 
 void sys_print_battery_tracker_debug(void)

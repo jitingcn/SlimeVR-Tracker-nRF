@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../../src/retained.h"
+#include "../led_feedback_stub.h"
 
 /* Replace only the storage backend; compile the actual channel business code
  * and actual RF encoding. Model sys_write's documented eager-RAM contract. */
@@ -59,12 +60,14 @@ int main(void)
 	storage_error = -EIO;
 	assert(channel_control_set(25) == -EIO);
 	assert(active_channel == 25 && state.rf_channel == 25 && persisted_channel == 100);
+	assert(led_test_events[LED_PARTIAL] == 1 && led_test_events[LED_SUCCESS] == 2);
 
 	/* A radio failure does not undo a successful persistent update. */
 	storage_error = 0;
 	radio_error = -EBUSY;
 	assert(channel_control_set(50) == -EBUSY);
 	assert(active_channel == 25 && state.rf_channel == 50 && persisted_channel == 50);
+	assert(led_test_events[LED_PARTIAL] == 2 && led_test_events[LED_SUCCESS] == 2);
 	storage_error = -ENOSPC;
 	assert(channel_control_reset() == -ENOSPC);
 	assert(state.rf_channel == ESB_RF_CHANNEL_DEFAULT && persisted_channel == 50);

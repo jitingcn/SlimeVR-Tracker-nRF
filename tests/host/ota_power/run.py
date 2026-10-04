@@ -30,6 +30,9 @@ constants = "\n".join(re.findall(r"^#define OTA_.*$", ota_header, re.MULTILINE))
 parts = [constants, block(ota, r"^enum ota_state \{", True),
          block(ota, r"^struct ota_context \{", True), "static struct ota_context ota;"]
 parts.append(re.search(r"^static atomic_t ota_reboot_pending;", ota, re.MULTILINE).group())
+parts.extend(re.findall(r"^static (?:struct led_token ota_feedback|uint32_t ota_feedback_revision|bool ota_feedback_terminal|enum led_semantic ota_feedback_state);", ota, re.MULTILINE))
+calibration_header = (SRC / "sensor/calibration/calibration.h").read_text()
+parts.append(block(calibration_header, r"^static inline int sensor_operation_result\([^;{]*\)\s*\{", False))
 for pattern in (r"^static struct power_request_mailbox power_requests;",
                 r"^static K_SEM_DEFINE\(power_wake_sem,.*?;",
                 r"^static K_MUTEX_DEFINE\(power_plan_lock\);",
@@ -57,14 +60,15 @@ for name in ("sensor_mode", "sensor_timeout", "was_ota_suppressed"):
     parts.append(re.search(rf"^static [^\n]* {name}[^;]*;", sensor, re.MULTILINE).group())
 for name in ("sensor_get_active_timeout_delay", "sensor_update_sensor_state"):
     parts.append(function(sensor, name))
-for name in ("esb_ota_is_active", "esb_ota_get_status", "esb_ota_handle_verify",
-             "esb_ota_handle_activate", "esb_ota_handle_abort", "esb_ota_check_timeout"):
+for name in ("esb_ota_is_active", "esb_ota_get_status", "ota_update_led", "esb_ota_handle_verify",
+             "ota_activate_impl", "esb_ota_handle_activate", "esb_ota_handle_abort", "esb_ota_check_timeout"):
     parts.append(function(ota, name))
 # BEGIN's admission prefix is sufficient here: the abort-gap call must reject
 # before reaching packet validation or flash work. A return of 0 below exposes
 # accidental admission without introducing mock copies of the admission rules.
-begin = function(ota, "esb_ota_handle_begin")
+begin = function(ota, "ota_begin_impl")
 parts.append(begin[:begin.index("\t/* Validate CRC-8 */")] + "\treturn 0;\n}")
+parts.append(function(ota, "esb_ota_handle_begin"))
 # Exercise the common lifecycle gate and both real handoff tails. Staging
 # address/flash preparation is outside this lifecycle contract.
 start = begin.index("\t/* Suspend sensor thread and hardware")

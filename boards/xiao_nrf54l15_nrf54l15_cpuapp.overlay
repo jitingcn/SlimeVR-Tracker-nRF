@@ -63,6 +63,10 @@
 	};
 
 	zephyr,user {
+		led-capability = "mono-gpio";
+		led-channel-gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;
+		led-channel-colors = <0>; /* SDK calls it LED 0, not a named color. */
+		led-channel-weights = <10000>;
 		/* External tracker IMU interrupt on XIAO D3. */
 		int0-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;
 	};

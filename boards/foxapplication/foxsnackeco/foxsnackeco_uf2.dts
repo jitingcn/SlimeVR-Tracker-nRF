@@ -88,8 +88,11 @@
 	};
 
 	zephyr,user {
+		led-capability = "mono-pwm";
+		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+		led-channel-colors = <5>; /* White per PWM pin comment. */
+		led-channel-weights = <10000>;
 		int0-gpios = <&gpio0 15 0>;
-		led0-gpios = <&gpio0 2 (GPIO_OPEN_SOURCE)>;
 		chg-gpios = <&gpio0 8 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		stby-gpios = <&gpio1 9 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 		vcc-gpios = <&gpio1 0 0>;

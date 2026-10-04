@@ -31,6 +31,12 @@
 };
 
 / {
+	zephyr,user {
+		led-capability = "mono-pwm";
+		pwms = <&pwm20 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+		led-channel-colors = <0>;
+		led-channel-weights = <10000>;
+	};
 	pwmleds {
 		pwm_led0: pwm_led_0 {
 			pwms = <&pwm20 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;

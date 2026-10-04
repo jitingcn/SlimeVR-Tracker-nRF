@@ -75,8 +75,11 @@ BATTSNS:P0.29(29)
 	};
 
 	zephyr,user {
+		led-capability = "mono-gpio";
+		led-channel-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+		led-channel-colors = <0>; /* Physical color unspecified. */
+		led-channel-weights = <10000>;
 	    	int0-gpios = <&gpio1 9 0>;
- 	    	led-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
 	};
 };
 

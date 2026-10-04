@@ -32,6 +32,27 @@ PRELUDE = r'''
 #define LOG_INF(...) ((void)0)
 static int calibration_request_lock, requested_calibration;
 static uint16_t requested_operation;
+static struct led_token requested_feedback;
+static uint32_t requested_generation;
+static int requested_storage_error;
+typedef int atomic_t;
+static atomic_t calibration_generation, calibration_kind;
+static int atomic_inc(atomic_t *value) { return (*value)++; }
+static int atomic_get(const atomic_t *value) { return *value; }
+static int atomic_set(atomic_t *value, int next) { int old = *value; *value = next; return old; }
+static uint32_t led_identity;
+static unsigned led_results[LED_SEMANTIC_COUNT], led_requests[LED_SEMANTIC_COUNT];
+uint32_t led_request_id(void) { return ++led_identity; }
+uint32_t led_event_id(void) { return ++led_identity; }
+struct led_token led_begin(enum led_owner owner, uint32_t request)
+{ return (struct led_token){owner, ++led_identity, request}; }
+enum led_admission led_state(struct led_token token, uint32_t revision, enum led_semantic semantic)
+{ (void)token; (void)revision; (void)semantic; return LED_ADMITTED; }
+enum led_admission led_result(struct led_token token, uint32_t event, enum led_semantic semantic)
+{ (void)token; (void)event; led_results[semantic]++; return LED_ADMITTED; }
+enum led_admission led_request_event(enum led_owner owner, uint32_t request, uint32_t event,
+                                    enum led_semantic semantic)
+{ (void)owner; (void)request; (void)event; led_requests[semantic]++; return LED_ADMITTED; }
 static bool mag_cal_led_pending, running;
 static uint8_t magneto_progress, sens_cal_axis;
 static uint16_t sens_cal_revolutions;
@@ -62,17 +83,22 @@ TEST = r'''
 int main(void) {
  assert(sensor_calibration_request(CAL_REQUEST_IMU,CAL_REQUEST_USER)==0);
  uint16_t first=sensor_calibration_current_operation(); assert(first && accepted==1);
+ assert(led_results[LED_ACCEPTED]==1 && led_results[LED_SUCCESS]==0);
+ uint32_t first_generation=sensor_calibration_current_generation();
  for(unsigned i=0;i<1000;i++) {
   assert(sensor_calibration_request(CAL_REQUEST_TCAL_BOOT,CAL_REQUEST_AUTO)==-1);
   assert(sensor_calibration_request(CAL_REQUEST_IMU,CAL_REQUEST_AUTO_SILENT)==-1);
  }
  assert(accepted==1 && rejected==0 && sensor_calibration_current_operation()==first);
+ assert(led_results[LED_ACCEPTED]==1 && led_results[LED_SUCCESS]==0);
+ assert(sensor_calibration_current_generation()==first_generation);
  assert(sensor_calibration_request(CAL_REQUEST_IMU,CAL_REQUEST_USER)==-1);
  assert(rejected==1 && last_reason==CAL_REASON_BUSY && sensor_calibration_current_operation()==first);
  assert(sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER)==0);
  assert(sensor_calibration_current_operation()==0 && sample_ends==1);
  assert(sensor_calibration_request(CAL_REQUEST_IMU,CAL_REQUEST_AUTO_SILENT)==0);
  assert(sensor_calibration_current_operation()==0 && accepted==1);
+ assert(!requested_feedback.session && led_results[LED_ACCEPTED]==1 && led_results[LED_SUCCESS]==0);
  sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER);
  assert(sensor_calibration_request(CAL_REQUEST_TCAL_BOOT,CAL_REQUEST_AUTO)==0);
  assert(last_kind==(CAL_KIND_TCAL_BOOT|CAL_EVENT_ORIGIN_AUTO));
@@ -134,13 +160,17 @@ int main(void) {
  reset_barrier=false;
  assert(sensor_calibration_request(CAL_REQUEST_IMU,CAL_REQUEST_USER)==0);
 #endif
+ assert(led_results[LED_SUCCESS]==0 && led_requests[LED_SUCCESS]==0);
  return 0;
 }
 '''
 
 
 def main():
-    names = ("calibration_request_kind", "sensor_calibration_current_operation", "sensor_calibration_request", "sensor_request_calibration_sens", "sensor_request_calibration_mag")
+    names = ("calibration_next_generation", "sensor_calibration_generation_valid",
+             "calibration_led_owner", "calibration_led_accept", "calibration_request_kind",
+             "sensor_calibration_current_generation", "sensor_calibration_current_operation",
+             "sensor_calibration_request", "sensor_request_calibration_sens", "sensor_request_calibration_mag")
     heated_names = ("sensor_tcal_heated_lock", "sensor_tcal_heated_unlock", "sensor_calibration_heated_reserve_locked", "sensor_calibration_heated_release_locked", "sensor_calibration_maintenance_begin", "sensor_calibration_maintenance_end")
     for heated in (False, True):
         selected = heated_names + names if heated else names

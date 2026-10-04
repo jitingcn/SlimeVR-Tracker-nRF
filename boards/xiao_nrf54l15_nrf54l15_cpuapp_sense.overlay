@@ -62,6 +62,10 @@
 	};
 
 	zephyr,user {
+		led-capability = "mono-gpio";
+		led-channel-gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;
+		led-channel-colors = <0>; /* SDK calls it LED 0, not a named color. */
+		led-channel-weights = <10000>;
 		/* Onboard LSM6DS3TR-C interrupt (INT1 = P0.02). */
 		int0-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
 	};

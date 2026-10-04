@@ -104,6 +104,10 @@ K_MUTEX_DEFINE(esb_radio_lock);
 static uint8_t radio_channel;
 static uint8_t paired_channel_found;
 static uint32_t own_pong_time;
+static bool own_pong_seen;
+static bool pairing_search_active;
+static bool radio_user_disabled;
+static uint32_t pairing_request;
 static uint32_t radio_session_generation;
 static uint8_t search_home;
 static uint8_t search_index;
@@ -197,6 +201,9 @@ static uint8_t received_remote_command = ESB_PONG_FLAG_NORMAL;
 static uint8_t acked_remote_command = ESB_PONG_FLAG_NORMAL;
 static bool remote_command_rejected;
 static uint32_t remote_command_generation;
+static uint32_t executing_shutdown_generation;
+static uint32_t shutdown_feedback_generation, shutdown_feedback_request;
+static uint32_t shutdown_accepted_event, shutdown_terminal_event;
 static uint16_t acked_test_rate_tps = 0; // TEST_MODE_ON payload at ack time
 static uint16_t executing_test_rate_tps = 0; // Snapshot for the in-flight TEST_MODE_ON execution
 static int64_t remote_command_receive_time = 0;
@@ -228,7 +235,13 @@ static void remote_print_meow(void);
 static int esb_remote_cmd_shutdown(void)
 {
 	LOG_WRN("Executing remote command: SHUTDOWN");
-	return sys_command_shutdown();
+	if (!shutdown_feedback_request || shutdown_feedback_generation != executing_shutdown_generation) {
+		shutdown_feedback_generation = executing_shutdown_generation;
+		shutdown_feedback_request = led_request_id();
+		shutdown_accepted_event = led_event_id();
+		shutdown_terminal_event = led_event_id();
+	}
+	return sys_command_shutdown_request(shutdown_feedback_request, shutdown_accepted_event, shutdown_terminal_event);
 }
 
 static void esb_remote_cmd_calibrate(void)
@@ -246,6 +259,7 @@ static void esb_remote_cmd_calibrate_acc(void)
 	LOG_WRN("Remote accelerometer calibration not supported (disabled in config)");
 	cal_event_reject(CAL_KIND_ACCEL_POSES, CAL_REASON_UNSUPPORTED);
 	tracker_events_notify();
+	led_request_event(LED_OWNER_ACC, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -258,13 +272,13 @@ static void esb_remote_cmd_meow(void)
 static void esb_remote_cmd_scan(void)
 {
 	LOG_INF("Executing remote command: SCAN");
-	sensor_request_scan(true);
+	sensor_request_scan(true, true);
 }
 
 static void esb_remote_cmd_mag_clear(void)
 {
 	LOG_INF("Executing remote command: MAG_CLEAR");
-	sensor_calibration_clear_mag(NULL, true);
+	sensor_calibration_clear_mag(NULL, true, true);
 }
 
 static void esb_remote_cmd_mag_cal(void)
@@ -302,6 +316,8 @@ static void esb_remote_cmd_tcal_on(void)
 #if CONFIG_SENSOR_USE_TCAL
 	LOG_INF("Executing remote command: TCAL_ON");
 	sensor_tcal_set_enabled(true);
+#else
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -310,6 +326,8 @@ static void esb_remote_cmd_tcal_off(void)
 #if CONFIG_SENSOR_USE_TCAL
 	LOG_INF("Executing remote command: TCAL_OFF");
 	sensor_tcal_set_enabled(false);
+#else
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -326,19 +344,20 @@ static void esb_remote_cmd_tcal_heated_start(void)
 	}
 #else
 	LOG_WRN("Remote command: TCAL_HEATED_START unsupported (heated T-Cal disabled)");
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
 static void esb_remote_cmd_tdma_on(void)
 {
 	LOG_INF("Executing remote command: TDMA_ON");
-	tdma_set_enabled(true);
+	tdma_user_set_enabled(true);
 }
 
 static void esb_remote_cmd_tdma_off(void)
 {
 	LOG_INF("Executing remote command: TDMA_OFF");
-	tdma_set_enabled(false);
+	tdma_user_set_enabled(false);
 }
 
 static void esb_remote_cmd_test_mode_on(void)
@@ -348,7 +367,7 @@ static void esb_remote_cmd_test_mode_on(void)
 	 * mid-execution cannot split apply/ack across different values. */
 	uint16_t tps = executing_test_rate_tps;
 	test_mode_set_target_tps(tps);
-	test_mode_set(true);
+	test_mode_user_set(true);
 	if (tps == 0) {
 		LOG_INF("Executing remote command: TEST_MODE_ON (default rate)");
 		return;
@@ -367,13 +386,13 @@ static void esb_remote_cmd_test_mode_on(void)
 static void esb_remote_cmd_test_mode_off(void)
 {
 	LOG_INF("Executing remote command: TEST_MODE_OFF");
-	test_mode_set(false);
+	test_mode_user_set(false);
 }
 
 static void esb_remote_cmd_reboot(void)
 {
 	LOG_WRN("Executing remote command: REBOOT");
-	int err = sys_request_system_reboot();
+	int err = sys_user_reboot();
 	if (err) {
 		LOG_WRN("Reboot request rejected: %d", err);
 	}
@@ -392,6 +411,7 @@ static void esb_remote_cmd_dfu(void)
 	sys_enter_dfu(false);
 #else
 	LOG_WRN("Remote command: DFU not supported (no bootloader)");
+	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -402,6 +422,7 @@ static void esb_remote_cmd_dfu_ota(void)
 	sys_enter_dfu(true);
 #else
 	LOG_WRN("Remote command: DFU_OTA not supported (no bootloader)");
+	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -459,6 +480,7 @@ static void esb_remote_cmd_sens_auto(void)
 	}
 #else
 	LOG_WRN("Sensitivity calibration not enabled");
+	led_request_event(LED_OWNER_SENS, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -493,6 +515,7 @@ static void esb_remote_cmd_reset_tcal(void)
 	sensor_tcal_clear();
 #else
 	LOG_WRN("Temperature calibration not enabled");
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -503,6 +526,7 @@ static void esb_remote_cmd_tcal_auto_on(void)
 	sensor_tcal_set_auto_calibration(true);
 #else
 	LOG_WRN("Remote command: TCAL_AUTO_ON not supported (T-Cal disabled in config)");
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -513,19 +537,20 @@ static void esb_remote_cmd_tcal_auto_off(void)
 	sensor_tcal_set_auto_calibration(false);
 #else
 	LOG_WRN("Remote command: TCAL_AUTO_OFF not supported (T-Cal disabled in config)");
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
 static void esb_remote_cmd_ping(void)
 {
 	LOG_INF("Executing remote command: PING");
-	set_led(SYS_LED_PATTERN_ONESHOT_PING, SYS_LED_PRIORITY_HIGHEST);
+	led_identify();
 }
 
 static void esb_remote_cmd_fusion_reset(void)
 {
 	LOG_INF("Executing remote command: FUSION_RESET");
-	sensor_request_fusion_reset();
+	sensor_request_fusion_reset(true);
 }
 
 static void esb_remote_cmd_tcal_boot_on(void)
@@ -535,6 +560,7 @@ static void esb_remote_cmd_tcal_boot_on(void)
 	sensor_boot_cal_set_enabled(true);
 #else
 	LOG_WRN("Remote command: TCAL_BOOT_ON not supported (T-Cal disabled in config)");
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -545,6 +571,7 @@ static void esb_remote_cmd_tcal_boot_off(void)
 	sensor_boot_cal_set_enabled(false);
 #else
 	LOG_WRN("Remote command: TCAL_BOOT_OFF not supported (T-Cal disabled in config)");
+	led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 #endif
 }
 
@@ -553,6 +580,7 @@ static void esb_remote_cmd_data_collect_on(void)
 	LOG_INF("Executing remote command: DATA_COLLECT_ON");
 	connection_set_data_collection(true);
 	test_mode_set(true);  // Prevent sleep during data collection
+	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_SUCCESS);
 }
 
 static void esb_remote_cmd_data_collect_off(void)
@@ -560,6 +588,7 @@ static void esb_remote_cmd_data_collect_off(void)
 	LOG_INF("Executing remote command: DATA_COLLECT_OFF");
 	connection_set_data_collection(false);
 	test_mode_set(false);
+	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_SUCCESS);
 }
 
 static int esb_remote_cmd_data_collect_batch_on(void)
@@ -567,9 +596,11 @@ static int esb_remote_cmd_data_collect_batch_on(void)
 	LOG_INF("Executing remote command: DATA_COLLECT_BATCH_ON at %u Hz", executing_batch_rate_hz);
 	int err = connection_set_data_collection_batch(true, executing_batch_rate_hz);
 	if (err) {
+		led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_REJECTED);
 		return err;
 	}
 	test_mode_set(true);  // Prevent sleep during data collection
+	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_SUCCESS);
 	return 0;
 }
 
@@ -578,6 +609,7 @@ static void esb_remote_cmd_data_collect_batch_off(void)
 	LOG_INF("Executing remote command: DATA_COLLECT_BATCH_OFF");
 	connection_set_data_collection_batch(false, 0);
 	test_mode_set(false);
+	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_SUCCESS);
 }
 
 static void esb_remote_cmd_ota_query_info(void)
@@ -596,12 +628,14 @@ static void esb_remote_cmd_ota_suppress(void)
 {
 	LOG_INF("Executing remote command: OTA_SUPPRESS (reducing poll rate)");
 	connection_set_ota_suppressed(true);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_SUCCESS);
 }
 
 static void esb_remote_cmd_ota_unsuppress(void)
 {
 	LOG_INF("Executing remote command: OTA_UNSUPPRESS (resuming normal rate)");
 	connection_set_ota_suppressed(false);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_SUCCESS);
 }
 
 static const struct esb_remote_cmd esb_remote_cmds[] = {
@@ -1239,6 +1273,7 @@ void event_handler(struct esb_evt const *event)
 					if (rx_id == tracker_id && ping_pending
 					    && rx_payload.data[2] == ping_ctr_sent) {
 						own_pong_time = k_uptime_get();
+						own_pong_seen = true;
 					}
 					if ((channel_search || channel_wait_normal)
 					    && (rx_id != tracker_id || !ping_pending
@@ -1755,6 +1790,7 @@ int esb_initialize(bool tx)
 	}
 	LOG_INF("ESB initialized, %sX mode", tx ? "T" : "R");
 	esb_initialized = true;
+	own_pong_seen = false;
 	own_pong_time = k_uptime_get();
 	++radio_session_generation;
 	k_mutex_unlock(&esb_radio_lock);
@@ -1841,7 +1877,7 @@ static int esb_send_pair_step(uint8_t step)
 	return err;
 }
 
-void esb_set_pair(uint64_t addr)
+int esb_set_pair(uint64_t addr)
 {
 	// Use device address as unique identifier (although it is not actually guaranteed, see datasheet)
 	uint64_t *device_addr = (uint64_t *)NRF_FICR->DEVICEADDR;
@@ -1853,14 +1889,17 @@ void esb_set_pair(uint64_t addr)
 	}
 	if ((addr & 0xFF) != checksum) {
 		LOG_INF("Incorrect checksum");
-		return;
+		led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
+		return -EINVAL;
 	}
 	esb_reset_pair();
 	memcpy(paired_addr, &addr, sizeof(paired_addr));
 	tracker_events_session_changed();
 	LOG_INF("Paired");
-	sys_write(PAIRED_ID, retained->paired_addr, paired_addr,
-			  sizeof(paired_addr)); // Write new address and tracker id
+	int err = sys_write(PAIRED_ID, retained->paired_addr, paired_addr, sizeof(paired_addr));
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(),
+		err ? LED_PARTIAL : LED_SUCCESS);
+	return err;
 }
 
 void esb_pair(void)
@@ -1892,7 +1931,10 @@ void esb_pair(void)
 		}
 		LOG_INF("Checksum: %02X", checksum);
 		tx_payload_pair.data[0] = checksum; // Use checksum to make sure packet is for this device
-		set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
+		struct led_token pairing = led_begin(LED_OWNER_RADIO, pairing_request ? pairing_request : led_request_id());
+		pairing_request = 0;
+		pairing_search_active = true;
+		bool timeout_reported = false;
 		int64_t pair_start_time = k_uptime_get();
 		uint8_t pair_home = radio_channel;
 		unsigned pair_index = 0;
@@ -1941,6 +1983,10 @@ void esb_pair(void)
 				&& (k_uptime_get() - pair_start_time) > CONFIG_CONNECTION_TIMEOUT_DELAY) {
 				LOG_WRN("Pairing timeout after %dm", CONFIG_CONNECTION_TIMEOUT_DELAY / 60000);
 				shutdown_requested = sys_request_system_off() == 0;
+				if (shutdown_requested && !timeout_reported) {
+					led_result(pairing, led_event_id(), LED_FAILED);
+					timeout_reported = true;
+				}
 			}
 #endif
 			if (paired_addr[0]) {
@@ -1972,21 +2018,20 @@ void esb_pair(void)
 			k_msleep(60 + (k_cycle_get_32() % 23));
 			k_mutex_unlock(&esb_radio_lock);
 		}
-		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_CONNECTION);
 		LOG_INF("Paired");
 		/* RX only copied the identity; entropy and queue reset belong here,
 		 * in the pairing thread, before the new radio session is ready. */
 		tracker_events_session_changed();
-		sys_write(
-			PAIRED_ID,
-			retained->paired_addr,
-			paired_addr,
-			sizeof(paired_addr)
-		); // Write new address and tracker id
+		int address_error = sys_write(PAIRED_ID, retained->paired_addr, paired_addr, sizeof(paired_addr));
 		uint8_t paired_channel = esb_rf_channel_encode(paired_channel_found);
-		sys_write(RF_CHANNEL_ID, &retained->rf_channel, &paired_channel, sizeof(paired_channel));
+		int channel_error = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &paired_channel, sizeof(paired_channel));
+		pairing_search_active = false;
+		if (!timeout_reported) {
+			int err = address_error ? address_error : channel_error;
+			led_result(pairing, led_event_id(), err ? LED_PARTIAL : LED_SUCCESS);
+		}
 		esb_deinitialize();
-		k_msleep(1600); // wait for led pattern
+		k_msleep(1600); /* Preserve the existing post-pairing settle window. */
 	}
 	LOG_INF("Tracker ID: %u", paired_addr[1]);
 	uint64_t receiver_address = 0;
@@ -2012,12 +2057,34 @@ void esb_reset_pair(void)
 	}
 }
 
-void esb_clear_pair(void)
+int esb_clear_pair(void)
 {
 	esb_reset_pair();
-	sys_write(PAIRED_ID, &retained->paired_addr, paired_addr,
-			  sizeof(paired_addr)); // write zeroes
+	int err = sys_write(PAIRED_ID, &retained->paired_addr, paired_addr, sizeof(paired_addr));
 	LOG_INF("Pairing data reset");
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(),
+		err ? LED_PARTIAL : LED_SUCCESS);
+	return err;
+}
+
+int esb_user_pair(void)
+{
+	pairing_request = led_request_id();
+	esb_reset_pair();
+	led_request_event(LED_OWNER_RADIO, pairing_request, led_event_id(), LED_ACCEPTED);
+	return 0;
+}
+
+int esb_user_set_enabled(bool enabled)
+{
+	int err = 0;
+	if (enabled) err = esb_reinitialize();
+	else esb_deinitialize();
+	if (!err) radio_user_disabled = !enabled;
+	led_maintenance_publish(LED_OWNER_RADIO, radio_user_disabled);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(),
+		err ? LED_FAILED : LED_SUCCESS);
+	return err;
 }
 
 void esb_process_ota_rx_queue(void)
@@ -2485,6 +2552,18 @@ bool esb_ready(void)
 	return esb_initialized && esb_conn_state != ESB_ST_PAIRING;
 }
 
+void esb_led_connection_facts(struct led_connection_facts *facts)
+{
+	unsigned key = irq_lock();
+	facts->healthy = esb_initialized && esb_conn_state == ESB_ST_PAIRED && own_pong_seen
+		&& !esb_ota_is_active() && !channel_search && !channel_wait_normal && ping_failures < 3
+		&& (uint32_t)(k_uptime_get_32() - own_pong_time) < 4500;
+	facts->radio_required = !radio_user_disabled;
+	facts->paired = paired_addr[0] != 0;
+	facts->pairing = pairing_search_active;
+	irq_unlock(key);
+}
+
 uint8_t esb_get_ping_ack_flag(void)
 {
 	/* A metadata PONG can replace the normal confirmation of a prior
@@ -2682,6 +2761,7 @@ static void esb_thread(void)
 				unsigned key = irq_lock();
 				uint8_t executing_command = received_remote_command;
 				uint32_t executing_generation = remote_command_generation;
+				executing_shutdown_generation = executing_generation;
 				if (executing_command == ESB_PONG_FLAG_TEST_MODE_ON) executing_test_rate_tps = received_test_rate_tps;
 				else if (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) executing_batch_rate_hz = received_batch_rate_hz;
 				else if (executing_command == ESB_PONG_FLAG_SET_CHANNEL) executing_channel_value = received_channel_value;

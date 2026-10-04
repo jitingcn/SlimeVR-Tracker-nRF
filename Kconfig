@@ -79,79 +79,24 @@ config BATTERY_NO_MAPPING
 
 endchoice
 
-choice
-	prompt "Status LED color mapping"
-    default LED_TRI_COLOR
-
-config LED_RGB_COLOR
-    bool "Use RGB color mapping"
-    help
-        Use RGB or RG color mapping for LED status if available.
-
-config LED_TRI_COLOR
-    bool "Use default color mapping"
-    help
-        Use the default color mapping for LED status.
-
-endchoice
-
-menu "Status LED default status color"
-    depends on LED_RGB_COLOR
-
-config LED_DEFAULT_COLOR_R
-    int "Red value"
-    range 0 10000
-    default 4000
-    depends on LED_RGB_COLOR
-    help
-        Red color for default status.
-        Valid range is 0 to 10000.
-
-config LED_DEFAULT_COLOR_G
-    int "Green value"
-    range 0 10000
-    default 6000
-    depends on LED_RGB_COLOR
-    help
-        Green color for default status.
-        Valid range is 0 to 10000.
-
-config LED_DEFAULT_COLOR_B
-    int "Blue value"
-    range 0 10000
-    default 0
-    depends on LED_RGB_COLOR
-    help
-        Blue color for default status.
-        Valid range is 0 to 10000.
-
-endmenu
-
 config LED_GLOBAL_BRIGHTNESS_PPTT
     int "Global LED brightness (pptt)"
     range 0 10000
     default 10000
     help
         Scale LED output brightness in parts per ten-thousand.
-        10000 is full brightness, 2500 is 25%.
+        0 is truly black on every controllable channel, including GPIO.
+        Nonzero GPIO output is binary rather than linearly dimmable.
+        10000 is full brightness, 2500 is 25%; board current limits still apply.
 
 config LED_NETWORK_SYNC
     bool "Synchronize ordinary status LEDs to receiver time"
     depends on CONNECTION_TDMA
     default y
     help
-        Share active, charging pulse and low-battery phase using fresh
+        Share READY heartbeat and unmultiplexed CHARGE phase using fresh
         receiver time. Other indications remain local. Raw 32-bit clock
         wrap may alter one interval; subsequent periods are unchanged.
-
-config LED_STRIP_TIMING_LOG
-    bool "Log LED strip frame timing"
-    default n
-    depends on LED_STRIP
-    help
-        Log one line with the LED strip frame period and how long the strip
-        update blocked, once per 1000 frames (about every 5 seconds while a
-        pattern is fading). Diagnostic for fade smoothness on real hardware.
 
 menu "Thread stack sizes"
 
@@ -169,8 +114,8 @@ config STATUS_THREAD_STACK_SIZE
     int "Status thread stack size"
     default 512
     help
-        Stack size of the status thread. Status changes call into the LED
-        driver, so the LED strip update path can run on this stack as well.
+        Stack size of the status thread. It publishes semantic fault facts;
+        only the LED worker runs hardware drivers.
 
 config USB_INIT_THREAD_STACK_SIZE
     int "USB init thread stack size"

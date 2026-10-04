@@ -1,13 +1,7 @@
 #include "globals.h"
-
-#include <math.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
-#include <zephyr/pm/device.h>
-
-#include "led.h"
-#include "led_strip_fade.h"
+#include <limits.h>
+#include "led_policy.h"
 #include "led_sync.h"
 #if CONFIG_LED_NETWORK_SYNC
 #include "connection/esb.h"
@@ -15,703 +9,551 @@
 
 LOG_MODULE_REGISTER(led, LOG_LEVEL_INF);
 
+/* Existing worker is the only driver/rail owner. Business calls copy bounded
+ * scalar facts under this lock; no driver, wait or formatting occurs inside. */
+static struct led_engine engine;
+static struct k_spinlock led_lock;
+static bool initialized;
+static bool hardware_quiesced;
+static uint32_t request_counter, event_counter;
+#ifdef CONFIG_LED_DEBUG
+static enum led_time_source clock_source;
+#endif
+K_SEM_DEFINE(led_changed, 0, 1);
+K_SEM_DEFINE(led_quiesced, 0, 1);
 static void led_thread(void);
 K_THREAD_DEFINE(led_thread_id, CONFIG_LED_THREAD_STACK_SIZE, led_thread, NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, 0);
 
-#define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
-
-#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, led_en_gpios)
-#define LED_EN_EXISTS true
-static const struct gpio_dt_spec led_en = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, led_en_gpios);
-#endif
-
-#if CONFIG_LED_STRIP
-#define LED_STRIP_EXISTS true
-#include <zephyr/drivers/led_strip.h>
-#define STRIP_NODE DT_ALIAS(led_strip)
-static const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
-static struct led_strip_fade led_fade;
-static bool strip_error_logged;
-static int64_t strip_error_log_ticks;
-#endif
-
-#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, led_gpios)
-#define LED_EXISTS true
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, led_gpios);
-#endif
-#if DT_NODE_EXISTS(DT_ALIAS(led0))
-#ifndef LED_EXISTS
-#define LED_EXISTS true
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-#else
-#define LED0_EXISTS true
-static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-#endif
-#endif
-#ifndef LED_EXISTS
-#ifndef LED_STRIP_EXISTS
-#warning "LED GPIO does not exist"
-// static const struct gpio_dt_spec led = {0};
-#endif
-#endif
-#if DT_NODE_EXISTS(DT_ALIAS(led1))
-#define LED1_EXISTS true
-static const struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
-#endif
-#if DT_NODE_EXISTS(DT_ALIAS(led2))
-#define LED2_EXISTS true
-static const struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
-#endif
-#if DT_NODE_EXISTS(DT_ALIAS(led3))
-#define LED3_EXISTS true
-static const struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
-#endif
-
-#if DT_NODE_EXISTS(DT_ALIAS(pwm_led0))
-#define PWM_LED_EXISTS true
-static const struct pwm_dt_spec pwm_led = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led0));
-#else
-#ifndef LED_STRIP_EXISTS
-#warning "PWM LED node does not exist"
-#endif
-#endif
-#if DT_NODE_EXISTS(DT_ALIAS(pwm_led1))
-#define PWM_LED1_EXISTS true
-static const struct pwm_dt_spec pwm_led1 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led1));
-#endif
-#if DT_NODE_EXISTS(DT_ALIAS(pwm_led2))
-#define PWM_LED2_EXISTS true
-static const struct pwm_dt_spec pwm_led2 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
-#endif
-
-#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
-static struct k_spinlock led_request_lock;
-K_SEM_DEFINE(led_changed, 0, 1);
-K_SEM_DEFINE(led_quiesced, 0, 1);
-K_MUTEX_DEFINE(led_shutdown_lock);
-static bool shutdown_pending;
-static enum sys_led_pattern led_patterns[SYS_LED_PATTERN_DEPTH]
-	= {[0 ...(SYS_LED_PATTERN_DEPTH - 1)] = SYS_LED_PATTERN_OFF};
-static uint32_t led_generations[SYS_LED_PATTERN_DEPTH];
-
-static int led_pin_init(void)
+static uint32_t local_ms(void)
 {
-	LOG_DBG("led_pin_init");
-#ifdef LED_STRIP_EXISTS
-	led_strip_fade_reset(&led_fade);
-#endif
-#if LED_EXISTS
-	gpio_pin_configure_dt(&led, GPIO_OUTPUT);
-	gpio_pin_set_dt(&led, 0);
-#endif
-#if LED0_EXISTS
-	gpio_pin_configure_dt(&led0, GPIO_OUTPUT);
-	gpio_pin_set_dt(&led0, 0);
-#endif
-#if LED1_EXISTS
-	gpio_pin_configure_dt(&led1, GPIO_OUTPUT);
-	gpio_pin_set_dt(&led1, 0);
-#endif
-#if LED2_EXISTS
-	gpio_pin_configure_dt(&led2, GPIO_OUTPUT);
-	gpio_pin_set_dt(&led2, 0);
-#endif
-#if LED3_EXISTS
-	gpio_pin_configure_dt(&led3, GPIO_OUTPUT);
-	gpio_pin_set_dt(&led3, 0);
-#endif
-	return 0;
+	return (uint32_t)k_uptime_get();
 }
-
-SYS_INIT(led_pin_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
-
-static void led_pin_reset(void)
+static void init_locked(uint32_t now_ms)
 {
-	LOG_DBG("led_pin_reset");
-#if LED_EXISTS
-	gpio_pin_configure_dt(&led, GPIO_DISCONNECTED);
-#endif
-#if LED0_EXISTS
-	gpio_pin_configure_dt(&led0, GPIO_DISCONNECTED);
-#endif
-#if LED1_EXISTS
-	gpio_pin_configure_dt(&led1, GPIO_DISCONNECTED);
-#endif
-#if LED2_EXISTS
-	gpio_pin_configure_dt(&led2, GPIO_DISCONNECTED);
-#endif
-#if LED3_EXISTS
-	gpio_pin_configure_dt(&led3, GPIO_DISCONNECTED);
-#endif
-}
-
-static void led_suspend(void)
-{
-	LOG_DBG("led_suspend");
-#ifdef LED_STRIP_EXISTS
-	pm_device_action_run(strip, PM_DEVICE_ACTION_SUSPEND);
-#endif
-#ifdef PWM_LED_EXISTS
-	pm_device_action_run(pwm_led.dev, PM_DEVICE_ACTION_SUSPEND);
-#endif
-#ifdef PWM_LED1_EXISTS
-	pm_device_action_run(pwm_led1.dev, PM_DEVICE_ACTION_SUSPEND);
-#endif
-#ifdef PWM_LED2_EXISTS
-	pm_device_action_run(pwm_led2.dev, PM_DEVICE_ACTION_SUSPEND);
-#endif
-	led_pin_reset();
-	// disable power
-#if LED_EN_EXISTS
-	gpio_pin_configure_dt(&led_en, GPIO_OUTPUT);
-	gpio_pin_set_dt(&led_en, 0);
-#endif
-}
-
-static void led_resume(void)
-{
-	LOG_DBG("led_resume");
-	// enable power
-#if LED_EN_EXISTS
-	gpio_pin_configure_dt(&led_en, GPIO_OUTPUT);
-	gpio_pin_set_dt(&led_en, 1);
-#if LED_STRIP_EXISTS
-	/* Rail settling margin, only on the worker's off -> on transition. */
-	k_msleep(2);
-#endif
-#endif
-#ifdef LED_STRIP_EXISTS
-	pm_device_action_run(strip, PM_DEVICE_ACTION_RESUME);
-#endif
-#ifdef PWM_LED_EXISTS
-	pm_device_action_run(pwm_led.dev, PM_DEVICE_ACTION_RESUME);
-#endif
-#ifdef PWM_LED1_EXISTS
-	pm_device_action_run(pwm_led1.dev, PM_DEVICE_ACTION_RESUME);
-#endif
-#ifdef PWM_LED2_EXISTS
-	pm_device_action_run(pwm_led2.dev, PM_DEVICE_ACTION_RESUME);
-#endif
-	led_pin_init();
-}
-
-#ifdef LED_STRIP_EXISTS
-#define LED_RGB_COLOR
-#else
-#ifdef CONFIG_LED_RGB_COLOR
-#define LED_RGB_COLOR
-#define LED_RG_COLOR
-#endif
-
-#if PWM_LED_EXISTS && PWM_LED1_EXISTS && PWM_LED2_EXISTS
-#define LED_TRI_COLOR
-#else
-#undef LED_RGB_COLOR
-#undef LED_TRI_COLOR
-#if PWM_LED_EXISTS && PWM_LED1_EXISTS
-#define LED_DUAL_COLOR
-#else
-#undef LED_RG_COLOR
-#undef LED_DUAL_COLOR
-#endif
-#endif
-#endif
-
-#ifdef LED_RGB_COLOR
-static int led_pwm_period[5][3] = {
-	{CONFIG_LED_DEFAULT_COLOR_R, CONFIG_LED_DEFAULT_COLOR_G, CONFIG_LED_DEFAULT_COLOR_B}, // Default
-	{0, 10000, 0},                                                                        // Success
-	{10000, 0, 0},                                                                        // Error
-	{8000, 2000, 0},                                                                      // Charging
-	{0, 0, 10000},                                                                        // Pairing
-};
-#elif defined(LED_TRI_COLOR)
-static int led_pwm_period[5][3] = {
-	{0, 0, 10000},   // Default
-	{0, 10000, 0},   // Success
-	{10000, 0, 0},   // Error
-	{6000, 4000, 0}, // Charging
-	{0, 0, 10000},   // Pairing
-};
-#elif defined(LED_RG_COLOR)
-static int led_pwm_period[5][2] = {
-	{CONFIG_LED_DEFAULT_COLOR_R, CONFIG_LED_DEFAULT_COLOR_G}, // Default
-	{0, 10000},                                               // Success
-	{10000, 0},                                               // Error
-	{8000, 2000},                                             // Charging
-	{4000, 6000},                                             // Pairing
-};
-#elif defined(LED_DUAL_COLOR)
-static int led_pwm_period[5][2] = {
-	{0, 10000},   // Default
-	{0, 10000},   // Success
-	{10000, 0},   // Error
-	{6000, 4000}, // Charging
-	{0, 10000},   // Pairing
-};
-#else
-static int led_pwm_period[5][1] = {
-	{10000}, // Default
-	{10000}, // Success
-	{10000}, // Error
-	{10000}, // Charging
-	{10000}, // Pairing
-};
-#endif
-
-// Using brightness and value if PWM is supported, otherwise value is coerced to on/off
-// TODO: use computed constants for high/low brightness and color values
-#if CONFIG_LED_STRIP_TIMING_LOG
-/*
- * Diagnostic for the fade smoothness: the sub-level carry relies on the fade
- * patterns refreshing at their nominal rate, so report the actual frame period
- * (between two strip updates) and how long the update itself blocked, once per
- * 1000 frames - about every 5 s while a pattern is fading.
- */
-static void led_strip_timing_note(uint32_t start_ticks)
-{
-	static uint32_t frames;
-	static uint32_t previous_start;
-	static uint32_t period_min_us = UINT32_MAX;
-	static uint32_t period_max_us;
-	static uint64_t period_sum_us;
-	static uint32_t update_min_us = UINT32_MAX;
-	static uint32_t update_max_us;
-	static uint64_t update_sum_us;
-	static uint32_t late_frames;
-
-	uint32_t now = k_uptime_ticks();
-	uint32_t update_us = k_ticks_to_us_floor32(now - start_ticks);
-
-	if (frames > 0) {
-		uint32_t period_us = k_ticks_to_us_floor32(start_ticks - previous_start);
-
-		if (period_us < period_min_us) {
-			period_min_us = period_us;
-		}
-		if (period_us > period_max_us) {
-			period_max_us = period_us;
-		}
-		period_sum_us += period_us;
-		if (period_us > 20000) {
-			late_frames++;
-		}
-	}
-	if (update_us < update_min_us) {
-		update_min_us = update_us;
-	}
-	if (update_us > update_max_us) {
-		update_max_us = update_us;
-	}
-	update_sum_us += update_us;
-	previous_start = start_ticks;
-	frames++;
-
-	if (frames >= 1000) {
-		LOG_INF("strip frames %u: period %u/%u/%u us (min/avg/max), late(>20ms) %u; "
-			"update blocked %u/%u/%u us",
-			frames, period_min_us, (uint32_t)(period_sum_us / (frames - 1)),
-			period_max_us, late_frames, update_min_us,
-			(uint32_t)(update_sum_us / frames), update_max_us);
-		frames = 0;
-		period_min_us = UINT32_MAX;
-		period_max_us = 0;
-		period_sum_us = 0;
-		update_min_us = UINT32_MAX;
-		update_max_us = 0;
-		update_sum_us = 0;
-		late_frames = 0;
+	if (!initialized) {
+		led_engine_init(&engine, now_ms);
+		initialized = true;
 	}
 }
-#endif
-
-
-static bool led_pin_set(enum sys_led_color color, int brightness_pptt, int value_pptt)
+static uint32_t next_id(uint32_t *counter)
 {
-	LOG_DBG("led_pin_set: color %d, brightness %d, value %d", color, brightness_pptt, value_pptt);
-	if (brightness_pptt < 0) {
-		brightness_pptt = 0;
-	} else if (brightness_pptt > 10000) {
-		brightness_pptt = 10000;
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	if (++*counter == 0) {
+		++*counter;
 	}
-	if (value_pptt < 0) {
-		value_pptt = 0;
-	} else if (value_pptt > 10000) {
-		value_pptt = 10000;
-	}
-#if LED_STRIP_EXISTS
-	static struct led_rgb pixel[1];
-	value_pptt = value_pptt * brightness_pptt / 10000;
-	value_pptt = value_pptt * CONFIG_LED_GLOBAL_BRIGHTNESS_PPTT / 10000;
-	struct led_strip_fade next_fade = led_fade;
-	const struct led_rgb requested = {
-		.r = led_strip_fade_next(&next_fade, led_pwm_period[color][0], value_pptt, 0),
-		.g = led_strip_fade_next(&next_fade, led_pwm_period[color][1], value_pptt, 1),
-		.b = led_strip_fade_next(&next_fade, led_pwm_period[color][2], value_pptt, 2),
-	};
-	pixel[0] = requested;
-#if CONFIG_LED_STRIP_TIMING_LOG
-	uint32_t led_frame_start = k_uptime_ticks();
-#endif
-	int err = led_strip_update_rgb(strip, pixel, 1);
-#if CONFIG_LED_STRIP_TIMING_LOG
-	led_strip_timing_note(led_frame_start);
-#endif
-	if (err < 0) {
-		int64_t now = k_uptime_ticks();
-		if (!strip_error_logged ||
-		    now - strip_error_log_ticks >= CONFIG_SYS_CLOCK_TICKS_PER_SEC) {
-			LOG_ERR("strip RGB %u/%u/%u update failed: %d",
-				requested.r, requested.g, requested.b, err);
-			strip_error_logged = true;
-			strip_error_log_ticks = now;
-		}
-		return false;
-	}
-	/* A rejected frame must not spend the fractional brightness carry. */
-	led_fade = next_fade;
-#elif PWM_LED_EXISTS
-	value_pptt = value_pptt * brightness_pptt / 10000;
-	value_pptt = value_pptt * CONFIG_LED_GLOBAL_BRIGHTNESS_PPTT / 10000;
-	// only supporting color if PWM is supported
-	pwm_set_pulse_dt(&pwm_led, pwm_led.period / 10000 * (led_pwm_period[color][0] * value_pptt / 10000));
-#if PWM_LED1_EXISTS
-	pwm_set_pulse_dt(&pwm_led1, pwm_led1.period / 10000 * (led_pwm_period[color][1] * value_pptt / 10000));
-#if PWM_LED2_EXISTS
-	pwm_set_pulse_dt(&pwm_led2, pwm_led2.period / 10000 * (led_pwm_period[color][2] * value_pptt / 10000));
-#endif
-#endif
-#else
-	gpio_pin_set_dt(&led, value_pptt > 5000);
-#endif
-	return true;
+	uint32_t value = *counter;
+	k_spin_unlock(&led_lock, key);
+	return value;
 }
-#endif
-
-/* Only the worker owns driver calls, including power and strip transfers. */
-void set_led(enum sys_led_pattern pattern, int priority)
+uint32_t led_request_id(void)
 {
-#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
-	if (priority < 0 || priority >= SYS_LED_PATTERN_DEPTH) {
+	return next_id(&request_counter);
+}
+uint32_t led_event_id(void)
+{
+	return next_id(&event_counter);
+}
+struct led_token led_begin(enum led_owner owner, uint32_t request_id)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	uint32_t previous = led_owner_valid(owner) ? engine.owners[owner].session : 0;
+	struct led_token token = led_engine_begin(&engine, owner, request_id);
+	k_spin_unlock(&led_lock, key);
+	if (token.session && token.session != previous) {
+		k_sem_give(&led_changed);
+	}
+	return token;
+}
+enum led_admission led_state(struct led_token token, uint32_t revision, enum led_semantic semantic)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	enum led_admission result = led_engine_state(&engine, token, revision, semantic, now_ms);
+	k_spin_unlock(&led_lock, key);
+	if (result == LED_ADMITTED) {
+		k_sem_give(&led_changed);
+	}
+	return result;
+}
+static enum led_admission
+result_submit(struct led_token token, uint32_t event_id, enum led_semantic semantic, bool request_only)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	enum led_admission result = led_engine_event(&engine, token, event_id, semantic, now_ms, request_only);
+	k_spin_unlock(&led_lock, key);
+	if (result == LED_CONFLICT) {
+		LOG_ERR("LED owner %u request %u has contradictory terminal %u", token.owner, token.request_id, semantic);
+	}
+	if (result == LED_ADMITTED || result == LED_CONFLICT) {
+		k_sem_give(&led_changed);
+	}
+	return result;
+}
+enum led_admission led_result(struct led_token token, uint32_t event_id, enum led_semantic semantic)
+{
+	return result_submit(token, event_id, semantic, false);
+}
+enum led_admission
+led_request_event(enum led_owner owner, uint32_t request_id, uint32_t event_id, enum led_semantic semantic)
+{
+	struct led_token token = {.owner = owner, .request_id = request_id};
+	return result_submit(token, event_id, semantic, true);
+}
+uint32_t led_button_input(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(local_ms());
+	bool changed = engine.button_hold_active || engine.button_event.present
+				 || (engine.active_event.present && engine.active_event.button_count);
+	uint32_t generation = led_engine_button_input(&engine);
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+	return generation;
+}
+enum led_admission led_button_group(uint32_t generation, uint32_t count)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	enum led_admission result = led_engine_button_group(&engine, generation, count, now_ms);
+	k_spin_unlock(&led_lock, key);
+	if (result == LED_ADMITTED) {
+		k_sem_give(&led_changed);
+	}
+	return result;
+}
+enum led_admission led_button_hold(uint32_t generation, bool active, uint32_t started_ms)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	enum led_admission result = led_engine_button_hold(&engine, generation, active, started_ms, now_ms);
+	k_spin_unlock(&led_lock, key);
+	if (result == LED_ADMITTED) {
+		k_sem_give(&led_changed);
+	}
+	return result;
+}
+enum led_admission led_button_exit(struct led_token token, uint32_t revision, uint32_t generation)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	enum led_admission result = led_engine_button_exit(&engine, token, revision, generation, now_ms);
+	k_spin_unlock(&led_lock, key);
+	if (result == LED_ADMITTED) {
+		k_sem_give(&led_changed);
+	}
+	return result;
+}
+void led_identify(void)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	bool changed
+		= !engine.quiesced && (!engine.identify_active || (int32_t)(now_ms - (engine.identify_origin_ms + 6000)) >= 0);
+	led_engine_identify(&engine, now_ms);
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
+void led_connection_publish(const struct led_connection_facts *facts)
+{
+	if (!facts) {
 		return;
 	}
-	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
-	if (led_patterns[priority] != pattern) {
-		led_patterns[priority] = pattern;
-		led_generations[priority]++;
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	const struct led_connection_facts *old = &engine.connection;
+	bool changed = !engine.quiesced
+				&& (facts->healthy != old->healthy || facts->output_ready != old->output_ready
+					|| facts->radio_required != old->radio_required || facts->paired != old->paired
+					|| facts->pairing != old->pairing);
+	if (changed) {
+		led_engine_connection(&engine, facts);
 	}
-	k_spin_unlock(&led_request_lock, key);
-	k_sem_give(&led_changed);
-#else
-	(void)pattern;
-	(void)priority;
-#endif
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
 }
-
+void led_power_publish(enum led_power_state state, bool low)
+{
+	if (state < LED_POWER_BATTERY || state > LED_POWER_EXTERNAL_UNKNOWN) {
+		return;
+	}
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	bool changed = !engine.quiesced && (engine.power != state || engine.low != (low && state != LED_POWER_CHARGING));
+	if (changed) {
+		led_engine_power(&engine, state, low, now_ms);
+	}
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
+void led_fault_publish(enum led_owner owner, enum led_fault_kind fault, uint32_t protection_id)
+{
+	/* Reject before computing changes: an invalid fault must not wake the
+	 * worker and consume or expire otherwise untouched pending feedback. */
+	if (!led_owner_valid(owner) || fault < LED_FAULT_NONE || fault > LED_FAULT_SAFETY) {
+		return;
+	}
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	const struct led_owner_state *state = &engine.owners[owner];
+	bool changed = !engine.quiesced
+				&& (state->fault != fault || (protection_id && protection_id != state->protection_id));
+	if (changed) {
+		led_engine_fault(&engine, owner, fault, protection_id, now_ms);
+	}
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
+void led_maintenance_publish(enum led_owner owner, bool active)
+{
+	if (!led_owner_valid(owner)) {
+		return;
+	}
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	bool changed = !engine.quiesced && engine.owners[owner].maintenance != active;
+	if (changed) {
+		led_engine_maintenance(&engine, owner, active);
+	}
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
+void led_operation_publish(enum led_owner owner, bool ota_active, bool heated_active)
+{
+	if (!led_owner_valid(owner)) {
+		return;
+	}
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	bool changed
+		= !engine.quiesced
+	   && (engine.owners[owner].ota_active != ota_active || engine.owners[owner].heated_active != heated_active);
+	if (changed) {
+		led_engine_operation(&engine, owner, ota_active, heated_active);
+	}
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
+void led_quiesce(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(local_ms());
+	bool changed = !engine.quiesced;
+	engine.quiesced = true;
+	engine.button_hold_active = false;
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
+bool led_output_enabled(void)
+{
+	struct led_hardware_info hardware;
+	led_hw_info(&hardware);
+	return hardware.capability != LED_CAP_NO_LED && hardware.global_limit_pptt != 0;
+}
 void led_shutdown(void)
 {
-#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
-	/* Shutdown callers may overlap; this operation cannot be superseded by
-	 * an ordinary request while the driver finishes its current transfer. */
-	k_mutex_lock(&led_shutdown_lock, K_FOREVER);
-	k_sem_reset(&led_quiesced);
-	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
-	shutdown_pending = true;
-	k_spin_unlock(&led_request_lock, key);
+	led_quiesce();
+	if (!led_output_enabled()) {
+		return;
+	}
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	bool done = hardware_quiesced;
+	k_spin_unlock(&led_lock, key);
+	/* Bounded existing black/gate handshake, not an animation drain. A platform
+	 * driver stuck beyond its proven bound cannot delay the device shutdown. */
+	if (!done) {
+		(void)k_sem_take(&led_quiesced, K_MSEC(50));
+	}
+}
+#ifdef CONFIG_LED_DEBUG
+void led_policy_snapshot(struct led_policy_view *view)
+{
+	if (!view) {
+		return;
+	}
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	/* Strictly readonly: status cannot admit/expire events or change phases. */
+	led_engine_view(&engine, now_ms, view);
+	view->time_source = clock_source;
+	k_spin_unlock(&led_lock, key);
+}
+enum led_preview_result led_preview_start(
+	uint32_t console_session,
+	enum led_semantic semantic,
+	int color_override,
+	uint32_t duration_ms,
+	struct led_preview_record *record
+)
+{
+	if (!record) {
+		return LED_PREVIEW_INVALID;
+	}
+	struct led_hardware_info hardware;
+	led_hw_info(&hardware);
+	bool color_supported = color_override < 0 || led_hw_color_supported(color_override);
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	enum led_preview_result result = led_engine_preview(
+		&engine,
+		console_session,
+		semantic,
+		color_override,
+		duration_ms,
+		now_ms,
+		&hardware,
+		color_supported,
+		record
+	);
+	k_spin_unlock(&led_lock, key);
+	if (result == LED_PREVIEW_ADMITTED) {
+		k_sem_give(&led_changed);
+	}
+	return result;
+}
+void led_preview_stop(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	if (engine.preview.status == LED_PREVIEW_ACTIVE) {
+		engine.preview.status = LED_PREVIEW_STOPPED;
+	}
+	k_spin_unlock(&led_lock, key);
 	k_sem_give(&led_changed);
-	k_sem_take(&led_quiesced, K_FOREVER);
-	k_mutex_unlock(&led_shutdown_lock);
+}
+void led_preview_session_start(uint32_t session)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(local_ms());
+	if (session != engine.console_session && engine.preview.status == LED_PREVIEW_ACTIVE) {
+		engine.preview.status = LED_PREVIEW_STOPPED;
+	}
+	engine.console_session = session;
+	k_spin_unlock(&led_lock, key);
+	k_sem_give(&led_changed);
+}
+void led_preview_disconnect(uint32_t session)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	if (engine.console_session == session) {
+		engine.console_session = 0;
+	}
+	if (engine.preview.status == LED_PREVIEW_ACTIVE && engine.preview.console_session == session) {
+		engine.preview.status = LED_PREVIEW_STOPPED;
+	}
+	k_spin_unlock(&led_lock, key);
+	k_sem_give(&led_changed);
+}
+void led_preview_snapshot(struct led_preview_record *record)
+{
+	if (!record) {
+		return;
+	}
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	*record = engine.preview;
+	k_spin_unlock(&led_lock, key);
+}
+#endif
+
+static uint32_t led_clock_raw(void)
+{
+	uint32_t local = led_sync_kernel_ticks(k_uptime_ticks(), CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+#if CONFIG_LED_NETWORK_SYNC
+	static bool have_offset;
+	static uint32_t held_offset;
+	uint32_t network;
+	bool fresh = esb_get_status_clock(&local, &network);
+	if (fresh) {
+		held_offset = network - local;
+		have_offset = true;
+	}
+#ifdef CONFIG_LED_DEBUG
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	clock_source = fresh ? LED_TIME_NETWORK_FRESH : have_offset ? LED_TIME_NETWORK_HELD : LED_TIME_LOCAL;
+	k_spin_unlock(&led_lock, key);
+#endif
+	return have_offset ? local + held_offset : local;
+#else
+	return local;
 #endif
 }
-
-#if LED_EXISTS || LED_STRIP_EXISTS || PWM_LED_EXISTS
-struct led_request {
-	enum sys_led_pattern pattern;
-	int owner;
-	uint32_t generation;
-};
-
-static struct led_request led_request_snapshot(void)
+/* A single bounded coordinator iteration is also the host smoke surface. */
+static uint32_t led_worker_step(void)
 {
-	struct led_request request = {.pattern = SYS_LED_PATTERN_OFF, .owner = -1};
-	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
-	for (int i = 0; i < SYS_LED_PATTERN_DEPTH; i++) {
-		if (led_patterns[i] != SYS_LED_PATTERN_OFF) {
-			request.pattern = led_patterns[i];
-			request.owner = i;
-			request.generation = led_generations[i];
-			break;
-		}
-	}
-	k_spin_unlock(&led_request_lock, key);
-	return request;
-}
-
-static bool led_complete(struct led_request request, enum sys_led_pattern result)
-{
-	k_spinlock_key_t key = k_spin_lock(&led_request_lock);
-	int winner = -1;
-	for (int i = 0; i < SYS_LED_PATTERN_DEPTH; i++) {
-		if (led_patterns[i] != SYS_LED_PATTERN_OFF) {
-			winner = i;
-			break;
-		}
-	}
-	bool matches = request.owner >= 0 && winner == request.owner
-		&& led_patterns[request.owner] == request.pattern
-		&& led_generations[request.owner] == request.generation;
-	if (matches) {
-		led_patterns[request.owner] = result;
-		led_generations[request.owner]++;
-	}
-	k_spin_unlock(&led_request_lock, key);
-	k_sem_give(&led_changed);
-	return matches;
-}
-
-static uint32_t led_local_ticks(void)
-{
-	/* nRF54 kernel ticks are 31250 Hz; LED phase is always 32768 Hz. */
-	uint64_t ticks = k_uptime_ticks();
-	return (uint32_t)((ticks / CONFIG_SYS_CLOCK_TICKS_PER_SEC) * LED_SYNC_HZ
-		+ (ticks % CONFIG_SYS_CLOCK_TICKS_PER_SEC) * LED_SYNC_HZ
-			/ CONFIG_SYS_CLOCK_TICKS_PER_SEC);
-}
+	uint64_t uptime_ms = (uint64_t)k_uptime_get();
+	uint32_t now_ms = (uint32_t)uptime_ms;
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+#ifdef CONFIG_LED_DEBUG
+	clock_source = LED_TIME_LOCAL;
 #endif
-
+	struct led_selection chosen = led_engine_select(&engine, now_ms);
+	k_spin_unlock(&led_lock, key);
+	if (chosen.priority == LED_PRIORITY_SHUTDOWN) {
+		led_hw_off();
+		key = k_spin_lock(&led_lock);
+		hardware_quiesced = true;
+		led_engine_black(&engine, local_ms(), true, true);
+		k_spin_unlock(&led_lock, key);
+		k_sem_give(&led_quiesced);
+		return UINT32_MAX;
+	}
+	struct led_hardware_info hardware;
+	led_hw_info(&hardware);
+	if (hardware.capability == LED_CAP_NO_LED || hardware.global_limit_pptt == 0) {
+		led_hw_off();
+		/* Invisible animations neither hold power nor schedule frame edges. A
+		 * muted preview still has a single hard-deadline bookkeeping wake. */
+#ifdef CONFIG_LED_DEBUG
+		key = k_spin_lock(&led_lock);
+		uint32_t muted_wait = UINT32_MAX;
+		if (engine.preview.status == LED_PREVIEW_ACTIVE) {
+			const struct led_behavior *preview_behavior = led_behavior_get(engine.preview.semantic);
+			if (engine.preview.color_override < 0 && preview_behavior && preview_behavior->extent == LED_FINITE) {
+				engine.preview.status = LED_PREVIEW_COMPLETED;
+			} else {
+				muted_wait = engine.preview.expires_ms - now_ms;
+			}
+		}
+		k_spin_unlock(&led_lock, key);
+		return muted_wait;
+#else
+		return UINT32_MAX;
+#endif
+	}
+	const struct led_behavior *behavior = led_behavior_get(chosen.semantic);
+	int color_override = -1;
+#ifdef CONFIG_LED_DEBUG
+	key = k_spin_lock(&led_lock);
+	if (engine.preview.status == LED_PREVIEW_ACTIVE && chosen.identity == 0x80000000U + engine.preview.generation) {
+		color_override = engine.preview.color_override;
+	}
+	k_spin_unlock(&led_lock, key);
+#endif
+	uint32_t wait_ms = chosen.next_ms;
+	struct led_envelope envelope = {.next_ms = UINT32_MAX};
+	enum led_role role = behavior ? behavior->role : LED_ROLE_NEUTRAL;
+	uint16_t level = behavior ? behavior->level : LED_LEVEL_NOTICE;
+	bool before_origin = !chosen.network && chosen.finite && (int32_t)(now_ms - chosen.origin_ms) < 0;
+	if (color_override >= 0) {
+		envelope.value_pptt = 10000;
+	} else if (behavior && !before_origin) {
+		uint32_t elapsed = now_ms - chosen.origin_ms;
+		if (chosen.network) {
+			uint32_t raw = led_clock_raw();
+			elapsed = led_sync_phase_ms(raw, behavior->duration_ms);
+			uint32_t wrap = led_sync_wrap_ms(raw);
+			if (wrap < wait_ms) {
+				wait_ms = wrap;
+			}
+#if CONFIG_LED_NETWORK_SYNC
+			if (wait_ms > 250) {
+				wait_ms = 250;
+			}
+#endif
+		}
+		envelope = chosen.button_count ? led_timeline_button_count(chosen.button_count, elapsed)
+									 : led_timeline_behavior(behavior, elapsed, hardware.gpio, chosen.finite);
+	}
+	if (before_origin && chosen.origin_ms - now_ms < wait_ms) {
+		wait_ms = chosen.origin_ms - now_ms;
+	}
+	if (envelope.next_ms < wait_ms) {
+		wait_ms = envelope.next_ms;
+	}
+	if (envelope.fading) {
+		/* Producer wakes must not shift the next absolute frame-grid deadline;
+		 * pixel BREATHE carry is spent once per successful visible slot. */
+		uint32_t frame_wait = LED_FRAME_MS - uptime_ms % LED_FRAME_MS;
+		if (frame_wait < wait_ms) {
+			wait_ms = frame_wait;
+		}
+	}
+	/* Recheck irreversible shutdown and cancelled button selections before the
+	 * driver call. Hardware remains worker-only and outside the facts lock. */
+	key = k_spin_lock(&led_lock);
+	bool shutdown = engine.quiesced;
+	bool cancelled = chosen.button_count
+		&& (!engine.active_event.present || engine.active_event.identity != chosen.identity
+			|| engine.active_event.event_id != engine.button_generation);
+	cancelled |= chosen.button_generation
+		&& (!engine.button_hold_active || chosen.button_generation != engine.button_generation
+			|| chosen.identity != engine.button_hold_identity);
+	k_spin_unlock(&led_lock, key);
+	if (shutdown || cancelled) {
+		return 0;
+	}
+	struct led_fade_sample fade;
+	const struct led_fade_sample *fade_sample = NULL;
+	if (hardware.capability == LED_CAP_RGB_PIXEL && behavior && envelope.fading && color_override < 0
+		&& (behavior->style == LED_STYLE_BREATHE || behavior->style == LED_STYLE_BUTTON_HOLD
+			|| behavior->style == LED_STYLE_MANUAL_EXIT)) {
+		fade.source = ((uint64_t)chosen.owner << 48) | ((uint64_t)chosen.semantic << 32) | chosen.identity;
+		fade.origin_ms = chosen.origin_ms;
+		fade.slot = (uint32_t)(uptime_ms / LED_FRAME_MS);
+		fade_sample = &fade;
+	}
+	bool success = led_hw_write(role, level, envelope.value_pptt, color_override, fade_sample);
+	key = k_spin_lock(&led_lock);
+	led_engine_black(&engine, local_ms(), envelope.value_pptt == 0, success);
+	k_spin_unlock(&led_lock, key);
+	/* At most two bounded retries per unchanged failed frame. New semantic
+	 * identity resets budget; a static broken driver never spins forever. */
+	static uint32_t failed_identity;
+	static uint8_t failures;
+	if (success) {
+		failures = 0;
+	} else {
+		if (failed_identity != chosen.identity) {
+			failed_identity = chosen.identity;
+			failures = 0;
+		}
+		if (++failures < 3 && wait_ms > 20) {
+			wait_ms = 20;
+		}
+	}
+	return wait_ms;
+}
 static void led_thread(void)
 {
-#if !LED_EXISTS && !LED_STRIP_EXISTS && !PWM_LED_EXISTS
-	LOG_WRN("LED GPIO does not exist");
-	return;
-#else
-	enum sys_led_pattern current = SYS_LED_PATTERN_OFF;
-	int owner = -1;
-	uint32_t generation = 0;
-	int state = 0;
-	bool powered = false;
-	int last_value = -1;
-	int last_brightness = -1;
-	enum sys_led_color last_color = SYS_LED_COLOR_DEFAULT;
-	int64_t due = 0;
-	unsigned steady_attempts = 0;
-	uint32_t local_origin = 0;
-	struct led_sync_start active = {0};
-#if CONFIG_LED_NETWORK_SYNC
-	uint32_t held_offset = 0;
-	bool have_offset = false;
-#endif
+	led_hw_init();
 	for (;;) {
-		k_spinlock_key_t key = k_spin_lock(&led_request_lock);
-		bool shutting_down = shutdown_pending;
-		k_spin_unlock(&led_request_lock, key);
-		if (shutting_down) {
-			if (powered) {
-				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
-#if LED_STRIP_EXISTS
-				/* Electrical margin, not a driver completion acknowledgment. */
-				k_msleep(1);
-#endif
-			}
-			led_suspend();
-			powered = false;
-			last_value = -1;
-			key = k_spin_lock(&led_request_lock);
-			led_patterns[SYS_LED_PRIORITY_HIGHEST] = SYS_LED_PATTERN_OFF_FORCE;
-			led_generations[SYS_LED_PRIORITY_HIGHEST]++;
-			shutdown_pending = false;
-			k_spin_unlock(&led_request_lock, key);
-			k_sem_give(&led_quiesced);
+		uint32_t start = local_ms();
+		uint32_t wait_ms = led_worker_step();
+		/* The segment deadline includes driver elapsed time, never delay+cost. */
+		if (wait_ms != UINT32_MAX) {
+			uint32_t spent = local_ms() - start;
+			wait_ms = spent >= wait_ms ? 0 : wait_ms - spent;
 		}
-		struct led_request request = led_request_snapshot();
-		int64_t now = k_uptime_ticks();
-		if (request.pattern != current ||
-		    (request.owner == owner && request.generation != generation)) {
-			current = request.pattern;
-			state = 0;
-			due = now;
-			steady_attempts = 0;
-			local_origin = led_local_ticks();
-			active = (struct led_sync_start){.entered = local_origin};
-			/* A new effect starts with a fresh first frame, not the previous
-			 * effect's fractional strip brightness. Keep hardware powered. */
-#if LED_STRIP_EXISTS
-			led_strip_fade_reset(&led_fade);
-#endif
-			last_value = -1;
-		}
-		owner = request.owner;
-		generation = request.generation;
-		if (current <= SYS_LED_PATTERN_OFF) {
-			if (powered) {
-				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
-#if LED_STRIP_EXISTS
-				k_msleep(1);
-#endif
-				led_suspend();
-				powered = false;
-			}
-			k_sem_take(&led_changed, K_FOREVER);
-			continue;
-		}
-		if (!powered) {
-			led_resume();
-			powered = true;
-			last_value = -1;
-			now = k_uptime_ticks();
-		}
-		if (now < due) {
-			k_sem_take(&led_changed, due == INT64_MAX ? K_FOREVER : K_TICKS(due - now));
-			continue;
-		}
-		uint32_t wait_us = 0;
-		bool forever = false;
-		int brightness = 10000;
-		int value = 0;
-		enum sys_led_color color = SYS_LED_COLOR_DEFAULT;
-		enum sys_led_pattern completed = SYS_LED_PATTERN_OFF;
-		bool complete = false;
-		switch (current) {
-		case SYS_LED_PATTERN_ON:
-		case SYS_LED_PATTERN_ON_PERSIST:
-			color = current == SYS_LED_PATTERN_ON ? SYS_LED_COLOR_DEFAULT : SYS_LED_COLOR_SUCCESS;
-			brightness = current == SYS_LED_PATTERN_ON ? 10000 : 2000;
-			value = 10000;
-			forever = true;
-			break;
-		case SYS_LED_PATTERN_SHORT:
-		case SYS_LED_PATTERN_LONG:
-		case SYS_LED_PATTERN_FLASH:
-		case SYS_LED_PATTERN_DFU:
-			state = (state + 1) % 2;
-			value = state * 10000;
-			color = current == SYS_LED_PATTERN_SHORT ? SYS_LED_COLOR_PAIRING :
-				current == SYS_LED_PATTERN_DFU ? SYS_LED_COLOR_CHARGING : SYS_LED_COLOR_DEFAULT;
-			wait_us = current == SYS_LED_PATTERN_SHORT ? (state ? 100000 : 900000) :
-				current == SYS_LED_PATTERN_LONG ? 500000 :
-				current == SYS_LED_PATTERN_FLASH ? 200000 : 100000;
-			break;
-		case SYS_LED_PATTERN_ONESHOT_POWERON:
-		case SYS_LED_PATTERN_ONESHOT_PROGRESS:
-		case SYS_LED_PATTERN_ONESHOT_COMPLETE:
-		case SYS_LED_PATTERN_ONESHOT_PING:
-			state++;
-			color = current == SYS_LED_PATTERN_ONESHOT_PROGRESS ||
-				current == SYS_LED_PATTERN_ONESHOT_COMPLETE ? SYS_LED_COLOR_SUCCESS : SYS_LED_COLOR_DEFAULT;
-			value = (current == SYS_LED_PATTERN_ONESHOT_PING ? state % 2 : !(state % 2)) * 10000;
-			complete = state == (current == SYS_LED_PATTERN_ONESHOT_POWERON ? 7 :
-				current == SYS_LED_PATTERN_ONESHOT_PROGRESS ? 5 :
-				current == SYS_LED_PATTERN_ONESHOT_COMPLETE ? 9 : 20);
-			wait_us = 200000;
-			break;
-		case SYS_LED_PATTERN_ONESHOT_POWEROFF:
-			state++;
-			brightness = state == 1 ? 10000 : (202 - state) * 50;
-			value = state == 1 || state == 202 ? 0 : 10000;
-			wait_us = state == 1 ? 250000 : 5000;
-			complete = state == 202;
-			completed = SYS_LED_PATTERN_OFF_FORCE;
-			break;
-		case SYS_LED_PATTERN_LONG_PERSIST:
-		case SYS_LED_PATTERN_PULSE_PERSIST:
-		case SYS_LED_PATTERN_ACTIVE_PERSIST: {
-			uint32_t local = led_local_ticks();
-			uint32_t clock = local - local_origin;
-#if CONFIG_LED_NETWORK_SYNC
-			uint32_t network;
-			if (esb_get_status_clock(&local, &network)) {
-				if (!have_offset && !active.started) {
-					active.joined = false;
-				}
-				held_offset = network - local;
-				have_offset = true;
-			}
-			clock = have_offset ? local + held_offset : local - local_origin;
-#endif
-			uint32_t distance;
-			if (current == SYS_LED_PATTERN_PULSE_PERSIST) {
-				color = SYS_LED_COLOR_CHARGING;
-				value = led_sync_pulse(led_sync_phase(clock, 5U * LED_SYNC_HZ));
-				distance = 164U;
-			} else if (current == SYS_LED_PATTERN_LONG_PERSIST) {
-				color = SYS_LED_COLOR_CHARGING;
-				brightness = 2000;
-				uint32_t phase = led_sync_phase(clock, LED_SYNC_HZ);
-				value = phase < LED_SYNC_HZ / 2U ? 10000 : 0;
-				distance = LED_SYNC_HZ / 2U - phase % (LED_SYNC_HZ / 2U);
-			} else {
-				uint32_t phase = led_sync_phase(clock, LED_SYNC_ACTIVE_PERIOD);
-				value = led_sync_active(&active, local, phase) ? 10000 : 0;
-				distance = phase < LED_SYNC_ACTIVE_OFF ?
-					LED_SYNC_ACTIVE_OFF - phase : LED_SYNC_ACTIVE_PERIOD - phase;
-				if (!active.eligible) {
-					uint32_t hold = LED_SYNC_ACTIVE_OFF - (local - active.entered);
-					if (hold < distance) {
-						distance = hold;
-					}
-				}
-			}
-			distance = led_sync_until(clock, distance);
-#if CONFIG_LED_NETWORK_SYNC
-			if (distance > LED_SYNC_HZ / 4U) {
-				distance = LED_SYNC_HZ / 4U;
-			}
-#endif
-			wait_us = (uint32_t)(((uint64_t)distance * 1000000U + LED_SYNC_HZ - 1U) / LED_SYNC_HZ);
-			break;
-		}
-		case SYS_LED_PATTERN_ERROR_A:
-		case SYS_LED_PATTERN_ERROR_B:
-		case SYS_LED_PATTERN_ERROR_C:
-		case SYS_LED_PATTERN_ERROR_D:
-			color = SYS_LED_COLOR_ERROR;
-			state = (state + 1) % (current == SYS_LED_PATTERN_ERROR_D ? 2 : 10);
-			value = (state % 2 && (current == SYS_LED_PATTERN_ERROR_D ||
-				state < 4 + 2 * ((int)current - SYS_LED_PATTERN_ERROR_A))) * 10000;
-			wait_us = 500000;
-			break;
-		default:
-			forever = true;
-			break;
-		}
-		/* Fade frames retain sub-level dither; stable outputs need no
-		 * transfer merely to check clock freshness. */
-		bool rendered = true;
-		if (value != last_value || brightness != last_brightness || color != last_color
-		    || current == SYS_LED_PATTERN_PULSE_PERSIST
-		    || current == SYS_LED_PATTERN_ONESHOT_POWEROFF) {
-			rendered = led_pin_set(color, brightness, value);
-			if (rendered) {
-				last_value = value;
-				last_brightness = brightness;
-				last_color = color;
-			} else {
-				last_value = -1;
-			}
-		}
-		if (complete) {
-			if (!led_complete(request, completed)) {
-				/* A new winning owner may inherit this final frame. A
-				 * replacement in the same slot instead restarts above. */
-				state--;
-			} else {
-				/* A lower-priority one-shot may now become visible. */
-				state = 0;
-			}
-			due = k_uptime_ticks();
-		} else if (forever) {
-			/* Only indefinitely held frames retry. Timed effects keep their
-			 * normal deadlines, including 5ms fades. A same-pattern wake
-			 * cannot refill this budget or revive an exhausted output. */
-			if (!rendered && ++steady_attempts < 3) {
-				due = k_uptime_ticks() + k_us_to_ticks_ceil64(100000);
-			} else {
-				due = INT64_MAX;
-				k_sem_take(&led_changed, K_FOREVER);
-			}
-		} else {
-			due = now + k_us_to_ticks_ceil64(wait_us);
-		}
+		(void)k_sem_take(&led_changed, wait_ms == UINT32_MAX ? K_FOREVER : K_MSEC(wait_ms));
 	}
-#endif
 }

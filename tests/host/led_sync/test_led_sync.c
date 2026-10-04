@@ -1,648 +1,885 @@
-#include <assert.h>
-#include <errno.h>
-#include <stdarg.h>
-#include <setjmp.h>
-#include <stdio.h>
-#include <string.h>
-#include "../../../src/system/led.c"
+#include "test_runtime.h"
 
-struct sample { int64_t time; unsigned value; struct led_rgb rgb; int result; };
-static struct sample samples[20000];
-static unsigned sample_count;
-static int64_t now_ticks, stop_ticks;
-static jmp_buf stopped;
-static jmp_buf shutdown_stopped;
-static bool driving_shutdown;
-static bool synced;
-static uint32_t offset;
-static unsigned clock_calls, waits, gate_off;
-static void (*output_hook)(void);
-struct event { int64_t at; enum sys_led_pattern pattern; int owner; int sync; uint32_t offset; };
-static struct event events[32];
-static unsigned event_count, next_event;
-enum action_kind { GATE_ON, GATE_OFF, RESUME, SUSPEND, SLEEP, WRITE_RETURN };
-struct action { enum action_kind kind; int64_t time; int value; };
-static struct action actions[30000];
-static unsigned action_count;
-static int strip_failures;
-static bool mutate_strip_buffer;
-struct error_log { int64_t time; char text[128]; };
-static struct error_log error_logs[64];
-static unsigned error_log_count;
-
-static void action(enum action_kind kind, int value)
+static void invalid_owner_and_fault_inputs(void)
 {
-	assert(action_count < sizeof(actions) / sizeof(actions[0]));
-	actions[action_count++] = (struct action){kind, now_ticks, value};
-}
-
-void host_log_error(const char *format, ...)
-{
-	assert(error_log_count < sizeof(error_logs) / sizeof(error_logs[0]));
-	struct error_log *entry = &error_logs[error_log_count++];
-	entry->time = now_ticks;
-	va_list args;
-	va_start(args, format);
-	vsnprintf(entry->text, sizeof(entry->text), format, args);
-	va_end(args);
-}
-
-static int64_t ms(unsigned value) { return ((uint64_t)value * CONFIG_SYS_CLOCK_TICKS_PER_SEC + 999) / 1000; }
-int64_t k_uptime_ticks(void) { return now_ticks; }
-int32_t k_msleep(int32_t duration)
-{
-	action(SLEEP, duration);
-	now_ticks += ms(duration);
-	return 0;
-}
-bool esb_get_status_clock(uint32_t *local, uint32_t *network)
-{
-	clock_calls++;
-	*local = led_local_ticks();
-	*network = synced ? *local + offset : *local;
-	return synced;
-}
-int k_sem_take(struct k_sem *sem, k_timeout_t timeout)
-{
-	if (driving_shutdown && led_quiesced.count) {
-		longjmp(shutdown_stopped, 1);
-	}
-	if (sem == &led_quiesced && !sem->count) {
-		driving_shutdown = true;
-		if (!setjmp(shutdown_stopped)) { led_thread(); }
-		driving_shutdown = false;
-		assert((!HOST_GATE || gate_off > 0) && led_quiesced.count);
-		sem->count = 0;
-		return 0;
-	}
-	waits++;
-	assert(waits < 100000);
-	if (sem->count) { sem->count = 0; return 0; }
-	int64_t wake = timeout == K_FOREVER ? INT64_MAX : now_ticks + timeout;
-	if (next_event < event_count && events[next_event].at <= wake) {
-		struct event e = events[next_event++];
-		now_ticks = e.at;
-		if (e.sync >= 0) { synced = e.sync; offset = e.offset; }
-		if (e.owner >= 0) { set_led(e.pattern, e.owner); }
-		if (e.owner == -2) { shutdown_pending = true; }
-		return 0;
-	}
-	if (wake >= stop_ticks) { now_ticks = stop_ticks; longjmp(stopped, 1); }
-	assert(wake > now_ticks);
-	now_ticks = wake;
-	return -1;
-}
-static void record(unsigned value)
-{
-	assert(sample_count < sizeof(samples) / sizeof(samples[0]));
-	samples[sample_count++] = (struct sample){.time = now_ticks, .value = value};
-	if (output_hook) { output_hook(); }
-}
-int gpio_pin_configure_dt(const struct gpio_dt_spec *spec, int flags) { (void)spec; (void)flags; return 0; }
-int gpio_pin_set_dt(const struct gpio_dt_spec *spec, int value)
-{
-	if (spec->pin == 2) {
-		action(value ? GATE_ON : GATE_OFF, value);
-		if (!value) { gate_off++; }
-	}
-#if !HOST_PWM && !CONFIG_LED_STRIP
-	if (spec->pin == 1) { record(value); }
-#endif
-	return 0;
-}
-int pwm_set_pulse_dt(const struct pwm_dt_spec *spec, uint32_t value) { (void)spec; record(value); return 0; }
-int pm_device_action_run(const struct device *dev, int pm_action)
-{
-	(void)dev;
-	action(pm_action == PM_DEVICE_ACTION_RESUME ? RESUME : SUSPEND, 0);
-	return 0;
-}
-int led_strip_update_rgb(const struct device *dev, struct led_rgb *rgb, size_t count)
-{
-	(void)dev;
-	assert(count == 1);
-	record(rgb[0].r + rgb[0].g + rgb[0].b);
-	samples[sample_count - 1].rgb = rgb[0];
-	int result = strip_failures ? -EIO : 0;
-	if (strip_failures > 0) { strip_failures--; }
-	samples[sample_count - 1].result = result;
-	/* The API permits a driver to use the RGB array as scratch space. */
-	if (mutate_strip_buffer) { rgb[0] = (struct led_rgb){0}; }
-	action(WRITE_RETURN, result);
-	return result;
-}
-static void reset(void)
-{
-	for (int i = 0; i < SYS_LED_PATTERN_DEPTH; i++) { led_patterns[i] = SYS_LED_PATTERN_OFF; led_generations[i] = 0; }
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token live = host_begin(LED_OWNER_ACC, LED_WAIT_STILL);
+	host_step(0);
+	assert(led_request_event(LED_OWNER_SYSTEM, 1, 1, LED_INPUT_ACK) == LED_ADMITTED);
+	struct led_engine before;
+	memcpy(&before, &engine, sizeof(before));
 	led_changed.count = 0;
-	led_quiesced.count = 0; shutdown_pending = false;
-	now_ticks = 0; sample_count = 0; event_count = 0; next_event = 0;
-	clock_calls = waits = gate_off = 0; synced = false; offset = 0; output_hook = NULL;
-	action_count = 0; strip_failures = 0; mutate_strip_buffer = false;
-	error_log_count = 0;
-#if CONFIG_LED_STRIP
-	led_strip_fade_reset(&led_fade);
-	strip_error_logged = false;
-	strip_error_log_ticks = 0;
-#endif
-}
-static void run(unsigned duration_ms)
-{
-	stop_ticks = now_ticks + ms(duration_ms);
-	if (!setjmp(stopped)) { led_thread(); }
-}
-static void event(unsigned at_ms, enum sys_led_pattern pattern, int owner)
-{
-	events[event_count++] = (struct event){ms(at_ms), pattern, owner, -1, 0};
-}
-static unsigned on_count(void)
-{
-	unsigned count = 0;
-	for (unsigned i = 0; i < sample_count; i++) { count += samples[i].value != 0; }
-	return count;
-}
-static void test_active_off_first(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, 4);
-	event(2000, SYS_LED_PATTERN_ACTIVE_PERSIST, 4);
-	event(9000, SYS_LED_PATTERN_ACTIVE_PERSIST, 4);
-	run(20500);
-	assert(on_count() == 2);
-	int64_t first = -1, second = -1;
-	for (unsigned i = 0; i < sample_count; i++) {
-		if (samples[i].value) { if (first < 0) first = samples[i].time; else second = samples[i].time; }
+	const enum led_owner invalid[] = {(enum led_owner)-1, LED_OWNER_COUNT};
+	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+		enum led_owner owner = invalid[i];
+		assert(led_begin(owner, 123).session == 0);
+		struct led_token token = live;
+		token.owner = owner;
+		assert(led_state(token, 2, LED_PROCESSING) == LED_INVALID);
+		assert(led_result(token, 123, LED_FAILED) == LED_INVALID);
+		assert(led_request_event(owner, 123, 123, LED_FAILED) == LED_INVALID);
+		led_fault_publish(owner, LED_FAULT_SAFETY, 123);
+		led_maintenance_publish(owner, true);
+		led_operation_publish(owner, true, true);
+		led_engine_fault(&engine, owner, LED_FAULT_SAFETY, 123, 0);
 	}
-	assert(first >= ms(9700) && first <= ms(9701));
-	assert(second - first >= ms(9999) && second - first <= ms(10001));
-	assert(waits < 200); /* not a 5ms poller */
-}
-static void test_same_pattern_owner(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, 4);
-	event(300, SYS_LED_PATTERN_ONESHOT_PROGRESS, 2);
-	event(400, SYS_LED_PATTERN_OFF, 4);
-	event(600, SYS_LED_PATTERN_ONESHOT_PROGRESS, 2);
-	run(1200);
-	assert(on_count() == 2);
-	assert(led_patterns[2] == SYS_LED_PATTERN_OFF);
-	assert(gate_off == HOST_GATE);
-	reset();
-	set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, 4);
-	event(300, SYS_LED_PATTERN_ONESHOT_PROGRESS, 2);
-	run(2000);
-	assert(on_count() == 4);
-	assert(led_patterns[2] == SYS_LED_PATTERN_OFF && led_patterns[4] == SYS_LED_PATTERN_OFF);
-}
-static void replace_during_final_frame(void)
-{
-	if (now_ticks >= ms(800)) {
-		/* Simulate a request arriving while a synchronous driver owns the buffer. */
-		set_led(SYS_LED_PATTERN_ON, 2);
-		now_ticks += ms(2);
-		output_hook = NULL;
+	const enum led_fault_kind faults[] = {(enum led_fault_kind)-1, (enum led_fault_kind)(LED_FAULT_SAFETY + 1)};
+	for (unsigned i = 0; i < sizeof(faults) / sizeof(faults[0]); ++i) {
+		led_fault_publish(LED_OWNER_ACC, faults[i], 123);
+		led_engine_fault(&engine, LED_OWNER_ACC, faults[i], 123, 0);
 	}
-}
-static void test_stale_completion(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, 2);
-	output_hook = replace_during_final_frame;
-	run(1200);
-	assert(led_patterns[2] == SYS_LED_PATTERN_ON);
-	assert(samples[sample_count - 1].value != 0);
-}
-static void test_priority_and_interruptible_wait(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, 4);
-	event(100, SYS_LED_PATTERN_ERROR_A, 3);
-	event(200, SYS_LED_PATTERN_OFF_FORCE, 0);
-	run(1000);
-	assert(on_count() == 1);
-	assert(gate_off == HOST_GATE);
-	assert(samples[sample_count - 1].time == ms(200));
-	assert(samples[sample_count - 1].value == 0);
-}
-static void test_solid_idle(void)
-{
-	reset(); set_led(SYS_LED_PATTERN_ON, 4);
-	event(500, SYS_LED_PATTERN_ON, 4);
-	run(10000);
-	assert(on_count() == 1 && waits < 8);
-	reset(); run(10000); assert(sample_count == 0 && waits == 1 && clock_calls == 0);
-}
-static void test_counts(void)
-{
-	const enum sys_led_pattern patterns[] = {SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PATTERN_ONESHOT_PING};
-	const unsigned counts[] = {3, 4, 10};
-	for (unsigned i = 0; i < 3; i++) {
-		reset(); set_led(patterns[i], 1); run(5000);
-		assert(on_count() == counts[i]);
-		assert(led_patterns[1] == SYS_LED_PATTERN_OFF);
-	}
-}
-static void test_phase_math(void)
-{
-	assert(led_sync_phase(5U * LED_SYNC_HZ, 5U * LED_SYNC_HZ) == 0);
-	assert(led_sync_pulse(0) == 0);
-	assert(led_sync_pulse(5U * LED_SYNC_HZ / 2U) == 10000);
-	assert(led_sync_until(UINT32_MAX, 100) == 1);
-	assert(led_sync_until(UINT32_MAX - 20, 100) == 21);
-	assert(led_sync_until(0, 100) == 100);
-	struct led_sync_start start = {.entered = UINT32_MAX - 1000};
-	uint32_t elapsed = LED_SYNC_ACTIVE_OFF - 1;
-	assert(!led_sync_active(&start, start.entered + elapsed, LED_SYNC_ACTIVE_OFF - 1));
-	assert(led_sync_active(&start, start.entered + elapsed + 1, LED_SYNC_ACTIVE_OFF));
-}
-#if CONFIG_LED_NETWORK_SYNC
-static void test_late_join_and_loss(void)
-{
-	reset(); synced = true; offset = 2U * LED_SYNC_HZ;
-	set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, 4);
-	events[event_count++] = (struct event){ms(18000), 0, -1, 0, 0};
-	run(28500);
-	assert(on_count() == 2);
-	unsigned first = 0;
-	while (!samples[first].value) first++;
-	assert(samples[first].time >= ms(17700) && samples[first].time <= ms(17701));
-	assert(clock_calls < 150);
-}
-static void test_clock_adoption(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, 4);
-	events[event_count++] = (struct event){ms(2000), 0, -1, 1, 2U * LED_SYNC_HZ};
-	run(28100);
-	assert(on_count() == 2);
-	unsigned first = 0; while (!samples[first].value) first++;
-	assert(samples[first].time >= ms(17700) && samples[first].time <= ms(17701));
-}
-static void test_raw_wrap(void)
-{
-	reset(); synced = true; offset = UINT32_MAX - LED_SYNC_HZ / 4U;
-	set_led(SYS_LED_PATTERN_LONG_PERSIST, 4);
-	run(2500);
-	assert(on_count() == 3);
-	/* Raw wrap is an on edge, followed by a normal 500ms half-cycle. */
-	unsigned first = 0; while (!samples[first].value) first++;
-	assert(samples[first].time >= ms(250) && samples[first].time <= ms(251));
-	assert(samples[first + 1].value == 0);
-	assert(samples[first + 1].time - samples[first].time >= ms(499));
-}
-#else
-static void test_disabled_clock(void)
-{
-	reset(); synced = true; offset = 1234567;
-	set_led(SYS_LED_PATTERN_LONG_PERSIST, 4); run(2200);
-	assert(on_count() == 3 && clock_calls == 0);
-}
-#endif
-static void shutdown_during_output(void)
-{
-	/* A concurrently published shutdown must win even if a normal highest
-	 * priority request arrives before the worker next snapshots requests. */
-	shutdown_pending = true;
-	set_led(SYS_LED_PATTERN_ON, 0);
-	output_hook = NULL;
-}
-static void test_shutdown_barrier(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_ON, 4);
-	output_hook = shutdown_during_output;
-	run(100);
-	assert(gate_off == HOST_GATE && led_quiesced.count == 1);
-	assert(samples[sample_count - 1].value == 0);
-	reset();
-	set_led(SYS_LED_PATTERN_ON, 0);
-	led_shutdown();
-	assert(gate_off == HOST_GATE && led_patterns[0] == SYS_LED_PATTERN_OFF_FORCE);
-	/* The next caller must not consume the previous caller's acknowledgment. */
-	led_shutdown();
-	assert(gate_off == 2 * HOST_GATE);
+	assert(memcmp(&before, &engine, sizeof(before)) == 0);
+	assert(led_changed.count == 0);
+	host_step(100);
+	assert(engine.winner.semantic == LED_INPUT_ACK && host_value == 0);
 }
 
-static void slow_output(void)
+static void credited_black_does_not_restart_unlit_event(void)
 {
-	now_ticks += ms(2);
-}
-static void test_pulse_period_with_blocking_driver(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_PULSE_PERSIST, 4);
-	output_hook = slow_output;
-	run(10500);
-	unsigned peak = 0, trough = UINT_MAX;
-	int64_t first_peak = 0, second_peak = 0;
-	for (unsigned i = 0; i < sample_count; i++) {
-		if (samples[i].time < ms(5000) && samples[i].value > peak) {
-			peak = samples[i].value; first_peak = samples[i].time;
-		}
-		if (samples[i].time >= ms(5000) && samples[i].time < ms(5010)) {
-			if (samples[i].value < trough) trough = samples[i].value;
-		}
-	}
-	for (unsigned i = 0; i < sample_count; i++) {
-		if (samples[i].time >= ms(5000) && samples[i].value >= peak) {
-			second_peak = samples[i].time; break;
-		}
-	}
-	assert(peak > 0 && trough <= peak / 100 + 1);
-	assert(second_peak - first_peak >= ms(4950));
-	assert(second_peak - first_peak <= ms(5050));
+	host_reset(LED_CAP_MONO_GPIO);
+	host_step(0);
+	host_now_ms = 1000;
+	assert(led_request_event(LED_OWNER_SYSTEM, 1, 1, LED_SUCCESS) == LED_ADMITTED);
+	/* Select without a driver receipt: a delayed worker must retain the
+	 * zero-gap origin rather than restart an unilluminated finite envelope. */
+	struct led_selection first = led_engine_select(&engine, 1000);
+	struct led_selection delayed = led_engine_select(&engine, 1050);
+	assert(first.semantic == LED_SUCCESS && first.origin_ms == 1000);
+	assert(delayed.identity == first.identity && delayed.origin_ms == first.origin_ms);
+	host_step(1050);
+	assert(host_value == 10000);
+	host_step(2999);
+	assert(engine.winner.semantic == LED_SUCCESS && host_value == 0);
+	host_step(3000);
+	assert(engine.winner.semantic == LED_NONE && host_value == 0);
 }
 
-static void test_power_cycle_margins(void)
+static void timeline_boundaries(void)
 {
-	reset();
-	set_led(SYS_LED_PATTERN_ON, 4);
-	event(50, SYS_LED_PATTERN_ON_PERSIST, 4); /* Already powered: no settling. */
-	event(100, SYS_LED_PATTERN_OFF, 4);
-	event(200, SYS_LED_PATTERN_ON, 4);
-	event(250, SYS_LED_PATTERN_ON, 4);
-	event(300, SYS_LED_PATTERN_OFF, 4);
-	run(500);
-	unsigned starts = 0, stops = 0, sleeps = 0;
-	for (unsigned i = 0; i < action_count; i++) {
-		struct action a = actions[i];
-		if (a.kind == GATE_ON) {
-			assert(a.time == ms(starts ? 200 : 0));
-			starts++;
-#if CONFIG_LED_STRIP
-			assert(actions[i + 1].kind == SLEEP && actions[i + 1].value == 2);
-			assert(actions[i + 2].kind == RESUME);
-			assert(actions[i + 2].time == a.time + ms(2));
-#endif
-		}
-		if (a.kind == GATE_OFF) {
-			int64_t margin = CONFIG_LED_STRIP ? ms(1) : 0;
-			assert(a.time == ms(stops ? 300 : 100) + margin);
-			stops++;
-		}
-		if (a.kind == SLEEP) {
-			sleeps++;
-			if (a.value == 1) {
-				assert(i > 0 && actions[i - 1].kind == WRITE_RETURN);
-				assert(actions[i - 1].time == a.time);
-				assert(actions[i + 1].kind == SUSPEND);
-				assert(actions[i + 1].time == a.time + ms(1));
-			} else {
-				assert(a.value == 2 && HOST_GATE);
-			}
-		}
-	}
-	assert(starts == 2 * HOST_GATE && stops == 2 * HOST_GATE);
-	assert(sleeps == (CONFIG_LED_STRIP ? 2U + 2U * HOST_GATE : 0U));
-#if CONFIG_LED_STRIP
-	assert(samples[0].time == (HOST_GATE ? ms(2) : 0));
-	assert(samples[1].time == ms(50));
-#endif
-}
-
-#if CONFIG_LED_STRIP
-static void assert_rgb(struct led_rgb actual, struct led_rgb expected)
-{
-	assert(actual.r == expected.r);
-	assert(actual.g == expected.g);
-	assert(actual.b == expected.b);
-}
-
-static void test_pulse_requests_preserve_frames(void)
-{
-	static struct sample baseline[2000];
-	reset();
-	set_led(SYS_LED_PATTERN_PULSE_PERSIST, 4);
-	run(6000);
-	unsigned count = sample_count;
-	assert(count <= sizeof(baseline) / sizeof(baseline[0]));
-	memcpy(baseline, samples, count * sizeof(samples[0]));
-	for (unsigned transfer = 0; transfer < 2; transfer++) {
-		reset();
-		set_led(SYS_LED_PATTERN_PULSE_PERSIST, 4);
-		int owner = transfer ? 2 : 4;
-		event(25, SYS_LED_PATTERN_PULSE_PERSIST, owner);
-		event(375, SYS_LED_PATTERN_PULSE_PERSIST, owner);
-		event(900, SYS_LED_PATTERN_PULSE_PERSIST, owner);
-		event(2500, SYS_LED_PATTERN_PULSE_PERSIST, owner);
-		run(6000);
-		assert(sample_count == count);
-		for (unsigned i = 0; i < count; i++) {
-			assert(samples[i].time == baseline[i].time);
-			assert_rgb(samples[i].rgb, baseline[i].rgb);
-		}
-	}
-}
-
-static void test_new_pattern_renders_matching_first_frame(void)
-{
-	reset();
-	set_led(SYS_LED_PATTERN_LONG, 4);
-	event(100, SYS_LED_PATTERN_ON, 4);
-	run(1000);
-	/* Both patterns start at full default color; the steady frame still
-	 * needs its own fresh rounding, rather than reusing the flashing frame. */
-	assert(sample_count == 2);
-	assert(samples[1].time == ms(100));
-	assert_rgb(samples[1].rgb, samples[0].rgb);
-	assert(gate_off == 0);
-}
-
-static void test_steady_retry_recovery(void)
-{
-	const enum sys_led_pattern patterns[] = {SYS_LED_PATTERN_ON, SYS_LED_PATTERN_ON_PERSIST};
-	for (unsigned p = 0; p < 2; p++) {
-		reset();
-		strip_failures = 1;
-		set_led(patterns[p], 4);
-		event(25, patterns[p], 4);
-		event(500, patterns[p], 4);
-		run(1000);
-		assert(sample_count == 2);
-		assert(samples[0].result == -EIO && samples[1].result == 0);
-		assert(samples[1].time - samples[0].time == ms(100));
-		assert_rgb(samples[1].rgb, samples[0].rgb);
-		assert(error_log_count == 1);
-	}
-}
-
-static void test_steady_retry_exhaustion(void)
-{
-	reset();
-	strip_failures = -1;
-	set_led(SYS_LED_PATTERN_ON, 4);
-	event(25, SYS_LED_PATTERN_ON, 4);
-	event(150, SYS_LED_PATTERN_ON, 4);
-	event(500, SYS_LED_PATTERN_ON, 4);
-	event(750, SYS_LED_PATTERN_ON, 2); /* Inheritance is not a restart. */
-	run(3000);
-	assert(sample_count == 3 && waits < 20);
-	for (unsigned i = 0; i < 3; i++) {
-		assert(samples[i].result == -EIO);
-		assert_rgb(samples[i].rgb, samples[0].rgb);
-		if (i) { assert(samples[i].time - samples[i - 1].time == ms(100)); }
-	}
-	reset();
-	strip_failures = -1;
-	set_led(SYS_LED_PATTERN_ON, 4);
-	event(500, SYS_LED_PATTERN_ON_PERSIST, 4);
-	run(2000);
-	assert(sample_count == 6);
-	assert(samples[3].time == ms(500));
-	assert(samples[4].time - samples[3].time == ms(100));
-	assert(samples[5].time - samples[4].time == ms(100));
-}
-
-static void test_retry_preemption_and_failed_black(void)
-{
-	reset();
-	strip_failures = 1;
-	set_led(SYS_LED_PATTERN_ON, 4);
-	event(50, SYS_LED_PATTERN_ON_PERSIST, 2);
-	run(500);
-	assert(sample_count == 2 && samples[1].time == ms(50));
-	assert(samples[1].result == 0 && samples[1].rgb.r == 0 && samples[1].rgb.g > 0);
-	for (unsigned shutdown = 0; shutdown < 2; shutdown++) {
-		reset();
-		strip_failures = -1;
-		set_led(SYS_LED_PATTERN_ON, 4);
-		event(50, SYS_LED_PATTERN_OFF_FORCE, shutdown ? -2 : 0);
-		run(1000);
-		assert(sample_count == 2);
-		assert(samples[1].time == ms(50) && samples[1].value == 0);
-		assert(samples[1].result == -EIO && gate_off == HOST_GATE);
-		assert(led_quiesced.count == shutdown);
-		bool suspended = false;
-		for (unsigned i = 0; i < action_count; i++) {
-			if (actions[i].kind == SUSPEND) {
-				assert(actions[i].time == ms(50) + ms(1));
-				suspended = true;
-			}
-			if (actions[i].kind == GATE_OFF) {
-				assert(suspended && actions[i].time == ms(50) + ms(1));
-			}
-		}
-		assert(suspended);
-	}
-}
-
-static void test_failed_fade_preserves_carry(void)
-{
-	struct led_rgb baseline[100];
-	reset();
-	for (unsigned i = 0; i < 100; i++) {
-		assert(led_pin_set(SYS_LED_COLOR_DEFAULT, 137 + 31 * i, 10000));
-		baseline[i] = samples[i].rgb;
-	}
-	reset();
-	for (unsigned i = 0; i < 100; i++) {
-		strip_failures = 1;
-		assert(!led_pin_set(SYS_LED_COLOR_DEFAULT, 137 + 31 * i, 10000));
-		assert_rgb(samples[2 * i].rgb, baseline[i]);
-		assert(led_pin_set(SYS_LED_COLOR_DEFAULT, 137 + 31 * i, 10000));
-		assert_rgb(samples[2 * i + 1].rgb, baseline[i]);
-	}
-}
-
-static void test_failed_fade_keeps_cadence(void)
-{
-	reset();
-	strip_failures = -1;
-	set_led(SYS_LED_PATTERN_PULSE_PERSIST, 4);
-	run(1100);
-	assert(sample_count >= 210 && sample_count <= 225);
-	for (unsigned i = 1; i < sample_count; i++) {
-		assert(samples[i].result == -EIO);
-		assert(samples[i].time - samples[i - 1].time >= ms(4));
-		assert(samples[i].time - samples[i - 1].time <= ms(6));
-	}
-	unsigned sleeps = 0;
-	for (unsigned i = 0; i < action_count; i++) { sleeps += actions[i].kind == SLEEP; }
-	assert(sleeps == HOST_GATE);
-	assert(error_log_count == 2);
-	assert(error_logs[1].time - error_logs[0].time >= ms(1000));
-}
-
-static void test_error_log_boundary(void)
-{
-	reset();
-	strip_failures = -1;
-	mutate_strip_buffer = true;
-	const unsigned times[] = {0, 999, 1000, 1999, 2000};
-	const unsigned counts[] = {1, 1, 2, 2, 3};
-	for (unsigned i = 0; i < 5; i++) {
-		now_ticks = ms(times[i]);
-		assert(!led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 10000));
-		assert(error_log_count == counts[i]);
-	}
-	char expected[128];
-	snprintf(expected, sizeof(expected), "strip RGB %u/%u/%u update failed: %d",
-		samples[0].rgb.r, samples[0].rgb.g, samples[0].rgb.b, -EIO);
-	for (unsigned i = 0; i < 3; i++) {
-		assert(error_logs[i].time == ms(i * 1000));
-		assert(strcmp(error_logs[i].text, expected) == 0);
-	}
-}
-#endif
-
-#if HOST_P10
-static void test_pulse_to_steady_brightness(void)
-{
-	const unsigned transition_ms[] = {25, 375, 900, 925, 1000};
-	const enum sys_led_pattern patterns[] = {
-		SYS_LED_PATTERN_ON, SYS_LED_PATTERN_ON_PERSIST,
+	assert(led_timeline(LED_STYLE_BREATHE,0,false,false).value_pptt==0);
+	assert(led_timeline(LED_STYLE_BREATHE,1000,false,false).value_pptt==7000);
+	assert(led_timeline(LED_STYLE_BREATHE,2000,false,false).value_pptt==10000);
+	assert(led_timeline(LED_STYLE_BREATHE,3999,false,false).value_pptt<20);
+	assert(led_timeline(LED_STYLE_BREATHE,4000,false,false).value_pptt==0);
+	assert(led_timeline(LED_STYLE_BREATHE,3999,true,false).value_pptt==10000);
+	assert(led_timeline(LED_STYLE_BREATHE,4000,true,false).value_pptt==0);
+	assert(led_timeline(LED_STYLE_BREATHE,5000,false,false).value_pptt==0);
+	assert(led_timeline(LED_STYLE_BREATHE,5100,false,false).value_pptt
+		==led_timeline(LED_STYLE_BREATHE,100,false,false).value_pptt);
+	static const struct { uint32_t age; uint16_t value; } breathing_anchors[] = {
+		{0,0}, {800,6000}, {1200,8000}, {1600,9500}, {2000,10000}
 	};
-	/* P10 default/success colors at 10% global brightness, with a fresh
-	 * dither accumulator. These are fixed physical channel levels. */
-	const struct led_rgb expected[] = {{26, 8, 13}, {0, 5, 0}};
-	for (unsigned p = 0; p < sizeof(patterns) / sizeof(patterns[0]); p++) {
-		for (unsigned t = 0; t < sizeof(transition_ms) / sizeof(transition_ms[0]); t++) {
-			reset();
-			set_led(SYS_LED_PATTERN_PULSE_PERSIST, 4);
-			event(transition_ms[t], patterns[p], 4);
-			run(transition_ms[t] + 1000);
-			unsigned steady_frames = 0;
-			for (unsigned i = 0; i < sample_count; i++) {
-				if (samples[i].time >= ms(transition_ms[t])) {
-					assert(samples[i].time == ms(transition_ms[t]));
-					assert_rgb(samples[i].rgb, expected[p]);
-					steady_frames++;
+	for (unsigned i=0;i<sizeof(breathing_anchors)/sizeof(breathing_anchors[0]);++i) {
+		assert(led_timeline(LED_STYLE_BREATHE,breathing_anchors[i].age,false,false).value_pptt
+			==breathing_anchors[i].value);
+		assert(led_timeline(LED_STYLE_BREATHE,4000-breathing_anchors[i].age,false,false).value_pptt
+			==breathing_anchors[i].value);
+	}
+	uint16_t up=0,down=10000;
+	for (uint32_t time=0;time<2000;time++) {
+		struct led_envelope rising=led_timeline(LED_STYLE_BREATHE,time,false,false);
+		struct led_envelope falling=led_timeline(LED_STYLE_BREATHE,2000+time,false,false);
+		assert(rising.fading && falling.fading && rising.next_ms<=LED_FRAME_MS && falling.next_ms<=LED_FRAME_MS);
+		assert(rising.value_pptt>=up && falling.value_pptt<=down);
+		assert(falling.value_pptt==led_timeline(LED_STYLE_BREATHE,2000-time,false,false).value_pptt);
+		up=rising.value_pptt; down=falling.value_pptt;
+	}
+	assert(led_timeline(LED_STYLE_EXIT,300,false,true).value_pptt==5000);
+	assert(led_timeline(LED_STYLE_EXIT,599,true,true).value_pptt==10000);
+	assert(led_timeline(LED_STYLE_EXIT,600,true,true).value_pptt==0);
+	assert(led_timeline(LED_STYLE_EXIT,800,true,true).complete);
+	assert(led_timeline(LED_STYLE_MOVE,0,false,false).value_pptt==10000);
+	assert(led_timeline(LED_STYLE_MOVE,200,false,false).value_pptt==0);
+	assert(led_timeline(LED_STYLE_MOVE,400,false,false).value_pptt==10000);
+	assert(led_timeline(LED_STYLE_MOVE,600,false,false).value_pptt==0);
+	assert(led_timeline(LED_STYLE_MOVE,2000,false,false).value_pptt==10000);
+	static const struct { uint32_t age; uint16_t value; } hold_cases[] = {
+		{0,10000}, {999,10000}, {1000,0}, {1249,0}, {1250,10000},
+		{1750,5000}, {2249,10}, {2250,0}, {2499,0}, {2500,10000},
+		{2999,10000}, {3000,0}, {3499,0}, {3500,10000}
+	};
+	for (unsigned i=0;i<sizeof(hold_cases)/sizeof(hold_cases[0]);++i) {
+		struct led_envelope sample=led_timeline(LED_STYLE_BUTTON_HOLD,hold_cases[i].age,false,false);
+		assert(sample.value_pptt==hold_cases[i].value);
+		assert(sample.fading==(hold_cases[i].age>=1250 && hold_cases[i].age<2250));
+	}
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,0,false,true).value_pptt==0);
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,249,false,true).value_pptt==0);
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,250,false,true).value_pptt==10000);
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,750,false,true).value_pptt==5000);
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,1249,false,true).value_pptt==10);
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,1250,false,true).value_pptt==0);
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,1500,false,true).complete);
+	assert(led_timeline(LED_STYLE_MANUAL_EXIT,1800,false,false).value_pptt==0);
+}
+/* Observe complete short/success/double glyphs through the actual worker on mono
+ * and RGB. Interior gaps and the final actual-black tail remain mandatory. */
+static void finite_glyph_recognition(void)
+{
+	static const struct {
+		enum led_semantic semantic;
+		unsigned pulses, on_ms, duration_ms;
+	} cases[] = {
+		{LED_INPUT_ACK,1,200,800}, {LED_ACCEPTED,1,200,800},
+		{LED_STAGE_ACK,1,200,800}, {LED_CANCELLED,1,200,800},
+		{LED_SUCCESS,4,200,2000}, {LED_REJECTED,2,200,1200},
+		{LED_FAILED,2,200,1200}, {LED_PARTIAL,2,200,1200},
+		{LED_APPLIED_NOT_SAVED,2,200,1200}
+	};
+	const enum led_capability capabilities[] = {LED_CAP_MONO_GPIO, LED_CAP_RGB_PWM};
+	for (unsigned cap=0;cap<2;++cap) {
+		for (unsigned family=0;family<sizeof(cases)/sizeof(cases[0]);++family) {
+			host_reset(capabilities[cap]);
+			assert(led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),cases[family].semantic)==LED_ADMITTED);
+			uint32_t end=600+cases[family].duration_ms;
+			unsigned pulses=0;
+			bool previous=false;
+			uint32_t started=0,last_end=0;
+			for (uint32_t time=0;time<=end;++time) {
+				host_step(time);
+				bool lit=host_value!=0;
+				if (lit && !previous) {
+					assert(pulses<cases[family].pulses);
+					if (pulses) assert(time-last_end==200);
+					else assert(time==600);
+					started=time;
 				}
+				if (!lit && previous) {
+					assert(time-started==cases[family].on_ms);
+					++pulses;
+					last_end=time;
+				}
+				previous=lit;
+				if (time>=600 && time<end) assert(engine.winner.semantic==cases[family].semantic);
 			}
-			assert(steady_frames == 1);
-			assert(gate_off == 0);
+			assert(pulses==cases[family].pulses && end-last_end==600);
+			assert(engine.winner.semantic!=cases[family].semantic && !host_value);
+			for (uint32_t time=end+1;time<=end+4000;++time) {
+				host_step(time);
+				assert(engine.winner.semantic!=cases[family].semantic && !host_value);
+			}
 		}
 	}
 }
+
+static void persistent_fault_and_link_glyphs(void)
+{
+	const enum led_fault_kind faults[] = {
+		LED_FAULT_SENSOR_MISSING, LED_FAULT_SENSOR, LED_FAULT_SYSTEM, LED_FAULT_SAFETY
+	};
+	const enum led_semantic semantics[] = {
+		LED_SENSOR_MISSING, LED_SENSOR_FAULT, LED_BLOCKING_FAULT, LED_SAFETY_FAULT
+	};
+	const enum led_capability capabilities[] = {LED_CAP_MONO_GPIO, LED_CAP_RGB_PWM};
+	for (unsigned cap=0;cap<2;++cap) {
+		for (unsigned family=0;family<4;++family) {
+			host_reset(capabilities[cap]);
+			led_fault_publish(LED_OWNER_SENSOR,faults[family],0);
+			for (uint32_t time=0;time<10000;++time) {
+				host_step(time);
+				assert(engine.winner.semantic==semantics[family]);
+				uint32_t phase=time%5000;
+				bool on=phase<800 || (phase>=1000 && phase<1800);
+				assert(host_value==(on ? 10000 : 0));
+			}
+		}
+		for (unsigned link=0;link<3;++link) {
+			host_reset(capabilities[cap]);
+			struct led_connection_facts facts={
+				.radio_required=true,.paired=link==1,.pairing=link==2
+			};
+			led_connection_publish(&facts);
+			enum led_semantic semantic=link==0 ? LED_UNPAIRED_IDLE : link==1 ? LED_RECONNECTING : LED_PAIRING;
+			for (uint32_t time=0;time<4000;++time) {
+				host_step(time);
+				assert(engine.winner.semantic==semantic);
+				assert(host_value==(time%2000<200 ? 10000 : 0));
+			}
+		}
+	}
+}
+
+static void hold_ack_black_gap(void)
+{
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token token=host_begin(LED_OWNER_ACC,LED_WAIT_STILL);
+	host_step(0); assert(host_value==10000);
+	host_now_ms=50;
+	assert(led_result(token,led_event_id(),LED_STAGE_ACK)==LED_ADMITTED);
+	assert(host_step(50)==600); assert(host_value==0);
+	host_step(649); assert(host_value==0);
+	host_step(650); assert(host_value==10000);
+	uint32_t end=engine.winner.origin_ms+led_behavior_get(LED_STAGE_ACK)->duration_ms;
+	/* A new owner phase cannot clip the pulse or the finite black tail. */
+	host_now_ms=700; assert(led_state(token,2,LED_WAIT_MOVE)==LED_ADMITTED);
+	for (uint32_t time=701;time<end;++time) {
+		host_step(time); assert(engine.winner.semantic==LED_STAGE_ACK);
+	}
+	host_step(end); assert(engine.winner.semantic==LED_WAIT_MOVE);
+}
+static void identities_and_truthful_terminal(void)
+{
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token old=host_begin(LED_OWNER_IMU,LED_WAIT_STILL);
+	host_step(0);
+	uint32_t id=led_event_id();
+	assert(led_result(old,id,LED_ACCEPTED)==LED_ADMITTED);
+	assert(led_result(old,id,LED_ACCEPTED)==LED_DUPLICATE);
+	struct led_token newer=host_begin(LED_OWNER_IMU,LED_PROCESSING);
+	assert(led_result(old,led_event_id(),LED_SUCCESS)==LED_STALE);
+	assert(led_state(old,2,LED_NONE)==LED_STALE);
+	host_step(100); assert(engine.winner.semantic==LED_PROCESSING);
+	uint32_t origin=engine.winner.origin_ms;
+	assert(led_state(newer,2,LED_PROCESSING)==LED_ADMITTED);
+	host_step(200); assert(engine.winner.origin_ms==origin);
+	assert(led_result(newer,led_event_id(),LED_FAILED)==LED_ADMITTED);
+	assert(led_result(newer,led_event_id(),LED_SUCCESS)==LED_CONFLICT);
+	host_step(200); assert(engine.winner.semantic==LED_FAILED && host_value==0);
+	host_step(800); assert(host_role==LED_ROLE_NEGATIVE && host_value==10000);
+	assert(engine.owners[LED_OWNER_IMU].semantic==LED_NONE);
+}
+static void expired_success_and_interrupted_result(void)
+{
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token token=host_begin(LED_OWNER_ACC,LED_PROCESSING);
+	assert(led_result(token,led_event_id(),LED_SUCCESS)==LED_ADMITTED);
+	led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_SENSOR,0);
+	host_step(0); assert(engine.winner.semantic==LED_SENSOR_FAULT);
+	const struct led_behavior *success=led_behavior_get(LED_SUCCESS);
+	uint32_t too_late=success->ttl_ms-success->duration_ms+1;
+	host_step(too_late);
+	led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_NONE,0);
+	host_step(too_late); assert(engine.winner.semantic!=LED_SUCCESS);
+	host_step(success->ttl_ms+1); assert(engine.winner.semantic!=LED_SUCCESS);
+	host_reset(LED_CAP_MONO_GPIO); host_step(0);
+	uint32_t request=led_request_id();
+	led_request_event(LED_OWNER_SYSTEM,request,led_event_id(),LED_FAILED);
+	host_step(200); assert(engine.winner.semantic==LED_FAILED && !host_value);
+	host_step(600); assert(host_value==10000);
+	led_power_publish(LED_POWER_BATTERY,true);
+	host_step(700); assert(engine.winner.semantic==LED_LOW_BATTERY);
+	host_step(2700); assert(engine.winner.semantic!=LED_FAILED);
+}
+static void low_guarantee_and_admission(void)
+{
+	enum led_semantic backgrounds[]={LED_OTA_ACTIVE,LED_WAIT_STILL,LED_PROCESSING};
+	for (size_t i=0;i<sizeof(backgrounds)/sizeof(backgrounds[0]);++i) {
+		host_reset(LED_CAP_MONO_GPIO); host_begin(LED_OWNER_RADIO,backgrounds[i]);
+		led_power_publish(LED_POWER_BATTERY,true);
+		host_step(0); assert(engine.winner.semantic==LED_LOW_BATTERY && host_value==10000);
+		for (uint32_t time=100;time<10000;time+=100) {
+			host_now_ms=time; led_identify();
+			led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_INPUT_ACK);
+			host_step(time);
+			if (time<2000) { assert(engine.winner.semantic==LED_LOW_BATTERY); }
+		}
+		host_step(10000); assert(engine.winner.semantic==LED_LOW_BATTERY);
+	}
+	host_reset(LED_CAP_MONO_GPIO); host_begin(LED_OWNER_ACC,LED_WAIT_STILL);
+	led_power_publish(LED_POWER_BATTERY,true); host_step(0); host_step(2000);
+	/* One ms too late to fit the start gap plus whole double glyph before LOW.
+	 * Its TTL still allows the full receipt after the two-second LOW window. */
+	host_now_ms=10000-led_behavior_get(LED_FAILED)->duration_ms-LED_FEEDBACK_START_GAP_MS+1;
+	led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_FAILED);
+	host_step(host_now_ms); assert(engine.winner.semantic==LED_WAIT_STILL);
+	host_step(10000); assert(engine.winner.semantic==LED_LOW_BATTERY);
+	host_step(10350); assert(host_value==0);
+	host_step(12000); assert(engine.winner.semantic==LED_FAILED && host_value==10000);
+	/* True low clear / actual charging cancels an admitted warning immediately. */
+	led_power_publish(LED_POWER_BATTERY,false); host_step(12010);
+	led_power_publish(LED_POWER_BATTERY,true); host_step(12020);
+	assert(engine.winner.semantic==LED_LOW_BATTERY);
+	led_power_publish(LED_POWER_CHARGING,true); host_step(12021);
+	assert(engine.winner.semantic!=LED_LOW_BATTERY && !engine.low);
+	/* Exact fit is allowed: the complete black tail ends at the next LOW
+	 * boundary, rather than being clipped or needlessly postponed. */
+	host_reset(LED_CAP_MONO_GPIO); host_begin(LED_OWNER_ACC,LED_WAIT_STILL);
+	led_power_publish(LED_POWER_BATTERY,true); host_step(0); host_step(2000);
+	host_now_ms=10000-led_behavior_get(LED_FAILED)->duration_ms-LED_FEEDBACK_START_GAP_MS;
+	led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_FAILED);
+	host_step(host_now_ms); assert(engine.winner.semantic==LED_FAILED && !host_value);
+	uint32_t origin=engine.winner.origin_ms;
+	for (uint32_t phase=0;phase<1200;++phase) {
+		host_step(origin+phase);
+		assert(engine.winner.semantic==LED_FAILED);
+		assert(host_value==(phase<200 || (phase>=400 && phase<600) ? 10000 : 0));
+	}
+	host_step(10000); assert(engine.winner.semantic==LED_LOW_BATTERY && host_value==10000);
+}
+static void safety_record_and_reject_preserves_ota(void)
+{
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token ota=host_begin(LED_OWNER_RADIO,LED_OTA_ACTIVE);
+	led_operation_publish(LED_OWNER_RADIO,true,false);
+	host_step(0);
+	host_now_ms=50;
+	led_request_event(LED_OWNER_RADIO,led_request_id(),led_event_id(),LED_REJECTED);
+	host_step(50); assert(engine.owners[LED_OWNER_RADIO].session==ota.session);
+	host_step(650); assert(engine.winner.semantic==LED_REJECTED && host_value==10000);
+	uint32_t refusal_end=engine.winner.origin_ms+led_behavior_get(LED_REJECTED)->duration_ms;
+	for (uint32_t time=651;time<refusal_end;++time) {
+		host_step(time); assert(engine.winner.semantic==LED_REJECTED);
+		assert(engine.owners[LED_OWNER_RADIO].session==ota.session);
+	}
+	host_step(refusal_end); assert(engine.winner.semantic==LED_OTA_ACTIVE);
+	uint32_t first_record=refusal_end+30;
+	led_fault_publish(LED_OWNER_TCAL,LED_FAULT_NONE,7);
+	host_step(first_record); assert(engine.winner.semantic==LED_SAFETY_FAULT);
+	uint32_t record_until=engine.owners[LED_OWNER_TCAL].protection_expires_ms;
+	host_now_ms=first_record+(record_until-first_record)/2;
+	led_fault_publish(LED_OWNER_TCAL,LED_FAULT_NONE,7);
+	host_step(host_now_ms); assert(engine.winner.semantic==LED_SAFETY_FAULT);
+	assert(engine.owners[LED_OWNER_TCAL].protection_expires_ms==record_until);
+	host_step(record_until); assert(engine.winner.semantic==LED_OTA_ACTIVE);
+	host_now_ms=record_until+100; led_fault_publish(LED_OWNER_TCAL,LED_FAULT_SAFETY,8);
+	uint32_t latched_until=engine.owners[LED_OWNER_TCAL].protection_expires_ms;
+	host_step(latched_until+1); assert(engine.winner.semantic==LED_SAFETY_FAULT);
+	led_fault_publish(LED_OWNER_TCAL,LED_FAULT_NONE,8);
+	host_step(host_now_ms+1); assert(engine.winner.semantic==LED_OTA_ACTIVE);
+}
+static void immediate_ready_and_blockers(void)
+{
+	host_reset(LED_CAP_MONO_GPIO); host_step(0);
+	struct led_connection_facts facts={.radio_required=true,.healthy=true,.output_ready=false,.paired=true};
+	led_connection_publish(&facts); host_step(200);
+	assert(!engine.ready && engine.winner.semantic!=LED_READY);
+	facts.output_ready=true; led_connection_publish(&facts);
+	host_step(300); assert(engine.winner.semantic==LED_READY && !host_value);
+	host_step(10000); assert(engine.winner.semantic==LED_READY && host_value==10000);
+	host_step(10199); assert(engine.winner.semantic==LED_READY && host_value==10000);
+	host_step(10201); assert(engine.winner.semantic==LED_READY && !host_value);
+	facts.healthy=false; led_connection_publish(&facts); host_step(10300);
+	assert(engine.winner.semantic==LED_RECONNECTING);
+	facts.healthy=true; led_connection_publish(&facts); host_step(10301);
+	assert(engine.winner.semantic==LED_READY && !host_value); /* No entry cue or recovery debounce. */
+	/* LOW blocks readiness without allowing stale health to survive its clear. */
+	host_reset(LED_CAP_MONO_GPIO);
+	led_power_publish(LED_POWER_BATTERY,true); led_connection_publish(&facts);
+	host_step(0); assert(engine.winner.semantic==LED_LOW_BATTERY);
+	facts.healthy=false; host_now_ms=1000; led_connection_publish(&facts);
+	host_step(2000); assert(engine.winner.semantic==LED_RECONNECTING);
+	/* Healthy PONG and live fusion are insufficient while OTA blocks output. */
+	host_reset(LED_CAP_MONO_GPIO); facts.healthy=true; led_connection_publish(&facts);
+	led_operation_publish(LED_OWNER_RADIO,true,false);
+	assert(!engine.ready);
+	host_step(0); assert(engine.winner.semantic==LED_OTA_ACTIVE);
+	host_now_ms=1500; led_operation_publish(LED_OWNER_RADIO,false,false);
+	host_step(1500); assert(engine.winner.semantic==LED_READY && !host_value);
+	/* Protection expiry exposes the ordinary heartbeat, never a fallback. */
+	host_reset(LED_CAP_MONO_GPIO); led_connection_publish(&facts);
+	led_fault_publish(LED_OWNER_TCAL,LED_FAULT_NONE,1);
+	host_step(0); assert(engine.winner.semantic==LED_SAFETY_FAULT);
+	host_step(6000); assert(engine.winner.semantic==LED_READY && !host_value);
+	host_step(10000); assert(engine.winner.semantic==LED_READY && host_value==10000);
+}
+static void external_power_priority_and_identify(void)
+{
+	const enum led_power_state powers[]={LED_POWER_CHARGING,LED_POWER_CHARGED,LED_POWER_EXTERNAL_UNKNOWN};
+	const enum led_semantic semantics[]={LED_CHARGING,LED_CHARGED,LED_EXTERNAL_POWER_UNKNOWN};
+	const enum led_role roles[]={LED_ROLE_POWER,LED_ROLE_POSITIVE,LED_ROLE_NEUTRAL};
+	for (unsigned power=0;power<sizeof(powers)/sizeof(powers[0]);++power) {
+		for (unsigned link=0;link<4;++link) {
+			host_reset(LED_CAP_RGB_PWM);
+			struct led_connection_facts facts={
+				.radio_required=true,.paired=link!=0,.pairing=link==2,
+				.healthy=link==3,.output_ready=link==3
+			};
+			led_connection_publish(&facts); led_power_publish(powers[power],false);
+			enum led_semantic semantic=semantics[power];
+			host_step(0);
+			for (uint32_t time=1;time<=12000;++time) {
+				host_step(time);
+				assert(engine.winner.semantic==semantic);
+				if (host_value) assert(host_role==roles[power]);
+			}
+			assert(engine.ready==(link==3)); /* Power presentation is not link truth. */
+			struct led_token hold=host_begin(LED_OWNER_ACC,LED_WAIT_STILL); host_step(12001);
+			assert(engine.winner.semantic==LED_WAIT_STILL && host_value==10000);
+			host_now_ms=13000; led_state(hold,2,LED_NONE); host_step(13000);
+			assert(engine.winner.semantic==semantic);
+			led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_SENSOR,0); host_step(13001);
+			assert(engine.winner.semantic==LED_SENSOR_FAULT);
+			led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_NONE,0); host_step(13002);
+			assert(engine.winner.semantic==semantic);
+			led_operation_publish(LED_OWNER_RADIO,true,false); host_step(13003);
+			assert(engine.winner.semantic==LED_OTA_ACTIVE);
+			led_operation_publish(LED_OWNER_RADIO,false,false); host_step(13004);
+			assert(engine.winner.semantic==semantic);
+			struct led_token heated=host_begin(LED_OWNER_TCAL,LED_HEATED_ACTIVE);
+			led_operation_publish(LED_OWNER_TCAL,false,true); host_step(13005);
+			assert(engine.winner.semantic==LED_HEATED_ACTIVE);
+			host_now_ms=13006; led_state(heated,2,LED_NONE);
+			led_operation_publish(LED_OWNER_TCAL,false,false); host_step(13006);
+			assert(engine.winner.semantic==semantic);
+			led_power_publish(LED_POWER_BATTERY,false); host_step(13007);
+			assert(engine.winner.semantic==(link==0 ? LED_UNPAIRED_IDLE : link==1 ? LED_RECONNECTING
+				: link==2 ? LED_PAIRING : LED_READY));
+		}
+	}
+	host_reset(LED_CAP_MONO_GPIO); led_identify(); host_step(0);
+	host_now_ms=1000; led_identify(); host_step(1000);
+	led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_SENSOR,0); host_step(1200);
+	host_now_ms=1600; led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_NONE,0); host_step(1600);
+	assert(engine.winner.semantic==LED_IDENTIFY && engine.winner.origin_ms==0 && !host_value);
+	host_step(6000); assert(engine.winner.semantic!=LED_IDENTIFY);
+}
+static void foreground_order_exit_and_quiesce(void)
+{
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token imu=host_begin(LED_OWNER_IMU,LED_WAIT_MOVE);
+	struct led_token acc=host_begin(LED_OWNER_ACC,LED_WAIT_STILL);
+	struct led_token ota=host_begin(LED_OWNER_RADIO,LED_OTA_ACTIVE);
+	struct led_token exit=host_begin(LED_OWNER_SYSTEM,LED_EXIT_PENDING);
+	host_step(0); assert(engine.winner.semantic==LED_EXIT_PENDING);
+	led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_SENSOR,0); host_step(100);
+	host_now_ms=900; led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_NONE,0); host_step(900);
+	assert(engine.winner.semantic==LED_EXIT_PENDING && host_value==0 && engine.winner.origin_ms==0);
+	led_state(exit,2,LED_NONE); host_step(901); assert(engine.winner.semantic==LED_OTA_ACTIVE);
+	led_state(ota,2,LED_NONE); host_step(902); assert(engine.winner.owner==LED_OWNER_IMU);
+	led_state(imu,2,LED_NONE); host_step(903); assert(engine.winner.owner==LED_OWNER_ACC);
+	(void)acc;
+	host_write_failure=true; led_quiesce(); host_step(904);
+	assert(engine.winner.priority==LED_PRIORITY_SHUTDOWN && host_offs>0 && hardware_quiesced);
+	assert(led_state(acc,2,LED_WAIT_MOVE)==LED_SHUTDOWN);
+	assert(led_result(acc,led_event_id(),LED_SUCCESS)==LED_SHUTDOWN);
+	host_step(1000); assert(host_value==0);
+}
+static void request_flood_tie_break_and_wrap(void)
+{
+	host_reset(LED_CAP_MONO_GPIO); host_step(0); host_now_ms=200;
+	for (int owner=LED_OWNER_SYSTEM;owner>=LED_OWNER_IMU;--owner) {
+		led_request_event(owner,led_request_id(),led_event_id(),LED_SUCCESS);
+	}
+	host_step(200); assert(engine.winner.owner==LED_OWNER_IMU);
+	uint32_t first_end=engine.winner.origin_ms+led_behavior_get(LED_SUCCESS)->duration_ms;
+	for (uint32_t time=201;time<first_end;++time) {
+		host_step(time); assert(engine.winner.owner==LED_OWNER_IMU);
+	}
+	/* A second full success group no longer fits these same-time receipts'
+	 * original TTL. Drop them rather than emit a truncated/replayed group. */
+	host_step(first_end);
+	assert(engine.winner.semantic==LED_NONE && !host_value);
+	host_step(4201); assert(engine.winner.semantic==LED_NONE && !host_value);
+	for (uint32_t i=0;i<10000;++i) {
+		led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_INPUT_ACK);
+	}
+	led_power_publish(LED_POWER_BATTERY,true); host_step(4301);
+	assert(engine.winner.semantic==LED_LOW_BATTERY);
+	host_reset(LED_CAP_MONO_GPIO); host_now_ms=UINT32_MAX-500;
+	led_power_publish(LED_POWER_BATTERY,true); host_step(UINT32_MAX-500);
+	host_step(1499); assert(engine.winner.semantic!=LED_LOW_BATTERY);
+	host_step(9499); assert(engine.winner.semantic==LED_LOW_BATTERY);
+	assert(led_sync_kernel_ticks((uint64_t)CONFIG_SYS_CLOCK_TICKS_PER_SEC*7,CONFIG_SYS_CLOCK_TICKS_PER_SEC)==7*LED_SYNC_HZ);
+	assert(led_sync_phase_ms(UINT32_MAX,10000)!=led_sync_phase_ms(0,10000));
+	assert(led_sync_wrap_ms(UINT32_MAX)==1);
+}
+static void invisible_effects_and_driver_black_failure(void)
+{
+	host_reset(LED_CAP_NO_LED);
+	led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_SUCCESS);
+	assert(host_step(0)==UINT32_MAX && host_writes==0 && host_offs==1);
+	host_reset(LED_CAP_MONO_GPIO); host_hardware.global_limit_pptt=0;
+	host_begin(LED_OWNER_ACC,LED_WAIT_STILL);
+	assert(host_step(0)==UINT32_MAX && host_writes==0 && host_value==0);
+	host_reset(LED_CAP_MONO_GPIO); host_begin(LED_OWNER_ACC,LED_WAIT_STILL); host_step(0);
+	led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_SUCCESS);
+	host_write_failure=true; host_step(50); host_step(170);
+	assert(!engine.black_known && host_value==10000);
+	host_write_failure=false; host_step(190); assert(host_value==0);
+	host_step(789); assert(host_value==0);
+	host_step(790); assert(host_value==10000 && host_role==LED_ROLE_POSITIVE);
+}
+static void same_class_pending_and_input_merge(void)
+{
+	host_reset(LED_CAP_MONO_GPIO); host_step(0); host_now_ms=200;
+	led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_FAILED);
+	host_step(200); assert(host_value==0);
+	uint32_t active=engine.winner.identity;
+	host_now_ms=300;
+	led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_FAILED);
+	host_step(300); assert(engine.winner.identity==active && host_value==0);
+	uint32_t active_end=engine.winner.origin_ms+led_behavior_get(LED_FAILED)->duration_ms;
+	for (uint32_t time=301;time<active_end;++time) {
+		host_step(time); assert(engine.winner.identity==active);
+	}
+	host_step(active_end); assert(engine.winner.identity!=active && host_value==10000);
+	host_reset(LED_CAP_MONO_GPIO); host_step(0); host_now_ms=200;
+	uint32_t request=led_request_id();
+	led_request_event(LED_OWNER_SYSTEM,request,led_event_id(),LED_INPUT_ACK);
+	struct led_token token=led_begin(LED_OWNER_SYSTEM,request);
+	assert(led_result(token,led_event_id(),LED_ACCEPTED)==LED_DUPLICATE);
+	assert(led_begin(LED_OWNER_SYSTEM,request).session==token.session);
+	host_step(200); assert(engine.winner.semantic==LED_INPUT_ACK && host_value==0);
+	host_step(400); assert(engine.winner.semantic!=LED_ACCEPTED);
+	assert(led_result(token,led_event_id(),LED_CANCELLED)==LED_ADMITTED);
+	assert(led_begin(LED_OWNER_SYSTEM,request).session==token.session);
+	assert(led_state(token,1,LED_MAINTENANCE)==LED_STALE);
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_connection_facts facts={.radio_required=true};
+	led_connection_publish(&facts);
+	struct led_token init=host_begin(LED_OWNER_SENSOR,LED_INITIALIZING);
+	host_step(0);
+	const struct led_behavior *visible=led_behavior_get(engine.winner.semantic);
+	assert((!visible || visible->style!=LED_STYLE_BREATHE) && !engine.ready);
+	host_step(299);
+	visible=led_behavior_get(engine.winner.semantic);
+	assert((!visible || visible->style!=LED_STYLE_BREATHE) && !engine.ready);
+	host_step(300); assert(engine.winner.semantic==LED_INITIALIZING);
+	led_state(init,2,LED_NONE); facts.pairing=true; led_connection_publish(&facts);
+	host_step(301); assert(engine.winner.semantic==LED_PAIRING);
+}
+static void reserved_completion_and_ota_lock(void)
+{
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token ota=host_begin(LED_OWNER_RADIO,LED_OTA_ACTIVE);
+	led_operation_publish(LED_OWNER_RADIO,true,false);
+	uint32_t completion_id=led_event_id();
+	/* A newer request rejection and input must not make the old immutable
+	 * session's reserved completion ID stale, or terminate its OTA lock. */
+	uint32_t other=led_request_id();
+	assert(led_request_event(LED_OWNER_RADIO,other,led_event_id(),LED_REJECTED)==LED_ADMITTED);
+	host_step(0); host_step(600);
+	host_now_ms=700;
+	assert(led_result(ota,completion_id,LED_FAILED)==LED_ADMITTED);
+	uint32_t refusal_end=600+led_behavior_get(LED_REJECTED)->duration_ms;
+	for (uint32_t time=701;time<refusal_end;++time) host_step(time);
+	host_step(refusal_end);
+	assert(engine.winner.semantic==LED_FAILED && host_value==10000);
+	host_step(refusal_end+led_behavior_get(LED_FAILED)->duration_ms);
+	assert(engine.winner.semantic==LED_OTA_ACTIVE);
+	led_operation_publish(LED_OWNER_RADIO,false,false); host_step(host_now_ms+1);
+	assert(engine.winner.semantic==LED_NONE);
+	/* An unrelated input must not merge away acceptance of a different request. */
+	host_reset(LED_CAP_MONO_GPIO);
+	led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_INPUT_ACK);
+	struct led_token accepted=led_begin(LED_OWNER_SYSTEM,led_request_id());
+	assert(led_result(accepted,led_event_id(),LED_ACCEPTED)==LED_ADMITTED);
+	host_step(0); host_step(600);
+	assert(engine.winner.semantic==LED_ACCEPTED && host_value==10000);
+}
+static void actual_clock_wrap(void)
+{
+	host_reset(LED_CAP_MONO_GPIO); host_step(0);
+	struct led_connection_facts facts={.radio_required=true,.healthy=true,.output_ready=true};
+	led_connection_publish(&facts); host_step(200);
+	assert(engine.winner.semantic==LED_READY);
+#if CONFIG_LED_NETWORK_SYNC
+	host_network_available=true;
+	host_network_raw=0;
+	host_step(0x80000064U);
+	assert(host_value==10000); /* uptime bit31 is not a future origin */
+	host_network_raw=0x7fffffffU;
+	host_step(0x80000065U);
+	uint32_t phase=led_sync_phase_ms(host_network_raw,10000);
+	assert(host_value==(phase<200 ? 10000 : 0));
+	host_network_raw=0x80000000U;
+	host_step(0x80000066U);
+	phase=led_sync_phase_ms(host_network_raw,10000);
+	assert(host_value==(phase<200 ? 10000 : 0));
+	host_network_raw=UINT32_MAX;
+	assert(host_step(0x80000067U)<=1);
+	host_network_raw=0;
+	host_step(0x80000068U); assert(host_value==10000);
+	host_network_available=false;
+	host_step(0x80000069U); assert(host_value==10000); /* hold readonly offset */
+#else
+	for (uint32_t delta=0;delta<10000;++delta) {
+		uint32_t time=0x80000000U+delta;
+		host_now_ms=time;
+		uint32_t raw=led_sync_kernel_ticks(k_uptime_ticks(),CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+		if (led_sync_phase_ms(raw,10000)<200) {
+			host_step(time); assert(host_value==10000); return;
+		}
+	}
+	assert(false);
 #endif
+}
+static void breathing_grid_and_idle_wakes(void)
+{
+	host_reset(LED_CAP_RGB_PWM);
+	struct led_token token=host_begin(LED_OWNER_IMU,LED_PROCESSING);
+	/* Continuous tasks start on first visibility, not admission. Present the
+	 * initial ramp before injecting later producer wakes into a lit segment. */
+	(void)host_step(0);
+	assert(host_step(1000)==LED_FRAME_MS && host_value>0);
+	for (uint32_t extra=1;extra<LED_FRAME_MS;extra++) {
+		host_now_ms=1000+extra;
+		assert(led_state(token,1+extra,LED_PROCESSING)==LED_ADMITTED);
+		/* Repeated producer wakes cannot defer the same next physical sample. */
+		assert(host_step(host_now_ms)+host_now_ms==1005);
+	}
+	assert(host_step(1005)==LED_FRAME_MS);
+	host_reset(LED_CAP_RGB_PWM);
+	host_begin(LED_OWNER_IMU,LED_WAIT_STILL);
+	assert(host_step(1000)>LED_FRAME_MS); /* Steady HOLD adds no frame wake train. */
+	led_quiesce();
+	assert(host_step(1001)==UINT32_MAX && host_value==0);
+}
+
+static void replace_selected_hold(void)
+{
+	uint32_t generation=led_button_input();
+	assert(led_button_hold(generation,true,host_now_ms)==LED_ADMITTED);
+}
+static void release_selected_hold(void)
+{
+	assert(led_button_hold(engine.button_generation,false,0)==LED_ADMITTED);
+}
+static void physical_hold_and_manual_handoff(void)
+{
+	host_reset(LED_CAP_RGB_PWM);
+	host_begin(LED_OWNER_ACC,LED_WAIT_STILL);
+	host_step(0);
+	host_now_ms=100;
+	uint32_t generation=led_button_input();
+	/* Publication is late; the initial full-on belongs to physical origin. */
+	host_now_ms=200;
+	assert(led_button_hold(generation,true,100)==LED_ADMITTED);
+	led_request_event(LED_OWNER_IMU,led_request_id(),led_event_id(),LED_FAILED);
+	led_identify();
+	host_step(600);
+	assert(engine.winner.semantic==LED_BUTTON_HOLD && host_value==10000 && host_level==LED_LEVEL_NOTICE);
+	assert(engine.winner.origin_ms==100);
+	uint32_t hold_identity=engine.winner.identity;
+	host_now_ms=800;
+	assert(led_button_hold(generation,true,700)==LED_DUPLICATE);
+	host_step(1100); assert(host_value==0 && engine.winner.identity==hold_identity);
+	host_step(1350); assert(host_value==10000);
+	host_step(2100); assert(host_value==2500 && engine.winner.origin_ms==100);
+	/* Faults and LOW still win, but never restart the physical wall-clock phase. */
+	led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_SENSOR_MISSING,0);
+	host_step(2100); assert(engine.winner.semantic==LED_SENSOR_MISSING);
+	led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_NONE,0);
+	host_step(2101); assert(engine.winner.semantic==LED_BUTTON_HOLD && host_value==2490);
+	led_power_publish(LED_POWER_BATTERY,true);
+	host_step(2102); assert(engine.winner.semantic==LED_LOW_BATTERY);
+	led_power_publish(LED_POWER_BATTERY,false);
+	host_step(2103); assert(engine.winner.semantic==LED_BUTTON_HOLD && host_value==2470);
+	struct led_token exit=led_begin(LED_OWNER_SYSTEM,led_request_id());
+	assert(led_button_exit(exit,1,generation)==LED_ADMITTED);
+	assert(!engine.button_hold_active);
+	uint32_t released=host_now_ms;
+	for (uint32_t elapsed=0;elapsed<=1800;++elapsed) {
+		host_step(released+elapsed);
+		assert(engine.winner.semantic==LED_MANUAL_EXIT && engine.winner.origin_ms==1100);
+		uint32_t age=released+elapsed-1100;
+		uint16_t expected=age<250 || age>=1250 ? 0 : (1250-age)*10;
+		assert(host_value==expected && host_level==LED_LEVEL_NOTICE);
+	}
+	assert(led_state(exit,2,LED_NONE)==LED_ADMITTED);
+	assert(led_button_hold(generation,true,100)==LED_STALE);
+	/* A newer physical press during a reversible fade survives old-generation
+	 * cleanup. Cancelling the old fade exposes the new press's own origin. */
+	host_reset(LED_CAP_RGB_PWM);
+	generation=led_button_input();
+	assert(led_button_hold(generation,true,0)==LED_ADMITTED);
+	host_step(1000);
+	exit=led_begin(LED_OWNER_SYSTEM,led_request_id());
+	assert(led_button_exit(exit,1,generation)==LED_ADMITTED);
+	host_step(1000);
+	host_now_ms=1100;
+	uint32_t newer=led_button_input();
+	assert(led_button_hold(newer,true,1100)==LED_ADMITTED);
+	assert(led_button_hold(generation,false,0)==LED_STALE);
+	assert(led_state(exit,2,LED_NONE)==LED_ADMITTED);
+	assert(led_button_exit(exit,3,generation)==LED_STALE);
+	host_step(1600);
+	assert(engine.winner.semantic==LED_BUTTON_HOLD && host_value==10000 && engine.winner.origin_ms==1100);
+	assert(led_button_hold(newer,false,0)==LED_ADMITTED);
+	assert(led_button_hold(newer,true,1100)==LED_STALE);
+	host_step(1601); assert(engine.winner.semantic!=LED_BUTTON_HOLD);
+	/* GPIO preserves the marker and full-ON fade interval, not a threshold. */
+	host_reset(LED_CAP_MONO_GPIO);
+	generation=led_button_input();
+	assert(led_button_hold(generation,true,0)==LED_ADMITTED);
+	for (uint32_t time=0;time<=3000;time+=100) {
+		host_step(time);
+		assert(host_value==(time<1000 || (time>=1250 && time<2250) || (time>=2500 && time<3000) ? 10000 : 0));
+	}
+	/* ISR retirement/replacement after selection but before actual driver call
+	 * rejects the stale worker frame, just as count cancellation does. */
+	void (*hooks[])(void)={release_selected_hold,replace_selected_hold};
+	for (unsigned cause=0;cause<2;++cause) {
+		host_reset(LED_CAP_RGB_PWM);
+		generation=led_button_input();
+		assert(led_button_hold(generation,true,0)==LED_ADMITTED);
+		host_step(400);
+		unsigned old_writes=host_writes;
+		host_info_hook=hooks[cause];
+		assert(host_step(500)==0 && host_writes==old_writes);
+		host_step(500);
+		if (cause) assert(engine.winner.semantic==LED_BUTTON_HOLD && engine.winner.origin_ms==500 && host_value==10000);
+		else assert(engine.winner.semantic!=LED_BUTTON_HOLD && !host_value);
+	}
+	/* Release during the marker, within the fade, or after its held-blink
+	 * boundary always inherits threshold origin and never replays light. */
+	static const uint32_t releases[]={1000,1600,2800};
+	for (unsigned i=0;i<sizeof(releases)/sizeof(releases[0]);++i) {
+		host_reset(LED_CAP_RGB_PWM);
+		generation=led_button_input();
+		assert(led_button_hold(generation,true,0)==LED_ADMITTED);
+		host_step(releases[i]);
+		exit=led_begin(LED_OWNER_SYSTEM,led_request_id());
+		assert(led_button_exit(exit,1,generation)==LED_ADMITTED);
+		for (unsigned dt=0;dt<=LED_MANUAL_EXIT_MS;++dt) {
+			host_step(releases[i]+dt);
+			uint32_t age=releases[i]+dt-1000;
+			assert(engine.winner.origin_ms==1000);
+			assert(host_value==(age<250 || age>=1250 ? 0 : (1250-age)*10));
+		}
+	}
+}
+
+static void terminal_feedback_group_separation(void)
+{
+	host_reset(LED_CAP_MONO_GPIO);
+	struct led_token token=led_begin(LED_OWNER_IMU,led_request_id());
+	assert(led_result(token,led_event_id(),LED_ACCEPTED)==LED_ADMITTED);
+	for (uint32_t time=0;time<=650;++time) host_step(time);
+	assert(host_value==10000);
+	/* Applied/persisted terminal replaces an incomplete acknowledgement. A
+	 * fresh 600ms observed dark separator precedes its four short pulses. */
+	assert(led_result(token,led_event_id(),LED_SUCCESS)==LED_ADMITTED);
+	for (uint32_t time=650;time<=3250;++time) {
+		host_step(time);
+		uint32_t age=time>=1250 ? time-1250 : 2000;
+		assert(host_value==(age<1400 && age%400<200 ? 10000 : 0));
+		if (time<3250) assert(engine.winner.semantic==LED_SUCCESS);
+	}
+	assert(engine.winner.semantic!=LED_SUCCESS);
+}
+
+static void success_full_window_and_low_conflicts(void)
+{
+	const enum led_capability capabilities[]={LED_CAP_MONO_GPIO,LED_CAP_RGB_PWM};
+	for (unsigned cap=0;cap<2;++cap) {
+		for (unsigned late=0;late<2;++late) {
+			host_reset(capabilities[cap]);
+			assert(led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_SUCCESS)==LED_ADMITTED);
+			led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_SENSOR,0);
+			host_step(0);
+			host_step(1000);
+			uint32_t release=1400+late;
+			host_step(release);
+			assert(host_value==10000 && !engine.black_known); /* No preceding black credit. */
+			led_fault_publish(LED_OWNER_SENSOR,LED_FAULT_NONE,0);
+			host_step(release);
+			if (late) {
+				assert(engine.winner.semantic!=LED_SUCCESS);
+				for (uint32_t time=release+1;time<=5000;++time) {
+					host_step(time);
+					assert(engine.winner.semantic!=LED_SUCCESS && !host_value);
+				}
+			} else {
+				assert(engine.winner.semantic==LED_SUCCESS && engine.winner.origin_ms==2000 && !host_value);
+				for (uint32_t time=release+1;time<4000;++time) {
+					host_step(time);
+					uint32_t age=time>=2000 ? time-2000 : 2000;
+					assert(engine.winner.semantic==LED_SUCCESS);
+					assert(host_value==(age<1400 && age%400<200 ? 10000 : 0));
+				}
+				host_step(4000);
+				assert(engine.winner.semantic!=LED_SUCCESS && !host_value);
+			}
+
+			host_reset(capabilities[cap]);
+			host_begin(LED_OWNER_ACC,LED_WAIT_STILL);
+			led_power_publish(LED_POWER_BATTERY,true);
+			host_step(0); host_step(2000);
+			host_now_ms=7400+late; /* 600ms separator + 2000ms glyph must fit before LOW at 10000. */
+			assert(led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_SUCCESS)==LED_ADMITTED);
+			host_step(host_now_ms);
+			assert(engine.winner.semantic==(late ? LED_WAIT_STILL : LED_SUCCESS));
+			for (uint32_t time=7401+late;time<10000;++time) {
+				host_step(time);
+				if (!late) {
+					uint32_t age=time>=8000 ? time-8000 : 2000;
+					assert(engine.winner.semantic==LED_SUCCESS);
+					assert(host_value==(age<1400 && age%400<200 ? 10000 : 0));
+				} else assert(engine.winner.semantic!=LED_SUCCESS);
+			}
+			host_step(10000);
+			assert(engine.winner.semantic==LED_LOW_BATTERY && host_value==10000);
+			host_step(12000); /* The missed success cannot fit after LOW within its occurrence TTL. */
+			assert(engine.winner.semantic!=LED_SUCCESS);
+		}
+		host_reset(capabilities[cap]);
+		assert(led_request_event(LED_OWNER_SYSTEM,led_request_id(),led_event_id(),LED_SUCCESS)==LED_ADMITTED);
+		host_step(0); host_step(600);
+		assert(host_value==10000);
+		led_power_publish(LED_POWER_BATTERY,true);
+		host_step(700);
+		assert(engine.winner.semantic==LED_LOW_BATTERY);
+		led_power_publish(LED_POWER_BATTERY,false);
+		for (uint32_t time=701;time<=5000;++time) {
+			host_step(time);
+			assert(engine.winner.semantic!=LED_SUCCESS && !host_value);
+		}
+	}
+}
+
+static void ready_heartbeat_boundaries(void)
+{
+	const enum led_capability capabilities[]={LED_CAP_MONO_GPIO,LED_CAP_RGB_PWM};
+	const struct led_connection_facts facts={.radio_required=true,.healthy=true,.output_ready=true,.paired=true};
+	for (unsigned cap=0;cap<2;++cap) {
+		host_reset(capabilities[cap]);
+		/* A network-enabled worker retains its last offset across loss.
+		 * Seed a real zero-offset snapshot before testing local/held time,
+		 * rather than inheriting a previous case's synchronization offset. */
+		host_network_available=true;
+		host_network_raw=0;
+		led_connection_publish(&facts);
+		host_step(0);
+		host_network_available=false;
+		for (uint32_t time=0;time<=20200;++time) {
+			host_step(time);
+			assert(engine.ready && engine.winner.semantic==LED_READY);
+			uint32_t raw=led_sync_kernel_ticks(k_uptime_ticks(),CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+			assert(host_value==(led_sync_phase_ms(raw,10000)<200 ? 10000 : 0));
+		}
+		for (uint32_t age=0;age<=20000;++age) {
+			struct led_envelope sample=led_timeline(LED_STYLE_READY,age,cap==0,false);
+			uint32_t phase=age%10000;
+			assert(!sample.complete && !sample.fading);
+			assert(sample.value_pptt==(phase<200 ? 10000 : 0));
+			assert(sample.next_ms==(phase<200 ? 200-phase : 10000-phase));
+		}
+#if CONFIG_LED_NETWORK_SYNC
+		/* Probe raw 32768Hz ticks immediately around the 200ms edge and
+		 * period wrap, rather than assuming integer uptime equals phase. */
+		const uint32_t ticks[]={6553,6554,327679,327680,334233,334234};
+		const bool on[]={true,false,false,true,true,false};
+		host_network_available=true;
+		for (unsigned i=0;i<sizeof(ticks)/sizeof(ticks[0]);++i) {
+			host_network_raw=ticks[i];
+			host_step(20300+i);
+			assert(engine.winner.semantic==LED_READY && host_value==(on[i] ? 10000 : 0));
+		}
+		/* Leave a zero held offset for subsequent local-clock scenarios. */
+		host_now_ms=20306;
+		host_network_raw=led_sync_kernel_ticks(k_uptime_ticks(),CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+		host_step(host_now_ms);
+		host_network_available=false;
+#endif
+	}
+}
 
 int main(void)
 {
-	test_phase_math(); test_active_off_first(); test_same_pattern_owner();
-	test_stale_completion(); test_priority_and_interruptible_wait();
-	test_solid_idle(); test_counts();
-	test_shutdown_barrier();
-	test_pulse_period_with_blocking_driver();
-	test_power_cycle_margins();
-#if CONFIG_LED_STRIP
-	test_pulse_requests_preserve_frames();
-	test_new_pattern_renders_matching_first_frame();
-	test_steady_retry_recovery();
-	test_steady_retry_exhaustion();
-	test_retry_preemption_and_failed_black();
-	test_failed_fade_preserves_carry();
-	test_failed_fade_keeps_cadence();
-	test_error_log_boundary();
-#endif
-#if HOST_P10
-	test_pulse_to_steady_brightness();
-#endif
-#if CONFIG_LED_NETWORK_SYNC
-	test_late_join_and_loss(); test_clock_adoption(); test_raw_wrap();
-#else
-	test_disabled_clock();
-#endif
-	puts("production LED worker: phase, ownership, priority, off-first, wrap passed");
+	invalid_owner_and_fault_inputs();
+	credited_black_does_not_restart_unlit_event();
+	timeline_boundaries(); finite_glyph_recognition(); persistent_fault_and_link_glyphs();
+	success_full_window_and_low_conflicts(); ready_heartbeat_boundaries();
+	hold_ack_black_gap(); identities_and_truthful_terminal();
+	physical_hold_and_manual_handoff(); terminal_feedback_group_separation();
+	breathing_grid_and_idle_wakes();
+	expired_success_and_interrupted_result(); low_guarantee_and_admission();
+	safety_record_and_reject_preserves_ota(); immediate_ready_and_blockers();
+	external_power_priority_and_identify(); foreground_order_exit_and_quiesce();
+	request_flood_tie_break_and_wrap(); invisible_effects_and_driver_black_failure();
+	same_class_pending_and_input_merge(); actual_clock_wrap();
+	reserved_completion_and_ota_lock();
+	puts("semantic LED renderer: timeline/identity/TTL/LOW/READY/background/P0 scenarios passed");
 	return 0;
 }

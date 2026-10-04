@@ -8,6 +8,8 @@
 #include <zephyr/sys/atomic.h>
 #include "connection/connection.h"
 #include "sensor/raw_collection.h"
+#include "../led_feedback_stub.h"
+static bool sensor_diagnostics_maintenance_active(void) { return false; }
 #define atomic_clear(value) atomic_set(value, 0)
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)

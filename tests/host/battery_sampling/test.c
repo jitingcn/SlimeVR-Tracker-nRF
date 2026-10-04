@@ -5,7 +5,29 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include "../led_feedback_stub.h"
+#define ARG_UNUSED(value) ((void)(value))
+#define USE_PMIC_CHARGER TEST_PMIC
+#define GPIO_ACTIVE_LOW 1
+#define GPIO_PULL_UP 2
+#if TEST_BOARD_GPIO
+#include "board_gpio.inc"
+#else
+#define CHG_EXISTS 1
+#define STBY_EXISTS 1
+#define PLUG_EXISTS 0
+#define TEST_DT_HAS_charger_full_on_plug 0
+#define TEST_CHG_PORT 0
+#define TEST_CHG_PIN 2
+#define TEST_CHG_FLAGS (GPIO_ACTIVE_LOW | GPIO_PULL_UP)
+#endif
 
+#define CONFIG_SENSOR_TCAL_HEATED TEST_HEATER
+#define TEST_DT_HAS_plug_gpios PLUG_EXISTS
+#define DT_NODE_HAS_PROP(node, prop) TEST_DT_HAS_##prop
+#define CHARGER_FULL_ON_PLUG (TEST_DT_HAS_charger_full_on_plug && PLUG_EXISTS)
+#define GPIO_INPUT 0
+#define atomic_get(value) (*(value))
 #define DT_NODE_HAS_STATUS(node, status) TEST_PMIC
 #define DT_NODELABEL(node) node
 #define LOG_MODULE_REGISTER(...)
@@ -15,10 +37,7 @@
 #define NRFX_ABS(value) abs(value)
 #define POWER_USBREGSTATUS_VBUSDETECT_Msk 1
 #define K_MSEC(value) (value)
-enum { SYS_STATUS_PLUGGED, SYS_STATUS_SYSTEM_ERROR, SYS_REGULATOR_DCDC,
-       SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PATTERN_ON_PERSIST,
-       SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PATTERN_ACTIVE_PERSIST,
-       SYS_LED_PRIORITY_SYSTEM, WDT_CHANNEL_POWER };
+enum { SYS_STATUS_PLUGGED, SYS_STATUS_SYSTEM_ERROR, SYS_REGULATOR_DCDC, WDT_CHANNEL_POWER };
 static struct { unsigned USBREGSTATUS; } power_registers;
 #define NRF_POWER (&power_registers)
 static int power_wake_sem;
@@ -26,22 +45,89 @@ static bool plugged, power_init;
 static int64_t clock_ms, attempts_at[128];
 static unsigned attempts, voltage_updates, soc_updates, shutdowns, watchdogs, waits;
 static bool input_charging, input_charged, input_pmic, input_dock, status_plugged;
+static bool reported_charged, reported_plugged;
 static int input_mv = 3800;
 static int16_t input_soc = 5000;
+static bool gpio_available = true;
+static int charger_error, gpio_error, standby_error, plug_error, plug_config_error;
+static bool plug_available = true;
+static bool gpio_use_raw;
+static int raw_charge_level = 1, raw_standby_level = 1;
+static int raw_plug_level = 1;
+#if CONFIG_SENSOR_TCAL_HEATED
+static bool heater_plug_ready = true;
+#endif
+static struct gpio_fixture { int port, pin, flags; } chg = {
+    TEST_CHG_PORT, TEST_CHG_PIN, TEST_CHG_FLAGS,
+}, stby = {0, 3, GPIO_ACTIVE_LOW | GPIO_PULL_UP};
+#if PLUG_EXISTS
+static struct gpio_fixture charger_plug = {
+    TEST_PLUG_PORT, TEST_PLUG_PIN, TEST_PLUG_FLAGS,
+};
+#endif
+#if CHARGER_FULL_ON_PLUG
+static int charger_plug_error = -ENODEV;
+#endif
+#if CONFIG_SENSOR_TCAL_HEATED
+#define heater_plug charger_plug
+#endif
+static bool gpio_is_ready_dt(const struct gpio_fixture *spec)
+{
+#if PLUG_EXISTS
+    if (spec == &charger_plug) return plug_available;
+#endif
+    return gpio_available;
+}
+static int gpio_pin_configure_dt(const struct gpio_fixture *spec, int flags)
+{
+    (void)flags;
+#if PLUG_EXISTS
+    if (spec == &charger_plug) return plug_config_error;
+#endif
+    return 0;
+}
+static int gpio_pin_get_dt(const struct gpio_fixture *spec)
+{
+#if PLUG_EXISTS
+    if (spec == &charger_plug) {
+        return plug_error ? plug_error : raw_plug_level ^ !!(spec->flags & GPIO_ACTIVE_LOW);
+    }
+#endif
+    assert(spec == &chg || spec == &stby);
+    if (gpio_error) return gpio_error;
+    if (spec == &stby && standby_error) return standby_error;
+    if (gpio_use_raw) {
+        int raw = spec == &chg ? raw_charge_level : raw_standby_level;
+        return raw ^ !!(spec->flags & GPIO_ACTIVE_LOW);
+    }
+    return spec == &chg ? input_charging : input_charged;
+}
+#if TEST_PMIC
+static bool charger_sample_valid;
+static int64_t charger_sample_ms;
+#endif
 static int last_voltage;
 static bool dock_read(void) { return input_dock; }
-static bool chg_read(void) { return input_charging; }
-static bool stby_read(void) { return input_charged; }
 static int battery_charger_state(bool *pmic, bool *charging, bool *charged)
 {
+#if TEST_BOARD_GPIO
+    return -ENOTSUP;
+#else
     *pmic = input_pmic;
-    return 0;
+    *charging = input_charging;
+    *charged = input_charged;
+    return charger_error;
+#endif
 }
 static int16_t read_batt_mV(int *mv)
 {
     assert(attempts < 128);
     attempts_at[attempts++] = clock_ms;
     *mv = input_mv;
+#if TEST_PMIC
+    charger_sample_valid = input_soc >= 0;
+    if (charger_sample_valid) charger_sample_ms = clock_ms;
+#endif
     return input_soc;
 }
 static int64_t k_uptime_get(void) { return clock_ms; }
@@ -50,7 +136,6 @@ static void set_status(int status, bool enabled)
     if (status == SYS_STATUS_PLUGGED) status_plugged = enabled;
 }
 static void set_regulator(int regulator) {}
-static void set_led(int pattern, int priority) {}
 static void sys_update_battery_tracker_voltage(int mv, bool charging)
 {
     ++voltage_updates;
@@ -59,8 +144,12 @@ static void sys_update_battery_tracker_voltage(int mv, bool charging)
 static void sys_update_battery_tracker(int16_t soc, bool charging) { ++soc_updates; }
 static int16_t sys_get_calibrated_battery_pptt(int16_t soc) { return soc; }
 static bool sys_system_off(void) { ++shutdowns; return true; }
-static void connection_update_battery(bool available, bool charging, bool charged,
-                                      uint32_t soc, int mv) {}
+static void connection_update_battery(bool available, bool external, bool full,
+                                      uint32_t soc, int mv)
+{
+    reported_plugged = external;
+    reported_charged = full;
+}
 static void watchdog_feed(int channel) { ++watchdogs; }
 static int k_sem_take(int *sem, int timeout)
 {
@@ -80,10 +169,124 @@ static void feed(int16_t soc)
 {
     power_battery_feed_and_track(true, false, soc, true, 3800);
 }
+static void expect_snapshot_error(int error)
+{
+    for (int sentinel = 0; sentinel < 2; ++sentinel) {
+        bool charging = sentinel, charged = !sentinel;
+        assert(sys_charger_snapshot(&charging, &charged) == error);
+        assert(charging == !!sentinel && charged == !sentinel);
+    }
+}
+static void expect_feedback(enum led_power_state expected, bool full)
+{
+    assert(led_test_power == expected);
+    assert(power_battery_device_charged() == full);
+    assert(reported_charged == full);
+}
 int main(int argc, char **argv)
 {
     assert(argc == 2);
     const char *scenario = argv[1];
+    assert(sys_gpio_init() == 0);
+    if (!strcmp(scenario, "feedback_unknown")) {
+        input_soc = 10000; NRF_POWER->USBREGSTATUS = 1;
+        gpio_available = false; charger_error = -EIO;
+        tick(0);
+        assert(led_test_power == LED_POWER_EXTERNAL_UNKNOWN && !led_test_low);
+        input_charging = input_charged = true;
+        tick(100);
+        assert(led_test_power == LED_POWER_EXTERNAL_UNKNOWN);
+    } else if (!strcmp(scenario, "feedback_charge")) {
+        input_charging = input_charged = true;
+        tick(0); assert(led_test_power == LED_POWER_CHARGING);
+        input_charging = false;
+        tick(100); assert(led_test_power == LED_POWER_CHARGED);
+        gpio_error = -EIO; charger_error = -EIO;
+        tick(200); assert(led_test_power == LED_POWER_EXTERNAL_UNKNOWN);
+    } else if (!strcmp(scenario, "feedback_low")) {
+        input_soc = 500;
+        tick(0); assert(led_test_low && led_test_power == LED_POWER_BATTERY);
+        NRF_POWER->USBREGSTATUS = 1; gpio_available = false; charger_error = -EIO;
+        tick(100); assert(led_test_low && led_test_power == LED_POWER_EXTERNAL_UNKNOWN);
+        gpio_available = true; charger_error = 0; input_charging = true;
+        tick(200); assert(led_test_power == LED_POWER_CHARGING);
+    } else if (!strcmp(scenario, "feedback_partial")) {
+        NRF_POWER->USBREGSTATUS = 1;
+        input_charging = input_charged = true;
+        standby_error = -EIO;
+        tick(0); assert(led_test_power == LED_POWER_EXTERNAL_UNKNOWN);
+        standby_error = 0;
+        tick(100); assert(led_test_power == LED_POWER_CHARGING);
+        input_charging = false;
+        tick(200); assert(led_test_power == LED_POWER_CHARGED);
+    } else if (!strcmp(scenario, "feedback_board")) {
+        gpio_use_raw = true;
+        raw_plug_level = raw_charge_level = 0;
+        tick(0); expect_feedback(LED_POWER_CHARGING, false);
+        raw_charge_level = 1;
+        tick(100); expect_feedback(LED_POWER_CHARGED, true);
+        tick(600);
+        assert(reported_plugged); /* Same full fact reaches battery telemetry. */
+        raw_charge_level = 0;
+        tick(700); expect_feedback(LED_POWER_CHARGING, false);
+        raw_plug_level = 1; /* CHG wins even an inactive PLUG conflict. */
+        tick(800); expect_feedback(LED_POWER_CHARGING, false);
+        raw_charge_level = 1;
+        tick(900); expect_feedback(LED_POWER_BATTERY, false);
+        NRF_POWER->USBREGSTATUS = 1;
+        tick(1000); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        raw_plug_level = 0; input_soc = 5000;
+        tick(1100); expect_feedback(LED_POWER_CHARGED, true);
+    } else if (!strcmp(scenario, "feedback_board_errors")) {
+        gpio_use_raw = true;
+        NRF_POWER->USBREGSTATUS = 1;
+        raw_plug_level = 0; raw_charge_level = 1;
+        tick(0); expect_feedback(LED_POWER_CHARGED, true);
+        gpio_error = -EIO;
+        expect_snapshot_error(-EIO);
+        tick(100); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        gpio_error = 0; plug_error = -EIO;
+        expect_snapshot_error(-EIO);
+        tick(200); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        raw_charge_level = 0; /* No partial CHG commit if the PLUG read fails. */
+        expect_snapshot_error(-EIO);
+        tick(300); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        plug_error = 0; gpio_available = false;
+        expect_snapshot_error(-ENODEV);
+        tick(400); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        gpio_available = true; plug_available = false;
+        expect_snapshot_error(-ENODEV);
+        tick(500); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        plug_available = true;
+        tick(600); expect_feedback(LED_POWER_CHARGING, false);
+        raw_charge_level = 1;
+        tick(700); expect_feedback(LED_POWER_CHARGED, true);
+    } else if (!strcmp(scenario, "feedback_board_initfail")) {
+        gpio_use_raw = true;
+        NRF_POWER->USBREGSTATUS = 1;
+        raw_plug_level = 0; raw_charge_level = 1;
+        plug_config_error = -EIO;
+        assert(sys_gpio_init() == 0);
+        expect_snapshot_error(-EIO);
+        tick(0); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        plug_config_error = 0; plug_available = false;
+        assert(sys_gpio_init() == 0);
+        expect_snapshot_error(-ENODEV);
+        tick(100); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        plug_available = true;
+        assert(sys_gpio_init() == 0);
+        tick(200); expect_feedback(LED_POWER_CHARGED, true);
+    } else if (!strcmp(scenario, "feedback_chg_only")) {
+        gpio_use_raw = true;
+        raw_plug_level = raw_charge_level = 0;
+        tick(0); expect_feedback(LED_POWER_CHARGING, false);
+        raw_charge_level = 1;
+        expect_snapshot_error(-ENOTSUP);
+        tick(100); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+        NRF_POWER->USBREGSTATUS = 1; raw_plug_level = 1;
+        expect_snapshot_error(-ENOTSUP);
+        tick(200); expect_feedback(LED_POWER_EXTERNAL_UNKNOWN, false);
+    } else
     if (!strcmp(scenario, "cadence")) {
         for (int t = 0; t <= 1000; t += 100) tick(t);
         assert(attempts == (TEST_PMIC ? 11 : 3));

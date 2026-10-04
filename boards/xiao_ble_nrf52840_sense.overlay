@@ -69,8 +69,14 @@
 	};
 
 	zephyr,user {
+		led-capability = "rgb-pwm";
+		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_INVERTED>,
+			<&pwm0 1 PWM_MSEC(1) PWM_POLARITY_INVERTED>,
+			<&pwm0 2 PWM_MSEC(1) PWM_POLARITY_INVERTED>;
+		led-channel-colors = <1 2 3>; /* SDK labels P0.26/.30/.06 R/G/B. */
+		led-channel-weights = <10000 10000 10000>;
+		led-primary-channel = <1>;
 		int0-gpios = <&gpio0 11 0>;
-		led-gpios = <&gpio0 17 (GPIO_OPEN_DRAIN|GPIO_ACTIVE_LOW)>;
 	};
 
 };

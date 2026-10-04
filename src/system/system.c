@@ -127,6 +127,12 @@ static const struct gpio_dt_spec stby = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, stby_
 #else
 #pragma message "Standby sense GPIO does not exist"
 #endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug) && \
+	DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, plug_gpios)
+#define CHARGER_FULL_ON_PLUG true
+static const struct gpio_dt_spec charger_plug = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, plug_gpios);
+static int charger_plug_error = -ENODEV;
+#endif
 
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, clk_gpios)
 #define CLK_EN_EXISTS true
@@ -359,11 +365,72 @@ struct warm_dirty_slot {
 	uint16_t id;
 	void *ptr;
 	size_t len;
+#if CONFIG_SENSOR_USE_TCAL
+	uint32_t feedback_identity;
+#endif
 };
 static struct warm_dirty_slot warm_dirty[WARM_DIRTY_MAX];
 static uint8_t warm_dirty_count;
 
-static void sys_flush_warm_locked(void);
+static int sys_flush_warm_locked(void);
+#if CONFIG_SENSOR_USE_TCAL
+static uint32_t warm_tcal_armed;
+static unsigned int warm_transaction_depth;
+struct warm_tcal_receipt { uint32_t identity; uint8_t written; int result; };
+static struct warm_tcal_receipt warm_tcal_receipts[WARM_DIRTY_MAX];
+static uint8_t warm_tcal_receipt_count;
+
+static uint8_t warm_tcal_id_mask(uint16_t id)
+{
+	switch (id) {
+	case MAIN_GYRO_TCAL_POINTS_ID: return 1;
+	case MAIN_GYRO_TCAL_COEFFS_ID: return 2;
+	case MAIN_GYRO_TCAL_STATE_ID: return 4;
+	case MAIN_GYRO_TEMP_ID: return 8;
+	default: return 0;
+	}
+}
+
+void sys_warm_feedback_arm(uint32_t identity)
+{
+	/* Called by the owner inside its existing warm transaction. */
+	warm_tcal_armed = identity;
+}
+
+static void warm_tcal_receipt_locked(const struct warm_dirty_slot *slot, bool written, int result)
+{
+	if (!slot->feedback_identity) return;
+	for (uint8_t i = 0; i < warm_tcal_receipt_count; i++) {
+		if (warm_tcal_receipts[i].identity == slot->feedback_identity) {
+			if (written) warm_tcal_receipts[i].written |= warm_tcal_id_mask(slot->id);
+			if (result) warm_tcal_receipts[i].result = result;
+			return;
+		}
+	}
+	if (warm_tcal_receipt_count < WARM_DIRTY_MAX) {
+		warm_tcal_receipts[warm_tcal_receipt_count++] = (struct warm_tcal_receipt){
+			.identity = slot->feedback_identity,
+			.written = written ? warm_tcal_id_mask(slot->id) : 0,
+			.result = result,
+		};
+	}
+}
+
+static void warm_tcal_dispatch(void)
+{
+	/* Take one immutable receipt at a time; callbacks never own storage lock. */
+	for (uint8_t i = 0; i < WARM_DIRTY_MAX; i++) {
+		k_mutex_lock(&sys_storage_lock, K_FOREVER);
+		if (!warm_tcal_receipt_count || warm_transaction_depth) {
+			k_mutex_unlock(&sys_storage_lock);
+			break;
+		}
+		struct warm_tcal_receipt receipt = warm_tcal_receipts[--warm_tcal_receipt_count];
+		k_mutex_unlock(&sys_storage_lock);
+		sensor_tcal_feedback_persisted(receipt.identity, receipt.written, receipt.result);
+	}
+}
+#endif
 
 static void warm_dirty_clear_id_locked(uint16_t id)
 {
@@ -372,6 +439,9 @@ static void warm_dirty_clear_id_locked(uint16_t id)
 			i++;
 			continue;
 		}
+#if CONFIG_SENSOR_USE_TCAL
+		warm_tcal_receipt_locked(&warm_dirty[i], false, -ECANCELED);
+#endif
 		warm_dirty[i] = warm_dirty[warm_dirty_count - 1];
 		warm_dirty_count--;
 	}
@@ -384,16 +454,30 @@ static void warm_dirty_mark_locked(uint16_t id, void *ptr, size_t len)
 	}
 	for (uint8_t i = 0; i < warm_dirty_count; i++) {
 		if (warm_dirty[i].id == id) {
+#if CONFIG_SENSOR_USE_TCAL
+			uint32_t identity = warm_tcal_id_mask(id) ? warm_tcal_armed : 0;
+			if (warm_dirty[i].feedback_identity && warm_dirty[i].feedback_identity != identity) {
+				warm_tcal_receipt_locked(&warm_dirty[i], false, -ECANCELED);
+			}
+#endif
 			warm_dirty[i].ptr = ptr;
 			warm_dirty[i].len = len;
+#if CONFIG_SENSOR_USE_TCAL
+			warm_dirty[i].feedback_identity = warm_tcal_id_mask(id) ? warm_tcal_armed : 0;
+#endif
 			return;
 		}
 	}
 	if (warm_dirty_count >= WARM_DIRTY_MAX) {
 		LOG_ERR("Warm dirty table full, forcing flush before mark ID %u", id);
-		sys_flush_warm_locked();
+		int result = sys_flush_warm_locked();
+		(void)result;
 		if (warm_dirty_count >= WARM_DIRTY_MAX) {
 			LOG_ERR("Warm dirty table still full after flush, dropping ID %u", id);
+#if CONFIG_SENSOR_USE_TCAL
+			struct warm_dirty_slot dropped = {.id = id, .feedback_identity = warm_tcal_id_mask(id) ? warm_tcal_armed : 0};
+			warm_tcal_receipt_locked(&dropped, false, result ? result : -ENOSPC);
+#endif
 			return;
 		}
 	}
@@ -401,6 +485,9 @@ static void warm_dirty_mark_locked(uint16_t id, void *ptr, size_t len)
 		.id = id,
 		.ptr = ptr,
 		.len = len,
+#if CONFIG_SENSOR_USE_TCAL
+		.feedback_identity = warm_tcal_id_mask(id) ? warm_tcal_armed : 0,
+#endif
 	};
 }
 
@@ -415,6 +502,9 @@ bool sys_warm_is_dirty(void)
 void sys_warm_transaction_begin(void)
 {
 	k_mutex_lock(&sys_storage_lock, K_FOREVER);
+#if CONFIG_SENSOR_USE_TCAL
+	warm_transaction_depth++;
+#endif
 }
 
 void sys_warm_transaction_mark(uint16_t id, void *retained_ptr, size_t len)
@@ -427,7 +517,14 @@ void sys_warm_transaction_end(bool retained_changed)
 	if (retained_changed) {
 		retained_update();
 	}
+#if CONFIG_SENSOR_USE_TCAL
+	bool dispatch = --warm_transaction_depth == 0;
+	if (dispatch) warm_tcal_armed = 0;
+#endif
 	k_mutex_unlock(&sys_storage_lock);
+#if CONFIG_SENSOR_USE_TCAL
+	if (dispatch) warm_tcal_dispatch();
+#endif
 }
 
 void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t len)
@@ -444,14 +541,17 @@ void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t le
 	sys_warm_transaction_end(true);
 }
 
-static void sys_flush_warm_locked(void)
+static int sys_flush_warm_locked(void)
 {
 	if (warm_dirty_count == 0) {
-		return;
+		return 0;
 	}
 	if (!sys_nvs_init()) {
 		LOG_ERR("sys_flush_warm: NVS init failed, keeping %u dirty IDs", warm_dirty_count);
-		return;
+#if CONFIG_SENSOR_USE_TCAL
+		for (uint8_t i = 0; i < warm_dirty_count; i++) warm_tcal_receipt_locked(&warm_dirty[i], false, -EIO);
+#endif
+		return -EIO;
 	}
 
 	LOG_INF("Flushing %u warm NVS ID(s)", warm_dirty_count);
@@ -459,22 +559,36 @@ static void sys_flush_warm_locked(void)
 		int err = nvs_write(&fs, warm_dirty[i].id, warm_dirty[i].ptr, warm_dirty[i].len);
 		if (err < 0) {
 			LOG_ERR("sys_flush_warm: NVS write ID %u failed: %d", warm_dirty[i].id, err);
+#if CONFIG_SENSOR_USE_TCAL
+			for (uint8_t j = i; j < warm_dirty_count; j++) warm_tcal_receipt_locked(&warm_dirty[j], false, err);
+#endif
 			/* Keep remaining dirty; drop only successfully written prefix next time. */
 			if (i > 0) {
 				memmove(&warm_dirty[0], &warm_dirty[i], (warm_dirty_count - i) * sizeof(warm_dirty[0]));
 			}
 			warm_dirty_count -= i;
-			return;
+			return err;
 		}
+#if CONFIG_SENSOR_USE_TCAL
+		warm_tcal_receipt_locked(&warm_dirty[i], true, 0);
+#endif
 	}
 	warm_dirty_count = 0;
+	return 0;
 }
 
-void sys_flush_warm(void)
+int sys_flush_warm(void)
 {
 	k_mutex_lock(&sys_storage_lock, K_FOREVER);
-	sys_flush_warm_locked();
+	int result = sys_flush_warm_locked();
+#if CONFIG_SENSOR_USE_TCAL
+	bool dispatch = warm_transaction_depth == 0;
+#endif
 	k_mutex_unlock(&sys_storage_lock);
+#if CONFIG_SENSOR_USE_TCAL
+	if (dispatch) warm_tcal_dispatch();
+#endif
+	return result;
 }
 
 // write to retained and nvs (cold / eager)
@@ -540,30 +654,27 @@ void sys_read(uint16_t id, void *data, size_t len)
 	k_mutex_unlock(&sys_storage_lock);
 }
 
-void sys_clear(void)
+int sys_clear(void)
 {
-
-	static bool reset_confirm = false;
-	if (!reset_confirm) {
-		printk(
-			"Resetting NVS and retained will clear all pairing, sensor calibration data, and battery calibration data. "
-			"Are you sure?\n"
-		);
-		reset_confirm = true;
-		return;
-	}
 	printk("Resetting NVS and retained\n");
 
 	sensor_calibration_clear_begin();
 	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	int err = sys_nvs_init() ? nvs_clear(&fs) : -EIO;
-	reset_confirm = false;
 	if (err < 0) {
 		k_mutex_unlock(&sys_storage_lock);
 		sensor_calibration_clear_end();
 		LOG_ERR("NVS reset failed: %d", err);
-		return;
+		led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_FAILED);
+		return err;
 	}
+	sensor_calibration_online_mag_cancel_pending();
+#if CONFIG_SENSOR_USE_TCAL
+	/* The heated clear barrier already retired its awaited token. Drop only
+	 * the cleared epoch's receipts; never let them bind a later calibration. */
+	warm_tcal_armed = 0;
+	warm_tcal_receipt_count = 0;
+#endif
 	warm_dirty_count = 0;
 	memset(retained, 0, sizeof(*retained));
 	nvs_init = false;
@@ -578,6 +689,8 @@ void sys_clear(void)
 	sensor_calibration_clear_end();
 
 	LOG_INF("NVS and retained reset");
+	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_SUCCESS);
+	return 0;
 }
 
 void sys_nvs_stats(void)
@@ -716,6 +829,7 @@ static void heated_button_poll(bool ota_busy)
 	heated_button_handled = true;
 	k_spin_unlock(&heated_button_lock, key);
 	if (ota_busy || sensor_tcal_heated_busy()) {
+		led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_REJECTED);
 		return;
 	}
 	int err = sensor_tcal_heated_start(CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C);
@@ -729,21 +843,88 @@ static void heated_button_poll(bool ota_busy)
 static const struct gpio_dt_spec button0 = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 static int64_t press_time = 0;
 static int64_t last_press_duration = 0;
+/* Provenance makes consuming a recognized hold's release distinct from any
+ * later tap that arrives while its reversible exit cue is running. */
+static int64_t last_press_started_at = 0;
+static uint32_t press_generation;
+static uint32_t last_press_generation;
 bool button_held_from_init;
 
 static void button_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	bool pressed = button_read();
+	int level = gpio_pin_get_dt(&button0);
+	if (level < 0) {
+		/* Unknown is neither a press nor a completed release gesture. */
+		if (press_generation) {
+			led_button_hold(press_generation, false, 0);
+		}
+		press_generation = 0;
+		press_time = 0;
+		last_press_duration = 0;
+		return;
+	}
+	bool pressed = level > 0;
 	int64_t current_time = k_uptime_get();
 	if (!pressed && button_held_from_init) { // after first depress, now allow events that need unambiguous button hold
 		button_held_from_init = false;
 	}
-	if (press_time && !pressed && current_time - press_time > 50) { // debounce
-		last_press_duration = current_time - press_time;
-	} else if (press_time && pressed) { // unusual press event on button already pressed
+	if (pressed) {
+		if (press_generation) return; /* Duplicate edge cannot restart the ramp. */
+		press_time = current_time;
+		press_generation = led_button_input();
+		/* Feedback facts only: all hardware remains owned by the LED worker. */
+		led_button_hold(press_generation, true, (uint32_t)current_time);
 		return;
 	}
-	press_time = pressed ? current_time : 0;
+	if (press_generation) {
+		int64_t duration = current_time - press_time;
+		if (duration > 50) { /* Preserve business debounce independently of light. */
+			last_press_duration = duration;
+			last_press_started_at = press_time;
+			last_press_generation = press_generation;
+		}
+		/* A qualified release keeps its visual phase until atomic handoff.
+		 * Clearing it here would expose background before the thread polls. */
+		if (duration < LED_BUTTON_HOLD_MS) {
+			led_button_hold(press_generation, false, 0);
+		}
+		press_time = 0;
+		press_generation = 0;
+	}
+}
+
+static void button_release_consume(int64_t original_press_time)
+{
+	unsigned int key = irq_lock();
+	if (last_press_started_at == original_press_time) {
+		last_press_duration = 0;
+	}
+	irq_unlock(key);
+}
+
+static void button_press_cancel(int64_t original_press_time)
+{
+	unsigned int key = irq_lock();
+	if (press_generation && press_time == original_press_time) {
+		press_time = 0;
+		press_generation = 0;
+	}
+	/* A release can race a held timeout/OTA refusal just before this cleanup. */
+	if (last_press_started_at == original_press_time) {
+		last_press_duration = 0;
+	}
+	irq_unlock(key);
+}
+
+static void button_status_clear_if_idle(void)
+{
+	/* Old handlers cannot release the sleep veto of newer queued/held input.
+	 * Keep the check and status write indivisible with respect to GPIO ISR. */
+	unsigned int key = irq_lock();
+	if (!press_generation && last_press_duration <= 50) {
+		set_status(SYS_STATUS_BUTTON_PRESSED, false);
+	}
+	irq_unlock(key);
 }
 
 static struct gpio_callback button_cb_data;
@@ -792,10 +973,13 @@ bool button_read(void)
 }
 
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
+static int sys_button_reboot(uint32_t generation);
+static int sys_button_shutdown(int64_t original_press_time, uint32_t hold_generation);
 static void button_thread(void)
 {
 	int num_presses = 0;
 	int64_t last_press = 0;
+	uint32_t group_generation = 0;
 
 	/* Register button thread with watchdog */
 	if (watchdog_register_thread(WDT_CHANNEL_BUTTON, 0) < 0) {
@@ -805,43 +989,74 @@ static void button_thread(void)
 	}
 
 	while (1) {
-		if (press_time && k_uptime_get() - press_time > 50) // debounce
-		{
+		/* Snapshot and consume one completed release atomically. Its physical
+		 * duration qualifies a long hold even if release fell between polls. */
+		unsigned int input_key = irq_lock();
+		int64_t released_duration = last_press_duration;
+		int64_t released_started_at = last_press_started_at;
+		uint32_t released_generation = last_press_generation;
+		if (released_duration > 50) last_press_duration = 0;
+		int64_t original_press_time = press_time;
+		uint32_t hold_generation = press_generation;
+		irq_unlock(input_key);
+		bool released_hold = released_duration >= LED_BUTTON_HOLD_MS;
+		if (released_duration > 50) {
 			if (!get_status(SYS_STATUS_BUTTON_PRESSED)) {
 				set_status(SYS_STATUS_BUTTON_PRESSED, true);
 			}
-			set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
+			if (released_hold) {
+				original_press_time = released_started_at;
+				hold_generation = released_generation;
+			} else {
+				group_generation = released_generation;
+				num_presses++;
+				LOG_INF("Button pressed %d times", num_presses);
+				last_press = k_uptime_get();
+			}
 		}
-		if (last_press_duration > 50) // debounce
-		{
+		if (hold_generation && !released_hold && k_uptime_get() - original_press_time > 50) {
+			/* A previous group's action deadline may expire during this press.
+			 * Refresh its sleep veto independently of visual count feedback. */
 			if (!get_status(SYS_STATUS_BUTTON_PRESSED)) {
 				set_status(SYS_STATUS_BUTTON_PRESSED, true);
 			}
-			num_presses++;
-			LOG_INF("Button pressed %d times", num_presses);
-			last_press_duration = 0;
-			last_press = k_uptime_get();
-			set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
 		}
-		/* Block all button actions during OTA (active or suppressed) */
+		/* Block all button actions during OTA (active or suppressed). */
 		bool ota_busy = esb_ota_is_active() || connection_get_ota_suppressed();
 #if HEATED_BUTTON_EXISTS
 		heated_button_poll(ota_busy);
 #endif
+		bool qualified_hold = released_hold
+			|| (hold_generation && k_uptime_get() - original_press_time >= LED_BUTTON_HOLD_MS && button_read());
+		if (qualified_hold) {
+			/* The hold owns this gesture. An earlier short release's quiet
+			 * deadline must not queue reboot before its qualified shutdown. */
+			last_press = 0;
+			num_presses = 0;
+		}
 		if (last_press && k_uptime_get() - last_press > 1000) {
 			LOG_INF("Button was pressed %d times", num_presses);
+			/* Nonterminal groups retain their exact count train. One click is a
+			 * terminal reboot gesture and owns only its manual exit cue. */
+			if (num_presses != 1 && !press_generation && !button_read()) {
+				enum led_admission feedback = led_button_group(group_generation, (uint32_t)num_presses);
+				if (feedback == LED_INVALID) {
+					LOG_WRN("Button count feedback exceeds deadline limit: %d", num_presses);
+				}
+			}
 			last_press = 0;
 			tracker_event_notice(TRACKER_EVENT_KIND_BUTTON, BUTTON_CLICK_GROUP,
 				(uint8_t)(num_presses < 255 ? num_presses : 255));
 			tracker_events_notify();
 			if (ota_busy) {
 				LOG_INF("Button action blocked by OTA");
-				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
+				led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
 			} else if (num_presses == 1) {
 				if (test_mode_get()) {
 					LOG_INF("Button reboot blocked by test mode");
+					led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
 				} else {
-					sys_request_system_reboot();
+					sys_button_reboot(group_generation);
 				}
 			}
 #if CONFIG_USER_EXTRA_ACTIONS // TODO: extra actions are default until server can send commands to trackers
@@ -850,18 +1065,21 @@ static void button_thread(void)
 			}
 #endif
 			num_presses = 0;
-			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			set_status(SYS_STATUS_BUTTON_PRESSED, false);
+			button_status_clear_if_idle();
 		}
-		if (press_time && k_uptime_get() - press_time > 1000 && button_read()) // Button is being held
+		if (qualified_hold)
 		{
 			if (ota_busy) {
 				LOG_INF("Button hold blocked by OTA");
-				press_time = 0;
-				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
-				set_status(SYS_STATUS_BUTTON_PRESSED, false);
+				led_button_hold(hold_generation, false, 0);
+				button_press_cancel(original_press_time);
+				led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
+				button_status_clear_if_idle();
 			} else {
-				int err = sys_user_shutdown();
+				int err = sys_button_shutdown(original_press_time, hold_generation);
+				/* Only this recognized gesture may be consumed. A new ISR input
+				 * during the reversible fade remains queued/held after refusal. */
+				led_button_hold(hold_generation, false, 0);
 				if (err > 0) {
 #if CONFIG_USER_EXTRA_ACTIONS
 					LOG_INF("Button hold timeout, shutdown canceled");
@@ -869,15 +1087,14 @@ static void button_thread(void)
 					LOG_INF("Pairing requested");
 					esb_reset_pair();
 #endif
-					press_time = 0;
-					set_status(SYS_STATUS_BUTTON_PRESSED, false); // TODO: is needed?
+					button_press_cancel(original_press_time);
+					button_status_clear_if_idle();
 				} else if (err == 0) { // shutting down or rebooting
 					k_thread_abort(button_thread_id);
 				} else {
 					LOG_WRN("Button shutdown rejected: %d", err);
-					press_time = 0;
-					set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-					set_status(SYS_STATUS_BUTTON_PRESSED, false);
+					button_press_cancel(original_press_time);
+					button_status_clear_if_idle();
 				}
 			}
 		}
@@ -900,6 +1117,13 @@ static int sys_gpio_init(void)
 #endif
 #if STBY_EXISTS
 	gpio_pin_configure_dt(&stby, GPIO_INPUT);
+#endif
+#if CHARGER_FULL_ON_PLUG
+	charger_plug_error = gpio_is_ready_dt(&charger_plug)
+		? gpio_pin_configure_dt(&charger_plug, GPIO_INPUT) : -ENODEV;
+	if (charger_plug_error) {
+		LOG_ERR("Charger external-power input unavailable: %d", charger_plug_error);
+	}
 #endif
 #if CLK_EN_EXISTS
 	gpio_pin_configure_dt(&clk_en, GPIO_OUTPUT);
@@ -942,73 +1166,166 @@ bool stby_read(void)
 #endif
 }
 
-int sys_user_shutdown(void)
+/* Button-owned reversible budget. No mailbox ownership is reserved here.
+ * Losing UI eligibility aborts this delayed action; the final read is not an
+ * atomic reservation, and the ordinary mailbox remains the admission owner. */
+static int sys_manual_exit_request(bool reboot, uint32_t request, uint32_t hold_generation)
+{
+	struct led_token exit = {0};
+	bool eligible = sys_exit_feedback_allowed(reboot);
+	if (eligible && led_output_enabled()) {
+		exit = led_begin(LED_OWNER_SYSTEM, request);
+		enum led_admission admitted = hold_generation
+			? led_button_exit(exit, 1, hold_generation) : led_state(exit, 1, LED_MANUAL_EXIT);
+		if (admitted == LED_ADMITTED) {
+			int64_t start = k_uptime_get();
+			while (k_uptime_get() - start < LED_MANUAL_EXIT_MS) {
+				if (!sys_exit_feedback_allowed(reboot)) {
+					eligible = false;
+					led_state(exit, 2, LED_NONE);
+					break;
+				}
+				k_msleep(20);
+			}
+		}
+	}
+	/* Invisible/refused exits still release only the originating feedback. */
+	if (hold_generation) led_button_hold(hold_generation, false, 0);
+	int err = eligible && sys_exit_feedback_allowed(reboot)
+		? (reboot ? sys_request_system_reboot() : sys_request_system_off()) : -EBUSY;
+	if (err) {
+		if (exit.session) led_result(exit, led_event_id(), LED_FAILED);
+		else led_request_event(LED_OWNER_SYSTEM, request, led_event_id(), LED_REJECTED);
+	}
+	return err;
+}
+
+#if BUTTON_EXISTS
+static int sys_button_reboot(uint32_t generation)
+{
+	return sys_manual_exit_request(true, led_request_id(), generation);
+}
+#endif
+
+static int sys_button_shutdown(int64_t original_press_time, uint32_t hold_generation)
 {
 	int64_t start_time = k_uptime_get();
+	uint32_t request = led_request_id();
+	bool feedback_allowed = sys_exit_feedback_allowed(!USER_SHUTDOWN_ENABLED);
+	if (!feedback_allowed && hold_generation) led_button_hold(hold_generation, false, 0);
 #if USER_SHUTDOWN_ENABLED
 	LOG_INF("User shutdown requested");
 	reboot_counter_write(0);
-	set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
 #endif
-	k_msleep(1500);
-	if (button_read()) // If alternate button is available and still pressed, wait for the user to stop pressing the
-					   // button
-	{
-		led_shutdown();
-		bool led_on = false;
-		while (button_read()) {
-			if (!led_on && k_uptime_get() - start_time > 500) // long pattern starts with led on, so delay pattern a bit
-			{
-				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
-				led_on = 1;
-			}
-			if (k_uptime_get() - start_time > 4000) // held for over 5 seconds, cancel shutdown
-			{
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-				return 1;
-			}
-			k_msleep(1);
+	/* Keep the independent hold prompt while the gesture is reversible.
+	 * A fade begins on release, not >1s recognition, so it cannot finish before
+	 * the user lets go. The existing four-second hold-cancel deadline remains. */
+	while (button_read()) {
+#if BUTTON_EXISTS
+		unsigned int key = irq_lock();
+		bool original_still_pressed = press_generation
+			? press_generation == hold_generation && press_time == original_press_time
+			: !hold_generation && original_press_time == 0; /* Public boot-held path has no ISR identity. */
+		irq_unlock(key);
+		if (!original_still_pressed) break;
+#endif
+		if (k_uptime_get() - start_time > 4000) {
+			if (hold_generation) led_button_hold(hold_generation, false, 0);
+			led_request_event(LED_OWNER_SYSTEM, request, led_event_id(), LED_CANCELLED);
+			return 1;
 		}
-		led_shutdown();
+		if (feedback_allowed && !sys_exit_feedback_allowed(!USER_SHUTDOWN_ENABLED)) {
+			feedback_allowed = false;
+			if (hold_generation) led_button_hold(hold_generation, false, 0);
+		}
+		k_msleep(1);
 	}
-#if USER_SHUTDOWN_ENABLED
-	return sys_request_system_off();
+#if BUTTON_EXISTS
+	/* Consume the original release before waiting for the fade. Its identity
+	 * comparison and clear are one ISR-atomic operation, with no LED calls. */
+	button_release_consume(original_press_time);
 #else
-	return sys_request_system_reboot();
+	(void)original_press_time;
 #endif
+	return sys_manual_exit_request(!USER_SHUTDOWN_ENABLED, request, hold_generation);
+}
+
+int sys_user_shutdown(void)
+{
+#if BUTTON_EXISTS
+	unsigned int input_key = irq_lock();
+	int64_t original_press_time = press_time;
+	uint32_t hold_generation = press_generation;
+	irq_unlock(input_key);
+#else
+	int64_t original_press_time = 0;
+	uint32_t hold_generation = 0;
+#endif
+	return sys_button_shutdown(original_press_time, hold_generation);
+}
+
+int sys_command_shutdown_request(uint32_t request, uint32_t accepted_event, uint32_t terminal_event)
+{
+	LOG_INF("Command shutdown requested");
+	reboot_counter_write(0);
+	bool reversible = sys_exit_feedback_allowed(false);
+	struct led_token exit = {0};
+	if (reversible) {
+		exit = led_begin(LED_OWNER_SYSTEM, request);
+		led_state(exit, 1, LED_EXIT_PENDING);
+	}
+	k_msleep(1500);
+	int err = sys_request_system_off();
+	if (err && reversible) {
+		led_result(exit, terminal_event, LED_FAILED);
+	} else if (!reversible) {
+		led_request_event(LED_OWNER_SYSTEM, request, err ? terminal_event : accepted_event,
+			err ? LED_REJECTED : LED_ACCEPTED);
+	}
+	return err;
 }
 
 int sys_command_shutdown(void)
 {
-	LOG_INF("Command shutdown requested");
-	reboot_counter_write(0);
-	set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
-	k_msleep(1500);
-	return sys_request_system_off();
+	uint32_t request = led_request_id();
+	uint32_t accepted = led_event_id();
+	uint32_t terminal = led_event_id();
+	return sys_command_shutdown_request(request, accepted, terminal);
 }
 
-void sys_enter_dfu(bool ota)
+int sys_enter_dfu(bool ota)
 {
+	uint32_t request = led_request_id();
+#if DFU_EXISTS
+	struct led_token handoff = led_begin(LED_OWNER_SYSTEM, request);
+	led_result(handoff, led_event_id(), LED_ACCEPTED);
+	led_state(handoff, 1, LED_PROCESSING);
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 	ARG_UNUSED(ota);
 	int err = bootmode_set(BOOT_MODE_TYPE_BOOTLOADER);
 	if (err) {
 		LOG_ERR("Failed to request MCUboot recovery: %d", err);
-		return;
+		led_result(handoff, led_event_id(), LED_FAILED);
+		return err;
 	}
 	LOG_INF("MCUboot serial recovery requested");
-	sys_request_system_reboot();
 #elif ADAFRUIT_BOOTLOADER
 	NRF_POWER->GPREGRET = ota ? ADAFRUIT_DFU_MAGIC_OTA_RESET : ADAFRUIT_DFU_MAGIC_UF2_RESET;
 	k_msleep(100);
-	sys_request_system_reboot();
 #elif NRF5_BOOTLOADER
 	ARG_UNUSED(ota);
 	gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
 	k_msleep(100);
-	sys_request_system_reboot();
+#endif
+	int reboot_err = sys_request_system_reboot();
+	if (reboot_err) {
+		led_result(handoff, led_event_id(), LED_FAILED);
+	}
+	return reboot_err;
 #else
 	ARG_UNUSED(ota);
+	led_request_event(LED_OWNER_SYSTEM, request, led_event_id(), LED_REJECTED);
+	return -ENOTSUP;
 #endif
 }
 
@@ -1053,4 +1370,36 @@ void sys_reset_mode(uint8_t mode)
 	default:
 		break;
 	}
+}
+
+int sys_charger_snapshot(bool *charging, bool *charged)
+{
+#if CHG_EXISTS
+	if (!gpio_is_ready_dt(&chg)) return -ENODEV;
+	int charge_level = gpio_pin_get_dt(&chg);
+	if (charge_level < 0) return charge_level;
+	int full_level = 0;
+#if STBY_EXISTS
+	if (!gpio_is_ready_dt(&stby)) return -ENODEV;
+	full_level = gpio_pin_get_dt(&stby);
+	if (full_level < 0) return full_level;
+#elif CHARGER_FULL_ON_PLUG
+	if (charger_plug_error) return charger_plug_error;
+	if (!gpio_is_ready_dt(&charger_plug)) return -ENODEV;
+	full_level = gpio_pin_get_dt(&charger_plug);
+	if (full_level < 0) return full_level;
+	/* Board-authorized PLUG && !CHG heuristic, not an electrical STBY alias. */
+#else
+	/* CHG alone proves active charging, not completion. Its inactive level
+	 * also covers absent power, charge suspension and unknown/full states. */
+	if (charge_level == 0) return -ENOTSUP;
+#endif
+	*charging = charge_level != 0;
+	*charged = full_level != 0 && !*charging;
+	return 0;
+#else
+	ARG_UNUSED(charging);
+	ARG_UNUSED(charged);
+	return -ENOTSUP;
+#endif
 }

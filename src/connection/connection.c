@@ -38,6 +38,7 @@
 #include "system/watchdog.h"
 #include "system/test_mode.h"
 #include "system/esb_ota.h"
+#include "system/led.h"
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 #include "radio_capture.h"
 #endif
@@ -866,6 +867,15 @@ static bool connection_raw_collection_active(void)
 	return connection_get_data_collection() || connection_get_data_collection_batch();
 }
 
+void connection_feedback_maintenance_update(void)
+{
+	bool active = connection_raw_collection_active() || sensor_diagnostics_maintenance_active();
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+	active = active || radio_capture_user_active();
+#endif
+	led_maintenance_publish(LED_OWNER_SENSOR, active);
+}
+
 static void connection_reset_raw_collection(bool reset_arq)
 {
 	k_msgq_purge(&raw_imu_msgq);
@@ -912,6 +922,7 @@ void connection_set_data_collection(bool enable)
 	}
 	if (enable) atomic_set(&data_collection_active, 1);
 	LOG_INF("Data collection %s", enable ? "STARTED" : "STOPPED");
+	connection_feedback_maintenance_update();
 }
 
 bool connection_get_data_collection(void)
@@ -952,6 +963,7 @@ int connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
 	if (!enable) {
 		LOG_INF("Batch data collection STOPPED");
 	}
+	connection_feedback_maintenance_update();
 	return 0;
 }
 
@@ -1618,6 +1630,12 @@ void connection_thread(void)
 		watchdog_feed(WDT_CHANNEL_CONNECTION);
 		bool radio_ready = esb_ready();
 		bool hid_ready = connection_hid_output_ready();
+		struct led_connection_facts led_facts = {0};
+		esb_led_connection_facts(&led_facts);
+		led_facts.output_ready = sensor_output_ready();
+		if (hid_ready && !radio_ready) led_facts.radio_required = false;
+		led_connection_publish(&led_facts);
+		connection_feedback_maintenance_update();
 
 		/* Adaptive PING interval based on connection health */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {

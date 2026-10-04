@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include "../led_feedback_stub.h"
 
 /* MMIO is W1C, not ordinary RAM. This also handles the old x = x clear. */
 struct reset_register {
@@ -72,12 +73,6 @@ static void tracker_events_schedule_boot(bool wake, bool watchdog)
 #define BIT(n) (1u << (n))
 #define GPIO_INPUT 0
 #define GPIO_INT_EDGE_BOTH 0
-#define SYS_LED_PATTERN_ON 0
-#define SYS_LED_PATTERN_LONG 0
-#define SYS_LED_PATTERN_OFF 0
-#define SYS_LED_PATTERN_ONESHOT_POWERON 0
-#define SYS_LED_PRIORITY_BOOT 0
-#define SYS_LED_PRIORITY_HIGHEST 0
 
 struct gpio_spec { int pin; int port; };
 static gpio_spec button0 = {0, 0};
@@ -92,7 +87,6 @@ static int gpio_pin_get_dt(const gpio_spec *) { return 1; }
 static unsigned gpregret = 0xD3;
 static unsigned nrf_power_gpregret_get(peripheral *, int) { return gpregret; }
 static void nrf_power_gpregret_set(peripheral *, int, unsigned value) { gpregret = value; }
-static void set_led(int, int) {}
 static uint8_t reboot_counter_read() { return 100; }
 static std::vector<uint8_t> counter_writes;
 static void reboot_counter_write(uint8_t value) { counter_writes.push_back(value); }

@@ -50,9 +50,11 @@ fixture = r'''
 #define K_MSEC(x) (x)
 #define atomic_set(p,v) (*(p)=(v))
 #define atomic_get(p) (*(p))
+#define atomic_clear(p) atomic_set(p,0)
 #define FUSION_VQF 1
 #define FUSION_EQF 2
 static bool main_suspended, main_running=true, main_ok=true, sensor_sensor_scanning;
+static int output_ready;
 static int sensor_thread_id, sensor_life_events;
 static unsigned suspended, resumed, idle_timeouts;
 static bool detector_pending, detector_rest=true;

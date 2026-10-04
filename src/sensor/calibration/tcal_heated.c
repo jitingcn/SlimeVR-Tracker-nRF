@@ -56,6 +56,12 @@ static struct {
 	int64_t rise_sampled_ms;
 	int64_t rest_since;
 	int64_t stable_since;
+	struct led_token feedback;
+	bool warm_pending;
+	uint8_t written_mask;
+	uint32_t published_generation;
+	uint32_t protection_id;
+	enum tcal_heated_stop_reason protection_reason;
 } heat;
 static struct TempCalPoint stage[TCAL_BUFFER_SIZE];
 static uint32_t owner_epoch;
@@ -81,6 +87,57 @@ bool sensor_tcal_heated_busy(void)
 	return busy;
 }
 
+static bool heat_safety_reason(enum tcal_heated_stop_reason reason)
+{
+	return reason == TCAL_HEATED_STOP_STALE_TEMP || reason == TCAL_HEATED_STOP_OVERTEMP ||
+		reason == TCAL_HEATED_STOP_RISE_FAST || reason == TCAL_HEATED_STOP_HEATER_ERROR;
+}
+
+static void heat_feedback_finish_locked(enum led_semantic semantic)
+{
+	sensor_calibration_result(heat.feedback, semantic);
+	heat.feedback = (struct led_token){0};
+	heat.warm_pending = false;
+	led_operation_publish(LED_OWNER_TCAL, false, heat.state == HEAT_OFF_FAILED);
+}
+
+/* Existing warm-storage owner supplies the immutable receipt identity. */
+void sensor_tcal_feedback_persisted(uint32_t identity, uint8_t written_mask, int result)
+{
+	sensor_tcal_heated_lock();
+	if (heat.warm_pending && identity == heat.feedback.session) {
+		heat.written_mask |= written_mask;
+		/* The model and its reference gyro temperature are one durable result. */
+		if (result < 0 || heat.written_mask == 15) {
+			sensor_tcal_lock();
+			bool replaced = sensor_tcal_model_generation() != heat.published_generation;
+			sensor_tcal_unlock();
+			heat_feedback_finish_locked(result < 0 ? LED_APPLIED_NOT_SAVED :
+				replaced || heat.reason == TCAL_HEATED_STOP_USER ? LED_PARTIAL : LED_SUCCESS);
+		}
+	}
+	sensor_tcal_heated_unlock();
+}
+
+static void heat_safety_refresh_locked(void)
+{
+	if (!heat.protection_id) {
+		return;
+	}
+	bool safety = heat.state == HEAT_OFF_FAILED || !heater_hw_available();
+	struct sensor_temperature_observation observation;
+	int err = sensor_get_imu_temperature_observation(&observation, HEAT_FRESH_MS);
+	if (heat.protection_reason == TCAL_HEATED_STOP_STALE_TEMP) {
+		safety |= err != 0;
+	}
+	if (err == 0) {
+		float ceiling = fminf(CONFIG_SENSOR_TCAL_HEATED_MAX_TEMP_C, heat.target + 2.0f);
+		safety |= observation.raw_c >= ceiling || observation.filtered_c >= ceiling;
+	}
+	/* Clearing current truth does not erase the six-second protection record. */
+	led_fault_publish(LED_OWNER_TCAL, safety ? LED_FAULT_SAFETY : LED_FAULT_NONE, 0);
+}
+
 /* Gate held; hardware off precedes any release/publication/storage operation. */
 static int finish_locked(enum tcal_heated_stop_reason reason)
 {
@@ -101,6 +158,17 @@ static int finish_locked(enum tcal_heated_stop_reason reason)
 		if (!err) {
 			sensor_calibration_heated_release_locked();
 		}
+		if (heat_safety_reason(reason)) {
+			if (!heat.protection_id || heat.protection_reason != reason) {
+				heat.protection_id = led_event_id();
+				heat.protection_reason = reason;
+			}
+			/* Hardware protection has already executed; this never delays off. */
+			led_fault_publish(LED_OWNER_TCAL,
+				err != 0 || !heater_hw_available() ? LED_FAULT_SAFETY : LED_FAULT_NONE, heat.protection_id);
+		}
+		heat_feedback_finish_locked(reason == TCAL_HEATED_STOP_USER || reason == TCAL_HEATED_STOP_SENSOR_STOP ||
+			reason == TCAL_HEATED_STOP_POWER_DOWN ? LED_CANCELLED : LED_FAILED);
 	}
 	return err;
 }
@@ -149,6 +217,8 @@ int sensor_tcal_heated_stop(void)
 		}
 	} else if (heat.state == HEAT_OFF_FAILED) {
 		(void)finish_locked(TCAL_HEATED_STOP_USER);
+	} else if (!heat.feedback.session) {
+		led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_CANCELLED);
 	}
 	sensor_tcal_heated_unlock();
 	return err;
@@ -175,6 +245,9 @@ void sensor_tcal_heated_clear_begin(void)
 	heat.resetting = true;
 	heat.ready = false;
 	tcal_accum_request_reset();
+	if (heat.warm_pending) {
+		heat_feedback_finish_locked(LED_CANCELLED);
+	}
 	(void)finish_locked(TCAL_HEATED_STOP_SENSOR_STOP);
 	sensor_tcal_heated_unlock();
 }
@@ -235,7 +308,7 @@ int sensor_tcal_heated_start(float target_temp)
 	if (!v_finite(&target_temp, 1) || target_temp < CONFIG_SENSOR_POLY_TEMP_MIN ||
 	    target_temp > CONFIG_SENSOR_TCAL_HEATED_MAX_TEMP_C - 2.0f ||
 	    target_temp >= CONFIG_SENSOR_POLY_TEMP_MAX || target_temp == 0.0f) {
-		return -EINVAL;
+		return sensor_operation_result(LED_OWNER_TCAL, -EINVAL, false);
 	}
 	sensor_tcal_heated_lock();
 	int err = 0;
@@ -272,6 +345,10 @@ int sensor_tcal_heated_start(float target_temp)
 	}
 	if (!err) {
 		tcal_accum_request_reset();
+		heat_feedback_finish_locked(LED_CANCELLED);
+		heat.protection_id = 0;
+		heat.written_mask = 0;
+		led_operation_publish(LED_OWNER_TCAL, false, true);
 		heat.epoch++;
 		/* Generation zero is not a valid hardware session lease. */
 		if (!heat.epoch) {
@@ -306,9 +383,15 @@ int sensor_tcal_heated_start(float target_temp)
 		if (err) {
 			(void)finish_locked(TCAL_HEATED_STOP_HEATER_ERROR);
 		}
+		if (!err) {
+			heat.feedback = led_begin(LED_OWNER_TCAL, led_request_id());
+			sensor_calibration_result(heat.feedback, LED_ACCEPTED);
+			sensor_calibration_stage(heat.feedback, LED_PROCESSING);
+			led_fault_publish(LED_OWNER_TCAL, LED_FAULT_NONE, 0);
+		}
 	}
 	sensor_tcal_heated_unlock();
-	return err;
+	return err ? sensor_operation_result(LED_OWNER_TCAL, err, false) : 0;
 }
 
 /* Called only by sensor owner, gate held. */
@@ -321,6 +404,7 @@ static void sync_owner_locked(void)
 		if (heat.state == HEAT_RESERVED) {
 			memset(stage, 0, sizeof(stage));
 			heat.state = HEAT_RUNNING;
+			sensor_calibration_stage(heat.feedback, LED_HEATED_ACTIVE);
 		}
 	}
 }
@@ -523,6 +607,7 @@ void sensor_tcal_heated_finalize(void)
 			(void)finish_locked(reason);
 		}
 	}
+	heat_safety_refresh_locked();
 	bool finalize = heat.state == HEAT_FINALIZING;
 	uint32_t epoch = heat.epoch;
 	sensor_tcal_heated_unlock();
@@ -566,8 +651,19 @@ void sensor_tcal_heated_finalize(void)
 			sensor_tcal_unlock();
 			/* This RAM publication is completion's linearization point. */
 			heat.applied = applied;
+			if (applied) {
+				heat.warm_pending = true;
+				heat.written_mask = 0;
+				sensor_tcal_lock();
+				heat.published_generation = sensor_tcal_model_generation();
+				sensor_tcal_unlock();
+				sensor_calibration_stage(heat.feedback, LED_HEATED_ACTIVE);
+				/* Bound before marking: capacity flush may complete immediately. */
+				sys_warm_feedback_arm(heat.feedback.session);
+			}
 			if (!applied) {
 				heat.reason = TCAL_HEATED_STOP_INSUFFICIENT_COVERAGE;
+				heat_feedback_finish_locked(LED_FAILED);
 			}
 			heat.state = HEAT_FINISHED;
 			heat.epoch++;

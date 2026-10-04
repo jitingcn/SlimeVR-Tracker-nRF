@@ -29,6 +29,8 @@ static unsigned writes, clears, errors;
 static int clear_error;
 static bool nvs_init = true;
 static unsigned warm_dirty_count;
+static uint32_t warm_tcal_armed;
+static unsigned warm_tcal_receipt_count;
 static int fs;
 static const float zero[3];
 static const float gyro[3] = {4.0f, -5.0f, 6.0f};
@@ -37,6 +39,7 @@ static pthread_mutex_t rendezvous = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
 static bool hold_write, write_entered, clear_waiting, release_write;
 static atomic_t main_suspended;
+static atomic_t output_ready;
 static bool main_ok = true;
 static int sensor_thread_id;
 static unsigned resumes;
@@ -47,6 +50,92 @@ static unsigned resumes;
 
 static void watchdog_resume(int channel) { (void)channel; }
 static void k_thread_resume(int *thread) { (void)thread; resumes++; }
+
+/* Semantic LED leaves. Submission is observed per semantic so the fixture can
+ * assert the reset-all receipt without reimplementing LED policy. */
+static unsigned led_results[LED_SEMANTIC_COUNT];
+static unsigned led_requests[LED_SEMANTIC_COUNT];
+static uint32_t led_identity;
+
+uint32_t led_request_id(void) { return ++led_identity; }
+uint32_t led_event_id(void) { return ++led_identity; }
+struct led_token led_begin(enum led_owner owner, uint32_t request_id)
+{
+	return (struct led_token){ .owner = owner, .session = ++led_identity, .request_id = request_id };
+}
+enum led_admission led_state(struct led_token token, uint32_t revision, enum led_semantic semantic)
+{
+	(void)token;
+	(void)revision;
+	(void)semantic;
+	return LED_ADMITTED;
+}
+enum led_admission led_result(struct led_token token, uint32_t event_id, enum led_semantic semantic)
+{
+	(void)token;
+	(void)event_id;
+	led_results[semantic]++;
+	return LED_ADMITTED;
+}
+enum led_admission led_request_event(enum led_owner owner, uint32_t request_id, uint32_t event_id,
+				     enum led_semantic semantic)
+{
+	(void)owner;
+	(void)request_id;
+	(void)event_id;
+	led_requests[semantic]++;
+	return LED_ADMITTED;
+}
+
+/* Request-generation guard from the request owner (calibration.c, not built
+ * here); reset-all must invalidate the collectors accepted before it. */
+static uint32_t led_generation = 1;
+static unsigned led_invalidations;
+
+uint32_t sensor_calibration_current_generation(void) { return led_generation; }
+bool sensor_calibration_generation_valid(uint32_t generation)
+{
+	return generation == 0 || generation == led_generation;
+}
+void sensor_calibration_invalidate_requests(void)
+{
+	led_generation++;
+	led_invalidations++;
+}
+/* Accepted reset admission clears one request kind atomically; this fixture has
+ * no live collector, so the leaf only needs to accept the call. */
+void sensor_calibration_invalidate_kind(int kind)
+{
+	(void)kind;
+}
+
+/* Warm storage leaves: BMI storage wrapping and guarded writes call these. */
+void sys_warm_transaction_begin(void)
+{
+}
+
+void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size)
+{
+	(void)id;
+	(void)data;
+	(void)size;
+}
+
+void sys_warm_transaction_end(bool schedule)
+{
+	(void)schedule;
+}
+
+int sys_flush_warm(void)
+{
+	return 0;
+}
+
+/* Reset-all under the storage lock also cancels a pending online-mag
+ * configuration write; that owner lives in online_mag.c, not built here. */
+void sensor_calibration_online_mag_cancel_pending(void)
+{
+}
 
 void host_mutex_waiting(struct k_mutex *mutex)
 {
@@ -117,30 +206,37 @@ static void assert_no_old_writes(void)
 
 static void test_clear_queued_bias(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 51) == 0);
+	led_results[LED_CANCELLED] = 0;
+	led_results[LED_SUCCESS] = 0;
+	led_results[LED_APPLIED_NOT_SAVED] = 0;
+	struct led_token token = led_begin(LED_OWNER_IMU, led_request_id());
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 51, token, 0, 0) == 0);
 	assert(event_count == 0);
-	sys_clear();
-	assert(clears == 0); // first call only asks for confirmation
 	assert(sensor_calibration_reset_imu() == -EBUSY);
-	sys_clear();
+	/* Confirmation is owned by the console; this call is already authorized. */
+	assert(sys_clear() == 0);
 	assert(clears == 1);
 	assert_no_old_writes();
 	assert(event_count == 1);
 	assert_event(0, 51, CAL_EVENT_END, CAL_OUTCOME_CANCELLED, CAL_PHASE_APPLY_PENDING, CAL_REASON_RESET);
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0) == 0);
+	/* Reset-all releases the abandoned candidate's own receipt, never a green. */
+	assert(led_results[LED_CANCELLED] == 1);
+	assert(led_results[LED_SUCCESS] == 0 && led_results[LED_APPLIED_NOT_SAVED] == 0);
+	/* It also invalidates every collector accepted before the barrier. */
+	assert(led_invalidations >= 1);
+	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == 0);
 }
 
 static void test_clear_applied_matrix(void)
 {
-	assert(sensor_calibration_commit_accel(matrix, 52) == 0);
+	assert(sensor_calibration_commit_accel(matrix, 52, (struct led_token){0}, false, 0) == 0);
 	assert(event_count == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_FRAME_CHANGED);
 	assert(event_count == 1);
 	assert_event(0, 52, CAL_EVENT_END, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	sensor_calibration_fusion_applied();
 	assert(writes == 0); // Finished, but existing worker has not persisted yet
-	sys_clear();
-	sys_clear();
+	assert(sys_clear() == 0);
 	assert_no_old_writes();
 	assert(event_count == 1); /* Already-applied success cannot become cancellation. */
 	/* Reset-all never replaces live coefficients mid-frame. */
@@ -160,16 +256,15 @@ static void *persist_thread(void *unused)
 static void *clear_thread(void *unused)
 {
 	(void)unused;
-	sys_clear();
+	assert(sys_clear() == 0);
 	return NULL;
 }
 
 static void test_clear_waits_for_persisting_transaction(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_calibration_fusion_applied();
-	sys_clear(); // confirmation, before starting both workers
 	hold_write = true;
 	pthread_t writer, clearer;
 	assert(pthread_create(&writer, NULL, persist_thread, NULL) == 0);
@@ -198,9 +293,8 @@ static void test_failed_clear_reports_error_and_releases_barrier(void)
 {
 	clear_error = -EIO;
 	retained->gyroBias[0] = 8.0f;
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
-	sys_clear();
-	sys_clear();
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sys_clear() == -EIO);
 	assert(errors == 1 && clears == 0);
 	assert(retained->gyroBias[0] == 8.0f);
 	sensor_calibration_persist_pending();
@@ -224,7 +318,7 @@ static void test_unavailable_consumer_and_recovery(void)
 	atomic_set(&main_suspended, true);
 	main_ok = true;
 	main_imu_resume();
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	/* Accepted before consumer loss: preserve until successful recovery/drain,
 	 * but report unavailable rather than indefinitely returning busy. */
 	sensor_calibration_set_consumer_ready(false);
@@ -241,7 +335,7 @@ static void test_unavailable_consumer_and_recovery(void)
 
 static void test_bmi_resume_cannot_reopen_terminal_gate(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0) == 0);
+	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	sensor_calibration_prepare_power_down();
 	assert(retained->gyroBias[0] == 4.0f);
 	assert(retained->fusion_id == 0);
@@ -250,8 +344,7 @@ static void test_bmi_resume_cannot_reopen_terminal_gate(void)
 	assert(resumes == 1);
 	assert(sensor_calibration_reset_imu() == -ESHUTDOWN);
 	assert(sensor_calibration_reset_accel() == -ESHUTDOWN);
-	sys_clear();
-	sys_clear(); // reset barrier also must not reopen the terminal gate
+	assert(sys_clear() == 0); // reset barrier must not reopen the terminal gate
 	assert_no_old_writes();
 	assert(sensor_calibration_reset_imu() == -ESHUTDOWN);
 }

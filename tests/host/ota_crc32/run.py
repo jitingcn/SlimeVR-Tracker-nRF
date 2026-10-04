@@ -33,7 +33,8 @@ parts = ["\n".join(re.findall(r"^#define OTA_.*$", header, re.MULTILINE)),
          block(ota, r"^struct ota_context \{", True),
          "static struct ota_context ota;", "static atomic_t ota_reboot_pending;",
          function(flash, "esb_ota_flash_compute_crc32")]
-for name in ("esb_ota_get_status", "esb_ota_handle_verify", "esb_ota_handle_activate"):
+parts.extend(re.findall(r"^static (?:struct led_token ota_feedback|uint32_t ota_feedback_revision|bool ota_feedback_terminal|enum led_semantic ota_feedback_state);", ota, re.MULTILINE))
+for name in ("esb_ota_get_status", "esb_ota_is_active", "ota_update_led", "esb_ota_handle_verify", "ota_activate_impl", "esb_ota_handle_activate"):
     parts.append(function(ota, name))
 
 with tempfile.TemporaryDirectory(prefix="tracker-ota-crc32-") as directory:

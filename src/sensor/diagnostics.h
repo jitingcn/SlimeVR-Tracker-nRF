@@ -35,9 +35,13 @@
 
 /* Console-safe session transitions. Expiry and output accounting are atomic;
  * already reserved output can finish printing after a stop/restart. */
-void sensor_debug_start(uint32_t duration_sec);
-void sensor_debug_stop(void);
+int sensor_debug_start(uint32_t duration_sec);
+int sensor_debug_stop(void);
 bool sensor_debug_is_active(void);
+bool sensor_diagnostics_maintenance_active(void);
+#if CONFIG_VQF_BENCH
+void sensor_benchmark_active(bool active);
+#endif
 
 #if CONFIG_SENSOR_RANGE_STATS
 // Sensor range tracking - records min/max values during runtime (not persisted)
@@ -53,7 +57,7 @@ typedef struct {
 // Get the current range statistics
 const sensor_range_stats_t *sensor_get_range_stats(void);
 // Reset range statistics
-void sensor_reset_range_stats(void);
+int sensor_reset_range_stats(void);
 // Print range statistics to console
 void sensor_print_range_stats(void);
 #endif // CONFIG_SENSOR_RANGE_STATS

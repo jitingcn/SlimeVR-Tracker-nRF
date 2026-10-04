@@ -29,6 +29,15 @@
 };
 
 / {
+	zephyr,user {
+		/* Separate DK lamps: only the fixed primary lamp expresses a role. */
+		led-capability = "tri-discrete";
+		pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_INVERTED>,
+			<&pwm0 1 PWM_MSEC(20) PWM_POLARITY_INVERTED>,
+			<&pwm0 2 PWM_MSEC(20) PWM_POLARITY_INVERTED>;
+		led-channel-colors = <0 0 0>;
+		led-channel-weights = <10000 10000 10000>;
+	};
 	chosen {
 		zephyr,console = &cdc_acm_uart0;
 		zephyr,shell-uart = &cdc_acm_uart0;

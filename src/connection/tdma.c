@@ -22,6 +22,8 @@
 */
 #include "tdma.h"
 #include "esb.h"
+#include "system/led.h"
+#include <errno.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -489,6 +491,19 @@ void tdma_set_enabled(bool enabled)
 #else
 	ARG_UNUSED(enabled);
 	LOG_WRN("TDMA not compiled in, cannot change at runtime");
+#endif
+}
+
+int tdma_user_set_enabled(bool enabled)
+{
+#if CONFIG_CONNECTION_TDMA
+	tdma_set_enabled(enabled);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_SUCCESS);
+	return 0;
+#else
+	ARG_UNUSED(enabled);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
+	return -ENOTSUP;
 #endif
 }
 

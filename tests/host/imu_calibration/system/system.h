@@ -9,5 +9,10 @@
 #define MAIN_ACC_6_BIAS_ID 7
 
 int sys_write(uint16_t id, void *ptr, const void *data, size_t len);
+void sys_warm_feedback_arm(uint32_t identity);
+void sys_warm_transaction_begin(void);
+void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size);
+void sys_warm_transaction_end(bool schedule);
+int sys_flush_warm(void);
 
 #endif
