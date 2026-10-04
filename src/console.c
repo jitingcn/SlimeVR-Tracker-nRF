@@ -6,6 +6,9 @@
 #include "sensor/calibration/calibration.h"
 #include "sensor/calibration/online_mag.h"
 #include "system/led.h"
+#if CONFIG_LED_DEBUG
+#include "system/led_debug.h"
+#endif
 #if CONFIG_VQF_BENCH
 #include "sensor/fusion/vqf/vqf.h"
 #include "sensor/diagnostics.h"
@@ -65,6 +68,10 @@
 #include <stdlib.h>
 
 LOG_MODULE_REGISTER(console, LOG_LEVEL_INF);
+#if CONFIG_LED_DEBUG
+static uint32_t console_led_session = 1;
+static uint32_t console_command_led_session;
+#endif
 
 static void console_thread(void);
 
@@ -95,6 +102,9 @@ BUILD_ASSERT(CONSOLE_LINE_MAX_LEN >= 2, "Console line buffer must hold an empty 
 struct console_line_message {
 	uint32_t epoch;
 	uint32_t session;
+#if CONFIG_LED_DEBUG
+	uint32_t led_session;
+#endif
 	char line[CONSOLE_LINE_MAX_LEN];
 };
 
@@ -201,6 +211,9 @@ static void console_finish_line_locked(void)
 	if (!console_input.overflow) {
 		message.epoch = console_input.epoch;
 		message.session = console_input.session;
+#if CONFIG_LED_DEBUG
+		message.led_session = console_led_session;
+#endif
 		memcpy(message.line, console_input.line, length);
 		message.line[length] = '\0';
 		if (k_msgq_put(&console_line_msgq, &message, K_NO_WAIT) != 0) {
@@ -625,6 +638,9 @@ int console_serial_start(void)
 	uart_irq_tx_disable(console_uart_dev);
 	console_drain_uart_locked();
 	console_input.active = true;
+#if CONFIG_LED_DEBUG
+	led_debug_session_start(console_led_session);
+#endif
 	console_reset_line_locked();
 	console_input.echo_head = 0;
 	console_input.echo_tail = 0;
@@ -671,6 +687,12 @@ static void console_serial_end(bool invalidate)
 	console_input.active = false;
 	console_input.session++;
 	console_reset_armed = false;
+#if CONFIG_LED_DEBUG
+	led_debug_disconnect(console_led_session);
+	if (++console_led_session == 0) {
+		console_led_session = 1;
+	}
+#endif
 	if (invalidate) {
 		console_input.epoch++;
 		console_drop_queued_lines_locked();
@@ -1392,6 +1414,9 @@ static void print_help(void)
 	printk("  range reset                Reset sensor range statistics\n");
 #if CONFIG_VQF_BENCH
 	printk("  vqfbench [iterations]      Benchmark VQF update paths (default 1000)\n");
+#endif
+#if CONFIG_LED_DEBUG
+	printk("  led                        Local LED appearance diagnostics (see 'led help')\n");
 #endif
 	printk("\n");
 	printk("Debug Commands:\n");
@@ -2429,6 +2454,13 @@ static void console_cmd_unavailable(size_t argc, char **argv)
 }
 #endif
 
+#if CONFIG_LED_DEBUG
+static void console_cmd_led(size_t argc, char **argv)
+{
+	led_debug_command(console_command_led_session, argc, argv);
+}
+#endif
+
 static const struct console_cmd console_cmds[] = {
 	{"help", console_cmd_help, CONSOLE_QUERY},
 	{"info", console_cmd_info, CONSOLE_QUERY},
@@ -2534,6 +2566,9 @@ static void console_thread(void)
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
 	printk("Type 'help' to show available commands.\n");
 #endif
+#if CONFIG_LED_DEBUG && !USB_EXISTS && !UART_CONSOLE_EXISTS
+	led_debug_session_start(console_led_session);
+#endif
 
 	while (1) {
 #if USB_EXISTS || UART_CONSOLE_EXISTS
@@ -2543,8 +2578,14 @@ static void console_thread(void)
 		}
 		char *line = message.line;
 		console_command_session = message.session;
+#if CONFIG_LED_DEBUG
+		console_command_led_session = message.led_session;
+#endif
 #else
 		char *line = rtt_console_getline();
+#if CONFIG_LED_DEBUG
+		console_command_led_session = console_led_session;
+#endif
 #endif
 		char *argv[8] = {NULL};
 		char *command_name = line;

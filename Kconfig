@@ -10,6 +10,14 @@ config USE_SLIMENRF_CONSOLE
     help
         Use basic console for commands.
 
+config LED_DEBUG
+    bool "Local LED appearance diagnostics"
+    default n
+    depends on USE_SLIMENRF_CONSOLE && (UART_CONSOLE || RTT_CONSOLE)
+    help
+        Enable bounded local LED previews and read-only diagnostics using the
+        existing console transport.
+
 config CUSTOMER_INFO
     bool "Read CUSTOMER provenance"
     depends on SOC_SERIES_NRF52
