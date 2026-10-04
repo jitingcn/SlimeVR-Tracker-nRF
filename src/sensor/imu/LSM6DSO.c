@@ -45,9 +45,13 @@ int lsm6dso_init(
 	}
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff;  // reset last odr
-	int8_t internal_freq_fine;
-	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_INTERNAL_FREQ_FINE, &internal_freq_fine); // affects ODR
-	freq_scale = 1.0f + 0.0015f * (float)internal_freq_fine;
+	uint8_t internal_freq_fine;
+	int freq_err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_INTERNAL_FREQ_FINE, &internal_freq_fine);
+	if (freq_err) {
+		LOG_ERR("Failed to read internal frequency fine");
+		return freq_err;
+	}
+	freq_scale = 1.0f + 0.0015f * (float)(int8_t)internal_freq_fine;
 	err |= lsm6dso_update_odr(accel_period_s, gyro_period_s, accel_actual_period_s, gyro_actual_period_s);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FIFO_CTRL4, 0x06); // enable Continuous mode
 	if (err) {

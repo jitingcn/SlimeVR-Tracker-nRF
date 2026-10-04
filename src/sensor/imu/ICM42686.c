@@ -146,7 +146,11 @@ int icm42686_init(
 		k_msleep(10);
 
 		uint8_t raw_count[2];
-		ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42686_FIFO_COUNTH, raw_count, 2);
+		int probe_err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42686_FIFO_COUNTH, raw_count, 2);
+		if (probe_err) {
+			LOG_ERR("Failed to read CLKIN probe");
+			return probe_err;
+		}
 
 		uint16_t fifo_count = (uint16_t)(raw_count[0] << 8 | raw_count[1]);
 
