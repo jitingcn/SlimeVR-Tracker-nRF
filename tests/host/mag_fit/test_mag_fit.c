@@ -194,6 +194,40 @@ static void scaled_prior(void)
 	assert(fabsf(out[0][1] + .025f) < .005f);
 	assert(fabsf(out[0][2] - .015f) < .005f);
 }
+static void partial_coverage(void)
+{
+	/* Ten occupied cells, not ten repeated directions: retain enough radial
+	 * information to satisfy the unchanged undamped numerical rank gate. */
+	unsigned cells = 0;
+	for (unsigned i = 0; i < 256; ++i) {
+		unsigned cell = i % 10;
+		if (cell == 9) {
+			cell = 10;
+		}
+		unsigned axis = cell / 8;
+		/* Stratify cells explicitly; independent minor-axis sequences vary
+		 * shape within each cell rather than tracing a correlated curve. */
+		float u[3] = {0};
+		u[axis] = 1;
+		u[(axis + 1) % 3] = .1f + .8f * fmodf((i + .5f) * .618033989f, 1);
+		u[(axis + 2) % 3] = .1f + .8f * fmodf((i + .5f) * .414213562f, 1);
+		float norm = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+		for (unsigned j = 0; j < 3; ++j) {
+			u[j] *= ((cell & (1U << j)) ? -1 : 1) / norm;
+		}
+		cells |= 1U << cell;
+		samples[i][0] = .48f * u[0] + .035f;
+		samples[i][1] = .53f * u[1] - .025f;
+		samples[i][2] = .50f * u[2] + .015f;
+	}
+	assert(__builtin_popcount(cells) == 10);
+	polls = cancel_at = 0;
+	float out[4][3];
+	struct mag_fit_result result;
+	assert(magneto_robust_fit(256, sample, poll_fit, NULL, NULL, 0, out, &result) == 0);
+	assert(result.condition <= 1000 && holdout_rms(out, .5f) < .005f);
+}
+
 
 int main(void)
 {
@@ -204,6 +238,7 @@ int main(void)
 	compare_contamination();
 	normalized_recovery();
 	scaled_prior();
+	partial_coverage();
 	sphere(true);
 	unchanged_failure(trusted, .5f, 0);
 	for (unsigned i = 0; i < 256; i++) {

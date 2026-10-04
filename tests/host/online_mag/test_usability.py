@@ -177,11 +177,13 @@ def five_poles():
     until_phase(i, CONFIRM, upper=True, gravity=False)
     assert lib.fixture_poles().bit_count() == 5
     assert lib.fixture_check() and lib.fixture_dirty() == 1
-    # Identical hemisphere is insufficient as the first independent holdout.
+    # The first window now also permits partial radial coverage, but may not
+    # establish a dip reference from this five-pole hemisphere.
     i = train()
-    for j in range(i, i + 900):
-        feed(j, upper=True, gravity=False)
-    assert lib.fixture_phase() == VALIDATING and lib.fixture_dirty() == 0
+    i = until_phase(i, PROBATION, upper=True)
+    until_phase(i, CONFIRM, upper=True)
+    assert lib.fixture_check() and lib.fixture_dirty() == 1
+    assert not lib.fixture_dip_known()
 
 
 def dip_transition():

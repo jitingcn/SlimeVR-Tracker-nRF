@@ -245,7 +245,7 @@ static int directions(unsigned slots, mag_fit_read_fn read, mag_fit_poll_fn poll
 		}
 		count++;
 	}
-	return count >= 48 && occupied >= 12 ? 0 : -EDOM;
+	return count >= 48 && occupied >= 10 ? 0 : -EDOM;
 }
 static bool solve(void)
 {

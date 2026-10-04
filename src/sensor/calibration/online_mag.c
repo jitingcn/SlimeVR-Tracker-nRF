@@ -734,7 +734,10 @@ static bool metrics_pass(bool trusted, bool allow_unchanged, struct evidence *e)
 		= dc >= 12 && (unsigned)__builtin_popcount(dip_poles) >= required_poles && e->diagnostics.dip_count >= 96;
 	e->dip_known = dip_coverage && dip_sq <= 0.0064f;
 	e->old_dip_known = dip_coverage && old_dip_sq <= 0.0064f;
-	if (cells < 12 || (unsigned)__builtin_popcount(poles) < required_poles || e->diagnostics.radial_count < 96) {
+	/* Partial radial coverage still needs both signs of two dominant axes.
+	 * Reference dip deliberately retains the broader coverage above. */
+	unsigned pairs = (poles & (poles >> 1)) & 0x15U;
+	if (cells < 10 || __builtin_popcount(pairs) < 2 || e->diagnostics.radial_count < 96) {
 		e->diagnostics.rejection = ONLINE_MAG_REJECT_COVERAGE;
 		return false;
 	}

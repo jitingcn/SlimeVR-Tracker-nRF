@@ -629,7 +629,8 @@ static void test_rejection_and_rollback(void)
 	fixture_reset(1000, 0);
 	train();
 	samples(900, true, true);
-	assert(fixture_phase() == VALIDATING && !dirty_marks); /* hemisphere lacks a pole */
+	assert(fixture_phase() == CONFIRMATION_READY && !dirty_marks);
+	assert(fixture_check() && dirty_marks == 1 && !online.dip_known);
 	fixture_reset(1000, 0);
 	train();
 	fixture_feed(bad, up, 1, 40);
