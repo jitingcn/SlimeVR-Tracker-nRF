@@ -765,7 +765,7 @@ static int sys_button_init(void)
 	gpio_init_callback(&button_cb_data, button_interrupt_handler, BIT(button0.pin));
 	gpio_add_callback(button0.port, &button_cb_data);
 	if (!reset_vbus_reset) { // button held at init is only a deliberate hold if reset was not caused by VBUS (USB plug-in wake)
-		button_held_from_init = gpio_pin_get_dt(&button0);
+		button_held_from_init = gpio_pin_get_dt(&button0) > 0;
 	}
 	return 0;
 }
@@ -776,7 +776,7 @@ SYS_INIT(sys_button_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 bool button_read_filtered(void) // ignores initial press only if button was held since boot (e.g. wake key)
 {
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
-	return button_held_from_init ? false : gpio_pin_get_dt(&button0);
+	return button_held_from_init ? false : gpio_pin_get_dt(&button0) > 0;
 #else
 	return false;
 #endif
@@ -785,7 +785,7 @@ bool button_read_filtered(void) // ignores initial press only if button was held
 bool button_read(void)
 {
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
-	return gpio_pin_get_dt(&button0);
+	return gpio_pin_get_dt(&button0) > 0;
 #else
 	return false;
 #endif
@@ -918,7 +918,7 @@ SYS_INIT(sys_gpio_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 bool dock_read(void)
 {
 #if DOCK_EXISTS
-	return gpio_pin_get_dt(&dock);
+	return gpio_pin_get_dt(&dock) > 0;
 #else
 	return false;
 #endif
@@ -927,7 +927,7 @@ bool dock_read(void)
 bool chg_read(void)
 {
 #if CHG_EXISTS
-	return gpio_pin_get_dt(&chg);
+	return gpio_pin_get_dt(&chg) > 0;
 #else
 	return false;
 #endif
@@ -936,7 +936,7 @@ bool chg_read(void)
 bool stby_read(void)
 {
 #if STBY_EXISTS
-	return gpio_pin_get_dt(&stby);
+	return gpio_pin_get_dt(&stby) > 0;
 #else
 	return false;
 #endif

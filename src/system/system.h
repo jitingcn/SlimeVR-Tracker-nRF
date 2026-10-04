@@ -66,6 +66,8 @@ void sys_nvs_stats(void);
 
 int set_sensor_clock(bool enable, float rate, float* actual_rate);
 
+/* Boolean GPIO readers report active only for a positive sample. Read errors
+ * are inactive, not evidence of a button gesture, dock or charging state. */
 bool button_read(void);
 bool button_read_filtered(void);
 
