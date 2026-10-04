@@ -53,7 +53,7 @@ static struct {
 	uint32_t generation, served, episode, last_sample, last_check, suppress;
 	uint32_t summary_time, norm_count;
 	float field, dip, candidate_field, reference_norm, reference_dip;
-	float norm_mean, norm_var, dir_bias, center[3], last_dir[3];
+	float norm_mean, norm_var, dir_bias, center[3], last_dir[3], last_raw[3];
 	uint16_t recent_count, admitted_since_fit;
 	uint16_t operation, cancelled_operation, replacement_operation;
 	uint8_t cancel_reason;
@@ -226,6 +226,7 @@ static void reset_episode_locked(uint32_t now)
 	memset(directions, 0, sizeof(directions));
 	memset(online.center, 0, sizeof(online.center));
 	memset(online.last_dir, 0, sizeof(online.last_dir));
+	memset(online.last_raw, 0, sizeof(online.last_raw));
 	online.recent_count = 0;
 	online.admitted_since_fit = 0;
 	online.dir_bias = 1;
@@ -767,7 +768,7 @@ static bool metrics_pass(bool trusted, bool allow_unchanged, struct evidence *e)
  * evaluation; a concurrent reset can only invalidate generation, not reuse them. */
 struct sample_policy {
 	uint32_t generation, episode;
-	float field, dip, candidate_field, center[3], last_dir[3];
+	float field, dip, candidate_field, center[3], last_dir[3], last_raw[3];
 	uint8_t phase;
 	bool trusted, dip_known;
 };
@@ -1000,6 +1001,7 @@ void sensor_calibration_online_mag_sample(const float raw[3], const float up[3],
 	};
 	memcpy(p.center, online.center, sizeof(p.center));
 	memcpy(p.last_dir, online.last_dir, sizeof(p.last_dir));
+	memcpy(p.last_raw, online.last_raw, sizeof(p.last_raw));
 	memcpy(matrix, magBAinv, sizeof(matrix));
 	summary_due = ELAPSED(now, online.summary_time) >= 1000U;
 	online.last_sample = now;
@@ -1007,7 +1009,8 @@ void sensor_calibration_online_mag_sample(const float raw[3], const float up[3],
 	tracker_events_notify();
 
 	/* No IRQ-off floating point loops, inverse trig, or structural checks. */
-	if (!isfinite(dot3(raw, raw)) || dot3(raw, raw) < 1e-12f) {
+	float raw_sq = dot3(raw, raw);
+	if (!isfinite(raw_sq) || raw_sq < 1e-12f) {
 		if (p.phase != TRAINING) {
 			finish_sample(now, &p, ONLINE_MAG_REJECT_SAMPLE, false, NULL);
 		}
@@ -1025,6 +1028,18 @@ void sensor_calibration_online_mag_sample(const float raw[3], const float up[3],
 	}
 	/* Collection geometry is independent of the old correction/reference.
 	 * A stale hard-iron center must not crowd all new samples into one octant. */
+	/* Recentring noisy stationary data can rotate its normalized direction.
+	 * Compare raw chords to the last admission, never to the moving center.
+	 * last_dir is nonzero exactly when an accepted raw history exists. */
+	if (dot3(p.last_dir, p.last_dir) > 0) {
+		float chord[3];
+		for (unsigned i = 0; i < 3; ++i) {
+			chord[i] = raw[i] - p.last_raw[i];
+		}
+		if (dot3(chord, chord) < 0.0004f * fmaxf(raw_sq, dot3(p.last_raw, p.last_raw))) {
+			goto validate;
+		}
+	}
 	for (unsigned i = 0; i < 3; ++i) {
 		dir[i] = raw[i] - p.center[i];
 	}
@@ -1058,6 +1073,7 @@ void sensor_calibration_online_mag_sample(const float raw[3], const float up[3],
 			++counts[octant];
 		}
 		memcpy(online.last_dir, dir, sizeof(dir));
+		memcpy(online.last_raw, raw, sizeof(online.last_raw));
 		if (online.phase == TRAINING && trusted && isfinite(field) && field > 0) {
 			online.field = field;
 			online.dip = dip;
