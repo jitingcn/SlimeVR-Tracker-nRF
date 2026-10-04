@@ -25,10 +25,15 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 size_t parse_args(char *str, char *argv[], size_t size);
 int32_t parse_i32(const char *str, uint8_t base);
 uint32_t parse_u32(const char *str, uint8_t base);
 uint64_t parse_u64(const char *str, uint8_t base);
+/* Strict complete decimal token, inclusive bounds; output unchanged on failure. */
+bool parse_long_bounded(const char *str, long minimum, long maximum, long *value);
+/* Exactly three finite comma-separated floats, without empty/trailing fields. */
+bool parse_float_triplet(const char *str, float values[3]);
 
 #endif

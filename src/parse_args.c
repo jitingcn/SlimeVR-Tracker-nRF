@@ -105,3 +105,44 @@ uint64_t parse_u64(const char *str, uint8_t base)
 {
 	return strtoull(str, NULL, base);
 }
+
+bool parse_long_bounded(const char *str, long minimum, long maximum, long *value)
+{
+	if (str == NULL || *str == '\0' || isspace((unsigned char)*str)) {
+		return false;
+	}
+	char *end;
+	errno = 0;
+	long parsed = strtol(str, &end, 10);
+	if (end == str || *end != '\0' || errno == ERANGE || parsed < minimum || parsed > maximum) {
+		return false;
+	}
+	*value = parsed;
+	return true;
+}
+
+bool parse_float_triplet(const char *str, float values[3])
+{
+	float parsed[3];
+	if (str == NULL) {
+		return false;
+	}
+	for (size_t i = 0; i < 3; i++) {
+		if (*str == '\0' || isspace((unsigned char)*str)) {
+			return false;
+		}
+		char *end;
+		errno = 0;
+		parsed[i] = strtof(str, &end);
+		uint32_t bits;
+		memcpy(&bits, &parsed[i], sizeof(bits));
+		/* Bit check remains valid under firmware fast-math. */
+		if (end == str || errno == ERANGE || (bits & 0x7f800000U) == 0x7f800000U ||
+		    *end != (i < 2 ? ',' : '\0')) {
+			return false;
+		}
+		str = end + (i < 2);
+	}
+	memcpy(values, parsed, sizeof(parsed));
+	return true;
+}

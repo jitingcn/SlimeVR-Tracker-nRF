@@ -378,6 +378,38 @@ int main(void)
     receive("reset all\n"); run_worker();
     assert(clear_calls == 2);
 
+    const char *bad_sens[] = {
+        "sens 1,,2,3\n", "sens 1,2,3,\n", "sens ,1,2\n", "sens 1,2,\n",
+        "sens 1,2\n", "sens 1,2,3,4\n", "sens 1,nan,3\n", "sens inf,2,3\n",
+        "sens 1,2,1e1000\n", "sens 1,2,3junk\n", "sens 1,2,3 extra\n"
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(bad_sens); i++) {
+        receive(bad_sens[i]); run_worker();
+        assert(sensitivity_writes == 0);
+    }
+    receive("sens 10.5,-2.1,15.0\n"); run_worker();
+    assert(sensitivity_writes == 1);
+    assert(saved_sensitivity[0] == 10.5f && saved_sensitivity[1] == -2.1f &&
+           saved_sensitivity[2] == 15.0f);
+    receive("sens +1,2e0,-0\n"); run_worker();
+    assert(sensitivity_writes == 2 && saved_sensitivity[0] == 1.0f);
+
+    long parsed = 123;
+    const char *bad_numbers[] = {"", " ", "1x", "1 ", "-1", "101", "999999999999999999999999"};
+    for (size_t i = 0; i < ARRAY_SIZE(bad_numbers); i++) {
+        assert(!parse_long_bounded(bad_numbers[i], 0, 100, &parsed));
+        assert(parsed == 123);
+    }
+    assert(parse_long_bounded("+100", 0, 100, &parsed) && parsed == 100);
+    assert(parse_long_bounded("0", 0, 100, &parsed) && parsed == 0);
+    receive("channel 999999999999999999999\nchannel 25junk\n"); run_worker();
+    assert(channel_writes == 0);
+    receive("channel 0\nchannel 100\n"); run_worker();
+    assert(channel_writes == 2 && saved_channel == 100);
+    float unchanged[3] = {4, 5, 6};
+    assert(!parse_float_triplet("1,2,", unchanged));
+    assert(unchanged[0] == 4 && unchanged[1] == 5 && unchanged[2] == 6);
+
     /* Real retained layout: paired_addr is deliberately NOT padded/aligned.
      * printk evaluates the actual production diagnostic arguments under UBSan. */
     assert((uintptr_t)retained->paired_addr % _Alignof(uint64_t) != 0);

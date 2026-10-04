@@ -66,6 +66,8 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <limits.h>
 
 LOG_MODULE_REGISTER(console, LOG_LEVEL_INF);
 #if CONFIG_LED_DEBUG
@@ -1512,9 +1514,8 @@ static void cmd_sens_auto(const char *axis_str, const char *rev_str)
 
 	uint16_t revolutions = SENS_CAL_DEFAULT_REVOLUTIONS;
 	if (rev_str != NULL) {
-		char *endptr;
-		long value = strtol(rev_str, &endptr, 10);
-		if (*endptr != '\0' || value < 1 || value > SENS_CAL_MAX_REVOLUTIONS) {
+		long value;
+		if (!parse_long_bounded(rev_str, 1, SENS_CAL_MAX_REVOLUTIONS, &value)) {
 			printk("Error: Invalid revolutions '%s'. Use 1 to %u.\n", rev_str, SENS_CAL_MAX_REVOLUTIONS);
 			console_reject();
 			return;
@@ -1735,22 +1736,8 @@ static void console_cmd_sens(size_t argc, char **argv)
 		if (!console_require_args(argc, 2, 2)) {
 			return;
 		}
-		char *token;
-		char *endptr;
-		int token_count = 0;
 		float values[3];
-
-		token = strtok(arg, ",");
-		while (token != NULL && token_count < 3) {
-			values[token_count] = strtof(token, &endptr);
-			if (token == endptr || *endptr != '\0') {
-				break; // Invalid float, stop parsing
-			}
-			token_count++;
-			token = strtok(NULL, ",");
-		}
-
-		if (token_count == 3 && token == NULL) {
+		if (parse_float_triplet(arg, values)) {
 			cmd_sens_set(values[0], values[1], values[2]);
 		} else {
 			printk("Error: Invalid format. Use: 'sens <x>,<y>,<z>', 'sens auto <x|y|z> [rev]', or 'sens reset'.\n");
@@ -1934,10 +1921,11 @@ static void console_cmd_tcal(size_t argc, char **argv)
 				console_reject();
 			} else {
 				char *endptr = NULL;
+				errno = 0;
 				long index = strtol(idx_str, &endptr, 10);
 
 				// Check if conversion was successful
-				if (endptr == NULL || endptr == idx_str) {
+				if (endptr == NULL || endptr == idx_str || errno == ERANGE || index < INT_MIN || index > INT_MAX) {
 					printk("Error: Invalid index '%s'. Please provide a number.\n", idx_str);
 					console_reject();
 				} else {
@@ -2181,10 +2169,8 @@ static void console_cmd_channel(size_t argc, char **argv)
 		printk("Example: channel 25 - Set RF channel to 25\n");
 		console_reject();
 	} else {
-		char *endptr;
-		long channel = strtol(arg, &endptr, 10);
-
-		if (endptr == arg || *endptr != '\0' || channel < 0 || channel > 100) {
+		long channel;
+		if (!parse_long_bounded(arg, 0, 100, &channel)) {
 			printk("Invalid channel. Must be a number between 0 and 100.\n");
 			console_reject();
 		} else {
@@ -2336,16 +2322,16 @@ static void console_cmd_debug(size_t argc, char **argv)
 
 	uint32_t duration = 1; // Default 1 second
 	if (arg) {
-		char *endptr;
-		long dur = strtol(arg, &endptr, 10);
-		if (endptr != arg && *endptr == '\0' && dur >= 1 && dur <= (long)SENSOR_DEBUG_MAX_DURATION_SEC) {
+		long dur;
+		if (parse_long_bounded(arg, 1, SENSOR_DEBUG_MAX_DURATION_SEC, &dur)) {
 			duration = (uint32_t)dur;
 		} else {
 			printk(
-				"Invalid duration (1-%us). Using default 1 seconds.\n",
+				"Invalid duration (1-%us).\n",
 				SENSOR_DEBUG_MAX_DURATION_SEC
 			);
 			console_reject();
+			return;
 		}
 	}
 	sensor_debug_start(duration);
@@ -2392,13 +2378,13 @@ static void console_cmd_vqfbench(size_t argc, char **argv)
 
 	uint32_t iterations = 1000;
 	if (arg) {
-		char *endptr;
-		long parsed = strtol(arg, &endptr, 10);
-		if (endptr != arg && *endptr == '\0' && parsed > 0 && parsed <= 20000) {
+		long parsed;
+		if (parse_long_bounded(arg, 1, 20000, &parsed)) {
 			iterations = (uint32_t)parsed;
 		} else {
-			printk("Invalid iteration count. Using default 1000.\n");
+			printk("Invalid iteration count (1-20000).\n");
 			console_reject();
+			return;
 		}
 	}
 	uint32_t request = led_request_id();

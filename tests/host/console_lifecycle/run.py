@@ -23,7 +23,8 @@ def function(name, text=source):
 parts = ["static void console_thread(void);", "static bool console_feedback_enabled;",
          source[source.index("#define CONSOLE_RESET_CONFIRM_MS"):source.index("\n#if USB_EXISTS || UART_CONSOLE_EXISTS", source.index("#define CONSOLE_RESET_CONFIRM_MS"))],
          source[source.index("static const struct device *const console_uart_dev"):source.index("\n#endif\n\n#if !USB_EXISTS")]]
-parts += [function("parse_args", (SRC / "parse_args.c").read_text())]
+parts += [function(name, (SRC / "parse_args.c").read_text()) for name in
+          ("parse_args", "parse_long_bounded", "parse_float_triplet")]
 parts += [function(name) for name in ("console_reject", "console_require_args",
           "console_reset_cancel", "console_reset_confirm", "cmd_sens_set",
           "console_cmd_sens", "console_cmd_reset", "console_cmd_channel", "print_connection")]
