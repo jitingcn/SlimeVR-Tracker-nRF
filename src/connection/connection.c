@@ -1525,8 +1525,12 @@ static int64_t connection_next_deadline_ms(int64_t now)
 		if (guarded_deadline < deadline) {
 			deadline = guarded_deadline;
 		}
-	} else if (esb_ready() && (int32_t)(ping_deadline - (uint32_t)deadline) < 0) {
-		deadline = ping_deadline;
+	} else if (esb_ready()) {
+		/* Lift the modular deadline to the nearest epoch around now. */
+		int64_t p_dl = now + (int32_t)(ping_deadline - (uint32_t)now);
+		if (p_dl < deadline) {
+			deadline = p_dl;
+		}
 	}
 	test_wake_delay_valid = false;
 	if (test_mode_get()) {
