@@ -311,7 +311,7 @@ static uint8_t get_server_constant_tracker_status(int status)
 #define BUILD_MIN   ((BUILD_TIME_IS_BAD) ? 99 :  COMPUTE_BUILD_MIN)
 #define BUILD_SEC   ((BUILD_TIME_IS_BAD) ? 99 :  COMPUTE_BUILD_SEC)
 
-#define BUILD_TIMESTAMP (((((((BUILD_YEAR - 2020) & 127) * 12 + (BUILD_MONTH & 15)) * 31 + (BUILD_DAY & 31)) * 24 + (BUILD_HOUR & 24)) * 60 + (BUILD_MIN & 60)) * 60 + (BUILD_SEC & 60))
+#define BUILD_TIMESTAMP (((((((BUILD_YEAR - 2020) & 127) * 12 + (BUILD_MONTH & 15)) * 31 + (BUILD_DAY & 31)) * 24 + (BUILD_HOUR % 24)) * 60 + (BUILD_MIN % 60)) * 60 + (BUILD_SEC % 60))
 
 #define TOSTRING(x) STRINGIFY(x)
 
