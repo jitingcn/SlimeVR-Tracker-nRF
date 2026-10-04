@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "../../harness/include/driver_util.h"
+#define BIT(n) (1UL << (n))
 
 static inline int64_t k_uptime_get(void) { return 0; }
 static inline void k_busy_wait(uint32_t usec) { (void)usec; }
