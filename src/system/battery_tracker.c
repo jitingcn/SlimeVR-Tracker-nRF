@@ -13,6 +13,7 @@ enum battery_cache_valid {
 	BATTERY_CACHE_REMAINING_TIME_ESTIMATE = 8,
 	BATTERY_CACHE_CYCLES = 16,
 	BATTERY_CACHE_CALIBRATION_COVERAGE = 32,
+	BATTERY_CACHE_CALIBRATED_PPTT = 64,
 };
 
 static uint8_t valid_cache_mask = 0; // track when data should be recalculated
@@ -389,7 +390,8 @@ static void update_curve(void)
 	}
 
 	sys_write(BATT_STATS_CURVE_ID, retained->battery_pptt_curve, curve, sizeof(curve));
-	valid_cache_mask &= (uint8_t)~BATTERY_CACHE_REMAINING_TIME_ESTIMATE; // invalidate remaining runtime (curve changed)
+	// sys_write updates the retained curve even if flash persistence fails.
+	valid_cache_mask &= (uint8_t)~(BATTERY_CACHE_REMAINING_TIME_ESTIMATE | BATTERY_CACHE_CALIBRATED_PPTT);
 }
 
 static int16_t apply_curve(int16_t pptt)
@@ -537,10 +539,11 @@ int16_t sys_get_calibrated_battery_pptt(int16_t pptt)
 	if (!battery_pptt_is_valid(pptt))
 		return -1;
 
-	if (pptt == last_pptt)
+	if ((valid_cache_mask & BATTERY_CACHE_CALIBRATED_PPTT) && pptt == last_pptt)
 		return last_calibrated_battery_pptt;
 	last_pptt = pptt;
 	last_calibrated_battery_pptt = apply_curve(pptt);
+	valid_cache_mask |= BATTERY_CACHE_CALIBRATED_PPTT;
 	return last_calibrated_battery_pptt;
 }
 
