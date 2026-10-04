@@ -1182,7 +1182,12 @@ void event_handler(struct esb_evt const *event)
 			last_log_time = now;
 			uint32_t total = tx_success_count + tx_failed_count;
 			uint32_t fail_rate = total > 0 ? (tx_failed_count * 100 / total) : 0;
-			LOG_INF("TX Stats: success=%u failed=%u rate=%u%%", tx_success_count, tx_failed_count, fail_rate);
+			if (esb_conn_state == ESB_ST_PAIRING) {
+				LOG_INF("TX Stats (pairing: waiting for receiver, normal): success=%u failed=%u rate=%u%%",
+					tx_success_count, tx_failed_count, fail_rate);
+			} else {
+				LOG_INF("TX Stats: success=%u failed=%u rate=%u%%", tx_success_count, tx_failed_count, fail_rate);
+			}
 		}
 
 		// Only count ping failures for connection timeout

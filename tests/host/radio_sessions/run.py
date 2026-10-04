@@ -182,7 +182,7 @@ int main(void) {
     return 0;
 }
 ''')
-    for name in ("payload", "commands", "collection", "recovery", "channels", "lifecycle"):
+    for name in ("payload", "tx_failures", "commands", "collection", "recovery", "channels", "lifecycle"):
         if os.environ.get("RADIO_CASE") not in (None, name):
             continue
         binary = temporary / name
