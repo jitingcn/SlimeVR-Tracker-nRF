@@ -38,7 +38,9 @@ GLOBALS = r'''
 #define CONFIG_SENSOR_TCAL_HEATED_RAMP_HALF_DEGREE_MS 45000
 #define CONFIG_SENSOR_TCAL_HEATED_MAX_RISE_MCPS 200
 #define CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KP 300
+#ifndef CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KI
 #define CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KI 5
+#endif
 #ifndef CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KFF
 #define CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KFF 0
 #endif
@@ -118,6 +120,11 @@ static inline bool v_finite(const float *v, size_t n) {
 SCENARIOS = (
     "admission", "imu_exclusion", "pending_candidate", "reset_barrier",
     "raw_overshoot", "filtered_overshoot", "raw_rise", "same_sequence",
+    "rise_noise", "rise_recovery", "rise_plant", "rise_cadence20", "rise_cadence113",
+    "rise_cadence1500", "rise_jitter", "rise_worker", "rise_worker_cut",
+    "rise_finalize", "rise_restart", "rise_invalid_time",
+    "rise_invalid_back", "rise_invalid_future", "rise_invalid_gap",
+    "rise_invalid_stale", "rise_invalid_duplicate", "rise_invalid_nan",
     "missed_deadline", "power_loss", "hardware_fault", "motion_resume",
     "stop_commit", "restart_epoch", "publish", "insufficient_bins",
     "missing_start", "missing_target", "invalid_stage", "model_generation",
@@ -184,7 +191,7 @@ def accumulator_source():
     ))
 
 
-def build_harness(work, main_source=None, fast_math=False, feedforward=0, timeout_min=90):
+def build_harness(work, main_source=None, fast_math=False, feedforward=0, timeout_min=90, integral_gain=5):
     """Build real controller+accumulator+IMU fixture; caller runs the executable.
 
     main_source replaces main only; adapter state/helpers remain accessible.
@@ -217,6 +224,7 @@ def build_harness(work, main_source=None, fast_math=False, feedforward=0, timeou
         "-std=c11", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
         "-Wno-format", "-pthread", "-fsanitize=undefined", "-fno-sanitize-recover=undefined",
         f"-DCONFIG_SENSOR_TCAL_HEATED_DEFAULT_KFF={int(feedforward)}",
+        f"-DCONFIG_SENSOR_TCAL_HEATED_DEFAULT_KI={int(integral_gain)}",
         f"-DCONFIG_SENSOR_TCAL_HEATED_TIMEOUT_MIN={int(timeout_min)}",
         "-include", str(work / "globals.h"), "-I", str(work),
         "-I", str(ROOT / "tests/host/imu_calibration"), "-I", str(ROOT / "src"),
@@ -238,6 +246,10 @@ def main():
                 Path(directory) / f"{label}-feedforward", fast_math=fast_math,
                 feedforward=100)
             subprocess.run([str(feedforward_executable), "pi_feedback_nonzero"], check=True)
+            proportional_executable = build_harness(
+                Path(directory) / f"{label}-proportional", fast_math=fast_math,
+                integral_gain=0)
+            subprocess.run([str(proportional_executable), "rise_zero_ki"], check=True)
 
 
 if __name__ == "__main__":

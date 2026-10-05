@@ -45,7 +45,16 @@ static struct {
 	float start_temp;
 	float setpoint;
 	float integral;
-	float previous_temp;
+	/* Safety evidence has its own sequence: worker/stop cannot consume a
+	 * sensor owner's opportunity to lower power or renew its hardware lease. */
+	uint32_t rise_sequence;
+	float rise_last_raw;
+	float rise_integral;
+	float rise_previous_mean;
+	int64_t rise_window_ms;
+	int64_t rise_previous_duration;
+	uint8_t rise_excess;
+	bool rise_limited;
 	uint16_t duty;
 	uint16_t count;
 	float accepted_min;
@@ -190,7 +199,7 @@ int sensor_tcal_heated_abort(enum tcal_heated_stop_reason reason)
 int sensor_tcal_heated_stop(void)
 {
 	sensor_tcal_heated_lock();
-	if (heat.state == HEAT_RESERVED || heat.state == HEAT_RUNNING) {
+	if (heat.state == HEAT_RESERVED || heat.state == HEAT_RUNNING || heat.state == HEAT_FINALIZING) {
 		struct sensor_temperature_observation observation;
 		enum tcal_heated_stop_reason reason = check_locked(&observation);
 		if (reason != TCAL_HEATED_STOP_NONE) {
@@ -259,6 +268,65 @@ void sensor_tcal_heated_clear_end(void)
 	sensor_tcal_heated_unlock();
 }
 
+/* Adjacent, covered raw-temperature windows. Integrate only actual advancing
+ * acquisitions; never split a long gap into invented samples or credit polls.
+ * Window lengths are >=1s and <1s + the largest admitted acquisition interval.
+ * The two means are separated by half the sum of their actual durations.
+ * Two consecutive excessive slopes therefore require three covered windows.
+ */
+static enum tcal_heated_stop_reason rise_observe_locked(
+	const struct sensor_temperature_observation *observation)
+{
+	if (observation->sequence == heat.rise_sequence) {
+		return observation->sampled_at_ms == heat.rise_sampled_ms ?
+			TCAL_HEATED_STOP_NONE : TCAL_HEATED_STOP_STALE_TEMP;
+	}
+	int64_t dt = observation->sampled_at_ms - heat.rise_sampled_ms;
+	if (dt <= 0 || dt > HEAT_FRESH_MS) {
+		return TCAL_HEATED_STOP_STALE_TEMP;
+	}
+	heat.rise_integral += (heat.rise_last_raw + observation->raw_c) * 0.5f * (float)dt;
+	heat.rise_window_ms += dt;
+	heat.rise_sampled_ms = observation->sampled_at_ms;
+	heat.rise_last_raw = observation->raw_c;
+	heat.rise_sequence = observation->sequence;
+	if (heat.rise_window_ms < HEAT_CONTROL_MS) {
+		return TCAL_HEATED_STOP_NONE;
+	}
+	float mean = heat.rise_integral / (float)heat.rise_window_ms;
+	if (!v_finite(&mean, 1)) {
+		return TCAL_HEATED_STOP_STALE_TEMP;
+	}
+	if (heat.rise_previous_duration) {
+		float rate = (mean - heat.rise_previous_mean) * 2000000.0f /
+			(float)(heat.rise_previous_duration + heat.rise_window_ms);
+		if (!v_finite(&rate, 1)) {
+			return TCAL_HEATED_STOP_STALE_TEMP;
+		}
+		heat.rise_excess = rate > CONFIG_SENSOR_TCAL_HEATED_MAX_RISE_MCPS ?
+			heat.rise_excess + 1 : 0;
+		if (heat.rise_excess >= 2) {
+			return TCAL_HEATED_STOP_RISE_FAST;
+		}
+		if (rate > CONFIG_SENSOR_TCAL_HEATED_MAX_RISE_MCPS * 0.5f) {
+			heat.rise_limited = true;
+			heat.sampling = false;
+			heat.rest_since = -1;
+			heat.stable_since = -1;
+			/* Shared readers may invalidate an unfinished accumulator, but
+			 * only its sensor owner applies the reset. Accepted slots stay. */
+			tcal_accum_request_reset();
+		} else if (rate <= CONFIG_SENSOR_TCAL_HEATED_MAX_RISE_MCPS * 0.25f) {
+			heat.rise_limited = false;
+		}
+	}
+	heat.rise_previous_mean = mean;
+	heat.rise_previous_duration = heat.rise_window_ms;
+	heat.rise_integral = 0;
+	heat.rise_window_ms = 0;
+	return TCAL_HEATED_STOP_NONE;
+}
+
 static enum tcal_heated_stop_reason check_locked(struct sensor_temperature_observation *observation)
 {
 	if (esb_ota_is_active() || connection_get_ota_suppressed()) {
@@ -281,14 +349,6 @@ static enum tcal_heated_stop_reason check_locked(struct sensor_temperature_obser
 	if (observation->raw_c >= ceiling || observation->filtered_c >= ceiling) {
 		return TCAL_HEATED_STOP_OVERTEMP;
 	}
-	/* Shared by owner, safety worker and explicit stop: a console command
-	 * must not turn an already-observed rise fault into successful saving. */
-	int64_t rise_elapsed = observation->sampled_at_ms - heat.rise_sampled_ms;
-	if (rise_elapsed >= HEAT_CONTROL_MS &&
-	    (observation->raw_c - heat.previous_temp) * 1000000.0f >
-	        CONFIG_SENSOR_TCAL_HEATED_MAX_RISE_MCPS * (float)rise_elapsed) {
-		return TCAL_HEATED_STOP_RISE_FAST;
-	}
 	if (k_uptime_get() - heat.started_ms >= (int64_t)CONFIG_SENSOR_TCAL_HEATED_TIMEOUT_MIN * 60000) {
 		return TCAL_HEATED_STOP_TIMEOUT;
 	}
@@ -300,7 +360,9 @@ static enum tcal_heated_stop_reason check_locked(struct sensor_temperature_obser
 			return TCAL_HEATED_STOP_STALE_TEMP;
 		}
 	}
-	return TCAL_HEATED_STOP_NONE;
+	/* Shared by owner, worker and stop, including while the immutable stage
+	 * waits for storage. Validity and controller liveness precede evidence. */
+	return rise_observe_locked(observation);
 }
 
 int sensor_tcal_heated_start(float target_temp)
@@ -372,7 +434,14 @@ int sensor_tcal_heated_start(float target_temp)
 		heat.control_ms = heat.started_ms;
 		heat.observed_ms = observation.sampled_at_ms;
 		heat.rise_sampled_ms = observation.sampled_at_ms;
-		heat.previous_temp = observation.raw_c;
+		heat.rise_sequence = observation.sequence;
+		heat.rise_last_raw = observation.raw_c;
+		heat.rise_integral = 0;
+		heat.rise_window_ms = 0;
+		heat.rise_previous_mean = 0;
+		heat.rise_previous_duration = 0;
+		heat.rise_excess = 0;
+		heat.rise_limited = false;
 		heat.sequence = observation.sequence;
 		heat.rest_since = -1;
 		heat.stable_since = -1;
@@ -456,7 +525,7 @@ void sensor_tcal_heated_update(bool is_resting)
 {
 	sensor_tcal_heated_lock();
 	sync_owner_locked();
-	if (heat.state != HEAT_RUNNING) {
+	if (heat.state != HEAT_RUNNING && heat.state != HEAT_FINALIZING) {
 		sensor_tcal_heated_unlock();
 		return;
 	}
@@ -468,7 +537,13 @@ void sensor_tcal_heated_update(bool is_resting)
 		sensor_tcal_heated_unlock();
 		return;
 	}
-	if (!is_resting) {
+	if (heat.state == HEAT_FINALIZING) {
+		/* Keep raw safety evidence current without touching the frozen stage,
+		 * ramp or deliberately disarmed hardware while storage is pending. */
+		sensor_tcal_heated_unlock();
+		return;
+	}
+	if (!is_resting || heat.rise_limited) {
 		heat.rest_since = -1;
 		heat.stable_since = -1;
 		heat.sampling = false;
@@ -485,14 +560,6 @@ void sensor_tcal_heated_update(bool is_resting)
 		if (elapsed <= 0 || elapsed > HEAT_FRESH_MS) {
 			reason = TCAL_HEATED_STOP_STALE_TEMP;
 		}
-		/* Raw codes are quantized: adjacent 2.5/10ms differences are not a
-		 * physical rate estimate. Check positive rise over >=1s of actual
-		 * observations; the absolute raw ceiling above is still immediate. */
-		int64_t rise_elapsed = observation.sampled_at_ms - heat.rise_sampled_ms;
-		if (rise_elapsed >= HEAT_CONTROL_MS) {
-			heat.previous_temp = observation.raw_c;
-			heat.rise_sampled_ms = observation.sampled_at_ms;
-		}
 		heat.observed_ms = observation.sampled_at_ms;
 		heat.sequence = observation.sequence;
 	}
@@ -505,10 +572,11 @@ void sensor_tcal_heated_update(bool is_resting)
 		sensor_tcal_heated_unlock();
 		return;
 	}
-	if (elapsed >= HEAT_CONTROL_MS && new_observation) {
+	bool control_due = elapsed >= HEAT_CONTROL_MS;
+	if (new_observation && (control_due || (heat.rise_limited && heat.duty))) {
 		float dt = (float)elapsed / 1000.0f;
 		/* Collect the starting band before ramping away from it. */
-		if (heat.sampling && heat.start_band_covered) {
+		if (control_due && heat.sampling && heat.start_band_covered) {
 			/* Anchor to total active ramp time: repeated float increments
 			 * drift over a long session. Paused control intervals add no time.
 			 * Each configured interval advances the reference by 0.5 C. */
@@ -523,14 +591,25 @@ void sensor_tcal_heated_update(bool is_resting)
 		float next_i = CLAMP(heat.integral + CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KI * error * dt,
 		                    -integral_limit, integral_limit);
 		float desired = p + ff + next_i;
+		/* A supervisory zero must not leave stored positive drive behind.
+		 * Only lower I toward cancellation; negative error must never create
+		 * positive I. A proportional-only controller has no stored drive and
+		 * no way to unwind artificial cancellation, so leave its I at zero.
+		 * Recovery uses the ordinary rest gate and PI law. */
+		if (heat.rise_limited && CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KI > 0) {
+			heat.integral = fminf(heat.integral,
+				CLAMP(-(p + ff), -integral_limit, 0.0f));
+		}
 		/* Signed integral can cancel an explicitly configured feedforward.
 		 * Integrate inside either actuator bound, or back toward that range. */
-		if ((desired >= 0.0f && desired <= CONFIG_SYSTEM_IMU_HEATER_MAX_DUTY_PPTT) ||
-		    (desired > CONFIG_SYSTEM_IMU_HEATER_MAX_DUTY_PPTT && error < 0.0f) ||
-		    (desired < 0.0f && error > 0.0f)) {
+		if (!heat.rise_limited &&
+		    ((desired >= 0.0f && desired <= CONFIG_SYSTEM_IMU_HEATER_MAX_DUTY_PPTT) ||
+		     (desired > CONFIG_SYSTEM_IMU_HEATER_MAX_DUTY_PPTT && error < 0.0f) ||
+		     (desired < 0.0f && error > 0.0f))) {
 			heat.integral = next_i;
 		}
-		desired = CLAMP(p + ff + heat.integral, 0.0f, (float)CONFIG_SYSTEM_IMU_HEATER_MAX_DUTY_PPTT);
+		desired = heat.rise_limited ? 0.0f :
+			CLAMP(p + ff + heat.integral, 0.0f, (float)CONFIG_SYSTEM_IMU_HEATER_MAX_DUTY_PPTT);
 		float slew = CONFIG_SENSOR_TCAL_HEATED_SLEW_PPTT_PER_S * dt;
 		/* Limit power increases, never delay a requested decrease. */
 		desired = fminf(desired, heat.duty + slew);
@@ -540,7 +619,9 @@ void sensor_tcal_heated_update(bool is_resting)
 			return;
 		}
 		heat.duty = (uint16_t)desired;
-		heat.control_ms = now;
+		if (control_due) {
+			heat.control_ms = now;
+		}
 		if (heater_hw_write(heat.epoch, observation.sequence, observation.sampled_at_ms, observation.raw_c, heat.duty)) {
 			(void)finish_locked(TCAL_HEATED_STOP_HEATER_ERROR);
 			sensor_tcal_heated_unlock();

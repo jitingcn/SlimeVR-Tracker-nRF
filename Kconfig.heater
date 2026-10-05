@@ -58,9 +58,18 @@ config SENSOR_TCAL_HEATED_STABLE_MS
     default 60000
 
 config SENSOR_TCAL_HEATED_MAX_RISE_MCPS
-    int "Maximum positive raw temperature rise (mC/s)"
+    int "Maximum confirmed raw-window temperature rise (mC/s)"
     range 50 1000
     default 200
+    help
+        Rise is measured between adjacent time-weighted raw-temperature means,
+        each covering at least one second of advancing acquisition timestamps.
+        Two consecutive slopes above this limit abort, even with heater off.
+        Confirmation requires three covered windows; acquisition cadence and
+        jitter extend their duration. Raw and filtered absolute ceilings remain
+        immediate. Above half this rate, the controller requests zero heat and
+        pauses ramp/unfinished sampling; at or below one quarter it releases
+        the limit and requires the normal rest dwell before sampling resumes.
 
 config SENSOR_TCAL_HEATED_TIMEOUT_MIN
     int "Session timeout (minutes)"

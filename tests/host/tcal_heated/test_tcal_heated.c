@@ -652,6 +652,167 @@ static void robust_case(const char *which, bool heated)
 	}
 }
 
+/* Dense gyro evidence is independent of the temperature polling cadence. */
+static void rise_feed_ms(unsigned duration, float raw, float filtered)
+{
+	for (unsigned ms = 0; ms < duration; ms++) {
+		now_ms++;
+		if (now_ms % 20 == 0)
+			new_sample(0, raw, filtered, true);
+		assert(sensor_tcal_heated_feed(bias, filtered));
+	}
+}
+
+static void rise_noise_case(void)
+{
+	/* User's held starting band: low admission anchor, one 20ms high raw
+	 * endpoint at 1s, then bounded deterministic noise. No invented point. */
+	sample.raw_c = 32.63f;
+	sample.filtered_c = 32.78f;
+	assert(sensor_tcal_heated_start(43) == 0);
+	sensor_tcal_heated_update(true);
+	uint32_t noise = 0x12345678;
+	float raw = 32.78f;
+	for (unsigned ms = 1; ms <= 31000; ms++) {
+		now_ms++;
+		if (ms % 20 == 0) {
+			noise = noise * 1664525u + 1013904223u;
+			raw = 32.78f + ((int)(noise >> 24) - 128) * (0.12f / 128);
+			if (ms == 1000) raw = 32.93f;
+			new_sample(0, raw, 32.78f, true);
+		}
+		assert(sensor_tcal_heated_feed(bias, 32.78f));
+		assert(heat.state == HEAT_RUNNING && !heat.rise_limited);
+		if (ms < 30000) assert(!heat.start_band_covered && heat.count == 0);
+	}
+	assert(heat.count == 1 && heat.start_band_covered && heat.setpoint > 32.78f);
+	unchanged();
+}
+
+static void rise_cadence_case(unsigned cadence, bool worker_first, bool jitter)
+{
+	start();
+	int64_t began = now_ms;
+	unsigned index = 0;
+	while (sensor_tcal_heated_busy()) {
+		unsigned dt = jitter ? (index++ % 3 == 0 ? 337 : 113) : cadence;
+		now_ms += dt;
+		float raw = 25 + (now_ms - began) * 0.0003f;
+		sample = (struct sensor_temperature_observation){raw, 25, now_ms, sample.sequence + 1};
+		unsigned before = writes;
+		int64_t deadline = lease_deadline;
+		if (worker_first) {
+			sensor_tcal_heated_finalize();
+			sensor_tcal_heated_finalize();
+			assert(writes == before && lease_deadline == deadline);
+		}
+		sensor_tcal_heated_update(true);
+		before = writes;
+		sensor_tcal_heated_update(true);
+		assert(writes == before); /* no second write, no second slope */
+		assert(!output_duty); /* external warming is hazardous even at zero */
+		assert(now_ms - began < 9000);
+	}
+	stopped(TCAL_HEATED_STOP_RISE_FAST);
+	assert(now_ms - began >= 3000);
+	unsigned max_gap = jitter ? 337 : cadence;
+	assert(now_ms - began < 3 * (1000 + max_gap));
+	printf("rise cadence=%u jitter=%d worker=%d confirmation=%lldms excursion=%.3fC\n",
+		cadence, jitter, worker_first, (long long)(now_ms - began), sample.raw_c - 25);
+}
+
+static void rise_recovery_case(void)
+{
+	resting();
+	/* Start real unfinished evidence and build ordinary PI power. */
+	rise_feed_ms(2000, 25, 24.5f);
+	assert(tcal_accum.active && output_duty > 0 && heat.count == 0);
+	float held = heat.setpoint;
+	int64_t began = now_ms;
+	while (now_ms - began < 2000) {
+		float raw = 25 + (now_ms - began + 20) * 0.00030f;
+		new_sample(20, raw, 24.5f, true);
+	}
+	assert(heat.rise_limited && !heat.sampling && !output_duty);
+	assert(heat.rise_excess == 1); /* transient over-limit slope, not sustained */
+	assert(heat.integral <= -150 && heat.setpoint == held && heat.stable_since == -1);
+}
+
+static void rise_plant_case(void)
+{
+	/* A duty-driven lumped body and lagged sensor, NOT reference-following.
+	 * Units: C, seconds, full-scale duty fraction. A short coupling change
+	 * stresses overspeed recovery; this is not hardware qualification. */
+	sample.raw_c = sample.filtered_c = 32.78f;
+	assert(sensor_tcal_heated_start(43) == 0);
+	sensor_tcal_heated_update(true);
+	float body = 32.78f, sensed = body, filtered = body;
+	unsigned pulse = 0, limited_ms = 0;
+	bool saw_cut = false, saw_recovery = false;
+	/* The low-gain plant's slow PI pole is ~227s. At 180s it is still
+	 * collecting the 33.0..33.5C slot; later slots only flush on real exit.
+	 * Allow that physical exit rather than injecting/loosening coverage. */
+	for (unsigned ms = 1; ms <= 360000; ms++) {
+		float ambient = ms < 40000 || ms > 65000 ? 32.78f : 32.48f;
+		if (!pulse && ms >= 40000 && output_duty >= 60)
+			pulse = ms;
+		float gain = pulse && ms - pulse < 1000 ? 65.0f : 3.0f;
+		body += (gain * output_duty / 10000.0f - (body - ambient) / 4.0f) * 0.001f;
+		sensed += (body - sensed) * (0.001f / 0.1f);
+		filtered += (sensed - filtered) * (0.001f / 0.5f);
+		now_ms++;
+		if (ms % 20 == 0)
+			new_sample(0, sensed, filtered, true);
+		assert(sensor_tcal_heated_feed(bias, filtered));
+		assert(heat.state == HEAT_RUNNING);
+		assert(body > 32 && body < 36);
+		if (heat.rise_limited) {
+			assert(!output_duty && !heat.sampling);
+			saw_cut = true;
+			limited_ms++;
+		} else if (saw_cut && heat.sampling) {
+			saw_recovery = true;
+		}
+		if (ms == 31000) assert(heat.count == 1 && heat.start_band_covered);
+	}
+	assert(pulse && saw_cut && saw_recovery && limited_ms < 15000);
+	assert(heat.count >= 2 && heat.setpoint > 33.5f);
+	unchanged();
+}
+
+static void rise_zero_ki_case(void)
+{
+	assert(CONFIG_SENSOR_TCAL_HEATED_DEFAULT_KI == 0);
+	resting();
+	/* External cooling establishes positive proportional demand. Then a
+	 * bounded external warming episode triggers limiting below the held
+	 * starting reference, where artificial negative I would latch heat off. */
+	for (unsigned i = 0; i < 3; i++) new_sample(1000, 24, 24, true);
+	assert(output_duty > 0);
+	for (unsigned i = 1; i <= 100; i++)
+		new_sample(20, 24 + i * 0.006f, 24 + i * 0.006f, true);
+	assert(heat.rise_limited && !output_duty && !heat.count);
+	new_sample(1000, 24.6f, 24.6f, true);
+	new_sample(1000, 24.6f, 24.6f, true);
+	assert(!heat.rise_limited && output_duty > 0 && !heat.sampling);
+	/* Evolve actual requested duty through a small thermal body, not the
+	 * reference. Without released P drive it cannot warm enough in this
+	 * horizon; rest and the complete starting accumulator remain required. */
+	float body = 24.6f, filtered = body;
+	for (unsigned ms = 1; ms <= 45000; ms++) {
+		body += (5.0f * output_duty / 10000.0f - (body - 24.6f) / 20.0f) * 0.001f;
+		filtered += (body - filtered) * (0.001f / 0.5f);
+		now_ms++;
+		if (ms % 20 == 0) new_sample(0, body, filtered, true);
+		assert(sensor_tcal_heated_feed(bias, filtered));
+		assert(heat.state == HEAT_RUNNING && !heat.rise_limited);
+		if (ms < 29000) assert(!heat.start_band_covered);
+	}
+	assert(body > 24.8f && output_duty > 0);
+	assert(heat.count == 1 && heat.start_band_covered && heat.setpoint > 25);
+	unchanged();
+}
+
 int main(int argc, char **argv)
 {
 	assert(argc == 2);
@@ -714,7 +875,101 @@ int main(int argc, char **argv)
 	} else if (!strcmp(which, "raw_rise")) {
 		start();
 		new_sample(1000, 25.21f, 25.0f, true);
+		for (unsigned i = 0; i < 6; i++) tick(true);
+		assert(heat.state == HEAT_RUNNING && !heat.rise_limited);
+		unchanged();
+	} else if (!strcmp(which, "rise_noise")) {
+		rise_noise_case();
+	} else if (!strcmp(which, "rise_plant")) {
+		rise_plant_case();
+	} else if (!strcmp(which, "rise_zero_ki")) {
+		rise_zero_ki_case();
+	} else if (!strcmp(which, "rise_recovery")) {
+		rise_recovery_case();
+		rise_feed_ms(2000, sample.raw_c, 25);
+		assert(!heat.rise_limited && !heat.sampling && !tcal_accum.active);
+		rise_feed_ms(5000, sample.raw_c, 25);
+		assert(heat.sampling && !heat.count);
+		rise_feed_ms(26000, sample.raw_c, 25);
+		assert(heat.start_band_covered && heat.count == 1);
+		unchanged();
+	} else if (!strcmp(which, "rise_cadence20") || !strcmp(which, "rise_cadence113") ||
+		   !strcmp(which, "rise_cadence1500") || !strcmp(which, "rise_jitter") ||
+		   !strcmp(which, "rise_worker")) {
+		unsigned cadence = !strcmp(which, "rise_cadence1500") ? 1500 :
+			!strcmp(which, "rise_cadence113") ? 113 : 20;
+		rise_cadence_case(cadence, !strcmp(which, "rise_worker"), !strcmp(which, "rise_jitter"));
+	} else if (!strcmp(which, "rise_worker_cut")) {
+		/* A fresh but 500ms-old admitted sample offsets acquisition windows
+		 * from PI cadence. The worker must leave the early off write to owner. */
+		sample.sampled_at_ms -= 500;
+		start();
+		int64_t began = now_ms;
+		while (now_ms - began < 1500) {
+			now_ms += 20;
+			sample = (struct sensor_temperature_observation){
+				25 + (now_ms - began + 500) * 0.00015f,
+				24.5f, now_ms, sample.sequence + 1};
+			unsigned before = writes;
+			int64_t deadline = lease_deadline;
+			sensor_tcal_heated_finalize();
+			sensor_tcal_heated_finalize();
+			assert(writes == before && lease_deadline == deadline);
+			if (heat.rise_limited) {
+				assert(output_duty > 0 && now_ms - heat.control_ms < 1000);
+				int64_t controlled = heat.control_ms;
+				sensor_tcal_heated_update(true);
+				assert(!output_duty && writes == before + 1 && heat.control_ms == controlled);
+				sensor_tcal_heated_update(true);
+				assert(writes == before + 1);
+			} else {
+				sensor_tcal_heated_update(true);
+			}
+		}
+		assert(heat.rise_limited && !output_duty && heat.integral <= -150);
+		assert(lease_deadline == sample.sampled_at_ms + HEAT_FRESH_MS);
+		unchanged();
+	} else if (!strcmp(which, "rise_finalize")) {
+		qualified_stage();
+		new_sample(1000, 25.3f, 25, true);
+		new_sample(1000, 25.6f, 25, true);
+		assert(heat.rise_excess == 1);
+		stop_hook();
+		assert(heat.state == HEAT_FINALIZING && !output_duty);
+		unsigned before = writes;
+		/* Owner keeps the safety history current while the stage is frozen. */
+		new_sample(1000, 25.9f, 25, true);
+		assert(writes == before);
+		sensor_tcal_heated_finalize();
 		stopped(TCAL_HEATED_STOP_RISE_FAST);
+	} else if (!strcmp(which, "rise_restart")) {
+		rise_cadence_case(20, true, false);
+		start();
+		assert(!heat.rise_excess && !heat.rise_limited && !heat.rise_previous_duration);
+		rise_feed_ms(31000, sample.raw_c, 25);
+		assert(heat.state == HEAT_RUNNING && heat.count == 1);
+		unchanged();
+	} else if (!strncmp(which, "rise_invalid_", sizeof("rise_invalid_") - 1)) {
+		start();
+		new_sample(1000, 25.3f, 25, true);
+		new_sample(1000, 25.6f, 25, true);
+		assert(heat.rise_excess == 1);
+		sample.sequence++;
+		if (!strcmp(which, "rise_invalid_back")) sample.sampled_at_ms--;
+		if (!strcmp(which, "rise_invalid_future")) sample.sampled_at_ms = now_ms + 1;
+		if (!strcmp(which, "rise_invalid_gap")) {
+			now_ms += HEAT_FRESH_MS + 1;
+			sample.sampled_at_ms = now_ms;
+		}
+		if (!strcmp(which, "rise_invalid_stale")) now_ms += HEAT_FRESH_MS + 1;
+		if (!strcmp(which, "rise_invalid_duplicate")) {
+			sample.sequence--;
+			sample.sampled_at_ms--;
+		}
+		if (!strcmp(which, "rise_invalid_nan")) sample.raw_c = from_bits(0x7fc00000);
+		/* A new sequence without advancing acquisition time is not coverage. */
+		sensor_tcal_heated_finalize();
+		stopped(TCAL_HEATED_STOP_STALE_TEMP);
 	} else if (!strcmp(which, "same_sequence")) {
 		start();
 		tick(true);
@@ -1141,7 +1396,7 @@ int main(int argc, char **argv)
 		unchanged();
 	} else if (!strcmp(which, "sustained_rise")) {
 		start();
-		for (int i = 1; i <= 50 && sensor_tcal_heated_busy(); i++)
+		for (int i = 1; i <= 150 && sensor_tcal_heated_busy(); i++)
 			new_sample(20, 25.0f + i * 0.020f * 0.30f, 25.0f, true);
 		stopped(TCAL_HEATED_STOP_RISE_FAST);
 	} else if (!strcmp(which, "ordinary_start_stop") || !strcmp(which, "ordinary_reset") ||
@@ -1176,10 +1431,10 @@ int main(int argc, char **argv)
 		float saturated_integral = heat.integral;
 		for (unsigned second = 0; second < 60; second++) tick(true);
 		near(heat.integral, saturated_integral);
-		/* Warm through target under the raw-rise limit; overshoot must unwind,
-		 * not retain saturated power or force an upper-bound integral jump. */
+		/* Warm through target below the rise-governor entry rate; ordinary
+		 * negative feedback must unwind without supervisory cancellation. */
 		while (sample.filtered_c < 44.25f) {
-			float measured = fminf(44.25f, sample.filtered_c + 0.1f);
+			float measured = fminf(44.25f, sample.filtered_c + 0.08f);
 			new_sample(1000, measured, measured, false);
 		}
 		float overshoot_integral = heat.integral;
@@ -1335,6 +1590,9 @@ int main(int argc, char **argv)
 		qualified_stage();
 		bool rise = !strcmp(which, "stop_rise_fault");
 		if (rise) {
+			for (unsigned i = 1; i <= 2; i++)
+				new_sample(1000, 25 + i * 0.3f, 25, true);
+			assert(heat.rise_excess == 1);
 			now_ms += 1000;
 			sample.raw_c += 0.3f;
 			sample.sampled_at_ms = now_ms;
