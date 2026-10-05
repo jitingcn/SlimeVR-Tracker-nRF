@@ -114,8 +114,8 @@ enum sensor_calibration_request_id {
 	CAL_REQUEST_MAG = 6,
 #if CONFIG_SENSOR_TCAL_HEATED
 	CAL_REQUEST_TCAL_HEATED = 7,
-	CAL_REQUEST_MAINTENANCE = 8,
 #endif
+	CAL_REQUEST_MAINTENANCE = 8,
 };
 
 enum cal_request_origin {
@@ -127,6 +127,9 @@ enum cal_request_origin {
 /* QUERY returns the pending request ID, or 0 when idle. CLEAR ends sample
  * admission and clears the slot, not a candidate already handed to its owner. */
 int sensor_calibration_request(int id, enum cal_request_origin origin);
+/* Reserve the request slot without starting a collector, in every build. */
+int sensor_calibration_maintenance_begin(void);
+void sensor_calibration_maintenance_end(void);
 uint16_t sensor_calibration_current_operation(void);
 struct led_token sensor_calibration_current_feedback(void);
 int sensor_calibration_current_storage_error(void);

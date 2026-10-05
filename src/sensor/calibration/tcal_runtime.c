@@ -33,6 +33,8 @@
 #include <errno.h>
 #include <string.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/crc.h>
 
 #include "bias_collect.h"
 #include "calibration.h"
@@ -208,8 +210,8 @@ static struct {
 	float temp_max;
 	bool active;
 	int64_t start_time;
-#if CONFIG_SENSOR_TCAL_HEATED
 	uint32_t reset_generation;
+#if CONFIG_SENSOR_TCAL_HEATED
 	int slot;
 	int pending_slot;
 	int64_t pending_since;
@@ -217,12 +219,11 @@ static struct {
 #endif
 } tcal_accum;
 
-#if CONFIG_SENSOR_TCAL_HEATED
 /* A consumed reset must still invalidate an average blocked on storage.
  * Only the sensor owner advances seen; publishers compare the saved epoch. */
 static atomic_t tcal_accum_reset_generation;
 static uint32_t tcal_accum_seen_reset_generation;
-#else
+#if !CONFIG_SENSOR_TCAL_HEATED
 static int64_t tcal_accum_last_commit_time = 0;
 #endif
 
@@ -443,22 +444,16 @@ void tcal_accum_reset(void)
 
 void tcal_accum_request_reset(void)
 {
-#if CONFIG_SENSOR_TCAL_HEATED
 	atomic_inc(&tcal_accum_reset_generation);
-#else
-	tcal_accum_reset();
-#endif
 }
 
 void tcal_accum_apply_reset(void)
 {
-#if CONFIG_SENSOR_TCAL_HEATED
 	uint32_t generation = (uint32_t)atomic_get(&tcal_accum_reset_generation);
 	if (generation != tcal_accum_seen_reset_generation) {
 		tcal_accum_reset();
 		tcal_accum_seen_reset_generation = generation;
 	}
-#endif
 }
 
 /**
@@ -485,9 +480,9 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp, u
 		return;
 	}
 
-#if CONFIG_SENSOR_TCAL_HEATED
 	/* Storage precedes the session gate, which precedes model ownership. */
 	sys_warm_transaction_begin();
+#if CONFIG_SENSOR_TCAL_HEATED
 	sensor_tcal_heated_lock();
 	if (sensor_tcal_heated_busy_locked() || sensor_tcal_heated_resetting_locked()
 	    || sensor_calibration_maintenance_active_locked()
@@ -497,7 +492,11 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp, u
 		return;
 	}
 #else
-	(void)reset_generation;
+	if (sensor_calibration_request(CAL_REQUEST_QUERY, CAL_REQUEST_AUTO_SILENT) == CAL_REQUEST_MAINTENANCE ||
+	    reset_generation != (uint32_t)atomic_get(&tcal_accum_reset_generation)) {
+		sys_warm_transaction_end(false);
+		return;
+	}
 #endif
 	sensor_tcal_lock();
 	/* Update direction from measured temps (same-slot revisits may be ~equal). */
@@ -561,16 +560,14 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp, u
 		}
 	}
 
-#if CONFIG_SENSOR_TCAL_HEATED
 	retained->gyroTemp = measured_temp;
-#endif
 	if (!is_new_point && retained->tempCalPoints[idx].temp == measured_temp &&
 	    memcmp(retained->tempCalPoints[idx].bias, final_bias, sizeof(final_bias)) == 0) {
 		sensor_tcal_unlock();
 #if CONFIG_SENSOR_TCAL_HEATED
 		sensor_tcal_heated_unlock();
-		sys_warm_transaction_end(true);
 #endif
+		sys_warm_transaction_end(true);
 		return;
 	}
 	retained->tempCalPoints[idx].temp = measured_temp;
@@ -624,6 +621,7 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp, u
 		/* Keep CRC valid for soft-reset without dirtying NVS for churn. */
 		retained_update();
 	}
+	sys_warm_transaction_end(true);
 #endif
 }
 
@@ -851,10 +849,7 @@ static void tcal_accum_flush(bool heated)
 	}
 	tcal_save_point(idx, avg_bias, avg_temp, tcal_accum.reset_generation);
 #else
-	/* Preserve the existing ordinary feature-off retained update ordering. */
-	retained->gyroTemp = avg_temp;
-	retained_update();
-	tcal_save_point(idx, avg_bias, avg_temp, 0);
+	tcal_save_point(idx, avg_bias, avg_temp, tcal_accum.reset_generation);
 	tcal_accum_last_commit_time = k_uptime_get();
 #endif
 
@@ -915,8 +910,8 @@ static void tcal_accum_feed(const float g[3], float temp, bool heated)
 	if (!tcal_accum.active) {
 		tcal_accum_reset();
 		tcal_accum.active = true;
-#if CONFIG_SENSOR_TCAL_HEATED
 		tcal_accum.reset_generation = tcal_accum_seen_reset_generation;
+#if CONFIG_SENSOR_TCAL_HEATED
 		tcal_accum.slot = TEMP_TO_IDX(temp);
 		tcal_accum.pending_slot = -1;
 #endif
@@ -2002,6 +1997,307 @@ void sensor_tcal_test_methods(float temp)
 
 
 	printk("\n=== End of T-Cal Method Comparison ===\n");
+}
+
+/* V2: canonical little-endian words, dense slots, CRC32 IEEE, RFC4648 base64.
+ * Only the console worker allocates/frees; the IRQ decodes into this one packet. */
+#define TCAL_BACKUP_MAGIC 0x324c4354u /* "TCL2" */
+#define TCAL_BACKUP_TIMEOUT_MS 60000
+struct tcal_backup_packet {
+	uint32_t magic, min, max, steps;
+	float gyro_temp;
+	struct TempCalPoint points[TCAL_BUFFER_SIZE];
+	uint32_t crc;
+};
+BUILD_ASSERT(sizeof(struct tcal_backup_packet) == 24 + TCAL_BUFFER_SIZE * 16);
+#define TCAL_BACKUP_TEXT_SIZE (4 * ((sizeof(struct tcal_backup_packet) + 2) / 3))
+#define TCAL_BACKUP_DATA_CHARS ((sizeof(struct tcal_backup_packet) * 8 + 5) / 6)
+static const char tcal_backup_alphabet[] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static struct {
+	struct k_spinlock lock;
+	struct tcal_backup_packet *packet;
+	int64_t last_input;
+	uint32_t generation;
+	uint16_t digits;
+	uint8_t previous;
+	bool invalid;
+	bool ready;
+} tcal_backup;
+static atomic_t tcal_backup_input_loss_generation;
+
+uint32_t sensor_tcal_backup_input_generation(void)
+{
+	return (uint32_t)atomic_get(&tcal_backup_input_loss_generation);
+}
+
+void sensor_tcal_backup_input_lost(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&tcal_backup.lock);
+	atomic_inc(&tcal_backup_input_loss_generation);
+	k_spin_unlock(&tcal_backup.lock, key);
+}
+
+bool sensor_tcal_backup_active(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&tcal_backup.lock);
+	bool active = tcal_backup.packet != NULL;
+	k_spin_unlock(&tcal_backup.lock, key);
+	return active;
+}
+
+/* 0: ordinary editor, 1: consumed, 2: wake worker. Invalid data is drained
+ * through its physical newline, never dispatched as a command prefix. */
+int sensor_tcal_backup_input_byte(uint8_t byte)
+{
+	k_spinlock_key_t key = k_spin_lock(&tcal_backup.lock);
+	int result = 0;
+	if (tcal_backup.packet != NULL) {
+		result = 1;
+		tcal_backup.last_input = k_uptime_get();
+		if (byte == 3) {
+			atomic_inc(&tcal_backup_input_loss_generation);
+			tcal_backup.ready = true;
+		} else if (byte == '\r' || byte == '\n') {
+			tcal_backup.ready = true;
+		} else if (!tcal_backup.ready && !tcal_backup.invalid) {
+			unsigned index = tcal_backup.digits++;
+			unsigned digit = 64;
+			if (byte >= 'A' && byte <= 'Z') {
+				digit = byte - 'A';
+			} else if (byte >= 'a' && byte <= 'z') {
+				digit = byte - 'a' + 26;
+			} else if (byte >= '0' && byte <= '9') {
+				digit = byte - '0' + 52;
+			} else if (byte == '+' || byte == '/') {
+				digit = byte == '+' ? 62 : 63;
+			}
+			if (index >= TCAL_BACKUP_TEXT_SIZE ||
+			    (index >= TCAL_BACKUP_DATA_CHARS ? byte != '=' : digit == 64)) {
+				tcal_backup.invalid = true;
+			} else if (index < TCAL_BACKUP_DATA_CHARS) {
+				unsigned phase = index % 4;
+				if (phase != 0) {
+					((uint8_t *)tcal_backup.packet)[(index + 1) * 6 / 8 - 1] =
+						(tcal_backup.previous << (2 * phase)) | (digit >> (6 - 2 * phase));
+				}
+				unsigned unused = (6 - sizeof(struct tcal_backup_packet) * 8 % 6) % 6;
+				if (index == TCAL_BACKUP_DATA_CHARS - 1 && (digit & ((1u << unused) - 1))) {
+					tcal_backup.invalid = true;
+				}
+				tcal_backup.previous = digit;
+			}
+		}
+		if (tcal_backup.ready) {
+			result = 2;
+		}
+	}
+	k_spin_unlock(&tcal_backup.lock, key);
+	return result;
+}
+
+/* Float words are checked as bits before any floating comparison (fast-math). */
+static bool tcal_backup_validate(struct tcal_backup_packet *packet, unsigned *count)
+{
+	uint8_t *data = (uint8_t *)packet;
+	if (sys_get_le32(data + sizeof(*packet) - 4) != crc32_ieee(data, sizeof(*packet) - 4)) {
+		return false;
+	}
+	for (size_t i = 0; i < sizeof(*packet); i += 4) {
+		uint32_t word = sys_get_le32(data + i);
+		memcpy(data + i, &word, 4);
+	}
+	if (packet->magic != TCAL_BACKUP_MAGIC ||
+	    packet->min != (uint32_t)CONFIG_SENSOR_POLY_TEMP_MIN ||
+	    packet->max != (uint32_t)CONFIG_SENSOR_POLY_TEMP_MAX ||
+	    packet->steps != CONFIG_SENSOR_POLY_STEPS_PER_DEGREE) {
+		return false;
+	}
+	for (size_t i = 16; i < sizeof(*packet) - 4; i += 4) {
+		uint32_t word;
+		memcpy(&word, data + i, 4);
+		if ((word & 0x7f800000u) == 0x7f800000u) {
+			return false;
+		}
+	}
+	if (packet->gyro_temp < -100.0f || packet->gyro_temp > 150.0f) {
+		return false;
+	}
+	*count = 0;
+	for (unsigned i = 0; i < TCAL_BUFFER_SIZE; i++) {
+		float temp = packet->points[i].temp;
+		if (temp == 0.0f) {
+			continue;
+		}
+		/* Producers truncate toward zero, including the open bin below MIN. */
+		if (temp <= CONFIG_SENSOR_POLY_TEMP_MIN - 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE ||
+		    temp >= CONFIG_SENSOR_POLY_TEMP_MAX) {
+			return false;
+		}
+		(*count)++;
+	}
+	return true;
+}
+
+static int tcal_backup_apply(const struct tcal_backup_packet *packet, unsigned count,
+	uint32_t generation, bool *applied)
+{
+	sys_warm_transaction_begin();
+	sensor_tcal_lock();
+	/* Serialize the publication boundary with physical session retirement.
+	 * No sleeping calls occur under this spinlock. */
+	k_spinlock_key_t key = k_spin_lock(&tcal_backup.lock);
+	if (generation != sensor_tcal_backup_input_generation()) {
+		k_spin_unlock(&tcal_backup.lock, key);
+		sensor_tcal_unlock();
+		sys_warm_transaction_end(false);
+		return -ECANCELED;
+	}
+	memcpy(retained->tempCalPoints, packet->points, sizeof(packet->points));
+	retained->gyroTemp = packet->gyro_temp;
+	*applied = true;
+	k_spin_unlock(&tcal_backup.lock, key);
+	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
+	memset(&retained->tempCalState, 0, sizeof(retained->tempCalState));
+	retained->tempCalState.count = count;
+	retained->tempCalState.valid = count != 0;
+	tcal_current_direction = TCAL_DIR_UNKNOWN;
+	tcal_direction_ref_temp = NAN;
+	sensor_tcal_refresh_model();
+	sensor_tcal_unlock();
+	tcal_accum_request_reset();
+
+	/* The existing four NVS keys are not power-loss atomic. Neither runtime
+	 * compensation nor its retained/persisted enable flag is changed. */
+	int error = 0;
+#define TCAL_BACKUP_SAVE(id, member) do { \
+	int result = sys_write(id, &retained->member, &retained->member, sizeof(retained->member)); \
+	if (result < 0 && error == 0) { error = result; } \
+} while (0)
+	TCAL_BACKUP_SAVE(MAIN_GYRO_TCAL_POINTS_ID, tempCalPoints);
+	TCAL_BACKUP_SAVE(MAIN_GYRO_TEMP_ID, gyroTemp);
+	TCAL_BACKUP_SAVE(MAIN_GYRO_TCAL_STATE_ID, tempCalState);
+	TCAL_BACKUP_SAVE(MAIN_GYRO_TCAL_COEFFS_ID, tempCalCoeffs);
+#undef TCAL_BACKUP_SAVE
+	sys_warm_transaction_end(false);
+	return error;
+}
+
+void sensor_tcal_backup_process(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&tcal_backup.lock);
+	struct tcal_backup_packet *packet = tcal_backup.packet;
+	uint32_t generation = tcal_backup.generation;
+	bool cancelled = generation != sensor_tcal_backup_input_generation() ||
+		k_uptime_get() - tcal_backup.last_input >= TCAL_BACKUP_TIMEOUT_MS;
+	if (packet == NULL || (!tcal_backup.ready && !cancelled)) {
+		k_spin_unlock(&tcal_backup.lock, key);
+		return;
+	}
+	bool complete = !cancelled && !tcal_backup.invalid &&
+		tcal_backup.digits == TCAL_BACKUP_TEXT_SIZE;
+	tcal_backup.packet = NULL; /* IRQ can no longer access worker-owned memory. */
+	k_spin_unlock(&tcal_backup.lock, key);
+	unsigned count = 0;
+	bool applied = false;
+	int error = -EINVAL;
+	if (complete && tcal_backup_validate(packet, &count)) {
+		error = sensor_calibration_maintenance_begin();
+		if (error == 0) {
+			error = tcal_backup_apply(packet, count, generation, &applied);
+			sensor_calibration_maintenance_end();
+		}
+	}
+	k_free(packet);
+	if (!applied) {
+		printk("T-Cal import rejected (%d): invalid, cancelled, timed out or busy; data unchanged.\n", error);
+	} else if (error < 0) {
+		printk("T-Cal import applied in RAM but SAVE FAILED (%d); import again to retry.\n", error);
+	} else {
+		printk("T-Cal import saved successfully (%u points).\n", count);
+	}
+	sensor_operation_result(LED_OWNER_TCAL, error, applied);
+}
+
+void sensor_tcal_backup_command(size_t argc, char **argv, uint32_t input_generation)
+{
+	bool importing = argc == 2 && strcmp(argv[1], "import") == 0;
+	if ((!importing && (argc != 2 || strcmp(argv[1], "export") != 0)) ||
+	    sensor_tcal_backup_active() ||
+	    input_generation != sensor_tcal_backup_input_generation()) {
+		printk("T-Cal backup rejected: use 'tcal export' or 'tcal import' when idle.\n");
+		return;
+	}
+	/* Immediate logging packages this string on the small console stack.
+	 * Deferred printk is also required for one indivisible raw log message. */
+	if (!importing && (!IS_ENABLED(CONFIG_LOG_MODE_DEFERRED) || !IS_ENABLED(CONFIG_LOG_PRINTK))) {
+		printk("T-Cal export requires deferred printk logging.\n");
+		return;
+	}
+	struct tcal_backup_packet *packet = k_malloc(importing ? sizeof(*packet) : TCAL_BACKUP_TEXT_SIZE + 1);
+	if (packet == NULL) {
+		printk("T-Cal backup rejected: insufficient memory.\n");
+		return;
+	}
+	if (sensor_calibration_maintenance_begin() != 0) {
+		k_free(packet);
+		printk("T-Cal backup rejected: calibration busy.\n");
+		return;
+	}
+	if (importing) {
+		sensor_calibration_maintenance_end();
+		k_spinlock_key_t key = k_spin_lock(&tcal_backup.lock);
+		if (input_generation != sensor_tcal_backup_input_generation()) {
+			k_spin_unlock(&tcal_backup.lock, key);
+			k_free(packet);
+			printk("T-Cal import rejected: console session ended.\n");
+			return;
+		}
+		tcal_backup.generation = input_generation;
+		tcal_backup.digits = 0;
+		tcal_backup.invalid = false;
+		tcal_backup.ready = false;
+		tcal_backup.last_input = k_uptime_get();
+		tcal_backup.packet = packet;
+		k_spin_unlock(&tcal_backup.lock, key);
+		printk("T-Cal import ready: paste ONE base64 line, then Enter; Ctrl-C cancels (60s idle timeout).\n");
+		return;
+	}
+	sensor_tcal_lock();
+	memcpy(packet->points, retained->tempCalPoints, sizeof(packet->points));
+	packet->gyro_temp = retained->gyroTemp;
+	sensor_tcal_unlock();
+	sensor_calibration_maintenance_end();
+	packet->magic = TCAL_BACKUP_MAGIC;
+	packet->min = CONFIG_SENSOR_POLY_TEMP_MIN;
+	packet->max = CONFIG_SENSOR_POLY_TEMP_MAX;
+	packet->steps = CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
+	uint8_t *data = (uint8_t *)packet;
+	for (size_t i = 0; i < sizeof(*packet) - 4; i += 4) {
+		uint32_t word;
+		memcpy(&word, data + i, 4);
+		sys_put_le32(word, data + i);
+	}
+	sys_put_le32(crc32_ieee(data, sizeof(*packet) - 4), data + sizeof(*packet) - 4);
+	/* Expand backwards in the same allocation: unread binary bytes precede
+	 * their encoded output. One deferred printk keeps other logs outside it. */
+	for (size_t group = (sizeof(*packet) + 2) / 3; group-- > 0;) {
+		size_t offset = group * 3;
+		uint32_t word = (uint32_t)data[offset] << 16;
+		if (offset + 1 < sizeof(*packet)) {
+			word |= (uint32_t)data[offset + 1] << 8;
+		}
+		if (offset + 2 < sizeof(*packet)) {
+			word |= data[offset + 2];
+		}
+		data[group * 4] = tcal_backup_alphabet[word >> 18];
+		data[group * 4 + 1] = tcal_backup_alphabet[(word >> 12) & 63];
+		data[group * 4 + 2] = offset + 1 < sizeof(*packet) ? tcal_backup_alphabet[(word >> 6) & 63] : '=';
+		data[group * 4 + 3] = offset + 2 < sizeof(*packet) ? tcal_backup_alphabet[word & 63] : '=';
+	}
+	data[TCAL_BACKUP_TEXT_SIZE] = '\0';
+	printk("%s\n", (char *)data);
+	k_free(packet);
 }
 
 #endif /* CONFIG_SENSOR_USE_TCAL */

@@ -23,6 +23,9 @@
 #include "build_defines.h"
 #include "parse_args.h"
 #include "zephyr/sys/printk.h"
+#if CONFIG_SENSOR_USE_TCAL
+#include "sensor/calibration/tcal_runtime.h"
+#endif
 #if CONFIG_THREAD_ANALYZER
 #include <zephyr/debug/thread_analyzer.h>
 #endif
@@ -53,6 +56,9 @@
 	 DT_NODE_HAS_STATUS(DT_CHOSEN(zephyr_console), okay))
 
 #if (USB_EXISTS || UART_CONSOLE_EXISTS || CONFIG_RTT_CONSOLE) && CONFIG_USE_SLIMENRF_CONSOLE
+#if CONFIG_SENSOR_USE_TCAL
+static uint32_t console_command_input_generation;
+#endif
 
 #if USB_EXISTS || UART_CONSOLE_EXISTS
 #include <zephyr/drivers/uart.h>
@@ -104,6 +110,9 @@ BUILD_ASSERT(CONSOLE_LINE_MAX_LEN >= 2, "Console line buffer must hold an empty 
 struct console_line_message {
 	uint32_t epoch;
 	uint32_t session;
+#if CONFIG_SENSOR_USE_TCAL
+	uint32_t input_generation;
+#endif
 #if CONFIG_LED_DEBUG
 	uint32_t led_session;
 #endif
@@ -137,6 +146,10 @@ struct console_input_state {
 	uint16_t echo_tail;
 };
 K_MSGQ_DEFINE(console_line_msgq, sizeof(struct console_line_message), CONSOLE_LINE_QUEUE_DEPTH, 4);
+#if CONFIG_SENSOR_USE_TCAL
+/* Separate from the bounded command queue: completion/close cannot be lost. */
+K_SEM_DEFINE(console_input_wake, 0, 1);
+#endif
 
 static struct console_input_state console_input;
 static bool console_echo_has_data_locked(void)
@@ -213,15 +226,24 @@ static void console_finish_line_locked(void)
 	if (!console_input.overflow) {
 		message.epoch = console_input.epoch;
 		message.session = console_input.session;
+#if CONFIG_SENSOR_USE_TCAL
+		message.input_generation = sensor_tcal_backup_input_generation();
+#endif
 #if CONFIG_LED_DEBUG
 		message.led_session = console_led_session;
 #endif
 		memcpy(message.line, console_input.line, length);
 		message.line[length] = '\0';
 		if (k_msgq_put(&console_line_msgq, &message, K_NO_WAIT) != 0) {
+#if CONFIG_SENSOR_USE_TCAL
+			sensor_tcal_backup_input_lost();
+#endif
 			console_echo_put_locked('\a');
 		}
 	}
+#if CONFIG_SENSOR_USE_TCAL
+	k_sem_give(&console_input_wake);
+#endif
 
 	console_echo_text_locked("\r\n");
 	console_reset_line_locked();
@@ -234,6 +256,9 @@ static void console_insert_char_locked(uint8_t byte)
 	if (length >= CONSOLE_LINE_MAX_LEN - 1U) {
 		if (!console_input.overflow) {
 			console_input.overflow = true;
+#if CONFIG_SENSOR_USE_TCAL
+			sensor_tcal_backup_input_lost();
+#endif
 			console_echo_put_locked('\a');
 		}
 		return;
@@ -418,6 +443,16 @@ static void console_input_byte_locked(uint8_t byte)
 		console_input.last_was_cr = false;
 		return;
 	}
+#if CONFIG_SENSOR_USE_TCAL
+	int capture = sensor_tcal_backup_input_byte(byte);
+	if (capture != 0) {
+		console_input.last_was_cr = byte == '\r';
+		if (capture == 2) {
+			k_sem_give(&console_input_wake);
+		}
+		return;
+	}
+#endif
 
 	if (byte == '\r' || byte == '\n') {
 		console_finish_line_locked();
@@ -688,6 +723,9 @@ static void console_serial_end(bool invalidate)
 	k_spinlock_key_t key = k_spin_lock(&console_input.lock);
 	console_input.active = false;
 	console_input.session++;
+#if CONFIG_SENSOR_USE_TCAL
+	sensor_tcal_backup_input_lost();
+#endif
 	console_reset_armed = false;
 #if CONFIG_LED_DEBUG
 	led_debug_disconnect(console_led_session);
@@ -708,6 +746,9 @@ static void console_serial_end(bool invalidate)
 		console_drain_uart_locked();
 	}
 	k_spin_unlock(&console_input.lock, key);
+#if CONFIG_SENSOR_USE_TCAL
+	k_sem_give(&console_input_wake);
+#endif
 #else
 	(void)invalidate;
 #endif
@@ -1374,6 +1415,8 @@ static void print_help(void)
 #if CONFIG_SENSOR_USE_TCAL
 	// Update the help string to show the new command set
 	printk("  tcal <on|off|status|dump|test temp|remove index|auto on|auto off> Temperature calibration\n");
+	printk("  tcal export                         One-line lossless temperature backup\n");
+	printk("  tcal import                         Wait for ready, paste backup; Ctrl-C cancels\n");
 #if CONFIG_SENSOR_TCAL_HEATED
 	printk("  tcal heat <start [temp]|stop|status> Closed-loop heated calibration\n");
 #endif
@@ -1804,6 +1847,10 @@ static void console_cmd_tcal_heat(size_t argc, char **argv)
 
 static void console_cmd_tcal(size_t argc, char **argv)
 {
+	if (argc > 1 && (strcmp(argv[1], "export") == 0 || strcmp(argv[1], "import") == 0)) {
+		sensor_tcal_backup_command(argc, argv, console_command_input_generation);
+		return;
+	}
 #if CONFIG_SENSOR_TCAL_HEATED
 	if (argc > 1 && strcmp(argv[1], "heat") == 0) {
 		console_cmd_tcal_heat(argc, argv);
@@ -2633,7 +2680,7 @@ static bool console_command_mutates(const struct console_cmd *command, size_t ar
 	const char *subcommand = argc > 1 ? argv[1] : NULL;
 	if (strcmp(command->name, "tcal") == 0) {
 		return subcommand == NULL || !(strcmp(subcommand, "status") == 0 || strcmp(subcommand, "dump") == 0 ||
-			strcmp(subcommand, "check") == 0 || strcmp(subcommand, "test") == 0 ||
+			strcmp(subcommand, "export") == 0 || strcmp(subcommand, "check") == 0 || strcmp(subcommand, "test") == 0 ||
 			(strcmp(subcommand, "boot") == 0 && argc == 2) ||
 			(strcmp(subcommand, "heat") == 0 && argc > 2 && strcmp(argv[2], "status") == 0));
 	}
@@ -2666,18 +2713,47 @@ static void console_thread(void)
 #endif
 
 	while (1) {
+#if CONFIG_SENSOR_USE_TCAL
+		sensor_tcal_backup_process();
+#endif
 #if USB_EXISTS || UART_CONSOLE_EXISTS
 		struct console_line_message message;
+#if CONFIG_SENSOR_USE_TCAL
+		if (k_msgq_get(&console_line_msgq, &message, K_NO_WAIT) != 0) {
+			k_sem_take(&console_input_wake,
+				sensor_tcal_backup_active() ? K_MSEC(1000) : K_FOREVER);
+			continue;
+		}
+		if (!console_line_is_current(message.epoch)) {
+			continue;
+		}
+#else
 		if (k_msgq_get(&console_line_msgq, &message, K_FOREVER) != 0 || !console_line_is_current(message.epoch)) {
 			continue;
 		}
+#endif
 		char *line = message.line;
 		console_command_session = message.session;
+#if CONFIG_SENSOR_USE_TCAL
+		console_command_input_generation = message.input_generation;
+#endif
 #if CONFIG_LED_DEBUG
 		console_command_led_session = message.led_session;
 #endif
 #else
-		char *line = rtt_console_getline();
+		bool input_overflow;
+		char *line = rtt_console_getline(&input_overflow);
+		if (input_overflow) {
+#if CONFIG_SENSOR_USE_TCAL
+			sensor_tcal_backup_input_lost();
+#endif
+			console_reset_cancel();
+			printk("Input line too long; command discarded.\n");
+			continue;
+		}
+#if CONFIG_SENSOR_USE_TCAL
+		console_command_input_generation = sensor_tcal_backup_input_generation();
+#endif
 #if CONFIG_LED_DEBUG
 		console_command_led_session = console_led_session;
 #endif
@@ -2697,6 +2773,13 @@ static void console_thread(void)
 				strtolower(argv[i]);
 			}
 			const struct console_cmd *command = console_find_command(command_name);
+#if CONFIG_SENSOR_USE_TCAL
+			if (strcmp(command_name, "tcal") == 0 && argv[1] != NULL &&
+			    strcmp(argv[1], "import") == 0) {
+				sensor_tcal_backup_input_lost();
+				printk("T-Cal import aborted: too many arguments.\n");
+			}
+#endif
 			if (command != NULL) {
 				console_feedback_enabled = console_command_mutates(command, ARRAY_SIZE(argv), argv);
 				console_reject();

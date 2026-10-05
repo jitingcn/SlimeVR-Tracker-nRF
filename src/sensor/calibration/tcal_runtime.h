@@ -25,6 +25,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #if CONFIG_SENSOR_USE_TCAL
 
@@ -83,6 +84,15 @@ void sensor_tcal_heated_accum_feed(const float g[3], float temp);
 void sensor_tcal_heated_accum_finish(void);
 #endif
 void sensor_tcal_runtime_init_from_retained(void);
+/* Worker command/process own allocation and publication; argv includes "tcal". */
+void sensor_tcal_backup_command(size_t argc, char **argv, uint32_t input_generation);
+void sensor_tcal_backup_process(void);
+bool sensor_tcal_backup_active(void);
+/* IRQ-safe sink: 0 ordinary editor, 1 consumed, 2 consumed and worker wake. */
+int sensor_tcal_backup_input_byte(uint8_t byte);
+uint32_t sensor_tcal_backup_input_generation(void);
+/* IRQ-safe cancellation, retired/freed by the worker. */
+void sensor_tcal_backup_input_lost(void);
 /* Caller holds the T-Cal lock across point mutation and publication. */
 void sensor_tcal_refresh_model(void);
 uint32_t sensor_tcal_reference_generation(void);

@@ -161,29 +161,35 @@ void sensor_calibration_heated_release_locked(void)
 	}
 }
 
+#endif
+
 int sensor_calibration_maintenance_begin(void)
 {
-	sensor_tcal_heated_lock();
+	k_mutex_lock(&calibration_request_lock, K_FOREVER);
 	int err = 0;
-	if (requested_calibration != 0 || sensitivity_maintenance ||
-	    (magneto_progress & 0x80) || sensor_tcal_heated_resetting_locked()) {
+	if (requested_calibration != 0 || (magneto_progress & 0x80)
+#if CONFIG_SENSOR_TCAL_HEATED
+	    || sensitivity_maintenance || sensor_tcal_heated_resetting_locked()
+#endif
+	) {
 		err = -EBUSY;
 	} else {
 		requested_calibration = CAL_REQUEST_MAINTENANCE;
 	}
-	sensor_tcal_heated_unlock();
+	k_mutex_unlock(&calibration_request_lock);
 	return err;
 }
 
 void sensor_calibration_maintenance_end(void)
 {
-	sensor_tcal_heated_lock();
+	k_mutex_lock(&calibration_request_lock, K_FOREVER);
 	if (requested_calibration == CAL_REQUEST_MAINTENANCE) {
 		requested_calibration = 0;
 	}
-	sensor_tcal_heated_unlock();
+	k_mutex_unlock(&calibration_request_lock);
 }
 
+#if CONFIG_SENSOR_TCAL_HEATED
 int sensor_calibration_sensitivity_maintenance_begin(void)
 {
 	sensor_tcal_heated_lock();
@@ -676,13 +682,14 @@ int sensor_calibration_request(int id, enum cal_request_origin origin)
 	k_mutex_lock(&calibration_request_lock, K_FOREVER);
 	switch (id) {
 	case CAL_REQUEST_CLEAR:
+		if (requested_calibration == CAL_REQUEST_MAINTENANCE
 #if CONFIG_SENSOR_TCAL_HEATED
-		if (requested_calibration == CAL_REQUEST_TCAL_HEATED ||
-		    requested_calibration == CAL_REQUEST_MAINTENANCE) {
+		    || requested_calibration == CAL_REQUEST_TCAL_HEATED
+#endif
+		) {
 			result = -EBUSY;
 			break;
 		}
-#endif
 		sensor_calibration_samples_end();
 		requested_calibration = 0;
 		requested_operation = 0;
@@ -806,9 +813,9 @@ static void calibration_thread(void)
 #endif
 		int requested = sensor_calibration_request(CAL_REQUEST_QUERY, CAL_REQUEST_USER);
 		uint16_t operation = sensor_calibration_current_operation();
-		if (requested > CAL_REQUEST_QUERY
+		if (requested > CAL_REQUEST_QUERY && requested != CAL_REQUEST_MAINTENANCE
 #if CONFIG_SENSOR_TCAL_HEATED
-		    && requested != CAL_REQUEST_TCAL_HEATED && requested != CAL_REQUEST_MAINTENANCE
+		    && requested != CAL_REQUEST_TCAL_HEATED
 #endif
 		    && !sensor_calibration_generation_valid(sensor_calibration_current_generation())) {
 			sensor_calibration_result(sensor_calibration_current_feedback(), LED_CANCELLED);
@@ -820,9 +827,10 @@ static void calibration_thread(void)
 			tracker_events_notify();
 			continue;
 		}
-		if (requested > CAL_REQUEST_QUERY && requested != CAL_REQUEST_MAG
+		if (requested > CAL_REQUEST_QUERY && requested != CAL_REQUEST_MAG &&
+		    requested != CAL_REQUEST_MAINTENANCE
 #if CONFIG_SENSOR_TCAL_HEATED
-		    && requested != CAL_REQUEST_TCAL_HEATED && requested != CAL_REQUEST_MAINTENANCE
+		    && requested != CAL_REQUEST_TCAL_HEATED
 #endif
 		) {
 			cal_event_start(operation, CAL_PHASE_WAIT_STILL, 0);

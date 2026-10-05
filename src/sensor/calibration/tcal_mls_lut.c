@@ -309,7 +309,6 @@ static int sensor_tcal_mls_lookup_locked(float temp, float bias_out[3])
 	// This avoids large stack allocations while scanning all buffer entries
 	WeightedPoint points[MLS_MAX_POINTS];
 	int point_count = 0;
-	int total_valid = 0;  // total points passing weight filter
 
 	float bandwidth_sq = MLS_BANDWIDTH * MLS_BANDWIDTH;
 	float min_selected_weight = 0.0f;  // track minimum weight in selected set
@@ -332,7 +331,6 @@ static int sensor_tcal_mls_lookup_locked(float temp, float bias_out[3])
 			continue;
 		}
 
-		total_valid++;
 
 		if (point_count < MLS_MAX_POINTS) {
 			// Still filling the selection buffer
