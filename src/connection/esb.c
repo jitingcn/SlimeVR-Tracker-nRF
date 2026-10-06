@@ -2436,10 +2436,10 @@ bool esb_channel_search_poll(bool blocked)
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
 	}
-	int64_t now = k_uptime_get();
 	blocked |= esb_ota_is_active() || ota_rx_head != ota_rx_tail;
 	if (blocked) {
 		/* OTA owns this physical channel. Freeze, never flush its exchange. */
+		int64_t now = k_uptime_get();
 		search_deadline = now + 300;
 		search_probe_at = now + 80;
 		k_mutex_unlock(&esb_radio_lock);
@@ -2465,15 +2465,20 @@ bool esb_channel_search_poll(bool blocked)
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
 	}
+	/* PONG RX updates own_pong_time in IRQ context. Sample it with the
+	 * clock so a newer PONG cannot wrap the unsigned age into a false loss. */
+	unsigned age_key = irq_lock();
+	int64_t now = k_uptime_get();
+	uint32_t lost_ms = (uint32_t)((uint32_t)now - own_pong_time);
+	irq_unlock(age_key);
 	if (!channel_search && ping_failures < 3
-	    && (uint32_t)((uint32_t)now - own_pong_time) < 4500) {
+	    && lost_ms < 4500) {
 		ping_warning_at = 0;
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
 	}
 	/* Fast probes replace ping_send_time: retain legacy loss accounting
 	 * independently of their cadence, including configured shutdown. */
-	uint32_t lost_ms = (uint32_t)((uint32_t)now - own_pong_time);
 	uint32_t missed = lost_ms / get_ping_interval_ms();
 	if (missed > ping_failures) {
 		ping_failures = missed;

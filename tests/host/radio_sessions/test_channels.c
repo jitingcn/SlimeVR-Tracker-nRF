@@ -38,12 +38,21 @@ static uint8_t pair_target, pair_step;
 static void receive_pair(void);
 static bool inject_late_pong;
 static void late_pong(void);
-static unsigned irq_lock(void) { return 0; }
-static void irq_unlock(unsigned key) {
-    (void)key;
-    if (inject_late_pong) { inject_late_pong = false; late_pong(); }
+static unsigned irq_depth, deferred_pongs, delivered_pongs;
+static bool pong_after_clock_read, pong_irq_pending;
+static void dispatch_pong_irq(void);
+static unsigned irq_lock(void) {
+    unsigned key = irq_depth;
+    ++irq_depth;
+    return key;
 }
-static uint32_t get_ping_interval_ms(void) { return 1497; }
+static void irq_unlock(unsigned key) {
+    assert(irq_depth > key);
+    irq_depth = key;
+    if (irq_depth == 0) dispatch_pong_irq();
+}
+static uint32_t ping_interval_ms = 1497;
+static uint32_t get_ping_interval_ms(void) { return ping_interval_ms; }
 static int64_t registered_at = -1;
 static void k_mutex_lock(int *lock, int timeout) { (void)timeout; ++*lock; }
 static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
@@ -67,6 +76,7 @@ static uint32_t warning_failures[256];
 static unsigned warning_count;
 static bool trace_warnings;
 static void warning_log(const char *format, ...) {
+    assert(!irq_depth);
     if (!strstr(format, "total")) return;
     assert(warning_count < 256);
     va_list args; va_start(args, format);
@@ -76,21 +86,31 @@ static void warning_log(const char *format, ...) {
     warning_failures[warning_count++] = failures;
     if (trace_warnings) printf("ping-warning t=%lldms failures=%u\n", (long long)now, failures);
 }
-static unsigned probes, writes, changes, disables;
+static unsigned probes, writes, changes, disables, tdma_resets, tx_flushes, rx_flushes;
 static struct { uint8_t rf_channel, paired_addr[8]; } storage, *retained = &storage;
 static struct { uint8_t data[13], length; } rx_payload;
 #define RF_CHANNEL_ID 31
-static int64_t k_uptime_get(void) { return now; }
+static int64_t k_uptime_get(void) {
+    int64_t sampled = now;
+    if (pong_after_clock_read) {
+        pong_after_clock_read = false;
+        ++now; /* Hardware time advances after the owner's clock sample. */
+        pong_irq_pending = true;
+        if (irq_depth) ++deferred_pongs;
+        else dispatch_pong_irq();
+    }
+    return sampled;
+}
 static uint32_t k_uptime_get_32(void) { return (uint32_t)now; }
 static uint32_t k_cycle_get_32(void) { return (uint32_t)now; }
 static bool esb_ota_is_active(void) { return ota_active; }
-static bool esb_is_idle(void) { return idle; }
+static bool esb_is_idle(void) { assert(!irq_depth); return idle; }
 static void esb_clear_time_sync_state(void) { server_time_synced = false; }
-static void tdma_set_enabled(bool enabled) { (void)enabled; }
+static void tdma_set_enabled(bool enabled) { assert(!irq_depth); if (!enabled) ++tdma_resets; }
 static void drop_failed_tx_payload_if_pending(void) {}
-static void esb_flush_tx(void) { assert(idle); }
-static void esb_flush_rx(void) { assert(idle); }
-static int esb_set_rf_channel(uint8_t ch) { assert(idle && ch <= 100); ++changes; return 0; }
+static void esb_flush_tx(void) { assert(idle && !irq_depth); ++tx_flushes; }
+static void esb_flush_rx(void) { assert(idle && !irq_depth); ++rx_flushes; }
+static int esb_set_rf_channel(uint8_t ch) { assert(idle && !irq_depth && ch <= 100); ++changes; return 0; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
 static int esb_write_ping(uint8_t *ping, bool force) {
     assert(force && ping[0] == 0xf0 && ping[1] == tracker_id);
@@ -136,6 +156,7 @@ static int esb_start_tx(void) {
     return 0;
 }
 static int sys_write(unsigned id, void *dst, const void *src, size_t len) {
+    assert(!irq_depth);
     assert(id == RF_CHANNEL_ID || id == PAIRED_ID);
     memcpy(dst, src, len); if (id == RF_CHANNEL_ID) ++writes; return persistence_error;
 }
@@ -167,8 +188,30 @@ static void late_pong(void) {
     rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
     assert(!accept_pong());
 }
+static void dispatch_pong_irq(void) {
+    assert(!irq_depth);
+    if (pong_irq_pending) {
+        pong_irq_pending = false;
+        rx_payload.length = ESB_PONG_LEN; rx_payload.data[0] = ESB_PONG_TYPE;
+        rx_payload.data[1] = tracker_id; rx_payload.data[2] = ping_ctr_sent;
+        rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
+        assert(accept_pong());
+        ++delivered_pongs;
+    }
+    /* The existing late-probe test targets invalidation, not an earlier
+     * unrelated critical section such as the age snapshot. */
+    if (inject_late_pong && !ping_pending) {
+        inject_late_pong = false;
+        late_pong();
+    }
+}
 
 static void reset(uint8_t home) {
+    assert(!irq_depth);
+    pong_after_clock_read = pong_irq_pending = inject_late_pong = false;
+    deferred_pongs = delivered_pongs = 0;
+    tdma_resets = tx_flushes = rx_flushes = 0;
+    ping_interval_ms = 1497;
     ++radio_session_generation;
     esb_conn_state = ESB_ST_PAIRED; connection_error_start_time = 0;
     ping_pending = ping_failed = false; ping_send_time = 0;
@@ -300,6 +343,65 @@ static void warning_lifecycle(void) {
         assert(warning_count == before + 1);
     }
 }
+
+static void pong_age(void) {
+    const int64_t samples[] = {10800000, UINT32_MAX};
+    for (unsigned i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i) {
+        reset(2);
+        now = samples[i];
+        ping_interval_ms = 997;
+        ping_failures = 0;
+        status_state = SYS_STATUS_USB_CONNECTED;
+        own_pong_seen = server_time_synced = true;
+        own_pong_time = (uint32_t)(now - 997);
+        record_ping_admission(ping_counter);
+        pong_after_clock_read = true;
+        bool searching = esb_channel_search_poll(false);
+        printf("pong-age sample=%lld delivered=%u deferred=%u failures=%u "
+               "warnings=%u error=%d search=%d tdma-resets=%u flushes=%u\n",
+               (long long)samples[i], delivered_pongs, deferred_pongs, ping_failures,
+               warning_count, !!get_status(SYS_STATUS_CONNECTION_ERROR),
+               searching, tdma_resets, tx_flushes + rx_flushes);
+        fflush(stdout);
+        assert(delivered_pongs == 1 && !pong_irq_pending && !pong_after_clock_read);
+        assert(own_pong_time == (uint32_t)now);
+        assert(!searching && !channel_search && !channel_wait_normal);
+        assert(ping_failures == 0 && warning_count == 0);
+        assert(!get_status(SYS_STATUS_CONNECTION_ERROR) && connection_error_start_time == 0);
+        assert(esb_conn_state == ESB_ST_PAIRED && server_time_synced);
+        assert(!tdma_resets && !tx_flushes && !rx_flushes && !probes && !changes);
+        assert(deferred_pongs == 1);
+    }
+    /* Real loss still crosses the exact healthy boundary, including the
+     * uint32 uptime rollover; the outage clock uses the full uptime. */
+    const int64_t last_pongs[] = {100, (int64_t)UINT32_MAX - 1000};
+    for (unsigned i = 0; i < sizeof(last_pongs) / sizeof(last_pongs[0]); ++i) {
+        reset(2);
+        ping_failures = 0; status_state = SYS_STATUS_USB_CONNECTED;
+        own_pong_time = (uint32_t)last_pongs[i];
+        now = last_pongs[i] + 4499;
+        assert(!esb_channel_search_poll(false));
+        assert(!ping_failures && !warning_count && !tdma_resets && !tx_flushes && !rx_flushes);
+        ++now;
+        assert(esb_channel_search_poll(false));
+        assert(channel_search && ping_failures == 4500 / get_ping_interval_ms());
+        assert(warning_count == 1 && tdma_resets == 1);
+        assert(!get_status(SYS_STATUS_CONNECTION_ERROR) && !connection_error_start_time);
+        idle = false;
+        now = last_pongs[i] + (TX_ERROR_THRESHOLD - 1) * get_ping_interval_ms();
+        (void)esb_channel_search_poll(false);
+        assert(ping_failures == TX_ERROR_THRESHOLD - 1 && !connection_error_start_time);
+        now = last_pongs[i] + TX_ERROR_THRESHOLD * get_ping_interval_ms();
+        (void)esb_channel_search_poll(false);
+        assert(ping_failures == TX_ERROR_THRESHOLD);
+        assert(connection_error_start_time == now && get_status(SYS_STATUS_CONNECTION_ERROR));
+        int64_t outage_start = connection_error_start_time;
+        now += 10000;
+        (void)esb_channel_search_poll(false);
+        assert(connection_error_start_time == outage_start);
+    }
+    puts("channels: coherent PONG IRQ age, true outage boundary and uint32 wrap PASS");
+}
 static void visit(uint8_t target) {
     assert(esb_channel_search_poll(false));
     for (unsigned i = 0; radio_channel != target && i < 101; ++i) {
@@ -309,6 +411,8 @@ static void visit(uint8_t target) {
 }
 int main(void) {
     trace_warnings = getenv("RADIO_PING_TRACE") != NULL;
+    pong_age();
+    if (getenv("RADIO_PONG_AGE_ONLY")) return 0;
     cadence();
     warning_lifecycle();
     puts("channels: 120s production-path ping cadence, recovery and suppression PASS");
