@@ -3000,6 +3000,21 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	bool valid_q = v_finite(q, 4) && v_finite(&q_norm2, 1) && q_norm2 > 0.0f;
 	if (valid_q) q_normalize(q, q);
 
+	/* Magnetic heading convergence is not physical motion. Prefer the
+	 * backend's independent IMU attitude for rest and session activity.
+	 * Backends without it (EqF) retain their existing attitude policy. An
+	 * invalid available 6D estimate must not fall back to corrected output. */
+	float q6[4];
+	float *motion_q = q;
+	if (valid_q && sensor_fusion->get_quat6) {
+		sensor_fusion->get_quat6(q6);
+		float norm2 = q6[0]*q6[0] + q6[1]*q6[1] + q6[2]*q6[2] + q6[3]*q6[3];
+		if (v_finite(q6, 4) && v_finite(&norm2, 1) && norm2 > 0.0f) {
+			q_normalize(q6, q6);
+		}
+		motion_q = q6;
+	}
+
 	// Get linear acceleration
 	float lin_a[3] = {0};
 	if (valid_q && v_diff_mag(sensor_loop_avg_a, lin_a) != 0) {
@@ -3010,7 +3025,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	float angular_speed_dps, lin_accel;
 	bool resting;
 	bool observed = sensor_motion_observe(frame->sensor_epoch, frame->g_count, frame->a_count,
-		q, lin_a, now, &resting, &angular_speed_dps, &lin_accel);
+		motion_q, lin_a, now, &resting, &angular_speed_dps, &lin_accel);
 	/* Consume even an invalidated/suspended frame so stale detector work
 	 * cannot become a fresh observation after resume. */
 	bool fusion_rest = false;

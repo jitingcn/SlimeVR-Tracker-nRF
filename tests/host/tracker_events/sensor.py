@@ -17,11 +17,12 @@ ROOT = Path(os.environ.get('SOURCE_ROOT', HERE.parents[2]))
 spec = importlib.util.spec_from_file_location('event_leaves', HERE / 'run.py')
 leaves = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(leaves)
-source = (ROOT / 'src/sensor/sensor.c').read_text()
+source = Path(os.environ.get('SENSOR_SOURCE', ROOT / 'src/sensor/sensor.c')).read_text()
+power = (ROOT / 'src/system/power.c').read_text()
 
 
 def function(name, source=source):
-    return extract_block(source, r'^(?:static )?(?:void|int|bool|float|uint32_t) ' + re.escape(name) + r'\([^;]*?\)\s*\{')
+    return extract_block(source, r'^(?:static )?(?:void|int|int64_t|bool|float|uint32_t) ' + re.escape(name) + r'\([^;]*?\)\s*\{')
 
 
 loop = function('sensor_loop')
@@ -30,8 +31,8 @@ acquire = loop[begin:loop.index('if (sensor_startup_discard_until_ms', begin)]
 publish = function('sensor_loop_publish')
 begin = publish.index('// Get updated quaternion from fusion')
 publish_policy = publish[begin:publish.index('sensor_diagnostics_output(', begin)]
-begin = publish.index('#if CONFIG_SENSOR_USE_TCAL', publish.index('// Update orientation'))
-calibration_policy = publish[begin:publish.index('// Periodic retained save', begin)]
+begin = publish.index('// Update orientation')
+transmit_policy = publish[begin:publish.index('// Periodic retained save', begin)]
 rest = source[source.index('static struct sensor_rest_detector rest_detector;'):source.index('static int sensor_scan(void);')]
 dwell = source[source.index('#ifndef SENSOR_REST_ENTER_STABLE_MS'):source.index('#define SENSOR_ACTIVITY_STARTUP_GUARD_MS')]
 fixture = r'''
@@ -42,6 +43,35 @@ fixture = r'''
 #define CONFIG_SENSOR_USE_TCAL 1
 #define CONFIG_SENSOR_GYRO_OVERSAMPLING 1
 #define CONFIG_SENSOR_ACCEL_OVERSAMPLING 1
+#define CONFIG_USE_ACTIVE_TIMEOUT 1
+#define CONFIG_SLEEP_ON_ACTIVE_TIMEOUT 1
+#define CONFIG_USE_IMU_WAKE_UP 1
+#define CONFIG_ACTIVE_TIMEOUT_DELAY 600000
+#define CONFIG_ACTIVE_TIMEOUT_THRESHOLD 15000
+#define CONFIG_ACTIVE_TIMEOUT_REPEAT_WAKE_COUNT 3
+#define CONFIG_ACTIVE_TIMEOUT_REPEAT_WAKE_DELAY 15000
+#define CONFIG_ACTIVE_TIMEOUT_IDLE_WAKE_DELAY 15000
+#define CONFIG_SENSOR_LP_TIMEOUT 500
+#define CONFIG_DELAY_SLEEP_ON_STATUS 1
+#define IMU_INT_EXISTS 1
+#define K_FOREVER (-1)
+#define K_MUTEX_DEFINE(name) struct {bool held;} name
+#define k_mutex_lock(p,t) do {(void)(t);assert(!(p)->held);(p)->held=true;} while(0)
+#define k_mutex_unlock(p) do {assert((p)->held);(p)->held=false;} while(0)
+struct k_sem {unsigned count;};
+#define K_SEM_DEFINE(name,initial,limit) struct k_sem name={initial}
+static void k_sem_give(struct k_sem *p) {p->count++;}
+#include "system/power_request.h"
+#include "system/status.h"
+static int status_state;
+int get_status(enum sys_status mask) {return (status_state&mask)!=0;}
+static bool test_mode_get(void) {return false;}
+static bool esb_ota_is_active(void) {return false;}
+static bool connection_get_ota_suppressed(void) {return false;}
+static bool esb_ready(void) {return true;}
+#ifndef MAX
+#define MAX(a,b) ((a)>(b)?(a):(b))
+#endif
 #define SENSOR_ACTIVITY_STARTUP_GUARD_MS 5000
 #define CONFIG_ACTIVE_TIMEOUT_MEANINGFUL_MOTION_MS 3000
 #define WDT_CHANNEL_SENSOR 0
@@ -58,7 +88,20 @@ static int output_ready;
 static int sensor_thread_id, sensor_life_events;
 static unsigned suspended, resumed, idle_timeouts;
 static bool detector_pending, detector_rest=true;
-static float pose[4]={1},q[4],sensor_loop_avg_a[3]={0,0,1};
+static float pose[4]={1},pose6[4]={1},q[4],sensor_loop_avg_a[3]={0,0,1};
+static bool independent_heading, invalid_6d;
+static float last_q[4]={1},last_lin_a[3],transmitted_q[4];
+static int64_t last_sensor_send_time,last_suspend_attempt_time,sensor_data_time;
+static float sensor_window_fused_angle_rad;
+static unsigned sensor_window_publishes,transmissions;
+static int test_mode_min_send_interval_ms(void) {return 1000;}
+static void sensor_compute_device_and_reported_quat(float *src,float *device,float *reported) {
+    memcpy(device,src,4*sizeof(float));memcpy(reported,src,4*sizeof(float));
+}
+static void sensor_rotate_sensor_vector_to_device_frame(float *src,float *out) {(void)src;(void)out;}
+static void connection_update_sensor_data(float *pose,float *lin,int64_t time) {
+    (void)lin;(void)time;memcpy(transmitted_q,pose,sizeof(transmitted_q));transmissions++;
+}
 static bool local_rest,cal_rest;
 static unsigned auto_calibrations;
 static float temp=20;
@@ -76,14 +119,17 @@ static bool take_observation(bool *out) {
     return available;
 }
 static void get_quat(float *out) {memcpy(out,pose,sizeof(pose));}
+static void get_quat6(float *out) {
+    memcpy(out,pose6,sizeof(pose6));
+    if(invalid_6d) out[0]=NAN;
+}
 static void update_gyro(float *g,float dt) {(void)g;(void)dt;}
-static struct {bool (*take_rest_observation)(bool*); void (*get_quat)(float*); void (*update_gyro)(float*,float);}
-    backend={take_observation,get_quat,update_gyro};
+static struct {bool (*take_rest_observation)(bool*); void (*get_quat)(float*); void (*update_gyro)(float*,float); void (*get_quat6)(float*);}
+    backend={take_observation,get_quat,update_gyro,get_quat6};
 static const typeof(backend) *sensor_fusion=&backend;
 static int fusion_id=FUSION_VQF;
 static void sensor_diagnostics_on_cal_gyro(float *g) {(void)g;}
 static void sensor_calibration_set_consumer_ready(bool x) {(void)x;}
-static void sys_cancel_WOM(void) {}
 static void watchdog_pause(int x) {(void)x;}
 static void watchdog_resume(int x) {(void)x;}
 static void k_thread_suspend(int *x) {(void)x; suspended++;}
@@ -93,7 +139,7 @@ static int k_event_wait(int *event,int mask,bool reset,int timeout) {
     now_ms+=timeout; idle_timeouts++; return 0;
 }
 static int64_t k_uptime_ticks(void) {return now_ms;}
-static void sensor_update_sensor_state(bool resting) {local_rest=resting;}
+static void sensor_update_sensor_state(bool resting);
 static void sensor_runtime_calibration_check(bool resting) {cal_rest=resting;}
 static void sensor_tcal_continuous_motion_detected(void) {cal_rest=false;}
 static void sensor_tcal_boot_calibration_check(void) {}
@@ -112,8 +158,22 @@ static void sensor_loop_wait(int64_t time_begin) {
     frame_waits++;
 }
 '''
-fixture += dwell + rest + function('feed_calibrated_gyro') + function('sensor_update_session_motion')
-fixture += function('main_imu_suspend') + function('main_imu_resume')
+fixture += function('status_ready', (ROOT / 'src/system/status.c').read_text()) + '\n'
+for pattern in (r'^static struct power_request_mailbox power_requests;',
+                r'^static K_SEM_DEFINE\(power_wake_sem,.*?;',
+                r'^static K_MUTEX_DEFINE\(power_plan_lock\);',
+                r'^static (?:bool|int64_t) wom_[^;]+;',
+                r'^#define WOM_ELIGIBILITY_LEASE_MS .*$'):
+    fixture += '\n'.join(re.findall(pattern, power, re.MULTILINE)) + '\n'
+for name in ('sys_cancel_WOM_locked', 'sys_cancel_WOM', 'sys_wom_ready', 'sys_plan_WOM'):
+    fixture += function(name, power) + '\n'
+for name in ('sensor_sensor_mode', 'sensor_sensor_timeout'):
+    fixture += extract_block(source, rf'^enum {name} \{{', semicolon=True) + '\n'
+for name in ('sensor_mode', 'sensor_timeout', 'was_ota_suppressed'):
+    fixture += re.search(rf'^static [^\n]* {name}[^;]*;', source, re.MULTILINE).group() + '\n'
+fixture += function('sensor_get_active_timeout_delay') + '\n' + function('sensor_update_sensor_state') + '\n'
+fixture += dwell + '\n' + rest + '\n' + function('feed_calibrated_gyro') + '\n' + function('sensor_update_session_motion') + '\n'
+fixture += function('main_imu_suspend') + '\n' + function('main_imu_resume') + '\n'
 fixture += r'''
 static uint64_t sensor_window_acq_us, sensor_window_acq_max_us;
 #define k_ticks_to_us_near64(x) (x)
@@ -130,8 +190,9 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame) {
 }
 static void publish_observation(sensor_loop_frame_t *frame) {
     frame_publishes++;
+    local_rest=false;
 '''
-fixture += publish_policy + calibration_policy + '\n}\n'
+fixture += publish_policy + 'local_rest=resting;\n' + transmit_policy + '\n}\n'
 fixture += 'static void frame_once(void) { for(unsigned iteration=0;iteration<1;iteration++) { int64_t time_begin=now_ms; sensor_loop_frame_t frame={0};\n' + acquire
 fixture += r'''
     (void)acq_begin_ticks;
@@ -158,15 +219,23 @@ static void drain(unsigned duration) {
 }
 static void reset_motion(void) {
     sensor_motion_reset(); main_suspended=false;
+    sys_cancel_WOM();status_state=0;
+    sensor_mode=SENSOR_SENSOR_MODE_LOW_NOISE;sensor_timeout=SENSOR_SENSOR_TIMEOUT_IMU;
+    last_data_time=last_sensor_send_time=0;
+    independent_heading=invalid_6d=false;backend.get_quat6=get_quat6;
+    sensor_session_woke_from_wom=true;
     sensor_session_meaningful_motion=false;
     gyro_actual_time=.006f; accel_actual_time=.01f; sensor_update_time_ms=6;
     now_ms=0; pose[0]=1;pose[1]=pose[2]=pose[3]=0;
     sensor_loop_avg_a[0]=sensor_loop_avg_a[1]=0;sensor_loop_avg_a[2]=1;
+    memcpy(pose6,pose,sizeof(pose6));memcpy(last_q,pose,sizeof(last_q));
+    memset(last_lin_a,0,sizeof(last_lin_a));
     local_rest=cal_rest=false;
 }
 static void yaw(float degrees) {
     float half=degrees*(3.14159265358979323846f/360.0f);
     pose[0]=cosf(half);pose[1]=pose[2]=0;pose[3]=sinf(half);
+    if(!independent_heading) memcpy(pose6,pose,sizeof(pose6));
 }
 static bool sample(uint32_t at,int gyro,int accel,float degrees) {
     now_ms=at; yaw(degrees);
@@ -223,6 +292,7 @@ static void rest_motion_contracts(void) {
         now_ms+=6;sensor_motion_prepare(frame.sensor_epoch,now_ms);
         sensor_rest_detector_update_accel(&rest_detector,sensor_loop_avg_a,accel_actual_time);
         for(unsigned j=0;j<4;j++)pose[j]=-pose[j];
+        for(unsigned j=0;j<4;j++)pose6[j]=-pose6[j];
         publish_observation(&frame);assert(local_rest);
     }
     assert(!sensor_session_meaningful_motion);
@@ -285,6 +355,64 @@ static void angular_window_contracts(void) {
     assert(sensor_motion_observe(tracker_events_sensor_epoch(),1,1,pose,lin,now_ms,&rest,&rate,&linear));
     assert(!rest && rate<0);
 }
+static void magnetic_heading_sleep_contracts(void) {
+    /* Keep 6D stationary while magnetic correction moves 9D beyond the
+     * rest entry gate. Exercise the actual publisher and power planner. */
+    reset_motion();independent_heading=true;
+    sensor_session_woke_from_wom=false; /* full normal 10-minute policy */
+    status_state=SYS_STATUS_USB_CONNECTED|SYS_STATUS_SERIAL_ACTIVE;
+    assert(!status_ready());
+    pose6[0]=2; /* publisher normalizes non-unit finite IMU attitude */
+    unsigned before=transmissions;
+    for(unsigned t=0;t<=602000;t+=10) {
+        bool resting=sample(t,1,1,.75f*t/1000);
+        if(t>=1000) assert(resting && cal_rest);
+    }
+    assert(wom_planned && wom_announced && wom_force);
+    assert(power_requests.request==SYS_POWER_REQ_WOM_FORCE);
+    assert(sensor_timeout==SENSOR_SENSOR_TIMEOUT_ACTIVITY_ELAPSED);
+    assert(wom_deadline==last_data_time+600000 && now_ms>wom_deadline);
+    assert(transmissions>before+600);
+    assert(sensor_motion_quat_angle(transmitted_q,pose)<.01f);
+    assert(sensor_motion_quat_angle(transmitted_q,pose6)>1);
+    assert(fabsf(q[0]*q[0]+q[3]*q[3]-1)<.00001f);
+    assert(!sensor_session_meaningful_motion && sensor_session_activity_score.value_ms==0);
+
+    /* Heading correction must not promote an idle wake to real activity. */
+    reset_motion();independent_heading=true;
+    for(unsigned t=0;t<=17000;t+=10) sample(t,1,1,3.0f*t/1000);
+    assert(local_rest && wom_planned && wom_force);
+    assert(!sensor_session_meaningful_motion && sensor_session_activity_score.value_ms==0);
+
+    reset_motion();sensor_session_woke_from_wom=false;
+    for(unsigned t=0;t<=602000;t+=10) {
+        assert(!sample(t,1,1,.75f*t/1000));
+        assert(!wom_planned);
+    }
+    /* NULL is the EqF contract, not fabricated 6D: preserve legacy policy. */
+    reset_motion();backend.get_quat6=NULL;
+    for(unsigned t=0;t<=17000;t+=10) sample(t,1,1,0);
+    assert(local_rest && wom_planned);
+    reset_motion();backend.get_quat6=NULL;
+    for(unsigned t=0;t<=17000;t+=10) assert(!sample(t,1,1,.75f*t/1000));
+    assert(!wom_planned);
+
+    /* Invalid available 6D and stale channels cannot earn sleep even with
+     * valid corrected output continuing to transmit. */
+    for(unsigned fault=0;fault<5;fault++) {
+        reset_motion();independent_heading=true;sensor_session_woke_from_wom=false;
+        for(unsigned t=0;t<=602000;t+=10) {
+            if(t==2000) {
+                if(fault==0) invalid_6d=true;
+                if(fault==1) memset(pose6,0,sizeof(pose6));
+                if(fault==2) pose6[0]=INFINITY;
+            }
+            sample(t,!(t>=2000 && fault==3),!(t>=2000 && fault==4),.75f*t/1000);
+            if(t>=2100) assert(!local_rest && !cal_rest && !wom_planned);
+        }
+        assert(output_ready && !wom_planned);
+    }
+}
 static void pm_frame_failure_contracts(void) {
     unsigned waits=frame_waits, acquires=frame_acquires, publishes=frame_publishes;
     collection_failure=true;
@@ -317,13 +445,14 @@ int main(void) {
     backend.take_rest_observation=take_observation;
     rest_motion_contracts();freshness_contracts();angular_window_contracts();
     pm_frame_failure_contracts();
+    magnetic_heading_sleep_contracts();
     puts("PASS actual sensor rest/activity/freshness/local eligibility and epoch publication contracts");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='sensor-events-') as tmp:
     tmp = Path(tmp)
     (tmp / 'leaves.h').write_text(leaves.LEAVES)
-    for name in ('kernel.h', 'init.h', 'random/random.h', 'logging/log.h'):
+    for name in ('kernel.h', 'spinlock.h', 'init.h', 'random/random.h', 'logging/log.h'):
         header = tmp / 'zephyr' / name
         header.parent.mkdir(parents=True, exist_ok=True)
         header.write_text('#include "leaves.h"\n')
