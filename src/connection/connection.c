@@ -1625,6 +1625,10 @@ void connection_thread(void)
 	);
 
 	while (1) {
+		/* Recovery must progress even without transport or while PING/search
+		 * paths keep bypassing the OTA polling branch. It may sleep, so sample
+		 * scheduler time only after servicing it. */
+		esb_ota_service();
 		int64_t now = k_uptime_get();
 
 		watchdog_feed(WDT_CHANNEL_CONNECTION);
@@ -1763,7 +1767,6 @@ void connection_thread(void)
 			 * with OTA data in the ACK payload.
 			 */
 			if (esb_ota_is_active()) {
-				esb_ota_check_timeout();
 				esb_ota_periodic_status();
 				k_usleep(1500);
 				continue;

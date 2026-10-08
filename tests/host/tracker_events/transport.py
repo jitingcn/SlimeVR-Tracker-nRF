@@ -97,7 +97,6 @@ static void esb_get_ping_request_data(uint8_t p[4]) { memset(p,0,4); }
 static int esb_write_ping(uint8_t *p,bool force) { (void)force; assert(p[0]==ESB_PING_TYPE); ping_calls++; return 0; }
 static void ping_stats_attempt(uint32_t n) { (void)n; }
 static uint32_t ping_next_periodic_deadline(uint32_t p,uint32_t n,uint32_t i) { (void)p;return n+i; }
-static void esb_ota_check_timeout(void) {}
 static void esb_ota_periodic_status(void) {}
 static void connection_set_ota_suppressed(bool x) { ota_suppressed=x; }
 static bool connection_raw_collection_active(void) { return raw; }

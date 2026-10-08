@@ -10,7 +10,10 @@
 #define __aligned(n) __attribute__((aligned(n)))
 typedef int atomic_t;
 static int atomic_get(const atomic_t *value) { return *value; }
-static void atomic_set(atomic_t *value, int next) { *value = next; }
+static int atomic_set(atomic_t *value, int next) { int old = *value; *value = next; return old; }
+#define atomic_clear(value) atomic_set(value, 0)
+static bool atomic_cas(atomic_t *value, int expected, int desired)
+{ if (*value != expected) return false; *value = desired; return true; }
 static void k_msleep(unsigned milliseconds) { host_now_ms += milliseconds; }
 static int sys_ota_reboot_reserve(void) { return 0; }
 static void sys_ota_reboot_resolve(bool commit) { (void)commit; }
@@ -24,11 +27,13 @@ static void accepted_update(void)
     host_reset(LED_CAP_RGB_PWM);
     memset(&ota, 0, sizeof(ota));
     atomic_set(&ota_reboot_pending, 0);
+    atomic_set(&ota_abort_requested, 0);
     ota_feedback = host_begin(LED_OWNER_RADIO, LED_OTA_ACTIVE);
     ota_feedback_revision = 1;
     ota_feedback_terminal = false;
     ota_feedback_state = LED_OTA_ACTIVE;
     ota.state = OTA_STATE_RECEIVING;
+    ota.session_started = true;
     ota_update_led();
     host_step(0);
     assert(engine.winner.semantic == LED_OTA_ACTIVE);
@@ -59,7 +64,8 @@ int main(void)
 
     accepted_update(); reject_new_begin();
     host_step(300);
-    esb_ota_handle_abort();
+    esb_ota_request_abort();
+    esb_ota_service();
     assert(ota_feedback_terminal && engine.owners[LED_OWNER_RADIO].terminal == LED_CANCELLED);
     /* A delayed worker cannot start cancellation unless the complete short
      * receipt still fits its TTL, even though the business session ended. */
@@ -73,7 +79,8 @@ int main(void)
     /* Expire the visible higher-priority refusal, not its newer request
      * identity: the old cancellation must still be session-valid afterward. */
     host_step(7000);
-    esb_ota_handle_abort();
+    esb_ota_request_abort();
+    esb_ota_service();
     assert(ota_feedback_terminal && engine.owners[LED_OWNER_RADIO].terminal == LED_CANCELLED);
     assert(ota.state == OTA_STATE_IDLE && atomic_get(&ota_reboot_pending));
     assert(esb_ota_is_active() && engine.owners[LED_OWNER_RADIO].ota_active);

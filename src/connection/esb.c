@@ -621,7 +621,7 @@ static void esb_remote_cmd_ota_query_info(void)
 static void esb_remote_cmd_ota_abort(void)
 {
 	LOG_WRN("Executing remote command: OTA_ABORT");
-	esb_ota_handle_abort();
+	esb_ota_request_abort();
 }
 
 static void esb_remote_cmd_ota_suppress(void)

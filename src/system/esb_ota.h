@@ -263,11 +263,11 @@ int esb_ota_handle_verify(void);
 /** Handle activate request; returns 0 on success */
 int esb_ota_handle_activate(void);
 
-/** Handle abort request and reboot through the active recovery path. */
-void esb_ota_handle_abort(void);
+/** Request cancellation; connection-owner service performs recovery reboot. */
+void esb_ota_request_abort(void);
 
-/** Check for OTA timeout; call periodically from connection thread */
-void esb_ota_check_timeout(void);
+/** Service failed-session recovery and receive timeout from connection thread. */
+void esb_ota_service(void);
 
 /** Send periodic OTA status packets; call from connection thread */
 void esb_ota_periodic_status(void);

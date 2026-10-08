@@ -43,12 +43,13 @@ production = system[start:end]
 production += "\n" + function(calibration, "sensor_calibration_result")
 production += "\n" + function(heated, "heat_feedback_finish_locked")
 production += "\n" + function(heated, "sensor_tcal_feedback_persisted")
-ota_production = "\n".join(re.findall(r"^#define OTA_(?:STATUS_[A-Z_]+|BEGIN_PACKET_SIZE|BOARD_TARGET_MAX) +.*$", ota_header, re.MULTILINE))
+ota_production = "\n".join(re.findall(r"^#define OTA_(?:STATUS_[A-Z_]+|BEGIN_PACKET_SIZE|BOARD_TARGET_MAX|TIMEOUT_MS) +.*$", ota_header, re.MULTILINE))
 ota_production += "\n" + re.search(r"^#define OTA_FLASH_PAGE_SIZE +.*$", ota_flash_header, re.MULTILINE).group()
 ota_production += "\n" + declaration(ota, "ota_state") + "\n" + declaration(ota, "ota_context")
-ota_production += "\nstatic struct ota_context ota;\nstatic atomic_t ota_reboot_pending;\n"
+ota_production += "\nstatic struct ota_context ota;\nstatic atomic_t ota_reboot_pending;\nstatic atomic_t ota_abort_requested;\n"
 ota_production += "\n".join(re.findall(r"^static (?:struct led_token ota_feedback|uint32_t ota_feedback_revision|bool ota_feedback_terminal|enum led_semantic ota_feedback_state);", ota, re.MULTILINE))
-for name in ("esb_ota_is_active", "ota_update_led", "ota_activate_impl", "esb_ota_handle_activate", "esb_ota_handle_abort"):
+for name in ("esb_ota_is_active", "ota_update_led", "ota_activate_impl", "esb_ota_handle_activate",
+             "esb_ota_request_abort", "ota_abort", "esb_ota_service"):
     ota_production += "\n" + function(ota, name)
 begin = function(ota, "ota_begin_impl")
 ota_production += "\n" + begin[:begin.index("\t/* Validate CRC-8 */")] + "\treturn 0;\n}"

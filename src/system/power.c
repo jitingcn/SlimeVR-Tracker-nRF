@@ -509,7 +509,11 @@ int sys_ota_reboot_reserve(void)
 
 void sys_ota_reboot_resolve(bool prepared)
 {
+	/* BEGIN publishes its session guard under a temporary reservation. Do not
+	 * release it between another owner's stale guard read and physical gate. */
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
 	power_request_ota_resolve(&power_requests, prepared, &power_wake_sem);
+	k_mutex_unlock(&power_plan_lock);
 }
 
 /* Returns true when the power request is consumed; false to keep it queued. */

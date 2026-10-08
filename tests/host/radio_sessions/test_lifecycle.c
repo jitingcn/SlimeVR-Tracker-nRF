@@ -10,7 +10,7 @@
 #define PING_INTERVAL_MS 1000
 #define PING_QUEUE_RETRY_MS 5
 #define OTA_SUPPRESS_TIMEOUT_MS 60000
-#define ESB_PING_LEN 12
+#define ESB_PING_LEN 13
 #define ESB_PING_TYPE 0
 #define ESB_PONG_FLAG_TEST_MODE_ON 1
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 2
@@ -25,7 +25,7 @@
 #define SUB_PACKET_INFO 6
 static jmp_buf iteration_done;
 static unsigned iterations, test_stops, search_calls, ping_calls, ota_calls;
-static bool disconnected, searching, radio_available, ota_active, test_enabled;
+static bool disconnected, searching, radio_available, hid_available, ota_active, test_enabled;
 static bool force_ping;
 static int ping_result;
 static int64_t dc_conn_error_start, ota_suppress_start_time;
@@ -50,7 +50,7 @@ static void sys_reboot(int reason) { assert(!"unexpected watchdog reboot"); }
 static void watchdog_feed(int channel) { if (iterations++) longjmp(iteration_done, 1); }
 static uint32_t ping_phase_ms(uint32_t interval) { return 0; }
 static bool esb_ready(void) { return radio_available; }
-static bool connection_hid_output_ready(void) { return false; }
+static bool connection_hid_output_ready(void) { return hid_available; }
 static bool sensor_output_ready(void) { return true; }
 static void esb_led_connection_facts(struct led_connection_facts *facts)
 {
@@ -71,7 +71,11 @@ static int esb_write_ping(uint8_t *data, bool force) { ping_calls++; return ping
 static void ping_stats_attempt(uint32_t now) {}
 static uint32_t ping_next_periodic_deadline(uint32_t deadline, uint32_t now, uint32_t interval) { return now + interval; }
 static bool esb_ota_is_active(void) { return ota_active; }
-static void esb_ota_check_timeout(void) { ota_calls++; }
+static void esb_ota_service(void)
+{
+    if (iterations) longjmp(iteration_done, 1);
+    ota_calls++;
+}
 static void esb_ota_periodic_status(void) {}
 void connection_set_ota_suppressed(bool enabled) { ota_suppressed = enabled; }
 static void test_mode_set(bool enabled) { test_enabled = enabled; if (!enabled) test_stops++; }
@@ -107,7 +111,7 @@ static void reset(bool batch)
     else connection_set_data_collection(true);
     dc_conn_error_start = 0;
     disconnected = searching = radio_available = test_enabled = true;
-    ota_active = ota_suppressed = force_ping = false;
+    ota_active = ota_suppressed = force_ping = hid_available = false;
     ping_result = 0;
     test_stops = search_calls = ping_calls = ota_calls = 0;
 }
@@ -145,10 +149,11 @@ int main(void)
         tick(120102); stopped();
 
         /* The same deadline applies to other early-continue paths. */
-        for (unsigned path = 0; path < 5; path++) {
+        for (unsigned path = 0; path < 7; path++) {
             reset(batch);
-            searching = false;
-            radio_available = path != 0;
+            searching = path == 6;
+            radio_available = path != 0 && path != 5;
+            hid_available = path == 5;
             force_ping = path == 1 || path == 2;
             ping_result = path == 2 ? -EAGAIN : 0;
             ota_active = path == 3;
@@ -157,7 +162,7 @@ int main(void)
             tick(60100); active(batch);
             tick(60101); stopped();
             if (force_ping) assert(ping_calls == 3);
-            if (ota_active) assert(ota_calls == 3);
+            assert(ota_calls == 3);
         }
     }
     /* An unrelated explicit test session must survive disconnection when

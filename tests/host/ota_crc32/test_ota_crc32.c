@@ -88,6 +88,7 @@ static void fixture(uint32_t size, uint32_t expected)
 	memset(flash_image, 0xFF, sizeof(flash_image));
 	ota_reboot_pending = 0;
 	ota.state = OTA_STATE_RECEIVING;
+	ota.session_started = true;
 	ota.image_size = ota.bytes_written = size;
 	ota.image_crc32 = expected;
 	ota.staging_base = flash_base;

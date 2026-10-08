@@ -27,9 +27,11 @@ ota_header = (SRC / "system/esb_ota.h").read_text()
 tcal = (SRC / "sensor/calibration/tcal_runtime.c").read_text()
 radio = (SRC / "connection/esb.c").read_text()
 constants = "\n".join(re.findall(r"^#define OTA_.*$", ota_header, re.MULTILINE))
+radio_header = (SRC / "connection/esb.h").read_text()
+constants += "\n" + "\n".join(re.findall(r"^#define ESB_OTA_.*$", radio_header, re.MULTILINE))
 parts = [constants, block(ota, r"^enum ota_state \{", True),
          block(ota, r"^struct ota_context \{", True), "static struct ota_context ota;"]
-parts.append(re.search(r"^static atomic_t ota_reboot_pending;", ota, re.MULTILINE).group())
+parts.extend(re.findall(r"^static atomic_t ota_(?:reboot_pending|abort_requested);", ota, re.MULTILINE))
 parts.extend(re.findall(r"^static (?:struct led_token ota_feedback|uint32_t ota_feedback_revision|bool ota_feedback_terminal|enum led_semantic ota_feedback_state);", ota, re.MULTILINE))
 calibration_header = (SRC / "sensor/calibration/calibration.h").read_text()
 parts.append(block(calibration_header, r"^static inline int sensor_operation_result\([^;{]*\)\s*\{", False))
@@ -60,24 +62,29 @@ for name in ("sensor_mode", "sensor_timeout", "was_ota_suppressed"):
     parts.append(re.search(rf"^static [^\n]* {name}[^;]*;", sensor, re.MULTILINE).group())
 for name in ("sensor_get_active_timeout_delay", "sensor_update_sensor_state"):
     parts.append(function(sensor, name))
-for name in ("esb_ota_is_active", "esb_ota_get_status", "ota_update_led", "esb_ota_handle_verify",
-             "ota_activate_impl", "esb_ota_handle_activate", "esb_ota_handle_abort", "esb_ota_check_timeout"):
+parts.append(block(ota_header, r"^static inline uint8_t esb_ota_crc8\([^;{]*\)\s*\{"))
+flash_header = (SRC / "system/esb_ota_flash.h").read_text()
+parts.append(block(flash_header, r"^struct esb_ota_page_buf \{", True))
+parts.append("static int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb);")
+parts.append(block(ota, r"^static struct esb_ota_page_buf ota_page_buf_view\(void\)\n\{"))
+for name in ("esb_ota_is_active", "esb_ota_get_status", "ota_update_led", "esb_ota_handle_data",
+             "esb_ota_handle_verify", "ota_activate_impl", "esb_ota_handle_activate",
+             "esb_ota_request_abort", "ota_abort", "esb_ota_service",
+             "ota_begin_impl", "esb_ota_handle_begin", "esb_ota_process_rx_packet"):
     parts.append(function(ota, name))
-# BEGIN's admission prefix is sufficient here: the abort-gap call must reject
-# before reaching packet validation or flash work. A return of 0 below exposes
-# accidental admission without introducing mock copies of the admission rules.
-begin = function(ota, "ota_begin_impl")
-parts.append(begin[:begin.index("\t/* Validate CRC-8 */")] + "\treturn 0;\n}")
-parts.append(function(ota, "esb_ota_handle_begin"))
-# Exercise the common lifecycle gate and both real handoff tails. Staging
-# address/flash preparation is outside this lifecycle contract.
-start = begin.index("\t/* Suspend sensor thread and hardware")
-branch = begin.index("#if OTA_USE_RAM_ENGINE", start)
-ram_end = begin.index("#else /* !OTA_USE_RAM_ENGINE */", branch)
-ready = begin.index("\t/* VTOR relocation not needed", ram_end)
-end = begin.index("#endif /* OTA_USE_RAM_ENGINE */", ready)
-parts.append("static int ota_suspend_and_ready(uint32_t image_size, uint16_t total_packets) {\n" +
-             begin[start:ram_end] + "\n#else\n" + begin[ready:end] + "\n#endif\n}")
+ram_engine = (SRC / "system/ota_ram_engine.inc").read_text()
+parts.append("#if OTA_USE_RAM_ENGINE\n" +
+             block(ram_engine, r"^struct ota_ram_engine_params \{", True) +
+             "\nstatic void ota_ram_engine(const struct ota_ram_engine_params *params);\n" +
+             function(ota, "ota_launch_ram_engine") + "\n#endif")
+# One bounded iteration through the actual no-transport early-continue path.
+# Transport-ready paths are exercised by radio_sessions' full connection loop.
+connection = (SRC / "connection/connection.c").read_text()
+thread = function(connection, "connection_thread")
+loop = thread[thread.index("\twhile (1) {"):thread.index("\t\tesb_process_ota_rx_queue();")]
+parts.append("static void connection_no_transport_iteration(void) {\n" +
+             loop.replace("while (1)", "for (int step = 0; step < 1; step++)", 1) +
+             "\nassert(!\"no-transport fixture unexpectedly admitted transport\");\n}\n}")
 # Exercise the actual power-loop dispatch, including its completion semantics.
 start = power.index("\t\tuint32_t generation = 0;")
 end = power.index("power_request_finish(&power_requests, requested, generation, consumed);", start)
@@ -105,6 +112,9 @@ with tempfile.TemporaryDirectory(prefix="tracker-ota-power-") as directory:
 typedef atomic_int atomic_t;
 #define atomic_get(value) atomic_load(value)
 #define atomic_set(value, new_value) atomic_exchange(value, new_value)
+static inline bool atomic_cas(atomic_t *value, int expected, int desired) {
+    return atomic_compare_exchange_strong(value, &expected, desired);
+}
 """)
     (temporary / "production.inc").write_text("\n\n".join(parts))
     (temporary / "zephyr/kernel.h").write_text("""
@@ -162,9 +172,14 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
             continue
         binary = temporary / f"ota-power-{mcuboot}-{imu_int}-{low_power_2}-{active_delay}-{heated}-{forced_ram}-{tcal_enabled}"
         command = shlex.split(os.environ.get("CC", "cc")) + [
-            "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-g", "-O1",
-            "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-            f"-DOTA_USE_MCUBOOT={mcuboot}", f"-DCONFIG_BOOTLOADER_MCUBOOT={mcuboot}",
+            "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+            "-Wno-pointer-to-int-cast", "-g", "-O1",
+            *(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
+              if os.environ.get("HOST_SANITIZERS", "1") != "0" else []),
+            "-fno-pie", "-no-pie",
+            "-Wl,--defsym,_flash_used=0x40000",
+            f"-DOTA_USE_MCUBOOT={mcuboot}",
+            *([ "-DCONFIG_BOOTLOADER_MCUBOOT=1" ] if mcuboot else []),
             f"-DIMU_INT_EXISTS={imu_int}",
             f"-DCONFIG_SENSOR_USE_LOW_POWER_2={low_power_2}",
             f"-DCONFIG_ACTIVE_TIMEOUT_DELAY={active_delay}",
