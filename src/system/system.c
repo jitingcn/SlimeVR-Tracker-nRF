@@ -14,6 +14,8 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/fatal.h>
+#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/kvss/nvs.h>
@@ -38,19 +40,61 @@ static K_MUTEX_DEFINE(sys_storage_lock);
 
 LOG_MODULE_REGISTER(system, LOG_LEVEL_INF);
 
+/* Architecture hook used by the NCS fatal handler as well. */
+extern void sys_arch_reboot(int type);
+
+void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
+{
+	ARG_UNUSED(reason);
+	ARG_UNUSED(esf);
+#if ADAFRUIT_FAULT_RECOVERY
+	NRF_POWER->GPREGRET = sys_bootloader_supports_recovery() ?
+		ADAFRUIT_FATAL_RECOVERY : ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	__DSB();
+#else
+	LOG_PANIC();
+#endif
+	sys_arch_reboot(0);
+	CODE_UNREACHABLE;
+}
+
 /* Sole owner of RESETREAS: preserve every cause before clearing the W1C
  * register. All APPLICATION init and main consumers use this boot snapshot,
  * independently of whether task watchdog support is enabled. */
 static uint32_t boot_reset_reason;
+#if ADAFRUIT_FAULT_RECOVERY
+static bool bootloader_supports_recovery;
+#endif
+
+bool sys_bootloader_supports_recovery(void)
+{
+#if ADAFRUIT_FAULT_RECOVERY
+	return bootloader_supports_recovery;
+#else
+	return false;
+#endif
+}
 
 static int sys_reset_reason_init(void)
 {
+#if ADAFRUIT_FAULT_RECOVERY
+	/* Consume the handoff before ESB reuses TIMER2; CC[0] is version data. */
+	bootloader_supports_recovery = NRF_TIMER2->CC[1] == ADAFRUIT_RECOVERY_CAPABILITY;
+	NRF_TIMER2->CC[1] = 0;
+#endif
 #ifdef NRF_RESET
 	boot_reset_reason = NRF_RESET->RESETREAS;
 	NRF_RESET->RESETREAS = boot_reset_reason;
 #else
 	boot_reset_reason = NRF_POWER->RESETREAS;
 	NRF_POWER->RESETREAS = boot_reset_reason;
+#if ADAFRUIT_FAULT_RECOVERY
+	uint32_t recovery = NRF_POWER->GPREGRET;
+	if (sys_bootloader_supports_recovery() &&
+	    (recovery == ADAFRUIT_WDT_RETRY_1 || recovery == ADAFRUIT_WDT_RETRY_2)) {
+		boot_reset_reason |= POWER_RESETREAS_DOG_Msk;
+	}
+#endif
 #endif
 	return 0;
 }

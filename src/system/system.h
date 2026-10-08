@@ -43,6 +43,8 @@ void configure_sense_pins(void);
 
 /* Complete RESETREAS snapshot captured once at PRE_KERNEL_1, before W1C. */
 uint32_t sys_get_reset_reason(void);
+/* One-shot bootloader handoff capability; false before PRE_KERNEL_1 capture. */
+bool sys_bootloader_supports_recovery(void);
 
 uint8_t reboot_counter_read(void);
 void reboot_counter_write(uint8_t reboot_counter);

@@ -93,25 +93,6 @@ void watchdog_pause(wdt_channel_id_t channel);
  */
 void watchdog_resume(wdt_channel_id_t channel);
 
-/**
- * @brief Get the current watchdog reset count
- *
- * @return Number of consecutive WDT resets
- */
-uint8_t watchdog_get_reset_count(void);
-
-/**
- * @brief Clear the watchdog reset count
- */
-void watchdog_clear_reset_count(void);
-
-/**
- * @brief Mark system boot as successful
- *
- * Call this after all critical systems have initialized successfully.
- * This clears the reset count to prevent entering DFU mode.
- */
-void watchdog_mark_boot_success(void);
 
 /**
  * @brief Get OTA RAM engine GPREGRET value saved at boot
@@ -152,9 +133,6 @@ static inline int watchdog_register_thread(wdt_channel_id_t channel, uint32_t ti
 static inline void watchdog_feed(wdt_channel_id_t channel) { (void)channel; }
 static inline void watchdog_pause(wdt_channel_id_t channel) { (void)channel; }
 static inline void watchdog_resume(wdt_channel_id_t channel) { (void)channel; }
-static inline uint8_t watchdog_get_reset_count(void) { return 0; }
-static inline void watchdog_clear_reset_count(void) {}
-static inline void watchdog_mark_boot_success(void) {}
 static inline uint8_t watchdog_get_ota_gpregret(void) { return 0; }
 static inline void watchdog_suspend_all(void) {}
 static inline void watchdog_resume_all(void) {}
@@ -164,5 +142,32 @@ static inline const char *watchdog_get_channel_name(wdt_channel_id_t channel)
 	return "disabled";
 }
 #endif /* CONFIG_TASK_WDT */
+#if defined(CONFIG_TASK_WDT) || \
+	(CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT && CONFIG_SOC_SERIES_NRF52)
+/**
+ * @brief Get the current watchdog reset count
+ *
+ * @return Bootloader retry count when advertised, otherwise the legacy
+ * retained consecutive count (zero when the task watchdog is disabled).
+ */
+uint8_t watchdog_get_reset_count(void);
+
+/**
+ * @brief Clear the watchdog reset count
+ */
+void watchdog_clear_reset_count(void);
+
+/**
+ * @brief Mark system boot as successful
+ *
+ * Called after 60 seconds of RF-independent healthy uptime. A capable loader
+ * owns retry markers; legacy task-watchdog builds clear their retained streak.
+ */
+void watchdog_mark_boot_success(void);
+#else
+static inline uint8_t watchdog_get_reset_count(void) { return 0; }
+static inline void watchdog_clear_reset_count(void) {}
+static inline void watchdog_mark_boot_success(void) {}
+#endif
 
 #endif /* _WATCHDOG_H_ */

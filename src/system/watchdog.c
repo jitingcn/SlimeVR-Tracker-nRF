@@ -7,12 +7,13 @@
 #include <zephyr/kernel.h>
 #include "watchdog.h"
 #include "system/system.h"
+#include "globals.h"
 
 #include <hal/nrf_power.h>
 /* Only compile when Task WDT is enabled */
 #if defined(CONFIG_TASK_WDT)
 
-#include "globals.h"
+static bool boot_success_marked;
 #include <zephyr/task_wdt/task_wdt.h>
 #include <zephyr/drivers/watchdog.h>
 #include <zephyr/device.h>
@@ -46,7 +47,6 @@ static uint32_t channel_timeouts[WDT_CHANNEL_COUNT];
 
 /* Watchdog state */
 static bool watchdog_initialized = false;
-static bool boot_success_marked = false;
 static uint8_t saved_gpregret = 0;  /* Saved at PRE_KERNEL for OTA debug */
 
 /* Channel names for logging */
@@ -231,11 +231,13 @@ int watchdog_init(void)
 		bool state_valid = (retained->watchdog_state.magic == WATCHDOG_STATE_MAGIC);
 
 		if (state_valid) {
-			/* Increment reset counter */
-			retained->watchdog_state.reset_count++;
+			if (!sys_bootloader_supports_recovery()) {
+				/* Legacy loaders leave the consecutive-reset policy to us. */
+				retained->watchdog_state.reset_count++;
+			}
 			retained->watchdog_state.total_wdt_resets++;
 			LOG_WRN("WDT reset count: %d (total: %d)",
-				retained->watchdog_state.reset_count,
+				watchdog_get_reset_count(),
 				retained->watchdog_state.total_wdt_resets);
 
 			/* Log last failed channel */
@@ -244,21 +246,25 @@ int watchdog_init(void)
 					channel_names[retained->watchdog_state.last_failed_channel]);
 			}
 
-			/* Check if we should enter DFU due to repeated WDT resets */
-			if (should_enter_dfu()) {
+			/* New loaders already own escalation; never count it twice. */
+			if (!sys_bootloader_supports_recovery() && should_enter_dfu()) {
 				enter_dfu_mode();
 				return 1;  /* Won't reach here */
 			}
 		} else {
 			/* First WDT reset or corrupted state - initialize */
 			LOG_WRN("WDT state not valid, initializing");
-			retained->watchdog_state.reset_count = 1;
+			if (!sys_bootloader_supports_recovery()) {
+				retained->watchdog_state.reset_count = 1;
+			}
 			retained->watchdog_state.total_wdt_resets = 1;
 			retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
 		}
 	} else if (retained) {
-		/* Non-WDT reset - clear counter but keep magic */
-		retained->watchdog_state.reset_count = 0;
+		if (!sys_bootloader_supports_recovery()) {
+			/* Non-WDT reset ends a legacy consecutive-reset streak. */
+			retained->watchdog_state.reset_count = 0;
+		}
 		retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
 	}
 
@@ -381,32 +387,6 @@ void watchdog_resume(wdt_channel_id_t channel)
 }
 
 
-uint8_t watchdog_get_reset_count(void)
-{
-	if (retained) {
-		return retained->watchdog_state.reset_count;
-	}
-	return 0;
-}
-
-void watchdog_clear_reset_count(void)
-{
-	if (retained) {
-		retained->watchdog_state.reset_count = 0;
-		/* Update retained data to persist the change */
-		retained_update();
-	}
-	LOG_INF("WDT reset count cleared");
-}
-
-void watchdog_mark_boot_success(void)
-{
-	if (!boot_success_marked) {
-		boot_success_marked = true;
-		watchdog_clear_reset_count();
-		LOG_INF("Boot success marked, WDT reset count cleared");
-	}
-}
 
 void watchdog_suspend_all(void)
 {
@@ -433,6 +413,64 @@ const char *watchdog_get_channel_name(wdt_channel_id_t channel)
 }
 
 #endif /* CONFIG_TASK_WDT */
+
+#if defined(CONFIG_TASK_WDT) || ADAFRUIT_FAULT_RECOVERY
+uint8_t watchdog_get_reset_count(void)
+{
+#if ADAFRUIT_FAULT_RECOVERY
+	if (sys_bootloader_supports_recovery()) {
+		uint32_t recovery = NRF_POWER->GPREGRET;
+		return recovery == ADAFRUIT_WDT_RETRY_1 ? 1 :
+		       recovery == ADAFRUIT_WDT_RETRY_2 ? 2 : 0;
+	}
+#endif
+#if defined(CONFIG_TASK_WDT)
+	if (retained) {
+		return retained->watchdog_state.reset_count;
+	}
+#endif
+	return 0;
+}
+
+void watchdog_clear_reset_count(void)
+{
+#if ADAFRUIT_FAULT_RECOVERY
+	if (sys_bootloader_supports_recovery()) {
+		unsigned int key = irq_lock();
+		uint32_t recovery = NRF_POWER->GPREGRET;
+		if (recovery == ADAFRUIT_WDT_RETRY_1 || recovery == ADAFRUIT_WDT_RETRY_2) {
+			NRF_POWER->GPREGRET = 0;
+		}
+		irq_unlock(key);
+		return;
+	}
+#endif
+#if defined(CONFIG_TASK_WDT)
+	if (retained) {
+		retained->watchdog_state.reset_count = 0;
+		retained_update();
+	}
+	LOG_INF("WDT reset count cleared");
+#endif
+}
+
+void watchdog_mark_boot_success(void)
+{
+#if ADAFRUIT_FAULT_RECOVERY
+	if (sys_bootloader_supports_recovery()) {
+		watchdog_clear_reset_count();
+		return;
+	}
+#endif
+#if defined(CONFIG_TASK_WDT)
+	if (!boot_success_marked) {
+		boot_success_marked = true;
+		watchdog_clear_reset_count();
+		LOG_INF("Boot success marked, WDT reset count cleared");
+	}
+#endif
+}
+#endif
 
 bool watchdog_caused_reset(void)
 {

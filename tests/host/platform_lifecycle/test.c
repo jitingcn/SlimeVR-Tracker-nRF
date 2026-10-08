@@ -10,6 +10,10 @@
 #define LOG_DBG(...) ((void)0)
 #define IS_ENABLED(x) (x)
 #define CONFIG_CLOCK_USE_LFXO 1
+#define CONFIG_TASK_WDT 1
+#define CONFIG_BUILD_OUTPUT_UF2 ADAFRUIT_FAULT_RECOVERY
+#define CONFIG_BOOTLOADER_MCUBOOT (!ADAFRUIT_FAULT_RECOVERY)
+#define WATCHDOG_RESET_THRESHOLD 3
 #define CONFIG_SENSOR_TCAL_HEATED 0
 #define LFCLK_WAIT_STEP_US 300
 #define LFCLK_STOP_TIMEOUT_US 10000
@@ -17,6 +21,9 @@
 #define SYS_REBOOT_COLD 0
 static int reboots;
 static void sys_reboot(int type) { reboots++; }
+#if ADAFRUIT_FAULT_RECOVERY
+static void k_msleep(int ms) { assert(ms == 100); }
+#endif
 static unsigned int irq_lock(void) { return 0; }
 static void irq_unlock(unsigned int key) {}
 typedef enum { NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL } nrf_clock_lfclk_t;
@@ -116,6 +123,28 @@ static const struct device bus1 = {1}, bus2 = {2};
 #define DEVICE_imu (&bus1)
 #define DEVICE_mag_spi (&bus2)
 #define DEVICE_mag (&bus2)
+#define WATCHDOG_NODE wdt
+#define DEVICE_wdt (&bus1)
+#define WATCHDOG_STATE_MAGIC 0xA5
+static struct {
+    struct {
+        unsigned magic, reset_count, total_wdt_resets, last_failed_channel;
+    } watchdog_state;
+} retained_storage, *retained = &retained_storage;
+static struct { unsigned GPREGRET; } power;
+#define NRF_POWER (&power)
+static bool reset_was_wdt, wdt_ready = true;
+static int wdt_init_result, wdt_init_calls;
+static bool watchdog_caused_reset(void) { return reset_was_wdt; }
+static bool device_is_ready(const struct device *dev) { return wdt_ready; }
+static int task_wdt_init(const struct device *dev) { ++wdt_init_calls; return wdt_init_result; }
+static bool recovery_supported;
+static bool sys_bootloader_supports_recovery(void) { return recovery_supported; }
+static int retained_updates;
+static void retained_update(void) { ++retained_updates; }
+#if !ADAFRUIT_FAULT_RECOVERY
+static void sys_enter_dfu(bool ota) { ++reboots; }
+#endif
 enum pm_device_action { PM_DEVICE_ACTION_SUSPEND, PM_DEVICE_ACTION_RESUME };
 static bool bus_suspended[3];
 static int pm_error[2][3], pm_calls[2][3];
@@ -144,6 +173,95 @@ static int sensor_request_scan(bool a, bool b) { return scan_result; }
 
 int main(void)
 {
+#if ADAFRUIT_FAULT_RECOVERY
+    recovery_supported = true;
+    /* GPREGRET owns the streak even if retained RAM is stale or replaced. */
+    for (unsigned count = 1; count <= 2; ++count) {
+        watchdog_initialized = false;
+        reset_was_wdt = true;
+        power.GPREGRET = count == 1 ? 0xE1 : 0xE2;
+        retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
+        retained->watchdog_state.reset_count = 250;
+        retained->watchdog_state.total_wdt_resets = 17;
+        retained->watchdog_state.last_failed_channel = 2;
+        assert(watchdog_init() == 0);
+        assert(power.GPREGRET == (count == 1 ? 0xE1u : 0xE2u));
+        assert(retained->watchdog_state.reset_count == 250);
+        assert(retained->watchdog_state.total_wdt_resets == 18);
+        assert(retained->watchdog_state.last_failed_channel == 2 && !reboots);
+        int calls = wdt_init_calls;
+        assert(watchdog_init() == 0 && wdt_init_calls == calls);
+        assert(retained->watchdog_state.total_wdt_resets == 18);
+        watchdog_mark_boot_success();
+        assert(power.GPREGRET == 0);
+    }
+    watchdog_initialized = false;
+    retained->watchdog_state.magic = 0;
+    power.GPREGRET = 0xE2;
+    assert(watchdog_init() == 0 && power.GPREGRET == 0xE2);
+    assert(retained->watchdog_state.total_wdt_resets == 1);
+    watchdog_initialized = false;
+    wdt_ready = false;
+    assert(watchdog_init() == -ENODEV && !watchdog_initialized);
+    assert(power.GPREGRET == 0xE2);
+    wdt_ready = true;
+    wdt_init_result = -EIO;
+    assert(watchdog_init() == -EIO && !watchdog_initialized);
+    assert(power.GPREGRET == 0xE2);
+    wdt_init_result = 0;
+    recovery_supported = false;
+#endif
+    /* Same Adafruit binary now takes the legacy retained-counter path. */
+    for (unsigned marker = 0; marker < 256; ++marker) {
+        power.GPREGRET = marker;
+        retained->watchdog_state.reset_count = 2;
+        assert(watchdog_get_reset_count() == 2);
+        watchdog_clear_reset_count();
+        assert(watchdog_get_reset_count() == 0 && power.GPREGRET == marker);
+    }
+    retained_updates = 0;
+    reboots = 0;
+    watchdog_initialized = false;
+    reset_was_wdt = true;
+    retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
+    retained->watchdog_state.reset_count = 1;
+    retained->watchdog_state.total_wdt_resets = 17;
+    assert(watchdog_init() == 0);
+    assert(watchdog_get_reset_count() == 2 && !reboots);
+    assert(retained->watchdog_state.total_wdt_resets == 18);
+    watchdog_initialized = false;
+    assert(watchdog_init() == 1);
+    assert(watchdog_get_reset_count() == 0 && reboots == 1);
+    assert(retained->watchdog_state.total_wdt_resets == 19 && retained_updates == 1);
+    reboots = 0;
+    retained->watchdog_state.reset_count = 2;
+    watchdog_mark_boot_success();
+    assert(watchdog_get_reset_count() == 0 && retained_updates == 2);
+    reset_was_wdt = false;
+    retained->watchdog_state.reset_count = 2;
+    assert(watchdog_init() == 0 && watchdog_get_reset_count() == 0);
+    watchdog_initialized = false;
+    /* Start an actual consecutive sequence from invalid retained state. */
+    retained->watchdog_state.magic = 0;
+    reset_was_wdt = true;
+    reboots = 0;
+    for (unsigned count = 1; count <= 3; ++count) {
+        watchdog_initialized = false;
+        assert(watchdog_init() == (count == 3 ? 1 : 0));
+        assert(retained->watchdog_state.total_wdt_resets == count);
+        assert(watchdog_get_reset_count() == (count == 3 ? 0 : count));
+        assert(reboots == (count == 3 ? 1 : 0));
+    }
+#if ADAFRUIT_FAULT_RECOVERY
+    assert(power.GPREGRET == ADAFRUIT_DFU_MAGIC_UF2_RESET);
+#endif
+    /* A non-DOG reboot clears a streak without deleting cumulative telemetry. */
+    watchdog_initialized = false;
+    reset_was_wdt = false;
+    retained->watchdog_state.reset_count = 2;
+    assert(watchdog_init() == 0);
+    assert(watchdog_get_reset_count() == 0);
+    assert(retained->watchdog_state.total_wdt_resets == 3);
     /* Normal STOP clears the software request before the oscillator settles. */
     reset_clock(false, NRF_CLOCK_LFCLK_XTAL);
     clock_switch(NRF_CLOCK_LFCLK_RC);
@@ -195,6 +313,8 @@ int main(void)
     }
     reboots = 0;
 
+    /* Registration cases start before init, independently of boot-policy cases. */
+    watchdog_initialized = false;
     for (int i = 0; i < WDT_CHANNEL_COUNT; i++) channel_ids[i] = -1;
     assert(watchdog_register_thread(0, 0) == -ENODEV && adds == 0 && feeds == 0);
     watchdog_initialized = true; add_result = -ENOMEM;
