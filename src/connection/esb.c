@@ -126,6 +126,12 @@ static bool pair_provisional;
 static struct led_token pair_feedback;
 static int64_t pair_confirm_deadline;
 
+/* Blind search visits all 51 even channels; an explicit odd home stays first. */
+static uint8_t channel_candidate_count(uint8_t home)
+{
+	return 51 + (home & 1);
+}
+
 static uint8_t channel_candidate(uint8_t home, unsigned index)
 {
 	if (index == 0) {
@@ -137,7 +143,7 @@ static uint8_t channel_candidate(uint8_t home, unsigned index)
 			return ch;
 		}
 	}
-	for (unsigned ch = 0; ch <= 100; ++ch) {
+	for (unsigned ch = 0; ch <= 100; ch += 2) {
 		bool preferred = ch == home;
 		for (unsigned i = 0; i < ESB_ALLOWED_CHANNELS_COUNT; ++i) {
 			preferred |= ESB_ALLOWED_CHANNELS[i] == ch;
@@ -2014,7 +2020,7 @@ void esb_pair(void)
 				pair_ack_pending = false;
 				esb_flush_tx();
 				esb_flush_rx();
-				unsigned next = (pair_index + 1) % 101;
+				unsigned next = (pair_index + 1) % channel_candidate_count(pair_home);
 				uint8_t ch = channel_candidate(pair_home, next);
 				if (esb_set_rf_channel(ch) == 0) {
 					radio_channel = ch;
@@ -2674,7 +2680,7 @@ bool esb_channel_search_poll(bool blocked)
 		if (heard) {
 			search_deadline = now + 1000;
 		} else {
-			uint8_t next_index = (search_index + 1) % 101;
+			uint8_t next_index = (search_index + 1) % channel_candidate_count(search_home);
 			uint8_t candidate = channel_candidate(search_home, next_index);
 			esb_flush_tx();
 			esb_flush_rx();

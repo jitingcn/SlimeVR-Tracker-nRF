@@ -38,6 +38,8 @@ static unsigned address_writes, schedule_updates;
 static uint8_t scheduled_slot, scheduled_total;
 static struct esb_payload { uint8_t data[8]; bool noack; } tx_payload_pair;
 static uint8_t pair_target, pair_step;
+static uint8_t pair_probe_channels[320], last_probe_channel;
+static unsigned pair_probe_count, pair_probe_limit;
 static void receive_pair(void);
 static bool inject_late_pong;
 static void late_pong(void);
@@ -126,6 +128,7 @@ static uint16_t connection_get_data_collection_batch_rate(void) { return 100; }
 static uint8_t last_probe[13];
 static int esb_write_ping(uint8_t *ping, bool force) {
     assert(force && ping[0] == 0xf0 && ping[1] == tracker_id);
+    last_probe_channel = radio_channel;
     memcpy(last_probe, ping, sizeof(last_probe));
     ++probes; record_ping_admission(ping_counter); return 0;
 }
@@ -166,6 +169,11 @@ static int esb_write_payload(const struct esb_payload *payload) {
     pair_step = payload->data[1]; return 0;
 }
 static int esb_start_tx(void) {
+    if (pair_probe_limit && pair_step == 0) {
+        assert(pair_probe_count < sizeof(pair_probe_channels));
+        pair_probe_channels[pair_probe_count++] = radio_channel;
+        if (pair_probe_count == pair_probe_limit) ++radio_session_generation;
+    }
     if (radio_channel != pair_target) return 0;
     if (pair_step == 0 && registered_at < 0) registered_at = now;
     if (pair_step == 1 && pair_ack_pending && now - registered_at >= 100) {
@@ -264,6 +272,7 @@ static void reset(uint8_t home) {
     channel_confirm_capable = channel_legacy_peer = channel_confirmed = false;
     ping_channel_confirm_sent = false; abort_requests = 0;
     cancel_pair_after_ack = false;
+    pair_probe_count = pair_probe_limit = 0;
     channel_error = persistence_error = 0;
     radio_user_disabled = own_pong_seen = server_time_synced = false;
     address_writes = schedule_updates = 0;
@@ -453,7 +462,7 @@ static void pong_age(void) {
 }
 static void visit(uint8_t target) {
     assert(esb_channel_search_poll(false));
-    for (unsigned i = 0; radio_channel != target && i < 101; ++i) {
+    for (unsigned i = 0; radio_channel != target && i < channel_candidate_count(search_home); ++i) {
         now = search_deadline; assert(esb_channel_search_poll(false));
     }
     assert(radio_channel == target && writes == 0);
@@ -779,7 +788,71 @@ static void owner_command_arguments(void) {
     assert(received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON && !schedule_updates);
 }
 
+static void scan_sequences(void) {
+    /* Independent policy oracle: preserve preferred order, then remaining evens. */
+    const uint8_t order[] = {
+        0, 2, 52, 72, 74, 76, 78, 82, 84, 86, 88, 50, 24, 48,
+        70, 68, 46, 44, 20, 54, 56, 28, 30,
+        6, 8, 10, 12, 14, 16, 18, 32, 34,
+        36, 38, 40, 42, 58, 60, 62, 64, 66,
+        4, 22, 26, 80, 90, 92, 94, 96, 98, 100,
+    };
+    assert(sizeof(order) == 51);
+    for (unsigned home = 0; home <= 100; ++home) {
+        uint8_t expected[52] = {home};
+        unsigned count = 1;
+        bool seen[101] = {0};
+        for (unsigned i = 0; i < sizeof(order); ++i)
+            if (order[i] != home) expected[count++] = order[i];
+        assert(count == 51 + (home & 1));
+        assert(channel_candidate_count(home) == count);
+        for (unsigned i = 0; i < count; ++i) {
+            uint8_t ch = channel_candidate(home, i);
+            assert(ch == expected[i] && ch <= 100 && !seen[ch]);
+            assert(!(ch & 1) || (i == 0 && ch == home));
+            seen[ch] = true;
+        }
+        for (unsigned ch = 0; ch <= 100; ++ch)
+            assert(seen[ch] == (!(ch & 1) || ch == home));
+
+        /* Observe actual owner PING submissions through two complete wraps. */
+        reset(home);
+        for (unsigned i = 0; i <= count * 2; ++i) {
+            if (i) now = search_deadline;
+            unsigned before = probes;
+            assert(esb_channel_search_poll(false));
+            assert(probes == before + 1 && last_probe_channel == expected[i % count]);
+            assert(search_index == i % count);
+        }
+        assert(changes == count * 2 && !writes && !address_writes);
+        /* OTA freezes the active sweep, including an explicit odd home. */
+        ota_active = true; now = search_deadline;
+        unsigned old_probes = probes, old_changes = changes;
+        assert(!esb_channel_search_poll(false));
+        assert(probes == old_probes && changes == old_changes && radio_channel == home);
+
+        /* Actual discovery sends three bursts per candidate; model no peer
+         * and interrupt via the existing lifecycle generation after two wraps. */
+        reset(home); memset(paired_addr, 0, sizeof(paired_addr));
+        pair_target = 0xff; registered_at = -1;
+        pair_probe_limit = (count * 2 + 1) * 3;
+        esb_pair();
+        assert(pair_probe_count == pair_probe_limit && !pairing_search_active);
+        for (unsigned i = 0; i < pair_probe_count; ++i)
+            assert(pair_probe_channels[i] == expected[(i / 3) % count]);
+        assert(changes == count * 2 && !writes && !address_writes && !pair_provisional);
+    }
+    puts("channels: actual recovery and pairing, all homes, 51 evens, odd home, two wraps PASS");
+}
+
 int main(void) {
+    if (getenv("RADIO_EVEN_ONLY")) {
+        scan_sequences();
+        advertised_channels();
+        proof_during_channel_hold();
+        puts("channels: odd dedicated redirects and OTA holds PASS");
+        return 0;
+    }
     trace_warnings = getenv("RADIO_PING_TRACE") != NULL;
     pong_age();
     if (getenv("RADIO_PONG_AGE_ONLY")) return 0;
@@ -792,15 +865,8 @@ int main(void) {
     legacy_compatibility();
     ota_status_abort();
     owner_command_arguments();
-    for (unsigned home = 0; home <= 100; ++home) {
-        bool seen[101] = {0};
-        assert(channel_candidate(home, 0) == home);
-        for (unsigned i = 0; i <= 100; ++i) {
-            uint8_t ch = channel_candidate(home, i);
-            assert(ch <= 100 && !seen[ch]); seen[ch] = true;
-        }
-    }
-    const uint8_t destinations[] = {0, 51, 100};
+    scan_sequences();
+    const uint8_t destinations[] = {0, 4, 100};
     for (unsigned i = 0; i < sizeof(destinations); ++i) {
         reset(2); visit(destinations[i]);
         dedicated_packet(destinations[i]);
@@ -846,7 +912,7 @@ int main(void) {
     ota_rx_head = 1; assert(!esb_channel_search_poll(false) && !channel_search);
     ota_rx_head = 0; idle = false;
     assert(!esb_channel_search_poll(false) && !channel_search);
-    idle = true; visit(51); unsigned old_changes = changes, old_probes = probes;
+    idle = true; visit(4); unsigned old_changes = changes, old_probes = probes;
     ota_active = true; now += 1000;
     assert(!esb_channel_search_poll(false) && changes == old_changes && probes == old_probes);
     ota_active = false; esb_deinitialize();
