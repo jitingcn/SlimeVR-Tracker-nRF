@@ -10,7 +10,7 @@
 #define ESB_ST_PAIRED 1
 static uint64_t now_ticks;
 static bool locked, change_on_unlock;
-static bool server_time_synced;
+static bool server_time_synced, channel_wait_normal, channel_redirect_pending;
 static int esb_conn_state, status_bits;
 static int64_t g_last_sync_timestamp;
 static uint32_t g_server_ticks_offset, g_last_sync_local_ticks;
@@ -48,6 +48,7 @@ static void reset(void)
 {
 	now_ticks = 100ULL * KERNEL_HZ;
 	server_time_synced = true;
+	channel_wait_normal = channel_redirect_pending = false;
 	esb_conn_state = ESB_ST_PAIRED;
 	status_bits = 0;
 	g_last_sync_timestamp = 100000;
@@ -77,6 +78,8 @@ int main(void)
 	reset(); status_bits = SYS_STATUS_CONNECTION_ERROR; unavailable();
 	reset(); esb_conn_state = 2; unavailable();
 	reset(); server_time_synced = false; unavailable();
+	reset(); channel_wait_normal = true; unavailable();
+	reset(); channel_redirect_pending = true; unavailable();
 	reset(); tdma_runtime_enabled = 0; unavailable();
 	reset(); tdma_cfg_pack = 0; unavailable();
 	reset(); tdma_cfg_pack = 10U | (22U << 8) | (220U << 16); unavailable();

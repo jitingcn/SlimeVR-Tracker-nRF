@@ -2775,6 +2775,7 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks)
 	unsigned key = irq_lock();
 	uint64_t kernel_ticks = k_uptime_ticks();
 	bool synced = server_time_synced && esb_conn_state == ESB_ST_PAIRED
+		&& !channel_wait_normal && !channel_redirect_pending
 		&& get_status(SYS_STATUS_CONNECTION_ERROR) == 0;
 	int64_t max_age_ms = tdma_status_clock_max_age_ms();
 	int64_t last_sync_ms = g_last_sync_timestamp;
