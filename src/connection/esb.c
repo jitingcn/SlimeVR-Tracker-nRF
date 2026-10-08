@@ -102,7 +102,6 @@ static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS[] = {
 /* Shared producer/lifecycle admission; recursive for owner-driven probes. */
 K_MUTEX_DEFINE(esb_radio_lock);
 static uint8_t radio_channel;
-static uint8_t paired_channel_found;
 static uint32_t own_pong_time;
 static bool own_pong_seen;
 static bool pairing_search_active;
@@ -117,6 +116,15 @@ static volatile bool channel_found;
 static volatile bool channel_heard;
 static int64_t search_deadline;
 static int64_t search_probe_at;
+static volatile bool channel_redirect_pending;
+static uint8_t channel_redirect;
+static bool channel_confirm_capable;
+static bool channel_legacy_peer;
+static bool channel_confirmed;
+static bool ping_channel_confirm_sent;
+static bool pair_provisional;
+static struct led_token pair_feedback;
+static int64_t pair_confirm_deadline;
 
 static uint8_t channel_candidate(uint8_t home, unsigned index)
 {
@@ -686,6 +694,14 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_OTA_SUPPRESS, "OTA_SUPPRESS", esb_remote_cmd_ota_suppress},
 	{ESB_PONG_FLAG_OTA_UNSUPPRESS, "OTA_UNSUPPRESS", esb_remote_cmd_ota_unsuppress},
 };
+
+static bool esb_pong_is_legacy(uint8_t flag)
+{
+	/* The two allocated legacy command ranges exclude reserved flags. */
+	return flag <= ESB_PONG_FLAG_TCAL_HEATED_START
+		|| (flag >= ESB_PONG_FLAG_OTA_QUERY_INFO
+		    && flag <= ESB_PONG_FLAG_DATA_COLLECT_METADATA);
+}
 
 static const char *esb_remote_cmd_name(uint8_t flag)
 {
@@ -1257,7 +1273,6 @@ void event_handler(struct esb_evt const *event)
 					break;
 				}
 				memcpy(paired_addr, rx_payload.data, sizeof(paired_addr));
-				paired_channel_found = radio_channel;
 				pair_ack_pending = false;
 			}
 		} else {
@@ -1271,43 +1286,56 @@ void event_handler(struct esb_evt const *event)
 						break;
 					}
 					uint8_t rx_id = rx_payload.data[1];
-					if (rx_id == tracker_id && ping_pending
-					    && rx_payload.data[2] == ping_ctr_sent) {
-						own_pong_time = k_uptime_get();
-						own_pong_seen = true;
-					}
-					if ((channel_search || channel_wait_normal)
-					    && (rx_id != tracker_id || !ping_pending
-					        || rx_payload.data[2] != ping_ctr_sent)) {
-						break;
-					}
-					if (channel_search || channel_wait_normal) {
-						channel_heard = true;
-					}
 					if (rx_id != tracker_id) {
-						// When using >7 trackers, multiple trackers share the same pipe
-						// This causes PONG responses to have mismatched IDs until TDMA is implemented
-						// For now, accept these responses as valid to maintain connectivity
-						LOG_WRN("Received PONG for tracker ID %u (local ID %u)", rx_id, tracker_id);
-						// set ping valid
-						ping_pending = false;
-						ping_failed = false;
-						ping_failures = 0;
-						esb_conn_state = ESB_ST_PAIRED;
-						if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-							set_status(SYS_STATUS_CONNECTION_ERROR, false);
-							connection_error_start_time = 0;
-							shutdown_requested = false;
-							ping_success_streak = 0;
-						}
 						break;
 					}
-					uint8_t rx_ctr = rx_payload.data[2];
-					int counter_diff = (int)ping_counter - (int)rx_ctr;
-					if (counter_diff < 0) {
-						counter_diff += 256; // Handle wrap-around
+					uint8_t pong_flags = rx_payload.data[7];
+					/* OTA status ACK cancellation is not a PING/time-sync reply. */
+					if (pong_flags == ESB_PONG_FLAG_OTA_ABORT && esb_ota_is_active()) {
+						esb_ota_request_abort();
+						return;
 					}
-
+					if (!ping_pending || rx_payload.data[2] != ping_ctr_sent) {
+						break;
+					}
+					if (pong_flags == ESB_PONG_FLAG_CHANNEL_CONFIRM) {
+						uint8_t advertised = rx_payload.data[8];
+						if (!ping_channel_confirm_sent || advertised > 100
+						    || rx_payload.data[9] != ESB_CHANNEL_CONFIRM_VERSION
+						    || rx_payload.data[10] != 0 || rx_payload.data[11] != 0) {
+							break;
+						}
+						channel_confirm_capable = true;
+						channel_legacy_peer = false;
+						if (advertised != radio_channel) {
+							/* IRQ publishes intent; only the idle TX owner retunes. */
+							channel_confirmed = false;
+							channel_redirect = advertised;
+							channel_redirect_pending = true;
+							channel_wait_normal = true;
+							channel_found = false;
+							ping_pending = false;
+							break;
+						}
+						channel_confirmed = true;
+					} else {
+						if (!esb_pong_is_legacy(pong_flags)) {
+							break;
+						}
+						if (ping_channel_confirm_sent && !channel_confirm_capable) {
+							channel_legacy_peer = true;
+						}
+						if (!channel_confirmed && !channel_legacy_peer) {
+							break;
+						}
+					}
+					if (channel_redirect_pending) {
+						break;
+					}
+					own_pong_time = k_uptime_get();
+					own_pong_seen = true;
+					channel_heard = true;
+					uint8_t rx_ctr = rx_payload.data[2];
 					// set ping valid first
 					ping_pending = false;
 					ping_failed = false;
@@ -1325,13 +1353,6 @@ void event_handler(struct esb_evt const *event)
 						ping_success_streak = 0;
 					}
 
-					bool match_ctr = (counter_diff >= 0 && counter_diff <= 5);
-					if (!match_ctr) {
-						LOG_WRN("unsynced counter %u (expected ~%u, diff=%d)", rx_ctr, ping_counter, counter_diff);
-						// Don't break - still process the PONG to maintain connection
-						// Just log the warning for debugging
-					}
-
 					uint32_t ping_rx_ticks = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
 										   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
 
@@ -1344,8 +1365,6 @@ void event_handler(struct esb_evt const *event)
 						}
 					}
 
-					// Check flags field (byte 7)
-					uint8_t pong_flags = rx_payload.data[7];
 					uint32_t rtt_us = 0;
 					float pong_sens_data[3] = {0.0f, 0.0f, 0.0f};
 					uint8_t pong_sens_auto_axis = 0;
@@ -1563,17 +1582,19 @@ void event_handler(struct esb_evt const *event)
 						// No history found - likely too old or buffer wrapped
 					}
 
-					/* Parse dynamic TDMA config from NORMAL PONG bytes 8-11.
-					 * Only valid when pong_flags == NORMAL (other commands
-					 * use bytes 8-11 for command-specific data). */
+					/* Dedicated replies never touch TDMA or command/echo state. */
+					if (pong_flags == ESB_PONG_FLAG_CHANNEL_CONFIRM) {
+						break;
+					}
+					/* NORMAL retains the legacy slot/total layout. */
 					if (pong_flags == ESB_PONG_FLAG_NORMAL) {
 						uint8_t tdma_slot   = rx_payload.data[8];
 						uint8_t tdma_total  = rx_payload.data[9];
 						uint8_t tdma_sticks = rx_payload.data[10];
 						uint8_t tdma_epoch  = rx_payload.data[11];
 
-						bool valid_schedule = tdma_total > 0 && tdma_slot < tdma_total
-							&& tdma_sticks >= 16;
+						bool valid_schedule = tdma_total > 0 && tdma_total <= 16
+							&& tdma_slot < tdma_total && tdma_sticks >= 16;
 						if (valid_schedule &&
 						    (channel_wait_normal || tdma_epoch != tdma_get_config_epoch())) {
 							tdma_update_config(tdma_slot, tdma_total, tdma_sticks, tdma_epoch);
@@ -1631,7 +1652,9 @@ void event_handler(struct esb_evt const *event)
 							LOG_INF("Remote command %s (0x%02X) received",
 								esb_remote_cmd_name(pong_flags), pong_flags);
 						}
-					} else {
+					} else if (!channel_wait_normal && !channel_search) {
+						/* A requested proof NORMAL did not consume the low-bit
+						 * command/metadata echo. Keep it for the post-proof PING. */
 						metadata_echo_pending = false;
 						if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
 							received_remote_command = ESB_PONG_FLAG_NORMAL;
@@ -1791,6 +1814,17 @@ int esb_initialize(bool tx)
 	}
 	LOG_INF("ESB initialized, %sX mode", tx ? "T" : "R");
 	esb_initialized = true;
+	channel_wait_normal = true;
+	channel_redirect_pending = false;
+	channel_confirmed = false;
+	channel_legacy_peer = false;
+	ping_channel_confirm_sent = false;
+	channel_found = false;
+	channel_heard = false;
+	ping_pending = false;
+	memset(ping_history, 0, sizeof(ping_history));
+	esb_clear_time_sync_state();
+	tdma_set_enabled(false);
 	own_pong_seen = false;
 	own_pong_time = k_uptime_get();
 	++radio_session_generation;
@@ -1801,11 +1835,29 @@ int esb_initialize(bool tx)
 void esb_deinitialize(void)
 {
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	++radio_session_generation;
+	pair_ack_pending = false;
+	if (pairing_search_active && esb_conn_state == ESB_ST_PAIRING) {
+		memset(paired_addr, 0, sizeof(paired_addr));
+	}
 	channel_search = false;
 	channel_wait_normal = true;
 	channel_found = false;
 	channel_heard = false;
+	channel_redirect_pending = false;
+	channel_confirmed = false;
+	channel_legacy_peer = false;
+	ping_channel_confirm_sent = false;
+	if (pair_provisional) {
+		pair_provisional = false;
+		pairing_search_active = false;
+		channel_confirm_capable = false;
+		memset(paired_addr, 0, sizeof(paired_addr));
+		esb_conn_state = ESB_ST_PAIRING;
+		led_result(pair_feedback, led_event_id(), LED_FAILED);
+	}
 	ping_pending = false;
+	memset(ping_history, 0, sizeof(ping_history));
 	esb_clear_time_sync_state();
 	tdma_set_enabled(false);
 	if (esb_initialized) {
@@ -1943,15 +1995,12 @@ void esb_pair(void)
 		uint32_t pair_generation = radio_session_generation;
 		while (paired_addr[0] != checksum) {
 			k_mutex_lock(&esb_radio_lock, K_FOREVER);
-			if (!esb_initialized) {
-				esb_set_addr_discovery();
-				esb_initialize(true);
-			}
-			if (pair_generation != radio_session_generation) {
-				pair_generation = radio_session_generation;
-				pair_home = radio_channel;
-				pair_index = 0;
-				pair_bursts = 0;
+			if (!esb_initialized || radio_user_disabled
+			    || pair_generation != radio_session_generation) {
+				pairing_search_active = false;
+				led_result(pairing, led_event_id(), LED_FAILED);
+				k_mutex_unlock(&esb_radio_lock);
+				return;
 			}
 			if (!clock_status) {
 				clocks_start();
@@ -2019,24 +2068,34 @@ void esb_pair(void)
 			k_msleep(60 + (k_cycle_get_32() % 23));
 			k_mutex_unlock(&esb_radio_lock);
 		}
-		LOG_INF("Paired");
-		/* RX only copied the identity; entropy and queue reset belong here,
-		 * in the pairing thread, before the new radio session is ready. */
-		tracker_events_session_changed();
-		int address_error = sys_write(PAIRED_ID, retained->paired_addr, paired_addr, sizeof(paired_addr));
-		uint8_t paired_channel = esb_rf_channel_encode(paired_channel_found);
-		int channel_error = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &paired_channel, sizeof(paired_channel));
-		pairing_search_active = false;
-		if (!timeout_reported) {
-			int err = address_error ? address_error : channel_error;
-			led_result(pairing, led_event_id(), err ? LED_PARTIAL : LED_SUCCESS);
+		/* Pair ACK is only an address hint. Confirm on the paired pipes before
+		 * publishing success or writing either address or RF channel. */
+		k_mutex_lock(&esb_radio_lock, K_FOREVER);
+		if (radio_user_disabled || pair_generation != radio_session_generation
+		    || paired_addr[0] != checksum) {
+			pairing_search_active = false;
+			led_result(pairing, led_event_id(), LED_FAILED);
+			k_mutex_unlock(&esb_radio_lock);
+			return;
 		}
+		pairing_search_active = false;
+		tracker_events_session_changed();
 		esb_deinitialize();
-		k_msleep(1600); /* Preserve the existing post-pairing settle window. */
+		k_msleep(1600); /* Preserve the receiver's post-pairing settle window. */
+		pair_feedback = pairing;
+		pair_provisional = true;
+		pairing_search_active = true;
+		pair_confirm_deadline = k_uptime_get() + CONFIG_CONNECTION_TIMEOUT_DELAY;
+		k_mutex_unlock(&esb_radio_lock);
+	}
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	if (!paired_addr[0] || radio_user_disabled) {
+		k_mutex_unlock(&esb_radio_lock);
+		return;
 	}
 	LOG_INF("Tracker ID: %u", paired_addr[1]);
 	uint64_t receiver_address = 0;
-	memcpy(&receiver_address, &retained->paired_addr[2], 6);
+	memcpy(&receiver_address, &paired_addr[2], 6);
 	LOG_INF("Receiver address: %012llX", receiver_address);
 
 	connection_set_id(paired_addr[1]);
@@ -2045,6 +2104,7 @@ void esb_pair(void)
 	esb_set_addr_paired();
 	esb_conn_state = ESB_ST_PAIRED;
 	clocks_stop();
+	k_mutex_unlock(&esb_radio_lock);
 }
 
 void esb_reset_pair(void)
@@ -2052,6 +2112,7 @@ void esb_reset_pair(void)
 	if (paired_addr[0] || esb_conn_state != ESB_ST_PAIRING) {
 		esb_deinitialize(); // make sure esb is off
 		esb_conn_state = ESB_ST_PAIRING;
+		channel_confirm_capable = false;
 		memset(paired_addr, 0, sizeof(paired_addr));
 		tracker_events_session_changed();
 		LOG_INF("Pairing requested");
@@ -2078,10 +2139,12 @@ int esb_user_pair(void)
 
 int esb_user_set_enabled(bool enabled)
 {
+	k_mutex_lock(&esb_radio_lock, K_FOREVER);
 	int err = 0;
 	if (enabled) err = esb_reinitialize();
 	else esb_deinitialize();
 	if (!err) radio_user_disabled = !enabled;
+	k_mutex_unlock(&esb_radio_lock);
 	led_maintenance_publish(LED_OWNER_RADIO, radio_user_disabled);
 	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(),
 		err ? LED_FAILED : LED_SUCCESS);
@@ -2109,7 +2172,8 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 		return -EACCES;
 	}
 	if (channel_wait_normal && !esb_ota_is_active()
-	    && data_length > 0 && data[0] != ESB_PING_TYPE) {
+	    && data_length > 0 && data[0] != ESB_PING_TYPE
+	    && data[0] != ESB_OTA_FW_INFO_TYPE) {
 		return -EAGAIN;
 	}
 	drop_failed_tx_payload_if_pending();
@@ -2142,6 +2206,11 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 	esb_write_rate_tick();
 
 	if (is_ping) {
+		data[7] &= ~ESB_PING_FLAG_CHANNEL_CONFIRM;
+		if (!channel_confirmed && !channel_legacy_peer) {
+			/* Never echo an unexecuted control while asking for channel proof. */
+			data[7] = ESB_PING_FLAG_CHANNEL_CONFIRM;
+		}
 		if (!server_time_synced) {
 			LOG_DBG("Sending PING while time not synced - attempting to re-sync");
 		}
@@ -2249,14 +2318,15 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 #endif
 	/* Zero ping_ticks until TX stamp — avoid RX binding new counter to old ticks. */
 	if (is_ping && queue_status == 0 && data_length == ESB_PING_LEN) {
-		ping_pending = true;
+		unsigned key = irq_lock();
 		ping_failed = false;
 		ping_counter++;
-		unsigned key = irq_lock();
 		ping_history[ping_history_idx].counter = tx_payload.data[2];
 		ping_history[ping_history_idx].ping_ticks = 0;
-		irq_unlock(key);
 		ping_ctr_sent = tx_payload.data[2];
+		ping_channel_confirm_sent = (tx_payload.data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
+		ping_pending = true;
+		irq_unlock(key);
 		LOG_DBG("PING queued (ctr=%u)", (unsigned)tx_payload.data[2]);
 	} else if (is_ping && queue_status != 0) {
 		ping_pending = false;
@@ -2427,6 +2497,12 @@ bool esb_channel_search_poll(bool blocked)
 	static uint32_t ping_warning_session;
 
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	if (pair_provisional && k_uptime_get() >= pair_confirm_deadline) {
+		esb_deinitialize(); /* Roll back the RAM-only identity and feedback. */
+		pairing_search_active = false;
+		k_mutex_unlock(&esb_radio_lock);
+		return true;
+	}
 	if (ping_warning_session != radio_session_generation) {
 		ping_warning_session = radio_session_generation;
 		ping_warning_at = 0;
@@ -2437,8 +2513,17 @@ bool esb_channel_search_poll(bool blocked)
 		return false;
 	}
 	blocked |= esb_ota_is_active() || ota_rx_head != ota_rx_tail;
-	if (blocked) {
-		/* OTA owns this physical channel. Freeze, never flush its exchange. */
+	if (blocked && !channel_found) {
+		/* Holds freeze retunes, not same-channel proof. Keep an outstanding
+		 * proof PING alive so a pending UNSUPPRESS/ABORT can follow it. */
+		unsigned key = irq_lock();
+		if (channel_redirect_pending) {
+			/* An advertisement held across another channel owner's exchange
+			 * must be re-probed, not replayed as a deferred retune. */
+			channel_redirect_pending = false;
+			ping_pending = false;
+		}
+		irq_unlock(key);
 		int64_t now = k_uptime_get();
 		search_deadline = now + 300;
 		search_probe_at = now + 80;
@@ -2446,12 +2531,34 @@ bool esb_channel_search_poll(bool blocked)
 		return false;
 	}
 	if (channel_found) {
-		if (channel_search && radio_channel != search_home) {
-			uint8_t stored = esb_rf_channel_encode(radio_channel);
-			int err = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &stored, sizeof(stored));
-			if (err < 0) {
-				LOG_WRN("Recovered channel persistence failed: %d", err);
+		uint8_t stored = retained->rf_channel;
+		uint8_t configured = esb_rf_channel_decode(stored);
+		if (configured == ESB_RF_CHANNEL_DEFAULT) {
+			configured = RADIO_RF_CHANNEL;
+		}
+		/* Do not reinterpret an explicit same-channel setting on startup.
+		 * Only pairing or an automatic relocation chooses a new encoding. */
+		if (channel_confirmed && (pair_provisional || configured != radio_channel)) {
+			stored = radio_channel == RADIO_RF_CHANNEL
+				? ESB_RF_CHANNEL_DEFAULT : esb_rf_channel_encode(radio_channel);
+		}
+		int address_error = 0;
+		if (pair_provisional) {
+			address_error = sys_write(PAIRED_ID, retained->paired_addr, paired_addr, sizeof(paired_addr));
+		}
+		int channel_error = 0;
+		if (channel_confirmed && retained->rf_channel != stored) {
+			channel_error = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &stored, sizeof(stored));
+			if (channel_error < 0) {
+				LOG_WRN("Recovered channel persistence failed: %d", channel_error);
 			}
+		}
+		if (pair_provisional) {
+			pair_provisional = false;
+			pairing_search_active = false;
+			led_result(pair_feedback, led_event_id(),
+				address_error || channel_error ? LED_PARTIAL : LED_SUCCESS);
+			LOG_INF("Pairing confirmed on channel %u", radio_channel);
 		}
 		channel_found = false;
 		channel_search = false;
@@ -2471,8 +2578,8 @@ bool esb_channel_search_poll(bool blocked)
 	int64_t now = k_uptime_get();
 	uint32_t lost_ms = (uint32_t)((uint32_t)now - own_pong_time);
 	irq_unlock(age_key);
-	if (!channel_search && ping_failures < 3
-	    && lost_ms < 4500) {
+	if (!channel_search && !channel_wait_normal && !channel_redirect_pending
+	    && ping_failures < 3 && lost_ms < 4500) {
 		ping_warning_at = 0;
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
@@ -2499,13 +2606,19 @@ bool esb_channel_search_poll(bool blocked)
 	 * changing physical channel. No queued pose or OTA frame crosses it. */
 	if (!esb_is_idle()) {
 		k_mutex_unlock(&esb_radio_lock);
-		return channel_search;
+		return channel_search || channel_wait_normal || channel_redirect_pending;
 	}
 	drop_failed_tx_payload_if_pending();
 	if (!channel_search) {
 		search_home = radio_channel;
 		search_index = 0;
 		unsigned key = irq_lock();
+		if (!channel_wait_normal) {
+			/* Re-probe legacy peers on recovery, but never downgrade a
+			 * receiver that demonstrated dedicated support this session. */
+			channel_legacy_peer = false;
+			channel_confirmed = false;
+		}
 		channel_search = true;
 		channel_wait_normal = true;
 		channel_heard = false;
@@ -2517,11 +2630,36 @@ bool esb_channel_search_poll(bool blocked)
 		esb_flush_tx();
 		esb_flush_rx();
 		esb_clear_time_sync_state();
+		memset(ping_history, 0, sizeof(ping_history));
 		tdma_set_enabled(false);
 	}
+	if (channel_redirect_pending) {
+		unsigned key = irq_lock();
+		uint8_t target = channel_redirect;
+		ping_pending = false;
+		channel_found = false;
+		channel_heard = false;
+		channel_confirmed = false;
+		irq_unlock(key);
+		esb_flush_tx();
+		esb_flush_rx();
+		esb_clear_time_sync_state();
+		memset(ping_history, 0, sizeof(ping_history));
+		tdma_set_enabled(false);
+		if (esb_set_rf_channel(target) != 0) {
+			/* Keep the redirect pending; never publish a failed tune. */
+			k_mutex_unlock(&esb_radio_lock);
+			return true;
+		}
+		key = irq_lock();
+		radio_channel = target;
+		channel_redirect_pending = false;
+		irq_unlock(key);
+		search_deadline = now + 300;
+		search_probe_at = now;
+	}
 	if (now >= search_deadline) {
-		/* A matching control response holds this candidate long enough for
-		 * deferred commands and a subsequent NORMAL schedule. */
+		/* A valid own NORMAL keeps this candidate while sync converges. */
 		/* Invalidate the old outstanding probe atomically with the final
 		 * RX result check; a late ISR must never confirm the next channel. */
 		unsigned key = irq_lock();
@@ -2529,6 +2667,8 @@ bool esb_channel_search_poll(bool blocked)
 		channel_heard = false;
 		if (!heard) {
 			ping_pending = false;
+			channel_confirmed = false;
+			channel_legacy_peer = false;
 		}
 		irq_unlock(key);
 		if (heard) {
@@ -2543,6 +2683,7 @@ bool esb_channel_search_poll(bool blocked)
 				search_index = next_index;
 			}
 			esb_clear_time_sync_state();
+			memset(ping_history, 0, sizeof(ping_history));
 			tdma_set_enabled(false);
 			search_deadline = now + 240 + (k_cycle_get_32() % 61);
 			search_probe_at = now;
@@ -2552,6 +2693,7 @@ bool esb_channel_search_poll(bool blocked)
 		uint8_t ping[ESB_PING_LEN] = {ESB_PING_TYPE};
 		ping[1] = tracker_id;
 		ping[7] = esb_get_ping_ack_flag();
+		esb_get_ping_request_data(&ping[8]);
 		(void)esb_write_ping(ping, true);
 		search_probe_at = now + 80 + (k_cycle_get_32() % 23);
 	}
@@ -2582,13 +2724,16 @@ void esb_led_connection_facts(struct led_connection_facts *facts)
 		&& !esb_ota_is_active() && !channel_search && !channel_wait_normal && ping_failures < 3
 		&& (uint32_t)(k_uptime_get_32() - own_pong_time) < 4500;
 	facts->radio_required = !radio_user_disabled;
-	facts->paired = paired_addr[0] != 0;
+	facts->paired = paired_addr[0] != 0 && !pair_provisional;
 	facts->pairing = pairing_search_active;
 	irq_unlock(key);
 }
 
 uint8_t esb_get_ping_ack_flag(void)
 {
+	if (!channel_confirmed && !channel_legacy_peer) {
+		return ESB_PING_FLAG_CHANNEL_CONFIRM;
+	}
 	/* A metadata PONG can replace the normal confirmation of a prior
 	 * control command; acknowledge its token before that older flag. */
 	if (metadata_echo_pending) {
@@ -2605,13 +2750,19 @@ uint8_t esb_get_ping_ack_flag(void)
 void esb_get_ping_request_data(uint8_t out[4])
 {
 	unsigned key = irq_lock();
-	if (metadata_echo_pending) {
+	uint8_t flag = esb_get_ping_ack_flag();
+	memset(out, 0, 4);
+	if (flag == ESB_PONG_FLAG_TEST_MODE_ON) {
+		uint16_t tps = test_mode_get_target_tps();
+		out[0] = (uint8_t)(tps >> 8);
+		out[1] = (uint8_t)tps;
+	} else if (flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
+		out[0] = (uint8_t)connection_get_data_collection_batch_rate();
+	} else if (flag == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
 		out[0] = received_metadata_mask;
 		out[1] = received_metadata_chunk;
 		out[2] = (uint8_t)(received_metadata_token >> 8);
 		out[3] = (uint8_t)received_metadata_token;
-	} else {
-		memset(out, 0, 4);
 	}
 	irq_unlock(key);
 }
@@ -2718,15 +2869,19 @@ static void esb_thread(void)
 
 	while (1) {
 #if CONFIG_CONNECTION_OVER_HID
-		if (esb_conn_state == ESB_ST_PAIRING && get_status(SYS_STATUS_USB_CONNECTED) == false
+		if (!radio_user_disabled && esb_conn_state == ESB_ST_PAIRING && get_status(SYS_STATUS_USB_CONNECTED) == false
 			&& k_uptime_get() - 750 > start_time) // only automatically enter pairing while not
 												  // potentially communicating by usb
 #else
-		if (esb_conn_state == ESB_ST_PAIRING)
+		if (!radio_user_disabled && esb_conn_state == ESB_ST_PAIRING)
 #endif
 		{
 			esb_pair();
-			esb_initialize(true);
+			k_mutex_lock(&esb_radio_lock, K_FOREVER);
+			if (!radio_user_disabled && paired_addr[0] && esb_conn_state != ESB_ST_PAIRING) {
+				esb_initialize(true);
+			}
+			k_mutex_unlock(&esb_radio_lock);
 		}
 #if defined(CONFIG_SOC_SERIES_NRF54L)
 		/* Stop HFCLK only after a longer idle period without any ESB TX.
@@ -2763,7 +2918,8 @@ static void esb_thread(void)
 		}
 		int64_t now_idle = k_uptime_get();
 
-		bool command_pending = received_remote_command != ESB_PONG_FLAG_NORMAL
+		bool command_pending = (channel_confirmed || channel_legacy_peer) && !channel_redirect_pending
+			&& received_remote_command != ESB_PONG_FLAG_NORMAL
 			&& received_remote_command != ESB_PONG_FLAG_DATA_COLLECT_METADATA
 			&& remote_command_receive_time > 0;
 		if (command_pending) {

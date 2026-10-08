@@ -1716,19 +1716,8 @@ void connection_thread(void)
 				uint8_t ping[ESB_PING_LEN] = {0};
 				ping[0] = ESB_PING_TYPE;
 				ping[1] = connection_get_id();
-				uint8_t ping_ack_flag = esb_get_ping_ack_flag();
-				ping[7] = ping_ack_flag;
-				if (ping_ack_flag == ESB_PONG_FLAG_TEST_MODE_ON) {
-					uint16_t tps = test_mode_get_target_tps();
-					ping[8] = (tps >> 8) & 0xFF;
-					ping[9] = tps & 0xFF;
-				} else if (ping_ack_flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
-					ping[8] = (uint8_t)connection_get_data_collection_batch_rate();
-				} else if (ping_ack_flag == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
-					uint8_t request[4];
-					esb_get_ping_request_data(request);
-					memcpy(&ping[8], request, sizeof(request));
-				}
+				ping[7] = esb_get_ping_ack_flag();
+				esb_get_ping_request_data(&ping[8]);
 				int err = esb_write_ping(ping, force_resync);
 				if (err == -EAGAIN) {
 					uint32_t retry_delay_ms = 0;

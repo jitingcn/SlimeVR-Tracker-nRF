@@ -10,7 +10,8 @@
 static int esb_radio_lock;
 static void k_mutex_lock(int *lock, int timeout) { ++*lock; }
 static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
-static bool channel_wait_normal;
+static bool channel_wait_normal, channel_search, channel_redirect_pending;
+static bool channel_confirmed = true, channel_legacy_peer, ping_channel_confirm_sent;
 static bool esb_ota_is_active(void) { return false; }
 typedef int atomic_t;
 static inline int atomic_get(const atomic_t *value)
@@ -249,6 +250,8 @@ static void reset(void)
 	sync_age = -1;
 	esb_initialized = true;
 	esb_conn_state = 1;
+	channel_wait_normal = channel_search = channel_redirect_pending = false;
+	channel_confirmed = true; channel_legacy_peer = ping_channel_confirm_sent = false;
 }
 static void assert_original(unsigned index, const uint8_t *data, size_t length, bool noack)
 {
@@ -419,6 +422,58 @@ static void clock_errors(void)
 	puts("clock errors: deferred, startup failure and inactive paths release ownership; resync transmits");
 }
 
+static void channel_proof_ping_preserves_arguments(void)
+{
+	const uint8_t commands[] = {ESB_PONG_FLAG_TEST_MODE_ON,
+		ESB_PONG_FLAG_SET_CHANNEL, ESB_PONG_FLAG_DATA_COLLECT_METADATA};
+	for (unsigned command = 0; command < sizeof(commands); ++command) {
+		for (unsigned proof = 0; proof < 5; ++proof) {
+			reset();
+			channel_wait_normal = proof != 0;
+			channel_search = proof == 2;
+			channel_redirect_pending = proof == 3;
+			channel_confirmed = proof == 0 || proof == 4;
+			channel_legacy_peer = proof == 1;
+			uint8_t ping[13] = {ESB_PING_TYPE};
+			ping[7] = commands[command];
+			const uint8_t arguments[] = {0x12, 0x34, 0x56, 0x78};
+			memcpy(&ping[8], arguments, sizeof(arguments));
+			assert(host_send_ping(ping, true) == 0);
+			assert(queued_count == 1 && queued[0].length == 13);
+			bool requested = proof == 2 || proof == 3;
+			assert(queued[0].data[7] == (requested ? ESB_PING_FLAG_CHANNEL_CONFIRM : commands[command]));
+			assert(ping_channel_confirm_sent == requested);
+			assert(memcmp(&queued[0].data[8], arguments, sizeof(arguments)) == 0);
+			assert(queued[0].data[12] == crc8_ccitt(7, queued[0].data, 12));
+		}
+	}
+}
+
+static void fw_info_before_normal(void)
+{
+	uint8_t info[13] = {ESB_OTA_FW_INFO_TYPE};
+	uint8_t pose[17] = {1};
+	for (unsigned legacy = 0; legacy < 2; ++legacy) {
+		reset();
+		channel_wait_normal = true;
+		channel_confirmed = !legacy;
+		channel_legacy_peer = legacy;
+		assert(esb_write(pose, true, sizeof(pose)) == -EAGAIN);
+		assert(queue_calls == 0);
+		assert(esb_write(info, false, sizeof(info)) == 0);
+		assert_original(0, info, sizeof(info), false);
+		assert(channel_wait_normal);
+	}
+	reset();
+	channel_confirmed = false;
+	channel_wait_normal = true;
+	uint8_t ping[13] = {ESB_PING_TYPE};
+	queue_failures = 2;
+	ping_channel_confirm_sent = false;
+	assert(esb_write_ping(ping, true) != 0);
+	assert(!ping_channel_confirm_sent); /* Failed admission is not a request witness. */
+}
+
 int main(void)
 {
 	const char *scenario = getenv("RADIO_SCENARIO");
@@ -477,5 +532,7 @@ int main(void)
 	reset();
 	assert(esb_write(ordinary, true, sizeof(ordinary)) == 0);
 	assert_original(0, ordinary, sizeof(ordinary), true);
+	channel_proof_ping_preserves_arguments();
+	fw_info_before_normal();
 	return 0;
 }

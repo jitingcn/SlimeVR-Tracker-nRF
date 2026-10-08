@@ -53,6 +53,20 @@ static struct { uint8_t paired_addr[8]; } retained_state, *retained = &retained_
 static int esb_conn_state = 1;
 static uint32_t ping_failures, ping_success_streak;
 static bool ping_pending, ping_failed;
+static bool channel_wait_normal, channel_redirect_pending, channel_search;
+static bool channel_confirmed = true, channel_legacy_peer;
+static unsigned fw_info_requests, abort_requests;
+static void esb_ota_handle_query_info(void) { ++fw_info_requests; }
+static void esb_ota_request_abort(void) { ++abort_requests; }
+static bool radio_user_disabled;
+#define K_FOREVER 0
+static int esb_radio_lock;
+static void k_mutex_lock(int *lock, int timeout) {
+    (void)timeout; ++*lock;
+}
+static void k_mutex_unlock(int *lock) {
+    assert(*lock > 0); --*lock;
+}
 static int64_t ping_send_time, connection_error_start_time;
 static unsigned feeds, registrations, shutdown_calls, test_mode_changes;
 static unsigned stop_after = 120, reject_count;
@@ -209,5 +223,62 @@ int main(void)
     now_ms += 100; feeds = 0;
     if (setjmp(thread_stop) == 0) esb_thread();
     assert(channel_calls == 3 && applied_channel == 0);
+    /* Executed commands and metadata survive the confirmation NORMAL while
+     * scheduling remains gated. Dedicated replies never enter this tail. */
+    for (volatile unsigned mode = 0; mode < 2; ++mode) {
+        channel_wait_normal = mode == 0;
+        channel_search = mode == 1;
+        metadata_echo_pending = true;
+        receive_control(ESB_PONG_FLAG_NORMAL);
+        assert(acked_remote_command == ESB_PONG_FLAG_SET_CHANNEL);
+        assert(received_remote_command == ESB_PONG_FLAG_SET_CHANNEL);
+        assert(metadata_echo_pending);
+        channel_wait_normal = channel_search = false;
+        receive_control(ESB_PONG_FLAG_SET_CHANNEL);
+        now_ms += 100; feeds = 0;
+        if (setjmp(thread_stop) == 0) esb_thread();
+        assert(channel_calls == 3); /* Receiver retry is not a new command. */
+    }
+    receive_control(ESB_PONG_FLAG_NORMAL); /* Ordinary acknowledged NORMAL. */
+    assert(acked_remote_command == ESB_PONG_FLAG_NORMAL);
+    assert(received_remote_command == ESB_PONG_FLAG_NORMAL && !metadata_echo_pending);
+    /* A command not executed before proof remains queued, not discarded. */
+    rx_payload.data[11] = 51;
+    receive_control(ESB_PONG_FLAG_SET_CHANNEL);
+    channel_wait_normal = true;
+    channel_confirmed = false;
+    now_ms += 100; feeds = 0;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(channel_calls == 3 && acked_remote_command == ESB_PONG_FLAG_NORMAL);
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    assert(received_remote_command == ESB_PONG_FLAG_SET_CHANNEL);
+    channel_wait_normal = false;
+    channel_confirmed = true;
+    receive_control(ESB_PONG_FLAG_SET_CHANNEL);
+    now_ms += 100; feeds = 0;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(channel_calls == 4 && applied_channel == 51);
+    assert(acked_remote_command == ESB_PONG_FLAG_SET_CHANNEL);
+    for (volatile unsigned legacy = 0; legacy < 2; ++legacy) {
+        channel_wait_normal = false;
+        receive_control(ESB_PONG_FLAG_NORMAL);
+        channel_wait_normal = true;
+        channel_confirmed = !legacy; channel_legacy_peer = legacy;
+        receive_control(ESB_PONG_FLAG_OTA_QUERY_INFO);
+        now_ms += 100; feeds = 0;
+        if (setjmp(thread_stop) == 0) esb_thread();
+        assert(fw_info_requests == legacy + 1 && channel_wait_normal);
+        assert(acked_remote_command == ESB_PONG_FLAG_OTA_QUERY_INFO);
+        receive_control(ESB_PONG_FLAG_OTA_QUERY_INFO);
+        now_ms += 100; feeds = 0;
+        if (setjmp(thread_stop) == 0) esb_thread();
+        assert(fw_info_requests == legacy + 1);
+    }
+    channel_wait_normal = false;
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    receive_control(ESB_PONG_FLAG_OTA_ABORT);
+    now_ms += 100; feeds = 0;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(abort_requests == 1);
     return 0;
 }

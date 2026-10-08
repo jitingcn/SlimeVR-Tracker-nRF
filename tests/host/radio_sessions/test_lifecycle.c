@@ -65,7 +65,6 @@ static bool tdma_ping_wake_delay_ms(uint32_t *delay) { *delay = force_ping ? 0 :
 static uint32_t ping_server_phase_delay_ms(uint32_t interval) { return 0; }
 uint8_t connection_get_id(void) { return tracker_id; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
-static uint16_t test_mode_get_target_tps(void) { return 30; }
 static void esb_get_ping_request_data(uint8_t *data) {}
 static int esb_write_ping(uint8_t *data, bool force) { ping_calls++; return ping_result; }
 static void ping_stats_attempt(uint32_t now) {}

@@ -91,8 +91,6 @@ static bool tdma_admission_stalled(void) { return tdma_stalled; }
 static uint32_t ping_server_phase_delay_ms(uint32_t x) { (void)x; return 0; }
 static uint8_t connection_get_id(void) { return tracker_id; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
-static uint16_t test_mode_get_target_tps(void) { return 100; }
-static uint16_t connection_get_data_collection_batch_rate(void) { return 0; }
 static void esb_get_ping_request_data(uint8_t p[4]) { memset(p,0,4); }
 static int esb_write_ping(uint8_t *p,bool force) { (void)force; assert(p[0]==ESB_PING_TYPE); ping_calls++; return 0; }
 static void ping_stats_attempt(uint32_t n) { (void)n; }

@@ -107,6 +107,11 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks);
 // Ping/Pong types for ACK payload validation
 #define ESB_PING_TYPE 0xF0
 #define ESB_PONG_TYPE 0xF1
+/* PING byte 7: low seven bits acknowledge commands; bit 7 requests channel proof. */
+#define ESB_PING_FLAG_CHANNEL_CONFIRM 0x80
+/* Response only: physical channel, version, two zero reserved bytes at 8..11. */
+#define ESB_PONG_FLAG_CHANNEL_CONFIRM 0x37
+#define ESB_CHANNEL_CONFIRM_VERSION 1
 
 // Ping/Pong packet sizes
 #define ESB_PING_LEN 13 // with CRC-8

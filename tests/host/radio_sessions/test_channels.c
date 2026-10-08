@@ -25,14 +25,17 @@ static void debug_log(const char *format, ...) { (void)format; }
 #define TX_ERROR_THRESHOLD 300
 #define ESB_ST_PAIRED 1
 #define PAIRED_ID 32
+#define RADIO_RF_CHANNEL 84
 static struct { uint64_t DEVICEADDR[1]; } ficr = {{0x123456789abc}};
 #define NRF_FICR (&ficr)
-static uint8_t paired_addr[8], radio_channel, paired_channel_found;
+static uint8_t paired_addr[8], radio_channel;
 static uint32_t radio_session_generation;
 static bool pair_ack_pending, clock_status, ping_failed;
 static bool own_pong_seen, pairing_search_active, radio_user_disabled;
 static uint32_t pairing_request;
-static int persistence_error;
+static int persistence_error, channel_error;
+static unsigned address_writes, schedule_updates;
+static uint8_t scheduled_slot, scheduled_total;
 static struct esb_payload { uint8_t data[8]; bool noack; } tx_payload_pair;
 static uint8_t pair_target, pair_step;
 static void receive_pair(void);
@@ -104,16 +107,26 @@ static int64_t k_uptime_get(void) {
 static uint32_t k_uptime_get_32(void) { return (uint32_t)now; }
 static uint32_t k_cycle_get_32(void) { return (uint32_t)now; }
 static bool esb_ota_is_active(void) { return ota_active; }
+static unsigned abort_requests;
+static void esb_ota_request_abort(void) { ++abort_requests; }
 static bool esb_is_idle(void) { assert(!irq_depth); return idle; }
 static void esb_clear_time_sync_state(void) { server_time_synced = false; }
 static void tdma_set_enabled(bool enabled) { assert(!irq_depth); if (!enabled) ++tdma_resets; }
 static void drop_failed_tx_payload_if_pending(void) {}
 static void esb_flush_tx(void) { assert(idle && !irq_depth); ++tx_flushes; }
 static void esb_flush_rx(void) { assert(idle && !irq_depth); ++rx_flushes; }
-static int esb_set_rf_channel(uint8_t ch) { assert(idle && !irq_depth && ch <= 100); ++changes; return 0; }
-static uint8_t esb_get_ping_ack_flag(void) { return 0; }
+static int esb_set_rf_channel(uint8_t ch) { assert(idle && !irq_depth && ch <= 100); ++changes; return channel_error; }
+static uint8_t esb_get_ping_ack_flag(void);
+static bool metadata_echo_pending;
+static uint8_t acked_remote_command, received_remote_command;
+static uint8_t received_metadata_mask, received_metadata_chunk;
+static uint16_t received_metadata_token;
+static uint16_t test_mode_get_target_tps(void) { return 250; }
+static uint16_t connection_get_data_collection_batch_rate(void) { return 100; }
+static uint8_t last_probe[13];
 static int esb_write_ping(uint8_t *ping, bool force) {
     assert(force && ping[0] == 0xf0 && ping[1] == tracker_id);
+    memcpy(last_probe, ping, sizeof(last_probe));
     ++probes; record_ping_admission(ping_counter); return 0;
 }
 static void clocks_start(void) { clock_status = true; }
@@ -132,12 +145,21 @@ static uint8_t crc8_ccitt(uint8_t seed, const uint8_t *data, size_t size) {
     return seed;
 }
 static void watchdog_feed(int channel) { (void)channel; assert(now < 100000); }
-static void k_msleep(int delay) { now += delay; }
+static bool cancel_pair_after_ack;
+void esb_deinitialize(void);
+static void k_msleep(int delay) {
+    now += delay;
+    if (cancel_pair_after_ack && delay == 2 && paired_addr[0]) {
+        cancel_pair_after_ack = false;
+        esb_deinitialize();
+    }
+}
 static int sys_request_system_off(void) { return 0; }
 static int esb_initialize(bool tx) {
     (void)tx; esb_initialized = true;
     ++radio_session_generation;
-    radio_channel = retained->rf_channel == 128 ? 0 : retained->rf_channel;
+    radio_channel = retained->rf_channel == 128 ? 0 :
+        retained->rf_channel == 0xff ? RADIO_RF_CHANNEL : retained->rf_channel;
     return 0;
 }
 static int esb_write_payload(const struct esb_payload *payload) {
@@ -158,18 +180,40 @@ static int esb_start_tx(void) {
 static int sys_write(unsigned id, void *dst, const void *src, size_t len) {
     assert(!irq_depth);
     assert(id == RF_CHANNEL_ID || id == PAIRED_ID);
-    memcpy(dst, src, len); if (id == RF_CHANNEL_ID) ++writes; return persistence_error;
+    if (id == RF_CHANNEL_ID) ++writes; else ++address_writes;
+    if (!persistence_error) memcpy(dst, src, len);
+    return persistence_error;
 }
 static void esb_disable(void) { ++disables; }
 static uint8_t tdma_get_config_epoch(void) { return epoch; }
 static void tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8_t new_epoch) {
     assert(slot < total && ticks >= 16); epoch = new_epoch;
+    ++schedule_updates; scheduled_slot = slot; scheduled_total = total;
 }
 void set_status(enum sys_status status, bool value) {
     if (value) status_state |= status; else status_state &= ~status;
 }
 int get_status(enum sys_status status) { return status_state & status; }
 #include "channels.inc"
+static void packet_crc(void) {
+    rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
+}
+static void normal_packet(uint8_t slot, uint8_t total) {
+    memset(&rx_payload, 0, sizeof(rx_payload));
+    rx_payload.length = ESB_PONG_LEN; rx_payload.data[0] = ESB_PONG_TYPE;
+    rx_payload.data[1] = tracker_id; rx_payload.data[2] = ping_ctr_sent;
+    rx_payload.data[8] = slot; rx_payload.data[9] = total;
+    rx_payload.data[10] = 16; rx_payload.data[11] = epoch + 1;
+    packet_crc();
+}
+static void dedicated_packet(uint8_t channel) {
+    normal_packet(0, 1);
+    rx_payload.data[7] = ESB_PONG_FLAG_CHANNEL_CONFIRM;
+    rx_payload.data[8] = channel;
+    rx_payload.data[9] = ESB_CHANNEL_CONFIRM_VERSION;
+    rx_payload.data[10] = rx_payload.data[11] = 0;
+    packet_crc();
+}
 enum { ESB_EVENT_TX_SUCCESS, ESB_EVENT_TX_FAILED };
 struct esb_evt { int evt_id; unsigned tx_attempts; };
 static int consecutive_enomem_errors;
@@ -183,18 +227,14 @@ static void failed_tx(void) {
     host_tx_event(&event);
 }
 static void late_pong(void) {
-    rx_payload.length = 13; rx_payload.data[0] = ESB_PONG_TYPE;
-    rx_payload.data[1] = tracker_id; rx_payload.data[2] = ping_ctr_sent;
-    rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
+    normal_packet(0, 1);
     assert(!accept_pong());
 }
 static void dispatch_pong_irq(void) {
     assert(!irq_depth);
     if (pong_irq_pending) {
         pong_irq_pending = false;
-        rx_payload.length = ESB_PONG_LEN; rx_payload.data[0] = ESB_PONG_TYPE;
-        rx_payload.data[1] = tracker_id; rx_payload.data[2] = ping_ctr_sent;
-        rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
+        normal_packet(0, 1);
         assert(accept_pong());
         ++delivered_pongs;
     }
@@ -220,7 +260,15 @@ static void reset(uint8_t home) {
     esb_initialized = true; idle = true; ota_active = false;
     ota_rx_head = ota_rx_tail = 0; ping_failures = 3;
     channel_search = channel_wait_normal = channel_found = channel_heard = false;
-    radio_channel = home; now = 100; probes = changes = writes = 0;
+    channel_redirect_pending = pair_provisional = pairing_search_active = false;
+    channel_confirm_capable = channel_legacy_peer = channel_confirmed = false;
+    ping_channel_confirm_sent = false; abort_requests = 0;
+    cancel_pair_after_ack = false;
+    channel_error = persistence_error = 0;
+    radio_user_disabled = own_pong_seen = server_time_synced = false;
+    address_writes = schedule_updates = 0;
+    metadata_echo_pending = false; acked_remote_command = received_remote_command = 0;
+    radio_channel = home; now = 100; probes = changes = writes = disables = 0;
     own_pong_time = (uint32_t)now;
     storage.rf_channel = esb_rf_channel_encode(home);
     memset(storage.paired_addr, 0x5a, sizeof(storage.paired_addr));
@@ -275,13 +323,14 @@ static void cadence(void) {
     }
     assert(minimum >= 10000 && maximum <= 10001);
     assert(ping_failures == (uint32_t)((now - 1 - own_pong_time) / get_ping_interval_ms()));
-    /* Accepted own PONG plus NORMAL completes search and resets throttling. */
-    rx_payload.length = ESB_PONG_LEN; rx_payload.data[0] = ESB_PONG_TYPE;
-    rx_payload.data[1] = tracker_id; rx_payload.data[2] = ping_ctr_sent;
-    rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
+    /* Dedicated proof plus a fresh legacy NORMAL completes recovery. */
+    dedicated_packet(radio_channel);
     assert(accept_pong() && ping_failures == 0 && !ping_pending);
+    assert(channel_confirmed && !channel_found);
+    record_ping_admission(ping_counter);
+    normal_packet(0, 1);
+    assert(accept_pong() && !ping_pending);
     server_time_synced = true;
-    rx_payload.data[8] = 0; rx_payload.data[9] = 1; rx_payload.data[10] = 16;
     receive_schedule(ESB_PONG_FLAG_NORMAL);
     assert(channel_found && !esb_channel_search_poll(false));
     unsigned recovered_count = warning_count;
@@ -310,7 +359,7 @@ static void warning_lifecycle(void) {
         esb_initialized = true; esb_conn_state = ESB_ST_PAIRED;
         now += 1; owner_tick(); assert(warning_count == 3 + mode);
     }
-    channel_search = false; ping_failures = 0; own_pong_time = now;
+    channel_search = channel_wait_normal = false; ping_failures = 0; own_pong_time = now;
     now += 1; owner_tick(); assert(warning_count == 4);
     ping_failures = 3; now += 1; owner_tick(); assert(warning_count == 5);
     for (unsigned mode = 0; mode < 3; ++mode) {
@@ -409,6 +458,327 @@ static void visit(uint8_t target) {
     }
     assert(radio_channel == target && writes == 0);
 }
+static void confirm_channel(uint8_t target) {
+    record_ping_admission(ping_counter);
+    dedicated_packet(target);
+    assert(accept_pong());
+    assert(!channel_found);
+    server_time_synced = false;
+    record_ping_admission(ping_counter);
+    normal_packet(0, 1); assert(accept_pong());
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(!channel_found && !writes && !address_writes);
+    record_ping_admission(ping_counter);
+    normal_packet(0, 1);
+    assert(accept_pong());
+    server_time_synced = true;
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(channel_found);
+    assert(!esb_channel_search_poll(false));
+}
+
+static void advertised_channels(void) {
+    /* Adjacent-channel decoding is not proof of the tuned physical channel. */
+    const uint8_t targets[] = {84, 85, 0, 100};
+    for (unsigned i = 0; i < sizeof(targets); ++i) {
+        for (unsigned startup = 0; startup < 2; ++startup) {
+            uint8_t from = startup ? 85 : 84;
+            if (targets[i] == from) continue;
+            reset(startup ? 85 : 84);
+            if (!startup) storage.rf_channel = 0xff;
+            if (startup) {
+                ping_failures = 0; channel_wait_normal = true;
+                assert(storage.rf_channel == 85);
+            }
+            visit(from);
+            dedicated_packet(targets[i]);
+            assert(!accept_pong());
+            assert(channel_redirect_pending && !channel_found);
+            assert(!schedule_updates && !writes && !address_writes && radio_channel == from);
+            unsigned before = changes;
+            ota_active = true;
+            assert(!esb_channel_search_poll(false));
+            assert(changes == before && !writes && radio_channel == from);
+            ota_active = false;
+            record_ping_admission(ping_counter); dedicated_packet(targets[i]);
+            assert(!accept_pong() && channel_redirect_pending);
+            idle = false;
+            assert(esb_channel_search_poll(false));
+            assert(changes == before && !writes);
+            idle = true; channel_error = -EIO;
+            assert(esb_channel_search_poll(false));
+            assert(channel_redirect_pending && radio_channel == from && !writes);
+            channel_error = 0;
+            assert(esb_channel_search_poll(false));
+            assert(radio_channel == targets[i] && !channel_redirect_pending);
+            assert(!channel_found && !server_time_synced && !writes && !schedule_updates);
+            dedicated_packet(targets[i]);
+            --rx_payload.data[2]; packet_crc();
+            assert(!accept_pong() && !writes);
+            confirm_channel(targets[i]);
+            assert(storage.rf_channel == (targets[i] == 84 ? 0xff :
+                targets[i] == 0 ? 128 : targets[i]));
+            assert(writes == (unsigned)(startup || targets[i] != 84) && !address_writes);
+        }
+    }
+    /* Version, reserved bytes, physical range, request and live counter matter. */
+    for (unsigned invalid = 0; invalid < 37; ++invalid) {
+        reset(85); visit(85); dedicated_packet(84);
+        if (invalid < 27) rx_payload.data[8] = 101 + invalid;
+        else if (invalid == 27) rx_payload.data[9] = 2;
+        else if (invalid == 28) ++rx_payload.data[1];
+        else if (invalid == 29) --rx_payload.data[2];
+        else if (invalid == 30) ping_pending = false;
+        else if (invalid == 31) rx_payload.length = 12;
+        else if (invalid == 32) rx_payload.data[10] = 1;
+        else if (invalid == 33) rx_payload.data[11] = 1;
+        else if (invalid == 34) rx_payload.data[9] = 0;
+        else if (invalid == 35) ping_channel_confirm_sent = false;
+        packet_crc();
+        if (invalid == 36) rx_payload.data[12] ^= 1;
+        assert(!accept_pong());
+        assert(!channel_redirect_pending && !channel_found && !channel_heard);
+        assert(!channel_legacy_peer && !channel_confirm_capable && !channel_confirmed);
+        assert(radio_channel == 85 && !writes && !address_writes && !schedule_updates);
+    }
+    unsigned valid = 0;
+    for (unsigned total = 1; total <= 16; ++total) {
+        for (unsigned slot = 0; slot < total; ++slot) {
+            reset(84); visit(84); dedicated_packet(84);
+            assert(accept_pong());
+            record_ping_admission(ping_counter); normal_packet(slot, total);
+            assert(accept_pong()); server_time_synced = true;
+            receive_schedule(ESB_PONG_FLAG_NORMAL);
+            assert(channel_found && schedule_updates == 1);
+            assert(scheduled_slot == slot && scheduled_total == total);
+            ++valid;
+        }
+    }
+    assert(valid == 136);
+    reset(84); visit(84); dedicated_packet(84); assert(accept_pong());
+    record_ping_admission(ping_counter); normal_packet(0xff, 0);
+    assert(accept_pong()); server_time_synced = true;
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(!channel_found && !schedule_updates && !writes);
+}
+
+static void proof_during_channel_hold(void) {
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        reset(84); storage.rf_channel = 0xff;
+        ping_failures = 0; channel_wait_normal = true;
+        ota_active = mode == 1; ota_rx_head = mode == 2;
+        record_ping_admission(ping_counter);
+        assert(!esb_channel_search_poll(mode == 0));
+        assert(ping_pending && channel_wait_normal);
+        assert(!changes && !tx_flushes && !rx_flushes && !writes);
+        dedicated_packet(84);
+        assert(accept_pong() && channel_confirmed);
+        record_ping_admission(ping_counter); normal_packet(0, 1);
+        assert(accept_pong()); server_time_synced = true;
+        receive_schedule(ESB_PONG_FLAG_NORMAL); assert(channel_found);
+        assert(!esb_channel_search_poll(mode == 0));
+        assert(!channel_wait_normal && !channel_search && !channel_found);
+        assert(!changes && !tx_flushes && !rx_flushes && !writes);
+        /* Once proof finishes, ordinary control PONGs are admitted despite
+         * suppression; the owner can execute UNSUPPRESS or OTA ABORT. */
+        record_ping_admission(ping_counter); normal_packet(0, 1);
+        rx_payload.data[7] = ESB_PONG_FLAG_OTA_UNSUPPRESS;
+        packet_crc();
+        assert(accept_pong());
+
+        reset(85); ping_failures = 0; channel_wait_normal = true;
+        ota_active = mode == 1; ota_rx_head = mode == 2;
+        record_ping_admission(ping_counter); dedicated_packet(84);
+        assert(!accept_pong() && channel_redirect_pending);
+        assert(!esb_channel_search_poll(mode == 0));
+        assert(radio_channel == 85 && channel_wait_normal && !channel_found);
+        assert(!changes && !tx_flushes && !rx_flushes && !writes);
+    }
+    /* User-selected physical84 is not an automatic migration. */
+    reset(84); ping_failures = 0; channel_wait_normal = true;
+    assert(storage.rf_channel == 84);
+    confirm_channel(84);
+    assert(storage.rf_channel == 84 && !writes);
+    /* Reconnect on that same custom channel keeps the explicit selection. */
+    ping_failures = 3; visit(84); confirm_channel(84);
+    assert(storage.rf_channel == 84 && !writes);
+}
+
+static void provisional_pairing(void) {
+    const uint8_t targets[] = {0, 84, 100};
+    for (unsigned i = 0; i < sizeof(targets); ++i) {
+        reset(85); memset(paired_addr, 0, sizeof(paired_addr));
+        pair_target = 85; registered_at = -1;
+        unsigned successes = led_test_events[LED_SUCCESS];
+        esb_pair();
+        assert(pair_provisional && pairing_search_active);
+        assert(paired_addr[1] == 3 && esb_conn_state == ESB_ST_PAIRED);
+        assert(!writes && !address_writes && led_test_events[LED_SUCCESS] == successes);
+        for (unsigned j = 0; j < 8; ++j) assert(storage.paired_addr[j] == 0x5a);
+        esb_initialize(true); /* Connection owner starts the paired pipes. */
+        visit(85); dedicated_packet(targets[i]);
+        assert(!accept_pong() && channel_redirect_pending);
+        assert(esb_channel_search_poll(false));
+        assert(radio_channel == targets[i] && !writes && !address_writes);
+        confirm_channel(targets[i]);
+        assert(!pair_provisional && !pairing_search_active);
+        assert(address_writes == 1 && writes == 1);
+        assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
+        assert(led_test_events[LED_SUCCESS] == successes + 1);
+    }
+    for (unsigned timeout = 0; timeout < 2; ++timeout) {
+        reset(85); memset(paired_addr, 0, sizeof(paired_addr));
+        pair_target = 85; registered_at = -1;
+        unsigned successes = led_test_events[LED_SUCCESS];
+        esb_pair(); assert(pair_provisional);
+        if (timeout) {
+            now = pair_confirm_deadline;
+            (void)esb_channel_search_poll(false);
+        } else {
+            esb_deinitialize();
+        }
+        assert(!pair_provisional && !paired_addr[0] && !esb_initialized);
+        assert(!writes && !address_writes && storage.rf_channel == 85);
+        for (unsigned j = 0; j < 8; ++j) assert(storage.paired_addr[j] == 0x5a);
+        assert(led_test_events[LED_SUCCESS] == successes);
+    }
+    reset(85); memset(paired_addr, 0, sizeof(paired_addr));
+    pair_target = 85; registered_at = -1; cancel_pair_after_ack = true;
+    unsigned prior_successes = led_test_events[LED_SUCCESS];
+    esb_pair();
+    assert(!cancel_pair_after_ack && !paired_addr[0] && !pair_provisional);
+    assert(!esb_initialized && !writes && !address_writes && storage.rf_channel == 85);
+    assert(led_test_events[LED_SUCCESS] == prior_successes);
+    for (unsigned j = 0; j < 8; ++j) assert(storage.paired_addr[j] == 0x5a);
+    reset(85); memset(paired_addr, 0, sizeof(paired_addr));
+    pair_target = 85; registered_at = -1;
+    unsigned successes = led_test_events[LED_SUCCESS], partials = led_test_events[LED_PARTIAL];
+    esb_pair(); esb_initialize(true); visit(85);
+    persistence_error = -EIO; confirm_channel(85);
+    assert(led_test_events[LED_PARTIAL] == partials + 1);
+    assert(led_test_events[LED_SUCCESS] == successes);
+    for (unsigned j = 0; j < 8; ++j) assert(storage.paired_addr[j] == 0x5a);
+}
+
+static void legacy_compatibility(void) {
+    const uint8_t replies[] = {ESB_PONG_FLAG_NORMAL, ESB_PONG_FLAG_OTA_QUERY_INFO,
+        ESB_PONG_FLAG_DATA_COLLECT_METADATA, ESB_PONG_FLAG_TEST_MODE_ON};
+    for (unsigned i = 0; i < sizeof(replies); ++i) {
+        reset(84); storage.rf_channel = 0xff; visit(86);
+        assert(ping_channel_confirm_sent);
+        normal_packet(0, 1); rx_payload.data[7] = replies[i]; packet_crc();
+        assert(accept_pong() && channel_legacy_peer && !channel_confirmed);
+        assert(!channel_found && !writes && !address_writes);
+        assert(!(esb_get_ping_ack_flag() & ESB_PING_FLAG_CHANNEL_CONFIRM));
+        record_ping_admission(ping_counter); normal_packet(0, 1);
+        assert(accept_pong()); server_time_synced = true;
+        receive_schedule(ESB_PONG_FLAG_NORMAL);
+        assert(channel_found && !esb_channel_search_poll(false));
+        assert(radio_channel == 86 && storage.rf_channel == 0xff && !writes);
+        /* A later recovery probes again, so a receiver upgrade is discovered. */
+        ping_failures = 3; visit(86);
+        assert(ping_channel_confirm_sent && !channel_legacy_peer);
+        dedicated_packet(84); assert(!accept_pong() && channel_confirm_capable);
+        assert(esb_channel_search_poll(false) && radio_channel == 84);
+        /* A known new receiver can never be silently downgraded by NORMAL. */
+        normal_packet(0, 1);
+        assert(!accept_pong() && !channel_legacy_peer && !channel_found);
+        confirm_channel(84);
+        assert(storage.rf_channel == 0xff && !writes);
+    }
+    reset(84); visit(86);
+    normal_packet(0, 1); ping_channel_confirm_sent = false;
+    assert(!accept_pong() && !channel_legacy_peer);
+    reset(84); visit(86);
+    normal_packet(0, 1); rx_payload.data[7] = 0x7f; packet_crc();
+    assert(!accept_pong() && !channel_legacy_peer);
+    now += get_ping_interval_ms(); maintenance_timeout();
+    assert(!channel_legacy_peer); /* Silence is never capability evidence. */
+    reset(84); ping_failures = 0; channel_wait_normal = true;
+    record_ping_admission(ping_counter); normal_packet(0, 1);
+    assert(accept_pong()); server_time_synced = true;
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(!esb_channel_search_poll(false) && storage.rf_channel == 84 && !writes);
+    /* Eight-byte legacy pairing identity commits only after valid NORMAL. */
+    reset(84); memset(paired_addr, 0, sizeof(paired_addr));
+    pair_target = 86; registered_at = -1;
+    esb_pair(); assert(pair_provisional && !address_writes && !writes);
+    esb_initialize(true); visit(86);
+    normal_packet(0, 1); rx_payload.data[7] = ESB_PONG_FLAG_OTA_QUERY_INFO; packet_crc();
+    assert(accept_pong() && channel_legacy_peer);
+    assert(!address_writes && !writes);
+    record_ping_admission(ping_counter); normal_packet(0, 1);
+    assert(accept_pong()); server_time_synced = true;
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(!esb_channel_search_poll(false));
+    assert(!pair_provisional && address_writes == 1 && !writes && storage.rf_channel == 84);
+    assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
+}
+
+static void ota_status_abort(void) {
+    for (unsigned pending = 0; pending < 2; ++pending) {
+        for (unsigned invalid = 0; invalid < 5; ++invalid) {
+            reset(85); channel_wait_normal = true; ota_active = true;
+            ping_pending = pending; ping_ctr_sent = 91; ping_failed = true;
+            ping_success_streak = 2; server_time_synced = true;
+            normal_packet(0, 1); rx_payload.data[2] = 0;
+            rx_payload.data[7] = ESB_PONG_FLAG_OTA_ABORT;
+            if (invalid == 1) ++rx_payload.data[1];
+            if (invalid == 2) rx_payload.length = 12;
+            if (invalid == 3) rx_payload.data[0] = ESB_PING_TYPE;
+            packet_crc();
+            if (invalid == 4) rx_payload.data[12] ^= 1;
+            uint32_t old_time = own_pong_time;
+            int old_status = status_state;
+            assert(!accept_pong());
+            assert(abort_requests == (invalid == 0));
+            assert(ping_pending == pending && ping_failed && ping_failures == 3);
+            assert(ping_success_streak == 2 && own_pong_time == old_time && !own_pong_seen);
+            assert(server_time_synced && status_state == old_status);
+            assert(channel_wait_normal && !channel_found && !channel_heard);
+            assert(!channel_confirmed && !channel_confirm_capable && !channel_legacy_peer);
+            assert(!writes && !address_writes && !schedule_updates);
+        }
+    }
+    reset(84); record_ping_admission(ping_counter); normal_packet(0, 1);
+    rx_payload.data[7] = ESB_PONG_FLAG_OTA_ABORT; packet_crc();
+    assert(accept_pong() && !abort_requests && !ping_pending);
+}
+
+static void owner_command_arguments(void) {
+    const uint8_t flags[] = {ESB_PONG_FLAG_TEST_MODE_ON,
+        ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, ESB_PONG_FLAG_DATA_COLLECT_METADATA};
+    const uint8_t expected[][4] = {{0, 250, 0, 0}, {100, 0, 0, 0}, {7, 2, 0x12, 0x34}};
+    for (unsigned legacy = 0; legacy < 2; ++legacy) {
+        for (unsigned command = 0; command < sizeof(flags); ++command) {
+            reset(84); visit(84);
+            if (legacy) normal_packet(0, 1); else dedicated_packet(84);
+            assert(accept_pong() && channel_wait_normal);
+            acked_remote_command = received_remote_command = flags[command];
+            metadata_echo_pending = command == 2;
+            received_metadata_mask = 7; received_metadata_chunk = 2; received_metadata_token = 0x1234;
+            unsigned old_probes = probes;
+            now = search_probe_at;
+            assert(esb_channel_search_poll(false));
+            assert(probes == old_probes + 1 && channel_wait_normal && !channel_found);
+            assert(last_probe[7] == flags[command] && !ping_channel_confirm_sent);
+            assert(memcmp(&last_probe[8], expected[command], 4) == 0);
+            assert(acked_remote_command == flags[command]);
+            assert(metadata_echo_pending == (command == 2));
+        }
+    }
+    reset(84);
+    acked_remote_command = received_remote_command = ESB_PONG_FLAG_TEST_MODE_ON;
+    metadata_echo_pending = true;
+    visit(84);
+    const uint8_t zero[4] = {0};
+    assert(last_probe[7] == ESB_PING_FLAG_CHANNEL_CONFIRM);
+    assert(memcmp(&last_probe[8], zero, 4) == 0);
+    dedicated_packet(84); assert(accept_pong());
+    assert(acked_remote_command == ESB_PONG_FLAG_TEST_MODE_ON && metadata_echo_pending);
+    assert(received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON && !schedule_updates);
+}
+
 int main(void) {
     trace_warnings = getenv("RADIO_PING_TRACE") != NULL;
     pong_age();
@@ -417,6 +787,11 @@ int main(void) {
     warning_lifecycle();
     puts("channels: 120s production-path ping cadence, recovery and suppression PASS");
     if (getenv("RADIO_PING_ONLY")) return 0;
+    advertised_channels();
+    proof_during_channel_hold();
+    legacy_compatibility();
+    ota_status_abort();
+    owner_command_arguments();
     for (unsigned home = 0; home <= 100; ++home) {
         bool seen[101] = {0};
         assert(channel_candidate(home, 0) == home);
@@ -428,7 +803,7 @@ int main(void) {
     const uint8_t destinations[] = {0, 51, 100};
     for (unsigned i = 0; i < sizeof(destinations); ++i) {
         reset(2); visit(destinations[i]);
-        rx_payload.length = 13; rx_payload.data[0] = ESB_PONG_TYPE;
+        dedicated_packet(destinations[i]);
         rx_payload.data[1] = tracker_id + 7;
         rx_payload.data[2] = ping_ctr_sent;
         rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
@@ -444,10 +819,10 @@ int main(void) {
         rx_payload.data[12] ^= 1;
         rx_payload.length = 12; assert(!accept_pong()); rx_payload.length = 13;
         assert(accept_pong() && channel_heard);
-        server_time_synced = true;
-        rx_payload.data[8] = 0xff; rx_payload.data[9] = 1; rx_payload.data[10] = 16;
+        record_ping_admission(ping_counter); normal_packet(0xff, 0);
+        assert(accept_pong()); server_time_synced = true;
         receive_schedule(ESB_PONG_FLAG_NORMAL); assert(!channel_found);
-        rx_payload.data[8] = 0;
+        normal_packet(0, 1);
         receive_schedule(ESB_PONG_FLAG_SET_CHANNEL); assert(!channel_found);
         receive_schedule(ESB_PONG_FLAG_NORMAL); assert(channel_found);
         assert(!esb_channel_search_poll(false));
@@ -477,22 +852,7 @@ int main(void) {
     ota_active = false; esb_deinitialize();
     assert(!esb_initialized && !channel_search && channel_wait_normal && !channel_found);
     assert(storage.rf_channel == 2 && writes == 0 && disables == 1);
-    for (unsigned i = 0; i < sizeof(destinations); ++i) {
-        reset(2); memset(paired_addr, 0, sizeof(paired_addr));
-        pair_target = destinations[i]; registered_at = -1;
-        esb_pair();
-        assert(led_test_events[LED_SUCCESS] == i + 1 && led_test_events[LED_PARTIAL] == 0);
-        assert(storage.rf_channel == esb_rf_channel_encode(pair_target));
-        assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
-        assert(paired_addr[1] == 3 && esb_conn_state == ESB_ST_PAIRED);
-        assert(writes == 1 && !esb_initialized);
-    }
-    reset(2); memset(paired_addr, 0, sizeof(paired_addr)); pair_target = 2;
-    registered_at = -1; persistence_error = -EIO;
-    unsigned successes = led_test_events[LED_SUCCESS];
-    esb_pair();
-    assert(led_test_events[LED_PARTIAL] == 1 && led_test_events[LED_SUCCESS] == successes);
-    persistence_error = 0;
+    provisional_pairing();
     struct led_connection_facts facts = {0};
     reset(2); memcpy(paired_addr, storage.paired_addr, sizeof(paired_addr));
     esb_conn_state = ESB_ST_PAIRED; ping_failures = 0; own_pong_seen = false;

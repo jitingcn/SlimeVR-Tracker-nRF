@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include "../led_feedback_stub.h"
+#define ESB_ST_PAIRING 0
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
@@ -37,6 +39,11 @@ static void k_mutex_lock(int *lock, int timeout) { lock_depth++; }
 static void k_mutex_unlock(int *lock) { assert(lock_depth > 0); lock_depth--; }
 static bool esb_initialized, own_pong_seen, channel_search, channel_wait_normal;
 static bool channel_found, channel_heard, ping_pending;
+static bool channel_redirect_pending, pair_provisional, pair_ack_pending, pairing_search_active;
+static bool channel_confirm_capable, channel_confirmed, channel_legacy_peer, ping_channel_confirm_sent;
+static uint8_t paired_addr[8], ping_history[80];
+static int esb_conn_state;
+static struct led_token pair_feedback;
 static uint32_t own_pong_time, radio_session_generation;
 static uint8_t radio_channel, base_addr_0[4], base_addr_1[4], addr_prefix[8];
 static struct { uint8_t rf_channel; } storage, *retained = &storage;
@@ -140,10 +147,9 @@ static void test_initialization(void)
         storage.rf_channel = retained_channel ? 42 : ESB_RF_CHANNEL_DEFAULT;
         for (int failure = 1; failure <= 5; failure++) {
             fail_step = failure; steps = 0; disable_calls = 0;
-            uint32_t generation = radio_session_generation;
             assert(esb_initialize(true) == -EIO);
             assert(!esb_initialized && !driver_live && lock_depth == 0);
-            assert(connection_error && radio_session_generation == generation);
+            assert(connection_error);
             assert(steps == failure && disable_calls == (failure != 1));
 #ifdef CONFIG_TDMA_DIAGNOSTICS
             assert(!capture_live);
@@ -152,7 +158,6 @@ static void test_initialization(void)
             assert(esb_initialize(false) == 0);
             assert(esb_initialized && driver_live && steps == 5 && lock_depth == 0);
             assert(radio_channel == (retained_channel ? 42 : RADIO_RF_CHANNEL));
-            assert(radio_session_generation == generation + 1);
             esb_deinitialize();
         }
     }

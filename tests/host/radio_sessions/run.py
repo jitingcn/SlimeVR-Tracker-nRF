@@ -75,7 +75,7 @@ commands = [constants, block(esb, r"^struct esb_remote_cmd \{", True)]
 commands.extend(re.findall(r"^static (?:bool remote_command_rejected|uint32_t remote_command_generation);", esb, re.MULTILINE))
 commands.extend(re.findall(r"^static uint32_t (?:executing_shutdown_generation|shutdown_feedback_generation, shutdown_feedback_request|shutdown_accepted_event, shutdown_terminal_event);", esb, re.MULTILINE))
 registry = block(esb, r"^static const struct esb_remote_cmd esb_remote_cmds\[\] = \{", True)
-actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start", "esb_remote_cmd_set_channel")
+actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start", "esb_remote_cmd_set_channel", "esb_remote_cmd_ota_query_info", "esb_remote_cmd_ota_abort")
 for name in actual_handlers:
     commands.append(function(esb, name))
 for name in sorted(set(re.findall(r", (esb_remote_cmd_\w+)\}", registry)) - set(actual_handlers)):
@@ -102,32 +102,39 @@ collection.append("static int batch_request(bool enable, uint16_t rate) { " + ("
 # mask as a bool in a fixture would hide a permanently blocked producer.
 status = (SOURCE / "system/status.c").read_text()
 start = esb.index("\t\t\t\t\tuint8_t rx_id = rx_payload.data[1];")
-end = esb.index("\n\t\t\t\t\tbool match_ctr", start)
+end = esb.index("\n\t\t\t\t\tuint32_t ping_rx_ticks", start)
 recovery = constants + "\n" + function(status, "get_status")
+recovery += "\n" + function(esb, "esb_pong_is_legacy")
 recovery += "\n" + "\n".join(re.findall(r"^#define PING_RECOVERY_THRESHOLD[^\n]*", esb, re.MULTILINE))
-recovery += "\nstatic void receive_valid_pong(void) { do {\n" + esb[start:end] + "\n(void)counter_diff;\n} while (0); }\n"
+recovery += "\nstatic void receive_valid_pong(void) { do {\n" + esb[start:end] + "\n(void)rx_ctr;\n} while (0); }\n"
 
 channels = constants + "\n" + block(esb, r"^static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS\[\] = \{", True)
 channels += "\n#define ESB_ALLOWED_CHANNELS_COUNT (sizeof(ESB_ALLOWED_CHANNELS))\n"
 channels += esb[esb.index("K_MUTEX_DEFINE(esb_radio_lock);"):esb.index("#define TX_ERROR_THRESHOLD")]
 channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_encode\([^;{]*\)\s*\{", False)
+channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_decode\([^;{]*\)\s*\{", False)
+channels += "\n" + function(esb, "esb_pong_is_legacy")
+channels += "\n" + function(esb, "esb_get_ping_ack_flag")
+channels += "\n" + function(esb, "esb_get_ping_request_data")
 # Reuse actual successful-PING accounting without pulling hardware admission
 # and TDMA into the channel fixture. Both constructs exist in baseline sources.
 channels += "\nstatic void record_ping_admission(uint8_t counter) {\n"
 channels += "bool is_ping = true; int queue_status = 0; unsigned data_length = ESB_PING_LEN;\n"
 channels += "struct { uint8_t data[ESB_PING_LEN]; } tx_payload = {{ESB_PING_TYPE, 0, counter}};\n"
+channels += "tx_payload.data[7] = esb_get_ping_ack_flag();\n"
 channels += block(esb, r"^\tif \(is_ping && queue_status == 0 && data_length == ESB_PING_LEN\) \{")
 channels += "\n" + block(esb, r"^\tif \(tx_payload.data\[0\] == ESB_PING_TYPE && queue_status == 0\) \{")
 channels += "\n}\n"
 channels += "\nstatic void maintenance_timeout(void) { int64_t now_idle = k_uptime_get();\n"
 channels += block(esb, r"^\t\tif \(ping_pending && \(now_idle - ping_send_time\) > \(get_ping_interval_ms\(\) - 100\)\) \{")
 channels += "\n}\n"
-channels += "\n" + function(esb, "esb_channel_search_poll")
 channels += "\n" + function(esb, "esb_deinitialize")
+channels += "\n" + function(esb, "esb_channel_search_poll")
 start = esb.index("\t\t\t\tif (rx_payload.data[0] == ESB_PONG_TYPE)")
-end = esb.index("\n\t\t\t\t\tbool match_ctr", start)
-channels += "\n#define PING_RECOVERY_THRESHOLD 1\nstatic bool accept_pong(void) { if (rx_payload.length != ESB_PONG_LEN) return false; do {\n" + esb[start:end] + "\n(void)counter_diff;\nreturn true;\n}\n} while (0); return false; }\n"
-start = esb.index("\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_NORMAL)")
+end = esb.index("\n\t\t\t\t\tuint32_t ping_rx_ticks", start)
+channels += "\n#define PING_RECOVERY_THRESHOLD 1\nstatic bool pong_admitted;\nstatic void receive_pong_prefix(void) { do {\n" + esb[start:end] + "\n(void)rx_ctr;\npong_admitted = true;\n}\n} while (0); }\n"
+channels += "\nstatic bool accept_pong(void) { pong_admitted = false; if (rx_payload.length == ESB_PONG_LEN) receive_pong_prefix(); return pong_admitted; }\n"
+start = esb.index("\t\t\t\t\t/* NORMAL retains the legacy slot/total layout.")
 end = esb.index("\n\n\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA)", start)
 channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\n" + esb[start:end] + "\n}\n"
 channels += "\n" + function(esb, "esb_send_pair_step")
