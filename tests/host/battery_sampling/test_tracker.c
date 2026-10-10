@@ -1,7 +1,9 @@
 #include <assert.h>
 #include <errno.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,6 +65,112 @@ static void *forbidden_alloc(size_t size) { (void)size; assert(!"curve allocated
 #define k_free free
 #include "production.inc"
 
+/* Capture only console rendering; tracker debug keeps the existing printk leaf. */
+static char console_output[4096];
+static size_t console_length;
+static void console_printk(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(console_output + console_length,
+                            sizeof(console_output) - console_length, format, args);
+    va_end(args);
+    assert(written >= 0 && (size_t)written < sizeof(console_output) - console_length);
+    console_length += (size_t)written;
+}
+#undef printk
+#define printk(...) console_printk(__VA_ARGS__)
+#include "console.inc"
+#undef printk
+
+static void assert_battery_rendering(int expected_mV, int16_t expected_pptt)
+{
+    assert(sys_get_valid_battery_mV() == expected_mV);
+    assert(sys_get_valid_battery_pptt() == expected_pptt);
+    void (*const renderers[])(void) = {print_battery, print_battery_tracker};
+    for (size_t renderer = 0; renderer < ARRAY_SIZE(renderers); renderer++) {
+        console_length = 0;
+        console_output[0] = '\0';
+        renderers[renderer]();
+        char *line = strstr(console_output, "Battery:");
+        assert(line && (line == console_output || line[-1] == '\n'));
+        char *end = strchr(line, '\n');
+        assert(end);
+        *end = '\0';
+        /* Calibration and cycle percentages elsewhere are not battery SOC. */
+        unsigned percentages = 0;
+        for (char *cursor = line; *cursor;) {
+            if (isdigit((unsigned char)*cursor) || *cursor == '-' || *cursor == '+') {
+                char *number_end;
+                double value = strtod(cursor, &number_end);
+                if (number_end != cursor) {
+                    if (*number_end == '%') {
+                        assert(expected_pptt >= 0);
+                        assert(value >= 0.0 && value <= 100.0);
+                        if (expected_pptt == 0)
+                            assert(value == 0.0);
+                        else
+                            assert(value > 0.0);
+                        if (percentages > 0)
+                            assert(value == (double)expected_pptt / 100.0);
+                        percentages++;
+                    }
+                    cursor = number_end;
+                    continue;
+                }
+            }
+            cursor++;
+        }
+        if (expected_pptt < 0) {
+            assert(!strchr(line, '%'));
+        } else {
+            assert(percentages == (renderer == 0 ? 1U : 2U));
+        }
+        if (expected_mV > 0 && (expected_pptt < 0 || renderer == 1)) {
+            char voltage[32];
+            snprintf(voltage, sizeof(voltage), "%d mV", expected_mV);
+            assert(strstr(line, voltage));
+        } else if (expected_mV < 0) {
+            assert(!strstr(line, " mV"));
+        }
+    }
+}
+
+static void console_scenario(void)
+{
+    /* Cold USB boot must not turn charged USB-side measurements into battery SOC. */
+    ticks = 1000;
+    sys_update_battery_tracker_voltage(4300, true);
+    sys_update_battery_tracker(10000, true);
+    assert(sys_get_battery_mV() == 4300);
+    assert_battery_rendering(-1, -1);
+
+    /* Voltage can settle before the SOC filter produces its first valid sample. */
+    ticks += 1000;
+    sys_update_battery_tracker_voltage(4211, false);
+    sys_update_battery_tracker(-1, false);
+    assert(sys_get_battery_mV() == 4211);
+    assert_battery_rendering(4211, -1);
+
+    /* Replug holds the last unplugged voltage, without inventing its missing SOC. */
+    ticks += 1000;
+    sys_update_battery_tracker_voltage(4350, true);
+    sys_update_battery_tracker(10000, true);
+    assert(sys_get_battery_mV() == 4350);
+    assert_battery_rendering(4211, -1);
+
+    ticks += 1000;
+    sys_update_battery_tracker_voltage(3900, false);
+    sys_update_battery_tracker(7500, false);
+    assert_battery_rendering(3900, 7500);
+
+    /* Real empty-battery SOC is valid and must not be hidden with the sentinel. */
+    ticks += 1000;
+    sys_update_battery_tracker_voltage(3000, false);
+    sys_update_battery_tracker(0, false);
+    assert_battery_rendering(3000, 0);
+}
+
 static struct battery_tracker_interval interval(unsigned id)
 {
     struct battery_tracker_interval result;
@@ -88,7 +196,9 @@ static void setup_discharge(void)
 int main(int argc, char **argv)
 {
     assert(argc == 2);
-    if (!strcmp(argv[1], "retry")) {
+    if (!strcmp(argv[1], "console")) {
+        console_scenario();
+    } else if (!strcmp(argv[1], "retry")) {
         setup_discharge();
         seed(18, 400000);
         for (int failure = 0; failure < 2; failure++) {

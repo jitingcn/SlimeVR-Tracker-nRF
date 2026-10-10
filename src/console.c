@@ -1169,7 +1169,7 @@ static void print_battery(void)
 	uint64_t unplugged_time = sys_get_last_unplugged_time();
 	uint64_t remaining = sys_get_battery_remaining_time_estimate();
 	uint64_t runtime = sys_get_battery_runtime_estimate();
-	if (battery_mV > 0) {
+	if (battery_mV > 0 && calibrated_pptt >= 0) {
 		unplugged_time = k_ticks_to_us_floor64(k_uptime_ticks() - unplugged_time);
 		uint32_t hours = unplugged_time / 3600000000;
 		unplugged_time %= 3600000000;
@@ -1179,10 +1179,10 @@ static void print_battery(void)
 		} else {
 			printk("Battery: %.0f%%\n", (double)calibrated_pptt / 100.0);
 		}
-	} else if (unplugged_time == 0) {
-		printk("Battery: Waiting for valid reading\n");
+	} else if (battery_mV > 0) {
+		printk("Battery: %d mV (charge level not available)\n", battery_mV);
 	} else {
-		printk("Battery: None\n");
+		printk("Battery: Waiting for valid unplugged reading\n");
 	}
 	if (remaining > 0) {
 		remaining = k_ticks_to_us_floor64(remaining);
@@ -1244,15 +1244,17 @@ static void print_battery_tracker(void)
 	int16_t pptt = sys_get_valid_battery_pptt();
 	int16_t calibrated_pptt = sys_get_calibrated_battery_pptt(pptt);
 	uint64_t unplugged_time = sys_get_last_unplugged_time();
-	if (battery_mV > 0) {
+	if (battery_mV > 0 && calibrated_pptt >= 0) {
 		printk(
 			"\nBattery: %.2f%% (Raw %.2f%%, %d mV)\n",
 			(double)calibrated_pptt / 100.0,
 			(double)pptt / 100.0,
 			battery_mV
 		);
+	} else if (battery_mV > 0) {
+		printk("\nBattery: %d mV (charge level not available)\n", battery_mV);
 	} else {
-		printk("\nBattery: None\n");
+		printk("\nBattery: Waiting for valid unplugged reading\n");
 	}
 	if (unplugged_time > 0) {
 		print_uptime(k_uptime_ticks() - unplugged_time, "Last updated");
