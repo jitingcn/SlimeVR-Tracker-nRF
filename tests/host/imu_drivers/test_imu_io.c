@@ -9,13 +9,16 @@
 #include "sensor/imu/BMI270.h"
 #include "sensor/imu/ICM42686.h"
 #include "sensor/imu/ICM42688.h"
+#include "sensor/imu/LSM6DSM.h"
 #include "sensor/imu/LSM6DSO.h"
 
-/* LSM6DSO shares these caches with the production LSM6DSV module. */
+/* DSM/DSO share these active-mode caches with the production LSM6DSV module. */
 uint8_t last_accel_mode = 0xff;
 uint8_t last_gyro_mode = 0xff;
 uint8_t last_accel_odr = 0xff;
 uint8_t last_gyro_odr = 0xff;
+float accel_sensitivity;
+float gyro_sensitivity;
 
 void host_bus_reset(void);
 void host_bus_fail_read(int reg);
@@ -114,6 +117,72 @@ static void test_bmi_boundary(unsigned reported, unsigned capacity)
 	for (unsigned i = packets * 12 + 1; i < sizeof(guarded); i++) assert(guarded[i] == 0xCC);
 }
 
+struct lsm_wom_case {
+	const char *name;
+	int (*init)(float, float, float, float *, float *);
+	void (*update_fs)(float, float, float *, float *);
+	uint8_t (*setup_wom)(void);
+	uint8_t ctrl1, ctrl2, threshold;
+	bool selectable_threshold_scale;
+};
+
+static float lsm_accel_range(uint8_t ctrl1)
+{
+	/* Datasheet FS_XL[1:0] encoding, not the driver's range constants. */
+	static const float ranges_g[] = {2, 16, 4, 8};
+	return ranges_g[(ctrl1 >> 2) & 3];
+}
+
+static void test_lsm_wom(const struct lsm_wom_case *d)
+{
+	const float active_ranges[] = {2, 4, 8, 16};
+	for (size_t i = 0; i < sizeof(active_ranges) / sizeof(active_ranges[0]); i++) {
+		float a_range, g_range, a_period, g_period;
+		host_bus_reset();
+		d->update_fs(active_ranges[i], 1000, &a_range, &g_range);
+		assert(a_range == active_ranges[i] && g_range == 1000);
+		assert(d->init(0, .0025f, .0025f, &a_period, &g_period) == 0);
+		uint8_t active_ctrl1 = host_bus_register(d->ctrl1);
+		uint8_t active_ctrl2 = host_bus_register(d->ctrl2);
+		assert(lsm_accel_range(active_ctrl1) == active_ranges[i]);
+		assert(accel_sensitivity * 32768 == active_ranges[i]);
+		float active_gyro_sensitivity = gyro_sensitivity;
+
+		/*
+		 * Model the register reset performed by sensor_shutdown() before
+		 * sensor_setup_WOM(). Keep the driver caches intact, as in RAM.
+		 * WAKE_UP_DUR (0x5c) resets to zero, including DSO WAKE_THS_W.
+		 */
+		host_bus_reset();
+		assert(d->setup_wom() == (NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW));
+		uint8_t ctrl1 = host_bus_register(d->ctrl1);
+		uint8_t duration = host_bus_register(0x5c);
+		unsigned divisor = d->selectable_threshold_scale && (duration & 0x10) ? 256 : 64;
+		float threshold_mg = (host_bus_register(d->threshold) & 0x3f)
+			* lsm_accel_range(ctrl1) * 1000 / divisor;
+		assert(threshold_mg == 31.25f);
+		assert((ctrl1 >> 4) == 5); /* ODR_XL=0101: 208 Hz, unchanged. */
+		assert(duration == 0); /* No extra wake duration or alternate scale. */
+		assert(accel_sensitivity * 32768 == active_ranges[i]);
+		assert(gyro_sensitivity == active_gyro_sensitivity);
+
+		/*
+		 * Wake reinitialization must restore the saved active full scale
+		 * even at the same ODR; WOM must not replace update_fs()'s cache.
+		 */
+		host_bus_reset();
+		assert(d->init(0, .0025f, .0025f, &a_period, &g_period) == 0);
+		assert(host_bus_register(d->ctrl1) == active_ctrl1);
+		assert(host_bus_register(d->ctrl2) == active_ctrl2);
+		assert(lsm_accel_range(host_bus_register(d->ctrl1)) == active_ranges[i]);
+		assert(accel_sensitivity * 32768 == active_ranges[i]);
+		assert(gyro_sensitivity == active_gyro_sensitivity);
+		printf("%s: active=%.0fg, WOM=%.2fmg, restored=%.0fg\n",
+		       d->name, active_ranges[i], threshold_mg,
+		       lsm_accel_range(host_bus_register(d->ctrl1)));
+	}
+}
+
 int main(int argc, char **argv)
 {
 	const struct icm_case drivers[] = {
@@ -149,6 +218,16 @@ int main(int argc, char **argv)
 		host_bus_set_register(LSM6DSO_INTERNAL_FREQ_FINE, (uint8_t)-10);
 		assert(lsm6dso_init(0, .0025f, .0025f, &a, &g) == 0);
 		assert(a > 0 && g > 0);
+	}
+	if (argc == 1 || !strcmp(argv[1], "wom")) {
+		const struct lsm_wom_case wom_drivers[] = {
+			{"LSM6DSM", lsm6dsm_init, lsm6dsm_update_fs, lsm6dsm_setup_WOM,
+			 LSM6DSM_CTRL1, LSM6DSM_CTRL2, LSM6DSM_WAKE_UP_THS, false},
+			{"LSM6DSO", lsm6dso_init, lsm6dso_update_fs, lsm6dso_setup_WOM,
+			 LSM6DSO_CTRL1, LSM6DSO_CTRL2, LSM6DSO_WAKE_UP_THS, true},
+		};
+		for (size_t i = 0; i < sizeof(wom_drivers) / sizeof(wom_drivers[0]); i++)
+			test_lsm_wom(&wom_drivers[i]);
 	}
 	puts("IMU I/O: failed probes, zero-only fallback, full-packet capacity and family behavior pass");
 	return 0;

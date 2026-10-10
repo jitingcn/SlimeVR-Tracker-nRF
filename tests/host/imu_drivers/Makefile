@@ -9,6 +9,7 @@ IMU_SOURCES := \
 	../../../src/sensor/imu/ICM42686.c \
 	../../../src/sensor/imu/ICM42688.c \
 	../../../src/sensor/imu/ICM45686.c \
+	../../../src/sensor/imu/LSM6DSM.c \
 	../../../src/sensor/imu/LSM6DSO.c
 
 IMU_HEADERS := $(IMU_SOURCES:.c=.h) ../../../src/sensor/imu/BMI270_firmware.h \

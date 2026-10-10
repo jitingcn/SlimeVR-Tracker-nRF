@@ -320,7 +320,7 @@ uint8_t lsm6dso_setup_WOM(void)
 	int err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		LSM6DSO_CTRL1,
-		DSO_ODR_208Hz | DSO_FS_XL_8G
+		DSO_ODR_208Hz | DSO_FS_XL_2G
 	);                                                                                     // set accel ODR and FS
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL6, DSO_OP_MODE_XL_NP); // set accel perf mode
 	err |= ssi_reg_write_byte(
@@ -338,7 +338,7 @@ uint8_t lsm6dso_setup_WOM(void)
 		SENSOR_INTERFACE_DEV_IMU,
 		LSM6DSO_WAKE_UP_THS,
 		0x01
-	);            // set threshold, 1 * 31.25 mg is ~31.25 mg
+	);            // Reset WAKE_THS_W=0 selects FS/64: 1 * (2000 mg / 64) = 31.25 mg
 	k_msleep(12); // need to wait for accel to settle
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_TAP_CFG2, 0x80); // enable interrupts
