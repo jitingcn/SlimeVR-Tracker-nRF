@@ -23,7 +23,9 @@ esb = (SOURCE / "connection/esb.c").read_text()
 connection = (SOURCE / "connection/connection.c").read_text()
 header = (SRC / "connection/esb.h").read_text()
 constants = "\n".join(re.findall(r"^#define (?:ESB_|PING_INTERVAL_MS)[^\n]*", header, re.MULTILINE))
+wom_state = block(esb, r"^static struct \{(?=\n\tuint16_t minutes, token;)") + " wom_command;"
 payload = constants + "\n" + "\n".join(re.findall(r"^static struct esb_payload tx_payload = .*;", esb, re.MULTILINE))
+payload += "\n" + wom_state + "\n" + function(esb, "esb_wom_prepare_ping")
 clocked_writer = re.search(r"^static int esb_write_clocked\(", esb, re.MULTILINE)
 if clocked_writer:
     payload += "\nstatic atomic_t tx_clock_users;\n"
@@ -74,6 +76,10 @@ tx_failures += handler[switch:end] + "\n}\n}\n"
 commands = [constants, block(esb, r"^struct esb_remote_cmd \{", True)]
 commands.extend(re.findall(r"^static (?:bool remote_command_rejected|uint32_t remote_command_generation);", esb, re.MULTILINE))
 commands.extend(re.findall(r"^static uint32_t (?:executing_shutdown_generation|shutdown_feedback_generation, shutdown_feedback_request|shutdown_accepted_event, shutdown_terminal_event);", esb, re.MULTILINE))
+commands.append(wom_state)
+for name in ("esb_wom_reset", "esb_wom_receive", "esb_wom_process",
+             "esb_wom_prepare_ping", "esb_get_ping_ack_flag", "esb_get_ping_request_data"):
+    commands.append(function(esb, name))
 registry = block(esb, r"^static const struct esb_remote_cmd esb_remote_cmds\[\] = \{", True)
 actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start", "esb_remote_cmd_set_channel", "esb_remote_cmd_ota_query_info", "esb_remote_cmd_ota_abort")
 for name in actual_handlers:
@@ -84,12 +90,16 @@ commands.append(function((SRC / "system/system.c").read_text(), "sys_command_shu
 commands.insert(0, function((SRC / "system/system.c").read_text(), "sys_command_shutdown_request"))
 commands += [registry, function(esb, "esb_remote_command_execute"), function(esb, "esb_thread")]
 # Exercise the production control-admission tail after PONG validation.
-start = esb.index("\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA)")
+start = esb.index("\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)")
 end = esb.index("\n\t\t\t\t}\n\t\t\t} break;", start)
 commands.append("static void receive_control(uint8_t pong_flags) {\n"
                 + "float pong_sens_data[3] = {0}; uint8_t pong_sens_auto_axis = 0; uint16_t pong_sens_auto_revolutions = 0;\n"
                 + esb[start:end] + "\n}")
 commands.append("static void receive_stop(void) { receive_control(ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF); }")
+commands.append("static unsigned host_receiver_restart(void) {\n"
+                + "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
+                + block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
+                + "\nreturn receiver_restart_detections;\n}")
 collection = []
 for name in ("connection_raw_collection_active", "connection_feedback_maintenance_update", "connection_reset_raw_collection", "connection_set_data_collection", "connection_get_data_collection", "connection_set_data_collection_batch", "connection_get_data_collection_batch", "connection_get_data_collection_batch_rate", "connection_send_raw_metadata"):
     collection.append(function(connection, name))
@@ -114,6 +124,7 @@ channels += esb[esb.index("K_MUTEX_DEFINE(esb_radio_lock);"):esb.index("#define 
 channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_encode\([^;{]*\)\s*\{", False)
 channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_decode\([^;{]*\)\s*\{", False)
 channels += "\n" + function(esb, "esb_pong_is_legacy")
+channels += "\n" + wom_state + "\n" + function(esb, "esb_wom_reset")
 channels += "\n" + function(esb, "esb_get_ping_ack_flag")
 channels += "\n" + function(esb, "esb_get_ping_request_data")
 # Reuse actual successful-PING accounting without pulling hardware admission
@@ -122,6 +133,7 @@ channels += "\nstatic void record_ping_admission(uint8_t counter) {\n"
 channels += "bool is_ping = true; int queue_status = 0; unsigned data_length = ESB_PING_LEN;\n"
 channels += "struct { uint8_t data[ESB_PING_LEN]; } tx_payload = {{ESB_PING_TYPE, 0, counter}};\n"
 channels += "tx_payload.data[7] = esb_get_ping_ack_flag();\n"
+channels += "esb_get_ping_request_data(&tx_payload.data[8]);\n"
 channels += block(esb, r"^\tif \(is_ping && queue_status == 0 && data_length == ESB_PING_LEN\) \{")
 channels += "\n" + block(esb, r"^\tif \(tx_payload.data\[0\] == ESB_PING_TYPE && queue_status == 0\) \{")
 channels += "\n}\n"
@@ -135,7 +147,7 @@ end = esb.index("\n\t\t\t\t\tuint32_t ping_rx_ticks", start)
 channels += "\n#define PING_RECOVERY_THRESHOLD 1\nstatic bool pong_admitted;\nstatic void receive_pong_prefix(void) { do {\n" + esb[start:end] + "\n(void)rx_ctr;\npong_admitted = true;\n}\n} while (0); }\n"
 channels += "\nstatic bool accept_pong(void) { pong_admitted = false; if (rx_payload.length == ESB_PONG_LEN) receive_pong_prefix(); return pong_admitted; }\n"
 start = esb.index("\t\t\t\t\t/* NORMAL retains the legacy slot/total layout.")
-end = esb.index("\n\n\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA)", start)
+end = esb.index("\n\n\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)", start)
 channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\n" + esb[start:end] + "\n}\n"
 channels += "\n" + function(esb, "esb_send_pair_step")
 channels += "\n" + function(esb, "esb_pair")

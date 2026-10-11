@@ -45,6 +45,8 @@ static uint16_t sys_get_be16(const uint8_t *p)
 #define CONFIG_USE_ACTIVE_TIMEOUT 1
 #define CONFIG_ACTIVE_TIMEOUT_THRESHOLD 15000
 #define CONFIG_SLEEP_ON_ACTIVE_TIMEOUT 1
+#define CONFIG_SHUTDOWN_ON_ACTIVE_TIMEOUT 1
+#define CONFIG_USER_SHUTDOWN 1
 #define SYS_STATUS_CALIBRATION_RUNNING 1
 #define SYS_STATUS_CONNECTION_ERROR 2
 #define USER_SHUTDOWN_ENABLED 1
@@ -282,9 +284,9 @@ static int prepare_upgrade(void)
 	assert(!sys_system_reboot());
 	assert(!sys_system_off());
 #if IMU_INT_EXISTS
-	assert(sys_plan_WOM(false, now_ms + 5000) == -EBUSY);
+	assert(sys_plan_WOM(false, now_ms + 5000, false) == -EBUSY);
 #else
-	assert(sys_plan_WOM(false, now_ms + 5000) == -ENOTSUP);
+	assert(sys_plan_WOM(false, now_ms + 5000, false) == -ENOTSUP);
 #endif
 	if (finish_during_preparation) {
 		assert(in_flight != SYS_POWER_REQ_NONE);
@@ -473,7 +475,7 @@ static void observe_airtime(int milliseconds)
 	assert(shutdown_prepares == 0);
 	assert(sys_ota_reboot_reserve() == -EBUSY);
 #if IMU_INT_EXISTS
-	assert(sys_plan_WOM(true, now_ms) == -EBUSY);
+	assert(sys_plan_WOM(true, now_ms, false) == -EBUSY);
 #endif
 }
 
@@ -508,7 +510,7 @@ static void power_notices(void)
 	assert(physical_offs == 1 && notice_phase == POWER_WILL_SHUTDOWN);
 #if !IMU_INT_EXISTS
 	fixture(); memset(&ota, 0, sizeof(ota));
-	assert(sys_plan_WOM(false, now_ms) == -ENOTSUP);
+	assert(sys_plan_WOM(false, now_ms, false) == -ENOTSUP);
 	sensor_update_sensor_state(true);
 	assert(notices == 0 && physical_offs == 0);
 #endif
@@ -624,7 +626,7 @@ static void readiness_cancel_and_rearm(void)
 	int64_t ready_at = original_deadline + 30000;
 	while (now_ms < ready_at) {
 		now_ms += MIN(100, ready_at - now_ms);
-		assert(sys_plan_WOM(false, original_deadline) == 0);
+		assert(sys_plan_WOM(false, original_deadline, false) == 0);
 		power_iteration();
 		if (now_ms < ready_at) { assert(notices == 0); }
 	}
@@ -632,7 +634,7 @@ static void readiness_cancel_and_rearm(void)
 	fresh_notice = now_ms;
 	for (int i = 0; i < 50; i++) {
 		now_ms += 100;
-		assert(sys_plan_WOM(false, original_deadline) == 0);
+		assert(sys_plan_WOM(false, original_deadline, false) == 0);
 		power_iteration();
 	}
 	assert(physical_offs == 1 && now_ms - fresh_notice == 5000);
@@ -641,13 +643,13 @@ static void readiness_cancel_and_rearm(void)
 static void replace_before_commit(void)
 {
 	sys_cancel_WOM();
-	assert(sys_plan_WOM(false, now_ms + 5000) == 0);
+	assert(sys_plan_WOM(false, now_ms + 5000, false) == 0);
 }
 
 static void stale_generation_and_veto(void)
 {
 	fixture(); memset(&ota, 0, sizeof(ota));
-	assert(sys_plan_WOM(false, now_ms + 5000) == 0);
+	assert(sys_plan_WOM(false, now_ms + 5000, false) == 0);
 	uint32_t generation = 0;
 	enum sys_power_request claimed = power_request_begin(&power_requests, &generation);
 	assert(claimed == SYS_POWER_REQ_WOM);
@@ -660,7 +662,7 @@ static void stale_generation_and_veto(void)
 	int64_t fresh = now_ms;
 	for (int i = 0; i < 50; i++) {
 		now_ms += 100;
-		assert(sys_plan_WOM(false, fresh + 5000) == 0);
+		assert(sys_plan_WOM(false, fresh + 5000, false) == 0);
 		power_iteration();
 	}
 	assert(physical_offs == 1);
@@ -681,10 +683,10 @@ static void stale_generation_and_veto(void)
 	/* Test/calibration/OTA can begin after the sensor's last publication. */
 	for (int veto = 0; veto < 5; veto++) {
 		fixture(); memset(&ota, 0, sizeof(ota));
-		assert(sys_plan_WOM(false, now_ms + 5000) == 0);
+		assert(sys_plan_WOM(false, now_ms + 5000, false) == 0);
 		for (int i = 0; i < 50; i++) {
 			now_ms += 100;
-			assert(sys_plan_WOM(false, wom_deadline) == 0);
+			assert(sys_plan_WOM(false, wom_deadline, false) == 0);
 		}
 		test_active = veto == 0;
 		calibration_active = veto == 1;
@@ -700,10 +702,10 @@ static void pending_heat_veto(void)
 {
 	/* Reservation alone must veto physical WoM, before worker status exists. */
 	fixture(); memset(&ota, 0, sizeof(ota));
-	assert(sys_plan_WOM(false, now_ms + 5000) == 0);
+	assert(sys_plan_WOM(false, now_ms + 5000, false) == 0);
 	for (int i = 0; i < 50; i++) {
 		now_ms += 100;
-		assert(sys_plan_WOM(false, wom_deadline) == 0);
+		assert(sys_plan_WOM(false, wom_deadline, false) == 0);
 	}
 	heated_pending = true;
 	power_iteration();
@@ -719,7 +721,7 @@ static void wom_supersession_and_failure(void)
 {
 	for (int replacement = 0; replacement < 3; replacement++) {
 		fixture(); memset(&ota, 0, sizeof(ota));
-		assert(sys_plan_WOM(true, now_ms + 5000) == 0);
+		assert(sys_plan_WOM(true, now_ms + 5000, false) == 0);
 		if (replacement == 0) {
 			assert(sys_request_system_off() == 0);
 		} else if (replacement == 1) {
@@ -747,7 +749,7 @@ static void consumed_intent_cleanup(void)
 {
 	for (int replacement = 0; replacement < 3; replacement++) {
 		fixture(); memset(&ota, 0, sizeof(ota));
-		assert(sys_plan_WOM(true, now_ms + 5000) == 0);
+		assert(sys_plan_WOM(true, now_ms + 5000, false) == 0);
 		uint32_t generation = 0;
 		enum sys_power_request claimed = power_request_begin(&power_requests, &generation);
 		assert(claimed == SYS_POWER_REQ_WOM_FORCE);
@@ -768,7 +770,7 @@ static void consumed_intent_cleanup(void)
 		if (replacement == 0) {
 			/* Cleared intent cannot be resurrected with an expired lead. */
 			now_ms += 10000;
-			assert(sys_plan_WOM(true, now_ms) == 0);
+			assert(sys_plan_WOM(true, now_ms, false) == 0);
 			power_iteration();
 			assert(notices == 3 && physical_offs == 0);
 		} else if (replacement == 1) {
@@ -786,43 +788,43 @@ static void boot_readiness_budget(void)
 	/* An early plan (including one cancelled before due) must not consume the
 	 * boot's readiness budget. Ready and forced plans must not start it either. */
 	fixture(); memset(&ota, 0, sizeof(ota));
-	assert(sys_plan_WOM(false, 10000) == 0);
+	assert(sys_plan_WOM(false, 10000, false) == 0);
 	sys_cancel_WOM();
 	link_ready = false;
-	assert(sys_plan_WOM(true, 10000) == 0);
+	assert(sys_plan_WOM(true, 10000, false) == 0);
 	sys_cancel_WOM();
 	now_ms = 5000;
-	assert(sys_plan_WOM(false, 10000) == 0);
+	assert(sys_plan_WOM(false, 10000, false) == 0);
 	now_ms = 9000;
 	sys_cancel_WOM();
-	assert(sys_plan_WOM(false, 10000) == 0);
+	assert(sys_plan_WOM(false, 10000, false) == 0);
 	assert(notice_phase == POWER_WOM_CANCELLED);
 	unsigned previous_notices = notices;
 	for (; now_ms < 20000; now_ms += 100) {
-		assert(sys_plan_WOM(false, 10000) == 0);
+		assert(sys_plan_WOM(false, 10000, false) == 0);
 		power_iteration();
 	}
 	sys_cancel_WOM(); /* budget began at10000; interruption cannot renew it */
 	now_ms = 30000;
 	for (; now_ms <= 40000; now_ms += 100) {
-		assert(sys_plan_WOM(false, 35000) == 0);
+		assert(sys_plan_WOM(false, 35000, false) == 0);
 		power_iteration();
 		if (now_ms < 40000) { assert(notices == previous_notices); }
 	}
 	assert(notices == previous_notices + 1 && notice_phase == POWER_WILL_WOM);
 	assert(notice_log[notices - 1].time == 40000 && physical_offs == 0);
 	for (; now_ms <= 45000; now_ms += 100) {
-		assert(sys_plan_WOM(false, 35000) == 0);
+		assert(sys_plan_WOM(false, 35000, false) == 0);
 		power_iteration();
 	}
 	assert(physical_offs == 1);
 
 	/* First blocked attempt at uptime zero still gets exactly one budget. */
 	fixture(); memset(&ota, 0, sizeof(ota)); link_ready = false; now_ms = 0;
-	assert(sys_plan_WOM(false, 0) == 0);
+	assert(sys_plan_WOM(false, 0, false) == 0);
 	sys_cancel_WOM();
 	now_ms = 30000;
-	assert(sys_plan_WOM(false, now_ms) == 0);
+	assert(sys_plan_WOM(false, now_ms, false) == 0);
 	assert(notices == 1 && notice_log[0].time == 30000);
 	power_iteration();
 	assert(physical_offs == 0);
@@ -862,6 +864,47 @@ static void ramp_anchor_tracks_due_attempts(void)
 	assert(physical_offs == 0);
 	idle_until(25100);
 	assert(physical_offs == 1);
+}
+
+/* A committed runtime timeout change is serialized against the plan by the
+ * policy lock. It withdraws only a normal-timeout plan: a forced plan already
+ * overrode the stored timeout, and a failed/no-op change must leave the plan
+ * and its commit deadline untouched. */
+static void wom_timeout_change_gate(void)
+{
+	/* begin() rejects while a physical shutdown has already started. */
+	fixture(); memset(&ota, 0, sizeof(ota));
+	power_requests.physical_started = true;
+	assert(sys_wom_timeout_change_begin() == -EBUSY);
+	power_requests.physical_started = false; /* begin() already released */
+
+	/* Committed change withdraws a normal-timeout plan. */
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_plan_WOM(true, now_ms + 5000, true) == 0);
+	assert(wom_planned && wom_announced && wom_normal_timeout);
+	unsigned before = notices;
+	assert(sys_wom_timeout_change_begin() == 0);
+	sys_wom_timeout_change_end(true);
+	assert(!wom_planned && !wom_announced);
+	assert(notices == before + 1 && notice_phase == POWER_WOM_CANCELLED);
+
+	/* Forced plan (normal_timeout=false) survives the same committed change. */
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_plan_WOM(true, now_ms + 5000, false) == 0);
+	assert(wom_planned && wom_announced && !wom_normal_timeout);
+	int64_t commit_at = wom_commit_at;
+	assert(sys_wom_timeout_change_begin() == 0);
+	sys_wom_timeout_change_end(true);
+	assert(wom_planned && wom_announced && wom_commit_at == commit_at);
+
+	/* A no-op change never withdraws the normal-timeout plan. */
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_plan_WOM(true, now_ms + 5000, true) == 0);
+	assert(wom_planned && wom_announced && wom_normal_timeout);
+	commit_at = wom_commit_at;
+	assert(sys_wom_timeout_change_begin() == 0);
+	sys_wom_timeout_change_end(false);
+	assert(wom_planned && wom_announced && wom_commit_at == commit_at);
 }
 #endif
 static void failed_shutdown_keeps_power(void)
@@ -1206,7 +1249,7 @@ static void tcal_sleep_policy(void)
 {
 	/* A deliberate local/remote collection session must not require test mode. */
 	fixture(); memset(&ota, 0, sizeof(ota));
-	now_ms = CONFIG_CONNECTION_TIMEOUT_DELAY + CONFIG_ACTIVE_TIMEOUT_DELAY + 10000;
+	now_ms = (int64_t)CONFIG_CONNECTION_TIMEOUT_DELAY + CONFIG_ACTIVE_TIMEOUT_DELAY + 10000;
 	esb_remote_cmd_tcal_auto_on();
 	assert(!test_mode_get());
 #if CONFIG_SENSOR_USE_TCAL
@@ -1260,7 +1303,7 @@ static void tcal_sleep_policy(void)
 #if IMU_INT_EXISTS
 	for (int forced = 0; forced < 2; forced++) {
 		fixture(); memset(&ota, 0, sizeof(ota));
-		assert(sys_plan_WOM(forced, now_ms + 5000) == 0);
+		assert(sys_plan_WOM(forced, now_ms + 5000, false) == 0);
 		uint32_t generation = 0;
 		enum sys_power_request claimed = power_request_begin(&power_requests, &generation);
 		assert(claimed == (forced ? SYS_POWER_REQ_WOM_FORCE : SYS_POWER_REQ_WOM));
@@ -1276,7 +1319,7 @@ static void tcal_sleep_policy(void)
 			assert(sensor_mode == SENSOR_SENSOR_MODE_LOW_NOISE);
 		}
 		/* Even a stale producer's new forced plan cannot bypass final veto. */
-		assert(sys_plan_WOM(forced, now_ms) == 0);
+		assert(sys_plan_WOM(forced, now_ms, false) == 0);
 		power_iteration();
 		assert(!wom_planned && physical_offs == 0);
 		sensor_tcal_set_auto_calibration(false);
@@ -1334,6 +1377,7 @@ int main(void)
 	consumed_intent_cleanup();
 	boot_readiness_budget();
 	ramp_anchor_tracks_due_attempts();
+	wom_timeout_change_gate();
 #endif
 	printf("PASS OTA/power activation, owner races, recovery and physical exclusion (MCUboot=%d)\n",
 	       OTA_USE_MCUBOOT);

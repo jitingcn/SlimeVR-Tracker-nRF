@@ -6,6 +6,8 @@
 #include "connection/esb.h"
 #include "system/esb_ota.h"
 #include "watchdog.h"
+#include "wom_timeout.h"
+#include <zephyr/sys/atomic.h>
 
 #if CONFIG_SENSOR_TCAL_HEATED
 #include "sensor/calibration/tcal_heated.h"
@@ -272,10 +274,95 @@ static inline bool sys_nvs_init(void)
 	return true;
 }
 
+#if CONFIG_USE_ACTIVE_TIMEOUT
+#define WOM_TIMEOUT_DEFAULT_MS CONFIG_ACTIVE_TIMEOUT_DELAY
+#else
+#define WOM_TIMEOUT_DEFAULT_MS 0
+#endif
+static atomic_t wom_timeout_delay_ms = ATOMIC_INIT(WOM_TIMEOUT_DEFAULT_MS);
+
+int64_t wom_timeout_get_delay_ms(void)
+{
+	return atomic_get(&wom_timeout_delay_ms);
+}
+
+uint16_t wom_timeout_get_minutes(void)
+{
+#if CONFIG_USE_ACTIVE_TIMEOUT && CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
+	/* A legacy custom millisecond default need not be representable by the
+	 * minute-only protocol. Never round it into a different reported value. */
+	int64_t delay = wom_timeout_get_delay_ms();
+	if (delay % 60000 != 0 || delay < INT64_C(60000) ||
+	    delay > (int64_t)WOM_TIMEOUT_MAX_MINUTES * 60000) {
+		return 0;
+	}
+	return (uint16_t)(delay / 60000);
+#else
+	return 0;
+#endif
+}
+
+static void wom_timeout_load(void)
+{
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
+	uint16_t minutes = 0;
+	int err = sys_nvs_init()
+		? nvs_read(&fs, WOM_TIMEOUT_MINUTES_ID, &minutes, sizeof(minutes)) : -EIO;
+	int32_t delay = WOM_TIMEOUT_DEFAULT_MS;
+#if CONFIG_USE_ACTIVE_TIMEOUT && CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
+	if (err == (int)sizeof(minutes) && minutes >= WOM_TIMEOUT_MIN_MINUTES &&
+	    minutes <= WOM_TIMEOUT_MAX_MINUTES) {
+		delay = (int32_t)((int64_t)minutes * 60000);
+	}
+#else
+	ARG_UNUSED(err);
+#endif
+	atomic_set(&wom_timeout_delay_ms, delay);
+	k_mutex_unlock(&sys_storage_lock);
+}
+
+int wom_timeout_set_minutes(uint16_t minutes)
+{
+	if (minutes > WOM_TIMEOUT_MAX_MINUTES) {
+		return -EINVAL;
+	}
+#if CONFIG_USE_ACTIVE_TIMEOUT && CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
+	int err = sys_wom_timeout_change_begin();
+	if (err) {
+		return err;
+	}
+	k_mutex_lock(&sys_storage_lock, K_FOREVER);
+	int32_t delay = minutes ? (int32_t)((int64_t)minutes * 60000) : WOM_TIMEOUT_DEFAULT_MS;
+	if (!sys_nvs_init()) {
+		err = -EIO;
+	} else if (minutes) {
+		err = nvs_write(&fs, WOM_TIMEOUT_MINUTES_ID, &minutes, sizeof(minutes));
+	} else {
+		err = nvs_delete(&fs, WOM_TIMEOUT_MINUTES_ID);
+	}
+	bool changed = false;
+	if (err == 0 || (minutes && err == (int)sizeof(minutes))) {
+		changed = atomic_get(&wom_timeout_delay_ms) != delay;
+		atomic_set(&wom_timeout_delay_ms, delay);
+		err = 0;
+	} else if (err > 0) {
+		err = -EIO;
+	}
+	k_mutex_unlock(&sys_storage_lock);
+	sys_wom_timeout_change_end(changed);
+	return err;
+#else
+	return -ENOTSUP;
+#endif
+}
+
 static bool ram_retention_valid = false;
 
 static int sys_retained_init(void)
 {
+	/* Dedicated atomic runtime state: reload on both cold boot and WOM wake,
+	 * independently of retained-layout validation. */
+	wom_timeout_load();
 #ifdef NRF_RESET
 	bool reset_pin_reset = sys_get_reset_reason() & RESET_RESETREAS_RESETPIN_Msk;
 #else
@@ -703,10 +790,16 @@ int sys_clear(void)
 	printk("Resetting NVS and retained\n");
 
 	sensor_calibration_clear_begin();
+	int gate_err = sys_wom_timeout_change_begin();
+	if (gate_err) {
+		sensor_calibration_clear_end();
+		return gate_err;
+	}
 	k_mutex_lock(&sys_storage_lock, K_FOREVER);
 	int err = sys_nvs_init() ? nvs_clear(&fs) : -EIO;
 	if (err < 0) {
 		k_mutex_unlock(&sys_storage_lock);
+		sys_wom_timeout_change_end(false);
 		sensor_calibration_clear_end();
 		LOG_ERR("NVS reset failed: %d", err);
 		led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_FAILED);
@@ -722,6 +815,7 @@ int sys_clear(void)
 	warm_dirty_count = 0;
 	memset(retained, 0, sizeof(*retained));
 	nvs_init = false;
+	atomic_set(&wom_timeout_delay_ms, WOM_TIMEOUT_DEFAULT_MS);
 
 	// Re-initialize fields that need non-zero default values
 	retained->gyroSensScale[0] = 1.0f;
@@ -730,6 +824,7 @@ int sys_clear(void)
 	retained->build_timestamp = BUILD_TIMESTAMP;
 	retained_update();
 	k_mutex_unlock(&sys_storage_lock);
+	sys_wom_timeout_change_end(true);
 	sensor_calibration_clear_end();
 
 	LOG_INF("NVS and retained reset");

@@ -2,6 +2,7 @@
 #include "system/system.h"
 #include "system/battery_tracker.h"
 #include "system/test_mode.h"
+#include "system/wom_timeout.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
 #include "sensor/calibration/online_mag.h"
@@ -1436,6 +1437,8 @@ static void print_help(void)
 	printk("  clearchannel               Clear RF channel (use default)\n");
 	printk("\n");
 	printk("System:\n");
+	printk("  wom timeout [minutes]      Query/set normal WOM timeout (1-35791 min; 0=default)\n");
+	printk("                             Low-activity wake timeout stays unchanged\n");
 	printk("  shutdown                   Power off the device\n");
 	printk("  reboot                     Soft reset the device\n");
 #if DFU_EXISTS
@@ -2206,6 +2209,57 @@ static void console_cmd_clear(size_t argc, char **argv)
 	esb_clear_pair();
 }
 
+static void console_cmd_wom(size_t argc, char **argv)
+{
+	if (!console_require_args(argc, 2, 3)) {
+		return;
+	}
+	if (strcmp(argv[1], "timeout") != 0) {
+		printk("Usage: wom timeout [minutes: 1-35791; 0=firmware default]\n");
+		console_reject();
+		return;
+	}
+	if (argc == 2) {
+		uint16_t minutes = wom_timeout_get_minutes();
+		if (!minutes) {
+#if CONFIG_USE_ACTIVE_TIMEOUT && CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
+			printk("Normal WOM timeout: %lld ms; legacy default is not representable "
+			       "as 1-35791 whole minutes. Set a valid minute value to enable minute queries.\n",
+			       (long long)wom_timeout_get_delay_ms());
+#else
+			printk("Normal WOM timeout is unavailable in this build.\n");
+#endif
+		} else {
+			printk("Normal WOM timeout: %u minutes (low-activity wake timeout unchanged)\n", minutes);
+		}
+		return;
+	}
+	for (const char *p = argv[2]; *p; p++) {
+		if (*p < '0' || *p > '9') {
+			printk("Invalid minutes. Expected 1-35791, or 0 to restore the firmware default.\n");
+			console_reject();
+			return;
+		}
+	}
+	long minutes;
+	if (!parse_long_bounded(argv[2], 0, WOM_TIMEOUT_MAX_MINUTES, &minutes)) {
+		printk("Invalid minutes. Expected 1-35791, or 0 to restore the firmware default.\n");
+		console_reject();
+		return;
+	}
+	int err = wom_timeout_set_minutes((uint16_t)minutes);
+	if (err) {
+		printk("Normal WOM timeout update failed: %d; setting unchanged.\n", err);
+		console_reject();
+	} else if (minutes == 0) {
+		printk("Normal WOM timeout restored to firmware default: %lld ms "
+		       "(low-activity wake timeout unchanged)\n",
+		       (long long)wom_timeout_get_delay_ms());
+	} else {
+		printk("Normal WOM timeout saved: %ld minutes (low-activity wake timeout unchanged)\n", minutes);
+	}
+}
+
 static void console_cmd_channel(size_t argc, char **argv)
 {
 	char *arg = argc > 1 ? argv[1] : NULL;
@@ -2635,6 +2689,7 @@ static const struct console_cmd console_cmds[] = {
 	{"clear", console_cmd_clear, CONSOLE_MUTATION},
 	{"channel", console_cmd_channel, CONSOLE_MUTATION},
 	{"clearchannel", console_cmd_clearchannel, CONSOLE_MUTATION},
+	{"wom", console_cmd_wom, CONSOLE_MIXED},
 	{"radio", console_cmd_radio, CONSOLE_MUTATION},
 #if DFU_EXISTS
 	{"dfu", console_cmd_dfu, CONSOLE_MUTATION},
@@ -2680,6 +2735,9 @@ static bool console_command_mutates(const struct console_cmd *command, size_t ar
 		return command->feedback == CONSOLE_MUTATION;
 	}
 	const char *subcommand = argc > 1 ? argv[1] : NULL;
+	if (strcmp(command->name, "wom") == 0) {
+		return argc != 2 || subcommand == NULL || strcmp(subcommand, "timeout") != 0;
+	}
 	if (strcmp(command->name, "tcal") == 0) {
 		return subcommand == NULL || !(strcmp(subcommand, "status") == 0 || strcmp(subcommand, "dump") == 0 ||
 			strcmp(subcommand, "export") == 0 || strcmp(subcommand, "check") == 0 || strcmp(subcommand, "test") == 0 ||

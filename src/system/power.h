@@ -13,9 +13,19 @@ int sys_interface_resume(void);
  * physical sleep never precedes an announced plan by less than five seconds.
  * Ordinary OFF/REBOOT and OTA supersede reversible WOM. Returns 0 when accepted
  * or idempotent before the physical gate, -EBUSY for another owner or an
- * irreversible transition, and -ENOTSUP without an IMU wake interrupt. */
-int sys_plan_WOM(bool force, int64_t deadline);
+ * irreversible transition, and -ENOTSUP without an IMU wake interrupt.
+ * normal_timeout tags only the configurable first/normal activity policy:
+ * both low-activity wake branches and the IMU ramp pass false. */
+int sys_plan_WOM(bool force, int64_t deadline, bool normal_timeout);
 void sys_cancel_WOM(void);
+
+/* Serialize a sensor policy snapshot with setting publication and the physical
+ * gate. Recursive: sensor policy may call the ordinary plan/cancel helpers. */
+void sys_power_policy_lock(void);
+void sys_power_policy_unlock(void);
+/* Success retains the policy lock until end; failure leaves it unlocked. */
+int sys_wom_timeout_change_begin(void);
+void sys_wom_timeout_change_end(bool changed);
 
 /* Queue an ordinary transition; never shuts hardware down inline. Returns 0
  * for acceptance/idempotence before the physical gate, or -EBUSY for another

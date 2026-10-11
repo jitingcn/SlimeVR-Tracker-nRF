@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <errno.h>
 #include "../led_feedback_stub.h"
+static unsigned irq_lock(void) { return 0; }
+static void irq_unlock(unsigned key) { (void)key; }
 #define ESB_ST_PAIRING 0
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)

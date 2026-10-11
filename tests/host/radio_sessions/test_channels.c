@@ -277,6 +277,7 @@ static void reset(uint8_t home) {
     radio_user_disabled = own_pong_seen = server_time_synced = false;
     address_writes = schedule_updates = 0;
     metadata_echo_pending = false; acked_remote_command = received_remote_command = 0;
+    esb_wom_reset();
     radio_channel = home; now = 100; probes = changes = writes = disables = 0;
     own_pong_time = (uint32_t)now;
     storage.rf_channel = esb_rf_channel_encode(home);
@@ -788,6 +789,48 @@ static void owner_command_arguments(void) {
     assert(received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON && !schedule_updates);
 }
 
+static void wom_channel_responses(void) {
+    reset(84);
+    wom_command.cached = wom_command.response_pending = true;
+    wom_command.cached_token = 0x1234;
+    wom_command.result = 37;
+    wom_command.result_flag = ESB_PING_FLAG_WOM_RESULT;
+    visit(84);
+    assert(last_probe[7] == ESB_PING_FLAG_CHANNEL_CONFIRM);
+    assert(wom_command.response_pending && !wom_command.sent_token);
+    dedicated_packet(84);
+    assert(accept_pong() && wom_command.response_pending);
+    now = search_probe_at;
+    assert(esb_channel_search_poll(false));
+    assert(last_probe[7] == ESB_PING_FLAG_WOM_RESULT);
+    assert(last_probe[8] == 0 && last_probe[9] == 37);
+    assert(last_probe[10] == 0x12 && last_probe[11] == 0x34);
+    assert(wom_command.sent_flag == ESB_PING_FLAG_WOM_RESULT);
+    assert(wom_command.sent_token == 0x1234);
+    /* Responses and the unused 0x2B are never legacy controls: even a valid
+     * CRC/counter cannot turn an unproven receiver into a legacy peer. */
+    const uint8_t invalid[] = {ESB_PING_FLAG_WOM_RESULT,
+        ESB_PING_FLAG_WOM_ERROR, 0x2B};
+    for (unsigned i = 0; i < sizeof(invalid); ++i) {
+        reset(84); visit(84); normal_packet(0, 1);
+        rx_payload.data[7] = invalid[i]; packet_crc();
+        assert(!accept_pong() && !channel_legacy_peer && !channel_confirmed);
+        assert(!channel_found && !own_pong_seen);
+    }
+    reset(84); visit(84); normal_packet(0, 1);
+    assert(ESB_PONG_FLAG_WOM_CONTROL == 0x28);
+    rx_payload.data[7] = ESB_PONG_FLAG_WOM_CONTROL;
+    rx_payload.data[8] = 0;
+    rx_payload.data[9] = 37;
+    rx_payload.data[10] = 0x12;
+    rx_payload.data[11] = 0x34;
+    packet_crc();
+    assert(accept_pong() && channel_legacy_peer);
+    wom_command.requested = wom_command.cached = wom_command.response_pending = true;
+    esb_deinitialize();
+    assert(!wom_command.requested && !wom_command.cached && !wom_command.response_pending);
+}
+
 static void scan_sequences(void) {
     /* Independent policy oracle: preserve preferred order, then remaining evens. */
     const uint8_t order[] = {
@@ -935,6 +978,7 @@ int main(void) {
     esb_led_connection_facts(&facts); assert(!facts.healthy);
     ping_failures = 0; now += 4500;
     esb_led_connection_facts(&facts); assert(!facts.healthy);
+    wom_channel_responses();
     puts("channels: exhaustive coverage, strict own probes, NORMAL gate, persistence, OTA and interruption PASS");
     return 0;
 }

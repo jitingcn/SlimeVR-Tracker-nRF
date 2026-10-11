@@ -55,9 +55,9 @@ fixture = r'''
 #define CONFIG_DELAY_SLEEP_ON_STATUS 1
 #define IMU_INT_EXISTS 1
 #define K_FOREVER (-1)
-#define K_MUTEX_DEFINE(name) struct {bool held;} name
-#define k_mutex_lock(p,t) do {(void)(t);assert(!(p)->held);(p)->held=true;} while(0)
-#define k_mutex_unlock(p) do {assert((p)->held);(p)->held=false;} while(0)
+#define K_MUTEX_DEFINE(name) struct {int held;} name
+#define k_mutex_lock(p,t) do {(void)(t);(p)->held++;} while(0)
+#define k_mutex_unlock(p) do {assert((p)->held>0);(p)->held--;} while(0)
 struct k_sem {unsigned count;};
 #define K_SEM_DEFINE(name,initial,limit) struct k_sem name={initial}
 static void k_sem_give(struct k_sem *p) {p->count++;}
@@ -165,12 +165,15 @@ for pattern in (r'^static struct power_request_mailbox power_requests;',
                 r'^static (?:bool|int64_t) wom_[^;]+;',
                 r'^#define WOM_ELIGIBILITY_LEASE_MS .*$'):
     fixture += '\n'.join(re.findall(pattern, power, re.MULTILINE)) + '\n'
-for name in ('sys_cancel_WOM_locked', 'sys_cancel_WOM', 'sys_wom_ready', 'sys_plan_WOM'):
+for name in ('sys_cancel_WOM_locked', 'sys_cancel_WOM', 'sys_power_policy_lock',
+             'sys_power_policy_unlock', 'sys_wom_ready', 'sys_plan_WOM'):
     fixture += function(name, power) + '\n'
 for name in ('sensor_sensor_mode', 'sensor_sensor_timeout'):
     fixture += extract_block(source, rf'^enum {name} \{{', semicolon=True) + '\n'
 for name in ('sensor_mode', 'sensor_timeout', 'was_ota_suppressed'):
     fixture += re.search(rf'^static [^\n]* {name}[^;]*;', source, re.MULTILINE).group() + '\n'
+fixture += 'static int64_t wom_timeout_get_delay_ms(void) { return CONFIG_ACTIVE_TIMEOUT_DELAY; }\n'
+fixture += function('sensor_uses_normal_timeout') + '\n'
 fixture += function('sensor_get_active_timeout_delay') + '\n' + function('sensor_update_sensor_state') + '\n'
 fixture += dwell + '\n' + rest + '\n' + function('feed_calibrated_gyro') + '\n' + function('sensor_update_session_motion') + '\n'
 fixture += function('main_imu_suspend') + '\n' + function('main_imu_resume') + '\n'

@@ -252,6 +252,7 @@ static void reset(void)
 	esb_conn_state = 1;
 	channel_wait_normal = channel_search = channel_redirect_pending = false;
 	channel_confirmed = true; channel_legacy_peer = ping_channel_confirm_sent = false;
+	memset(&wom_command, 0, sizeof(wom_command));
 }
 static void assert_original(unsigned index, const uint8_t *data, size_t length, bool noack)
 {
@@ -474,6 +475,40 @@ static void fw_info_before_normal(void)
 	assert(!ping_channel_confirm_sent); /* Failed admission is not a request witness. */
 }
 
+static void wom_response_payload(void)
+{
+	for (unsigned proof = 0; proof < 2; ++proof) {
+		for (unsigned outcome = 0; outcome < 3; ++outcome) {
+			reset();
+			channel_confirmed = !proof;
+			wom_command.cached = wom_command.response_pending = true;
+			wom_command.cached_token = 0x4567;
+			wom_command.result = outcome == 0 ? 35791 : outcome == 1 ? EIO : 0;
+			wom_command.result_flag = outcome == 1 ? ESB_PING_FLAG_WOM_ERROR
+				: ESB_PING_FLAG_WOM_RESULT;
+			uint8_t ping[13] = {ESB_PING_TYPE};
+			ping[7] = ESB_PING_FLAG_WOM_RESULT;
+			/* Deliberately stale caller bytes: the real writer must snapshot
+			 * completed flag/result/token together before its real CRC. */
+			memset(&ping[8], 0xab, 4);
+			assert(host_send_ping(ping, true) == 0);
+			assert(queued_count == 1 && queued[0].length == 13);
+			assert(queued[0].data[12] == crc8_ccitt(7, queued[0].data, 12));
+			if (proof) {
+				assert(queued[0].data[7] == ESB_PING_FLAG_CHANNEL_CONFIRM);
+				assert(wom_command.sent_token == 0 && wom_command.response_pending);
+			} else {
+				assert(queued[0].data[7] == wom_command.result_flag);
+				assert(queued[0].data[8] == (wom_command.result >> 8));
+				assert(queued[0].data[9] == (uint8_t)wom_command.result);
+				assert(queued[0].data[10] == 0x45 && queued[0].data[11] == 0x67);
+				assert(wom_command.sent_token == 0x4567);
+				assert(wom_command.sent_flag == wom_command.result_flag);
+			}
+		}
+	}
+}
+
 int main(void)
 {
 	const char *scenario = getenv("RADIO_SCENARIO");
@@ -534,5 +569,6 @@ int main(void)
 	assert_original(0, ordinary, sizeof(ordinary), true);
 	channel_proof_ping_preserves_arguments();
 	fw_info_before_normal();
+	wom_response_payload();
 	return 0;
 }

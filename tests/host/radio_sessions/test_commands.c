@@ -42,8 +42,9 @@ static uint32_t sys_get_be32(const uint8_t *p)
 	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 static void connection_request_raw_metadata(uint8_t mask, uint8_t chunk, uint16_t token) {}
-static inline unsigned irq_lock(void) { return 0; }
-static inline void irq_unlock(unsigned key) {}
+static unsigned irq_depth;
+static inline unsigned irq_lock(void) { return irq_depth++; }
+static inline void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
 static void receive_control(uint8_t flag);
 static void receive_stop(void);
 static bool inject_stop, replaced_shutdown, batch_active = true;
@@ -126,6 +127,36 @@ static int sensor_tcal_heated_start(float target)
     return heated_result;
 }
 #endif
+static uint16_t wom_minutes = 10;
+static uint16_t wom_default_minutes = 10, wom_last_set_minutes;
+static unsigned wom_writes, wom_queries;
+static int wom_set_error;
+static bool inject_wom_request, reset_during_wom;
+static bool in_wom_rx;
+static uint16_t test_mode_get_target_tps(void) { return 250; }
+static uint16_t connection_get_data_collection_batch_rate(void) { return 100; }
+static void esb_wom_receive(uint16_t minutes, uint16_t token);
+static void esb_wom_reset(void);
+static void esb_clear_time_sync_state(void) {}
+static void tdma_set_enabled(bool enabled) { (void)enabled; }
+static void connection_request_ping_resync(void) {}
+static uint16_t wom_timeout_get_minutes(void) { ++wom_queries; return wom_minutes; }
+static int wom_timeout_set_minutes(uint16_t minutes)
+{
+    ++wom_writes;
+    wom_last_set_minutes = minutes;
+    if (inject_wom_request) {
+        inject_wom_request = false;
+        esb_wom_receive(30, 101);
+    }
+    if (reset_during_wom) {
+        reset_during_wom = false;
+        esb_wom_reset();
+    }
+    if (wom_set_error) return wom_set_error;
+    wom_minutes = minutes ? minutes : wom_default_minutes;
+    return 0;
+}
 #include "commands.inc"
 
 static void run_shutdown(unsigned rejected)
@@ -167,6 +198,216 @@ static void run_heated_request(int result)
     assert(heated_calls == (CONFIG_SENSOR_TCAL_HEATED ? 1U : 0U));
     assert(acked_remote_command == ESB_PONG_FLAG_TCAL_HEATED_START);
 }
+static void request_wom(uint16_t minutes, uint16_t token)
+{
+    rx_payload.data[8] = minutes >> 8;
+    rx_payload.data[9] = minutes;
+    rx_payload.data[10] = token >> 8;
+    rx_payload.data[11] = token;
+    in_wom_rx = true;
+    receive_control(ESB_PONG_FLAG_WOM_CONTROL);
+    in_wom_rx = false;
+}
+
+static void run_wom_owner(void)
+{
+    now_ms += 100;
+    feeds = 0;
+    stop_after = 3;
+    if (setjmp(thread_stop) == 0) esb_thread();
+}
+
+static void expect_wom(uint8_t flag, uint16_t result, uint16_t token)
+{
+    uint8_t data[4];
+    assert(esb_get_ping_ack_flag() == flag);
+    esb_get_ping_request_data(data);
+    assert(sys_get_be16(data) == result && sys_get_be16(data + 2) == token);
+}
+
+static void test_wom_transactions(void)
+{
+    channel_confirmed = true;
+    channel_legacy_peer = channel_wait_normal = channel_search = false;
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    esb_wom_reset();
+    request_wom(20, 1);
+    assert(esb_get_ping_ack_flag() == ESB_PONG_FLAG_NORMAL && !wom_writes);
+    run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 1);
+    assert(wom_writes == 1);
+    request_wom(20, 1); run_wom_owner();
+    assert(wom_writes == 1);
+    /* An unrelated NORMAL before admission cannot consume the outcome. */
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 1);
+    wom_command.sent_flag = ESB_PING_FLAG_WOM_RESULT;
+    wom_command.sent_token = 1;
+    channel_wait_normal = true;
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 1);
+    channel_wait_normal = false;
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    assert(!wom_command.response_pending && !wom_command.cached);
+    request_wom(20, 2); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 2);
+    assert(wom_writes == 2); /* New token, same value is fresh. */
+
+    request_wom(0, 3); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 3);
+    unsigned queries = wom_queries;
+    wom_minutes = 25; /* Local mutation invalidates a stale successful answer. */
+    request_wom(0, 3); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 25, 3);
+    assert(wom_queries == queries + 2);
+    request_wom(0, 4); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 25, 4);
+    assert(wom_queries == queries + 3);
+    wom_set_error = -EIO;
+    request_wom(40, 5); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EIO, 5);
+    assert(wom_minutes == 25 && wom_writes == 3);
+    wom_set_error = 0;
+    request_wom(40, 5); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EIO, 5);
+    assert(wom_writes == 3); /* Failure is terminal for this token too. */
+    request_wom(35792, 6); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EINVAL, 6);
+    request_wom(15, 0); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EINVAL, 0);
+    assert(wom_writes == 3);
+    wom_minutes = 0;
+    request_wom(0, 7); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, ENOTSUP, 7);
+
+    request_wom(35791, 8);
+    channel_confirmed = false;
+    run_wom_owner();
+    assert(wom_writes == 3 && esb_get_ping_ack_flag() == ESB_PING_FLAG_CHANNEL_CONFIRM);
+    channel_confirmed = true;
+    channel_redirect_pending = true;
+    run_wom_owner();
+    assert(wom_writes == 3);
+    channel_redirect_pending = false;
+    run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 35791, 8);
+    receive_control(ESB_PONG_FLAG_DATA_COLLECT_METADATA);
+    assert(esb_get_ping_ack_flag() == ESB_PONG_FLAG_DATA_COLLECT_METADATA);
+    metadata_echo_pending = false;
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 35791, 8);
+    receive_control(ESB_PONG_FLAG_OTA_QUERY_INFO);
+    run_wom_owner();
+    assert(esb_get_ping_ack_flag() == ESB_PONG_FLAG_OTA_QUERY_INFO);
+    receive_control(ESB_PONG_FLAG_NORMAL);
+
+    /* RX during blocking persistence must not publish the old token as new. */
+    request_wom(22, 100);
+    inject_wom_request = true;
+    esb_wom_process();
+    assert(wom_minutes == 22 && !wom_command.response_pending);
+    assert(wom_command.requested && wom_command.token == 101);
+    esb_wom_process();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 30, 101);
+    /* Flag/payload split across a newer request is repaired before CRC. */
+    uint8_t ping[13] = {[7] = ESB_PING_FLAG_WOM_RESULT};
+    request_wom(31, 102);
+    esb_wom_prepare_ping(ping);
+    assert(ping[7] == ESB_PONG_FLAG_NORMAL && sys_get_be32(&ping[8]) == 0);
+    esb_wom_process();
+    ping[7] = ESB_PING_FLAG_WOM_ERROR;
+    esb_wom_prepare_ping(ping);
+    assert(ping[7] == ESB_PING_FLAG_WOM_RESULT);
+    assert(sys_get_be16(&ping[8]) == 31 && sys_get_be16(&ping[10]) == 102);
+    request_wom(32, 103);
+    reset_during_wom = true;
+    esb_wom_process();
+    assert(!wom_command.cached && !wom_command.requested && !wom_command.response_pending);
+    /* Completed token1 may be reused after a fast receiver reboot: NORMAL
+     * consumption must already have retired the old transaction cache. */
+    wom_minutes = 10;
+    request_wom(0, 1); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 10, 1);
+    wom_minutes = 20;
+    ping[7] = ESB_PING_FLAG_WOM_RESULT;
+    esb_wom_prepare_ping(ping);
+    assert(ping[7] == ESB_PING_FLAG_WOM_RESULT);
+    assert(sys_get_be16(&ping[8]) == 10); /* Completed snapshot, drained first. */
+    assert(!wom_command.requested);
+    wom_command.sent_flag = ESB_PING_FLAG_WOM_RESULT;
+    wom_command.sent_token = 1;
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    assert(!wom_command.cached);
+    request_wom(0, 1); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 1);
+    /* A detected restart retires even an unconsumed/error response. */
+    assert(host_receiver_restart() == 1);
+    assert(!wom_command.cached && !wom_command.response_pending);
+    wom_minutes = 30;
+    request_wom(0, 1); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 30, 1);
+    /* Pending same-token sets cannot report an old success after local change. */
+    request_wom(20, 2); run_wom_owner();
+    unsigned writes = wom_writes;
+    wom_minutes = 40;
+    request_wom(20, 2); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 2);
+    assert(wom_minutes == 20 && wom_writes == writes + 1);
+    /* CLEAR is an action, not a zero-minute setting or cached readback. */
+    writes = wom_writes;
+    queries = wom_queries;
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 200);
+    assert(wom_writes == writes && !wom_command.response_pending);
+    run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 0, 200);
+    assert(wom_last_set_minutes == 0 && wom_minutes == wom_default_minutes);
+    assert(wom_writes == writes + 1 && wom_queries == queries);
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 200); run_wom_owner();
+    assert(wom_writes == writes + 1 && wom_queries == queries);
+    wom_minutes = 27; /* Local changes must not cause the same clear to rerun. */
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 200); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 0, 200);
+    assert(wom_minutes == 27 && wom_writes == writes + 1);
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 201); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 0, 201);
+    assert(wom_minutes == wom_default_minutes && wom_writes == writes + 2);
+    /* The old zero operation still queries without calling persistence. */
+    request_wom(0, 202); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, wom_default_minutes, 202);
+    assert(wom_writes == writes + 2);
+    wom_minutes = 28;
+    wom_set_error = -EIO;
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 203); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EIO, 203);
+    assert(wom_minutes == 28 && wom_writes == writes + 3);
+    wom_set_error = 0;
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 203); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EIO, 203);
+    assert(wom_writes == writes + 3);
+    /* An exact compiled default need not have an integer-minute readback. */
+    wom_default_minutes = 0;
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 204); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 0, 204);
+    assert(wom_minutes == 0 && wom_writes == writes + 4);
+    request_wom(0, 205); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, ENOTSUP, 205);
+    assert(wom_writes == writes + 4);
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 0); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EINVAL, 0);
+    assert(wom_writes == writes + 4);
+    /* Consumed CLEAR may be performed anew even if a fresh epoch reuses it. */
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 206); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 0, 206);
+    wom_command.sent_flag = ESB_PING_FLAG_WOM_RESULT;
+    wom_command.sent_token = 206;
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    assert(!wom_command.cached && !wom_command.response_pending);
+    wom_minutes = 29;
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 206); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 0, 206);
+    assert(wom_minutes == 0 && wom_writes == writes + 6);
+    puts("commands: WOM tokens, cached failures, query, proof holds and persistence snapshots");
+}
+
 int main(void)
 {
     run_shutdown(0);
@@ -280,5 +521,6 @@ int main(void)
     now_ms += 100; feeds = 0;
     if (setjmp(thread_stop) == 0) esb_thread();
     assert(abort_requests == 1);
+    test_wom_transactions();
     return 0;
 }

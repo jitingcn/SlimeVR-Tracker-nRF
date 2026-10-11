@@ -51,7 +51,9 @@ parts.append("#if CONFIG_SENSOR_USE_TCAL\n" +
              "\n" + function(tcal, "sensor_tcal_get_enabled") +
              "\n" + function(tcal, "sensor_tcal_get_auto_calibration") +
              "\n" + function(tcal, "sensor_tcal_set_auto_calibration") + "\n#endif")
-for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_wom_ready", "sys_plan_WOM",
+for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_power_policy_lock",
+             "sys_power_policy_unlock", "sys_wom_timeout_change_begin",
+             "sys_wom_timeout_change_end", "sys_wom_ready", "sys_plan_WOM",
              "sys_power_state_request", "sys_request_system_off", "sys_request_system_reboot",
              "sys_ota_reboot_reserve", "sys_ota_reboot_resolve", "sys_power_notice",
              "sys_WOM", "sys_system_off", "sys_system_reboot"):
@@ -60,6 +62,11 @@ parts += [block(sensor, r"^enum sensor_sensor_mode \{", True),
           block(sensor, r"^enum sensor_sensor_timeout \{", True)]
 for name in ("sensor_mode", "sensor_timeout", "was_ota_suppressed"):
     parts.append(re.search(rf"^static [^\n]* {name}[^;]*;", sensor, re.MULTILINE).group())
+# The sensor policy reads the dedicated WOM timeout storage leaf; the fixture
+# only needs its legacy runtime default, not NVS persistence.
+parts.append("static int64_t wom_timeout_get_delay_ms(void) { return CONFIG_ACTIVE_TIMEOUT_DELAY; }")
+parts.append("#if CONFIG_USE_ACTIVE_TIMEOUT && CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP\n" +
+             function(sensor, "sensor_uses_normal_timeout") + "\n#endif")
 for name in ("sensor_get_active_timeout_delay", "sensor_update_sensor_state"):
     parts.append(function(sensor, name))
 parts.append(block(ota_header, r"^static inline uint8_t esb_ota_crc8\([^;{]*\)\s*\{"))
@@ -122,21 +129,23 @@ static inline bool atomic_cas(atomic_t *value, int expected, int desired) {
 #include <stdint.h>
 #include <assert.h>
 #include <stddef.h>
-struct k_mutex { bool locked; };
+/* Zephyr k_mutex is recursive; the sensor policy holds the plan lock while the
+ * ordinary plan/cancel helpers re-enter it, so model a lock depth. */
+struct k_mutex { int locked; };
 #define K_MUTEX_DEFINE(name) struct k_mutex name
 #define K_FOREVER (-1)
 static void (*before_mutex_lock)(void);
 static inline void k_mutex_lock(struct k_mutex *mutex, int timeout) {
     (void)timeout;
-    if (before_mutex_lock) {
+    if (mutex->locked == 0 && before_mutex_lock) {
         void (*callback)(void) = before_mutex_lock;
         before_mutex_lock = NULL;
         callback();
     }
-    assert(!mutex->locked); mutex->locked = true;
+    mutex->locked++;
 }
 static inline void k_mutex_unlock(struct k_mutex *mutex) {
-    assert(mutex->locked); mutex->locked = false;
+    assert(mutex->locked > 0); mutex->locked--;
 }
 struct k_sem { unsigned count; };
 #define K_SEM_DEFINE(name, initial, maximum) struct k_sem name = { initial }
@@ -167,7 +176,7 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
         active_delay = 5000 if (variant // 8) % 2 else 90000
         heated = (variant // 16) % 2
         forced_ram = (variant // 32) % 2
-        tcal_enabled = variant // 64
+        tcal_enabled = (variant // 64) % 2
         if forced_ram and mcuboot:
             continue
         binary = temporary / f"ota-power-{mcuboot}-{imu_int}-{low_power_2}-{active_delay}-{heated}-{forced_ram}-{tcal_enabled}"

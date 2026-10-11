@@ -68,6 +68,7 @@ static K_SEM_DEFINE(power_wake_sem, 0, 1);
 static K_MUTEX_DEFINE(power_plan_lock);
 static bool wom_planned;
 static bool wom_force;
+static bool wom_normal_timeout;
 static bool wom_announced;
 static int64_t wom_deadline;
 static int64_t wom_commit_at;
@@ -401,6 +402,40 @@ void sys_cancel_WOM(void)
 	k_mutex_unlock(&power_plan_lock);
 }
 
+void sys_power_policy_lock(void)
+{
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+}
+
+void sys_power_policy_unlock(void)
+{
+	k_mutex_unlock(&power_plan_lock);
+}
+
+int sys_wom_timeout_change_begin(void)
+{
+	sys_power_policy_lock();
+	k_spinlock_key_t key = k_spin_lock(&power_requests.lock);
+	bool busy = power_requests.physical_started ||
+		power_requests.ota_reboot != POWER_OTA_REBOOT_NONE ||
+		power_requests.request == SYS_POWER_REQ_SYSTEM_OFF ||
+		power_requests.request == SYS_POWER_REQ_REBOOT;
+	k_spin_unlock(&power_requests.lock, key);
+	if (busy) {
+		sys_power_policy_unlock();
+		return -EBUSY;
+	}
+	return 0;
+}
+
+void sys_wom_timeout_change_end(bool changed)
+{
+	if (changed && wom_planned && wom_normal_timeout) {
+		sys_cancel_WOM_locked();
+	}
+	sys_power_policy_unlock();
+}
+
 static bool sys_wom_ready(bool force, int64_t now)
 {
 #if CONFIG_DELAY_SLEEP_ON_STATUS
@@ -425,7 +460,7 @@ static bool sys_wom_ready(bool force, int64_t now)
 /* Called continuously by the sensor while the original idle policy remains
  * eligible. Readiness delays are unadvertised; every announced plan gets its
  * full lead time, even when rest debounce consumed part of the idle timeout. */
-int sys_plan_WOM(bool force, int64_t deadline)
+int sys_plan_WOM(bool force, int64_t deadline, bool normal_timeout)
 {
 #if !IMU_INT_EXISTS
 	return -ENOTSUP;
@@ -433,6 +468,7 @@ int sys_plan_WOM(bool force, int64_t deadline)
 	k_mutex_lock(&power_plan_lock, K_FOREVER);
 	int64_t now = k_uptime_get();
 	if (wom_planned && (wom_force != force || wom_deadline != deadline ||
+			    wom_normal_timeout != normal_timeout ||
 			    now - wom_last_eligible >= WOM_ELIGIBILITY_LEASE_MS)) {
 		sys_cancel_WOM_locked();
 	}
@@ -443,6 +479,7 @@ int sys_plan_WOM(bool force, int64_t deadline)
 			wom_planned = true;
 			wom_force = force;
 			wom_deadline = deadline;
+			wom_normal_timeout = normal_timeout;
 		}
 		wom_last_eligible = now;
 		if (!sys_wom_ready(force, now)) {
@@ -535,7 +572,8 @@ static bool sys_WOM(bool force, uint32_t generation)
 		return true;
 	}
 	int64_t now = k_uptime_get();
-	if (veto || !wom_planned || now - wom_last_eligible >= WOM_ELIGIBILITY_LEASE_MS ||
+	if (veto || !wom_planned ||
+	    now - wom_last_eligible >= WOM_ELIGIBILITY_LEASE_MS ||
 	    (wom_announced && !sys_wom_ready(force, now))) {
 		sys_cancel_WOM_locked();
 		k_mutex_unlock(&power_plan_lock);

@@ -23,7 +23,9 @@ esb = (SRC / "connection/esb.c").read_text()
 connection = (SRC / "connection/connection.c").read_text()
 flash = (SRC / "system/esb_ota_flash.c").read_text()
 header = (SRC / "system/esb_ota.h").read_text()
-parts = [function(esb, "esb_deinitialize"), function(esb, "esb_initialize"),
+parts = [block(esb, r"^static struct \{(?=\n\tuint16_t minutes, token;)") + " wom_command;",
+         function(esb, "esb_wom_reset"),
+         function(esb, "esb_deinitialize"), function(esb, "esb_initialize"),
          function(connection, "connection_next_deadline_ms"),
          function(connection, "connection_idle_wait"),
          block(header, r"^struct bootloader_settings \{") + ";",

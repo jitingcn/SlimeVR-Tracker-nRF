@@ -24,6 +24,7 @@
 #include "system/system.h"
 #include "system/power.h"
 #include "system/test_mode.h"
+#include "system/wom_timeout.h"
 #include "system/esb_ota.h"
 #include "system/watchdog.h"
 #include "util.h"
@@ -1760,6 +1761,17 @@ enum sensor_sensor_timeout {
 static enum sensor_sensor_timeout sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU;
 static bool was_ota_suppressed = false;
 
+#if CONFIG_USE_ACTIVE_TIMEOUT && CONFIG_SLEEP_ON_ACTIVE_TIMEOUT && CONFIG_USE_IMU_WAKE_UP
+static bool sensor_uses_normal_timeout(void)
+{
+#if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
+	return !sensor_session_woke_from_wom || sensor_session_meaningful_motion;
+#else
+	return true;
+#endif
+}
+#endif
+
 static int64_t sensor_get_active_timeout_delay(void)
 {
 #if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
@@ -1770,7 +1782,7 @@ static int64_t sensor_get_active_timeout_delay(void)
 		return CONFIG_ACTIVE_TIMEOUT_IDLE_WAKE_DELAY;
 	}
 #endif
-	return CONFIG_ACTIVE_TIMEOUT_DELAY;
+	return wom_timeout_get_delay_ms();
 }
 
 static void sensor_update_session_motion(float angular_speed_dps, float lin_accel, int64_t now_ms)
@@ -1810,6 +1822,9 @@ static void sensor_update_sensor_state(bool resting)
 	bool ota_suppressed_now = esb_ota_is_active() || connection_get_ota_suppressed();
 	bool suspended = atomic_get(&main_suspended);
 	int64_t now_ms = k_uptime_get();
+	/* Exclude a setting commit between reading its delay and publishing the
+	 * corresponding plan. Calibration queries above never hold this gate. */
+	sys_power_policy_lock();
 
 	/* Reset activity timer on OTA suppression→unsuppression transition
 	 * to prevent accumulated idle time from immediately triggering sleep
@@ -1852,7 +1867,8 @@ static void sensor_update_sensor_state(bool resting)
 		if (sensor_timeout >= SENSOR_SENSOR_TIMEOUT_ACTIVITY &&
 		    last_data_delta >= MAX(0, active_timeout_delay - TRACKER_EVENT_WOM_ADVANCE_MS)) {
 			wom_eligible = true;
-			if (sys_plan_WOM(true, last_data_time + active_timeout_delay) == 0 &&
+			if (sys_plan_WOM(true, last_data_time + active_timeout_delay,
+					 sensor_uses_normal_timeout()) == 0 &&
 			    last_data_delta > active_timeout_delay) {
 				sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY_ELAPSED;
 			}
@@ -1872,7 +1888,7 @@ static void sensor_update_sensor_state(bool resting)
 			/* Announcing early is not a suspend attempt. Preserve the original
 			 * ramp anchor only once the original idle threshold is due and
 			 * its request has been accepted. */
-			if (sys_plan_WOM(false, last_data_time + imu_timeout) == 0 &&
+			if (sys_plan_WOM(false, last_data_time + imu_timeout, false) == 0 &&
 			    last_data_delta > imu_timeout) {
 				sensor_timeout = SENSOR_SENSOR_TIMEOUT_IMU_ELAPSED;
 			}
@@ -1894,6 +1910,7 @@ static void sensor_update_sensor_state(bool resting)
 		}
 		sensor_mode = SENSOR_SENSOR_MODE_LOW_NOISE;
 	}
+	sys_power_policy_unlock();
 }
 
 int sensor_init(void)

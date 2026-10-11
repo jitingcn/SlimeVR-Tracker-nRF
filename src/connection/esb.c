@@ -28,6 +28,7 @@
 #include "system/battery_tracker.h"
 #include "system/test_mode.h"
 #include "system/watchdog.h"
+#include "system/wom_timeout.h"
 #include "system/esb_ota.h"
 #include "connection.h"
 #include "tracker_events.h"
@@ -234,6 +235,109 @@ static bool metadata_echo_pending;
 static uint8_t received_sens_auto_axis;
 static uint16_t received_sens_auto_revolutions;
 static float received_sens_data[3] = {0};
+
+/* Cache a completed transaction until its admitted response is consumed.
+ * NORMAL and detected receiver restarts retire the receiver's token epoch. */
+static struct {
+	uint16_t minutes, token;
+	uint16_t cached_minutes, cached_token, result;
+	uint16_t sent_token;
+	uint8_t result_flag, sent_flag;
+	bool requested, cached, response_pending;
+	uint32_t generation;
+} wom_command;
+
+static void esb_wom_reset(void)
+{
+	unsigned key = irq_lock();
+	uint32_t generation = wom_command.generation + 1;
+	memset(&wom_command, 0, sizeof(wom_command));
+	wom_command.generation = generation;
+	irq_unlock(key);
+}
+
+static void esb_wom_receive(uint16_t minutes, uint16_t token)
+{
+	/* Local changes invalidate successful readbacks, but CLEAR and ENTER
+	 * acknowledge completed actions and must never rerun on a duplicate.
+	 * The getter is atomic; persistence and power admission stay deferred. */
+	if (wom_command.cached && minutes == wom_command.cached_minutes
+	    && token == wom_command.cached_token
+	    && (wom_command.result_flag == ESB_PING_FLAG_WOM_ERROR
+	        || minutes == ESB_WOM_TIMEOUT_CLEAR
+	        || wom_timeout_get_minutes() == wom_command.result)) {
+		wom_command.response_pending = true;
+		return;
+	}
+	if (wom_command.requested && minutes == wom_command.minutes
+	    && token == wom_command.token) {
+		return;
+	}
+	wom_command.minutes = minutes;
+	wom_command.token = token;
+	wom_command.requested = true;
+	wom_command.response_pending = false;
+	wom_command.sent_token = 0;
+	wom_command.sent_flag = ESB_PONG_FLAG_NORMAL;
+	++wom_command.generation;
+}
+
+static void esb_wom_process(void)
+{
+	unsigned key = irq_lock();
+	if (!wom_command.requested || (!channel_confirmed && !channel_legacy_peer)
+	    || channel_redirect_pending) {
+		irq_unlock(key);
+		return;
+	}
+	uint16_t minutes = wom_command.minutes;
+	uint16_t token = wom_command.token;
+	uint32_t generation = wom_command.generation;
+	irq_unlock(key);
+
+	/* Persistence and power admission run only in the radio owner, IRQs on. */
+	bool clear = minutes == ESB_WOM_TIMEOUT_CLEAR;
+	int err = token == 0 || (!clear && minutes > 35791) ? -EINVAL
+		: clear ? wom_timeout_set_minutes(0)
+		: minutes == 0 ? 0 : wom_timeout_set_minutes(minutes);
+	uint16_t result = err ? (uint16_t)-err
+		: clear ? 0 : minutes ? minutes : wom_timeout_get_minutes();
+	if (!err && !clear && result == 0) {
+		err = -ENOTSUP;
+		result = ENOTSUP;
+	}
+
+	key = irq_lock();
+	if (generation == wom_command.generation) {
+		wom_command.requested = false;
+		wom_command.cached = true;
+		wom_command.cached_minutes = minutes;
+		wom_command.cached_token = token;
+		wom_command.result = result;
+		wom_command.result_flag = err ? ESB_PING_FLAG_WOM_ERROR
+			: ESB_PING_FLAG_WOM_RESULT;
+		wom_command.response_pending = true;
+	}
+	irq_unlock(key);
+}
+
+static void esb_wom_prepare_ping(uint8_t *data)
+{
+	/* Flag/data getters run separately. Re-snapshot a WOM result as one unit
+	 * immediately before CRC so an intervening RX cannot splice transactions. */
+	unsigned key = irq_lock();
+	if (data[7] == ESB_PING_FLAG_WOM_RESULT
+	    || data[7] == ESB_PING_FLAG_WOM_ERROR) {
+		data[7] = wom_command.response_pending ? wom_command.result_flag : ESB_PONG_FLAG_NORMAL;
+		uint16_t result = wom_command.response_pending ? wom_command.result : 0;
+		uint16_t token = wom_command.response_pending ? wom_command.cached_token : 0;
+		data[8] = result >> 8;
+		data[9] = result;
+		data[10] = token >> 8;
+		data[11] = token;
+	}
+	irq_unlock(key);
+}
 
 
 typedef void (*esb_remote_cmd_fn)(void);
@@ -704,7 +808,7 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 static bool esb_pong_is_legacy(uint8_t flag)
 {
 	/* The two allocated legacy command ranges exclude reserved flags. */
-	return flag <= ESB_PONG_FLAG_TCAL_HEATED_START
+	return flag <= ESB_PONG_FLAG_WOM_CONTROL
 		|| (flag >= ESB_PONG_FLAG_OTA_QUERY_INFO
 		    && flag <= ESB_PONG_FLAG_DATA_COLLECT_METADATA);
 }
@@ -1419,6 +1523,7 @@ void event_handler(struct esb_evt const *event)
 								receiver_restart_detections
 							);
 							esb_clear_time_sync_state();
+							esb_wom_reset();
 							tdma_set_enabled(false);
 							ping_failures = 0;
 							connection_request_ping_resync();
@@ -1610,7 +1715,11 @@ void event_handler(struct esb_evt const *event)
 						}
 					}
 
-					if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
+					if (pong_flags == ESB_PONG_FLAG_WOM_CONTROL) {
+						metadata_echo_pending = false;
+						esb_wom_receive(sys_get_be16(&rx_payload.data[8]),
+							sys_get_be16(&rx_payload.data[10]));
+					} else if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
 						received_metadata_mask = rx_payload.data[8];
 						received_metadata_chunk = rx_payload.data[9];
 						received_metadata_token = sys_get_be16(&rx_payload.data[10]);
@@ -1620,6 +1729,7 @@ void event_handler(struct esb_evt const *event)
 					} else if (pong_flags != ESB_PONG_FLAG_NORMAL) {
 						/* Real controls may supersede a pending metadata echo. */
 						metadata_echo_pending = false;
+						esb_wom_reset();
 						uint16_t pong_test_rate_tps = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
 							&& rx_payload.length >= 10 ? sys_get_be16(&rx_payload.data[8]) : 0;
 						uint8_t pong_batch_rate_hz = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
@@ -1662,6 +1772,12 @@ void event_handler(struct esb_evt const *event)
 						/* A requested proof NORMAL did not consume the low-bit
 						 * command/metadata echo. Keep it for the post-proof PING. */
 						metadata_echo_pending = false;
+						if (wom_command.response_pending
+						    && wom_command.sent_token == wom_command.cached_token
+						    && wom_command.sent_flag == wom_command.result_flag) {
+							wom_command.response_pending = false;
+							wom_command.cached = false;
+						}
 						if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
 							received_remote_command = ESB_PONG_FLAG_NORMAL;
 							acked_remote_command = ESB_PONG_FLAG_NORMAL;
@@ -1825,6 +1941,7 @@ int esb_initialize(bool tx)
 	channel_confirmed = false;
 	channel_legacy_peer = false;
 	ping_channel_confirm_sent = false;
+	esb_wom_reset();
 	channel_found = false;
 	channel_heard = false;
 	ping_pending = false;
@@ -1854,6 +1971,7 @@ void esb_deinitialize(void)
 	channel_confirmed = false;
 	channel_legacy_peer = false;
 	ping_channel_confirm_sent = false;
+	esb_wom_reset();
 	if (pair_provisional) {
 		pair_provisional = false;
 		pairing_search_active = false;
@@ -2230,6 +2348,7 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 			data[5] = (server_time_ticks >> 8) & 0xFF;
 			data[6] = server_time_ticks & 0xFF;
 		}
+		esb_wom_prepare_ping(data);
 		// Calculate crc8 checksum over first 12 bytes
 		uint8_t crc_calc = crc8_ccitt(0x07, data, ESB_PING_LEN - 1);
 		data[ESB_PING_LEN - 1] = crc_calc;
@@ -2331,6 +2450,11 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 		ping_history[ping_history_idx].ping_ticks = 0;
 		ping_ctr_sent = tx_payload.data[2];
 		ping_channel_confirm_sent = (tx_payload.data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
+		wom_command.sent_flag = tx_payload.data[7];
+		wom_command.sent_token =
+			(tx_payload.data[7] == ESB_PING_FLAG_WOM_RESULT
+			 || tx_payload.data[7] == ESB_PING_FLAG_WOM_ERROR)
+			? ((uint16_t)tx_payload.data[10] << 8) | tx_payload.data[11] : 0;
 		ping_pending = true;
 		irq_unlock(key);
 		LOG_DBG("PING queued (ctr=%u)", (unsigned)tx_payload.data[2]);
@@ -2745,6 +2869,9 @@ uint8_t esb_get_ping_ack_flag(void)
 	if (metadata_echo_pending) {
 		return ESB_PONG_FLAG_DATA_COLLECT_METADATA;
 	}
+	if (wom_command.response_pending) {
+		return wom_command.result_flag;
+	}
 	if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
 		return acked_remote_command;
 	}
@@ -2769,6 +2896,12 @@ void esb_get_ping_request_data(uint8_t out[4])
 		out[1] = received_metadata_chunk;
 		out[2] = (uint8_t)(received_metadata_token >> 8);
 		out[3] = (uint8_t)received_metadata_token;
+	} else if (flag == ESB_PING_FLAG_WOM_RESULT
+	           || flag == ESB_PING_FLAG_WOM_ERROR) {
+		out[0] = wom_command.result >> 8;
+		out[1] = wom_command.result;
+		out[2] = wom_command.cached_token >> 8;
+		out[3] = wom_command.cached_token;
 	}
 	irq_unlock(key);
 }
@@ -2924,6 +3057,7 @@ static void esb_thread(void)
 #endif
 		}
 		int64_t now_idle = k_uptime_get();
+		esb_wom_process();
 
 		bool command_pending = (channel_confirmed || channel_legacy_peer) && !channel_redirect_pending
 			&& received_remote_command != ESB_PONG_FLAG_NORMAL

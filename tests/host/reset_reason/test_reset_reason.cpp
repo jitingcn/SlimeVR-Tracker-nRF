@@ -145,6 +145,10 @@ static void __DSB() { assert(registers.GPREGRET == expected_fatal); ++barriers; 
 #endif
 	throw rebooted{};
 }
+/* Runtime WOM timeout restoration is a storage leaf (NVS-backed owner lives in
+ * system.c, not built here); retained init only needs it not to abort. */
+static void wom_timeout_load() {}
+
 #include "production.inc"
 
 int main(int argc, char **argv)

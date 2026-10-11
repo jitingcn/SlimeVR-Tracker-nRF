@@ -189,6 +189,21 @@ static int nvs_clear(int *storage)
 	return 0;
 }
 
+/* Reset also gates the runtime WOM timeout owner; the fixture admits the
+ * change and only tracks the restored default, not NVS persistence. */
+#define WOM_TIMEOUT_DEFAULT_MS 0
+static atomic_t wom_timeout_delay_ms;
+
+int sys_wom_timeout_change_begin(void)
+{
+	return 0;
+}
+
+void sys_wom_timeout_change_end(bool changed)
+{
+	(void)changed;
+}
+
 #include "clear_resume.inc"
 
 static void assert_no_old_writes(void)
