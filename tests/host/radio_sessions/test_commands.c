@@ -133,6 +133,14 @@ static unsigned wom_writes, wom_queries;
 static int wom_set_error;
 static bool inject_wom_request, reset_during_wom;
 static bool in_wom_rx;
+static unsigned wom_enter_calls;
+static int wom_enter_error;
+static int sys_request_WOM_now(void)
+{
+    assert(!in_wom_rx && irq_depth == 0);
+    ++wom_enter_calls;
+    return wom_enter_error;
+}
 static uint16_t test_mode_get_target_tps(void) { return 250; }
 static uint16_t connection_get_data_collection_batch_rate(void) { return 100; }
 static void esb_wom_receive(uint16_t minutes, uint16_t token);
@@ -408,6 +416,73 @@ static void test_wom_transactions(void)
     puts("commands: WOM tokens, cached failures, query, proof holds and persistence snapshots");
 }
 
+static void test_wom_enter(void)
+{
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    esb_wom_reset();
+    unsigned writes = wom_writes, queries = wom_queries;
+    wom_minutes = 0; /* Unsupported minute readback does not veto entry. */
+    request_wom(ESB_WOM_ENTER, 300);
+    assert(wom_enter_calls == 0 && !wom_command.response_pending);
+    assert(esb_get_ping_ack_flag() == ESB_PONG_FLAG_NORMAL);
+    request_wom(ESB_WOM_ENTER, 300); /* Duplicate in RX is still deferred. */
+    channel_confirmed = false;
+    run_wom_owner();
+    assert(wom_enter_calls == 0);
+    channel_confirmed = true;
+    channel_redirect_pending = true;
+    run_wom_owner();
+    assert(wom_enter_calls == 0 && !wom_command.response_pending);
+    channel_redirect_pending = false;
+    run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, ESB_WOM_ENTER, 300);
+    assert(wom_enter_calls == 1 && wom_minutes == 0);
+    request_wom(ESB_WOM_ENTER, 300); run_wom_owner();
+    wom_minutes = 37;
+    request_wom(ESB_WOM_ENTER, 300); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, ESB_WOM_ENTER, 300);
+    assert(wom_enter_calls == 1 && wom_writes == writes && wom_queries == queries);
+    receive_control(ESB_PONG_FLAG_NORMAL); /* No sent witness: cache survives. */
+    request_wom(ESB_WOM_ENTER, 300); run_wom_owner();
+    assert(wom_enter_calls == 1);
+    wom_command.sent_flag = ESB_PING_FLAG_WOM_RESULT;
+    wom_command.sent_token = 300;
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    assert(!wom_command.cached);
+    request_wom(ESB_WOM_ENTER, 300); run_wom_owner();
+    assert(wom_enter_calls == 2); /* New epoch permits fresh core admission. */
+
+    const int errors[] = {-EBUSY, -ENOTSUP, -EIO};
+    for (unsigned i = 0; i < sizeof(errors) / sizeof(errors[0]); ++i) {
+        uint16_t token = 301 + i;
+        unsigned calls = wom_enter_calls;
+        wom_enter_error = errors[i];
+        request_wom(ESB_WOM_ENTER, token);
+        assert(wom_enter_calls == calls && !wom_command.response_pending);
+        assert(esb_get_ping_ack_flag() == ESB_PONG_FLAG_NORMAL);
+        run_wom_owner();
+        expect_wom(ESB_PING_FLAG_WOM_ERROR, -errors[i], token);
+        assert(wom_enter_calls == calls + 1);
+        wom_enter_error = 0;
+        request_wom(ESB_WOM_ENTER, token); run_wom_owner();
+        expect_wom(ESB_PING_FLAG_WOM_ERROR, -errors[i], token);
+        assert(wom_enter_calls == calls + 1); /* No late retry after veto clears. */
+    }
+    unsigned calls = wom_enter_calls;
+    request_wom(ESB_WOM_ENTER, 0); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_ERROR, EINVAL, 0);
+    assert(wom_enter_calls == calls && wom_writes == writes && wom_queries == queries);
+    request_wom(ESB_WOM_ENTER, 304); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, ESB_WOM_ENTER, 304);
+    assert(wom_enter_calls == calls + 1 && wom_minutes == 37);
+    request_wom(0, 305); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 37, 305);
+    request_wom(ESB_WOM_TIMEOUT_CLEAR, 306); run_wom_owner();
+    expect_wom(ESB_PING_FLAG_WOM_RESULT, 0, 306);
+    assert(wom_writes == writes + 1 && wom_enter_calls == calls + 1);
+    puts("commands: deferred WOM entry admission, terminal errors and action-only duplicate cache");
+}
+
 int main(void)
 {
     run_shutdown(0);
@@ -522,5 +597,6 @@ int main(void)
     if (setjmp(thread_stop) == 0) esb_thread();
     assert(abort_requests == 1);
     test_wom_transactions();
+    test_wom_enter();
     return 0;
 }

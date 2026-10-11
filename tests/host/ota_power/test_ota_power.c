@@ -38,13 +38,17 @@ static uint16_t sys_get_be16(const uint8_t *p)
 #define CLAMP(x, low, high) ((x) < (low) ? (low) : ((x) > (high) ? (high) : (x)))
 #define CONFIG_DYNAMIC_ACTIVE_TIMEOUT 0
 #define CONFIG_SENSOR_LP_TIMEOUT 500
-#define CONFIG_USE_IMU_TIMEOUT 1
+#define CONFIG_USE_IMU_TIMEOUT CONFIG_USE_IMU_WAKE_UP
+#ifndef CONFIG_USE_IMU_WAKE_UP
 #define CONFIG_USE_IMU_WAKE_UP 1
+#endif
 #define CONFIG_IMU_TIMEOUT_RAMP_MIN 5000
 #define CONFIG_IMU_TIMEOUT_RAMP_MAX 15000
 #define CONFIG_USE_ACTIVE_TIMEOUT 1
 #define CONFIG_ACTIVE_TIMEOUT_THRESHOLD 15000
+#ifndef CONFIG_SLEEP_ON_ACTIVE_TIMEOUT
 #define CONFIG_SLEEP_ON_ACTIVE_TIMEOUT 1
+#endif
 #define CONFIG_SHUTDOWN_ON_ACTIVE_TIMEOUT 1
 #define CONFIG_USER_SHUTDOWN 1
 #define SYS_STATUS_CALIBRATION_RUNNING 1
@@ -135,13 +139,14 @@ static void esb_disable(void) { radio_disables++; }
 #endif
 static uint8_t notice_phase, notice_detail;
 static int wom_pin;
+static unsigned wom_setup_calls;
 static bool link_ready = true;
 static bool esb_ready(void) { return link_ready; }
 static bool status_ready(void) { return link_ready; }
 #if IMU_INT_EXISTS
 static void sensor_calibration_online_mag_retained_save(void) {}
 static void sensor_record_wom_sleep(void) {}
-static int sensor_setup_WOM(void) { return wom_pin; }
+static int sensor_setup_WOM(void) { wom_setup_calls++; return wom_pin; }
 #define NRF_DT_GPIOS_TO_PSEL(a,b) 0
 #define NRF_GPIO_PIN_DIR_INPUT 0
 #define NRF_GPIO_PIN_INPUT_DISCONNECT 0
@@ -315,8 +320,9 @@ static void fixture(void)
 	finish_during_preparation = false;
 	notices = shutdown_prepares = 0;
 	notice_phase = notice_detail = wom_pin = 0;
+	wom_setup_calls = 0;
 	link_ready = true;
-	wom_planned = wom_announced = wom_ready_timeout_initialized = false;
+	wom_planned = wom_announced = wom_ready_timeout_initialized = wom_manual = false;
 	wom_deadline = wom_commit_at = wom_ready_timeout = wom_last_eligible = 0;
 	test_active = calibration_active = ota_suppressed = false;
 	shutdown_requested = connection_error = false;
@@ -1339,8 +1345,109 @@ static void tcal_sleep_policy(void)
 #endif
 }
 
+static void manual_wom_entry(void)
+{
+	fixture(); memset(&ota, 0, sizeof(ota));
+#if !CONFIG_USE_IMU_WAKE_UP || !IMU_INT_EXISTS
+	assert(sys_request_WOM_now() == -ENOTSUP);
+	assert(!sys_WOM_manual_pending() && notices == 0 && physical_offs == 0);
+#else
+	assert(sys_request_WOM_now() == 0);
+	int64_t due = wom_commit_at;
+	assert(due == now_ms + TRACKER_EVENT_WOM_ADVANCE_MS);
+	assert(wom_manual && wom_force && !wom_normal_timeout);
+	assert(notices == 1 && notice_phase == POWER_WILL_WOM && notice_detail == POWER_WOM_FORCED);
+	/* Moving at 40 Hz cannot cancel entry; neither can an elapsed idle
+	 * shutdown profile replace the requested actual WOM with ordinary OFF. */
+	sensor_timeout = SENSOR_SENSOR_TIMEOUT_ACTIVITY;
+	last_data_time = now_ms - CONFIG_ACTIVE_TIMEOUT_DELAY - 1;
+	for (int i = 0; i < 199; i++) {
+		now_ms += 25;
+		sensor_update_sensor_state(i % 2 != 0);
+		assert(sys_request_WOM_now() == 0);
+		assert(sys_plan_WOM(true, now_ms, true) == -EBUSY);
+		assert(wom_commit_at == due && notices == 1);
+		power_iteration();
+		assert(physical_offs == 0 && sys_WOM_manual_pending());
+	}
+	assert(sys_wom_timeout_change_begin() == 0);
+	sys_wom_timeout_change_end(true);
+	assert(wom_manual && wom_commit_at == due);
+	now_ms = due; /* Eligibility lease has long expired; direct request persists. */
+	assert(sys_request_WOM_now() == 0 && wom_commit_at == due);
+	power_iteration();
+	assert(physical_offs == 1 && physical_reboots == 0 && wom_setup_calls == 1);
+	assert(!sys_WOM_manual_pending());
+
+	/* Every safety veto rejects admission and also cancels accepted work
+	 * throughout the warning and at the due-time physical gate. */
+	for (int veto = 0; veto < 7; veto++) {
+#if !CONFIG_SENSOR_USE_TCAL
+		if (veto == 5) continue;
+#endif
+#if !CONFIG_SENSOR_TCAL_HEATED
+		if (veto == 6) continue;
+#endif
+		for (int admitted = 0; admitted < 3; admitted++) {
+			fixture(); memset(&ota, 0, sizeof(ota));
+			if (admitted) assert(sys_request_WOM_now() == 0);
+			test_active = veto == 0;
+			calibration_active = veto == 1;
+			ota_suppressed = veto == 2;
+			atomic_set(&main_suspended, veto == 3);
+			if (veto == 4) ota.session_started = true;
+#if CONFIG_SENSOR_USE_TCAL
+			atomic_set(&tcal_auto_calibration_enabled, veto == 5);
+#endif
+#if CONFIG_SENSOR_TCAL_HEATED
+			heated_pending = veto == 6;
+#endif
+			assert(sys_request_WOM_now() == -EBUSY);
+			if (admitted) {
+				now_ms = admitted == 1 ? now_ms + 100 : wom_commit_at;
+				power_iteration();
+				assert(!wom_manual && notice_phase == POWER_WOM_CANCELLED);
+			} else assert(notices == 0);
+			assert(physical_offs == 0 && physical_reboots == 0);
+		}
+	}
+	for (int owner = 0; owner < 4; owner++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		if (owner == 0) assert(sys_request_system_off() == 0);
+		if (owner == 1) assert(sys_request_system_reboot() == 0);
+		if (owner == 2) assert(sys_ota_reboot_reserve() == 0);
+		if (owner == 3) power_requests.physical_started = true;
+		assert(sys_request_WOM_now() == -EBUSY && !wom_manual && notices == 0);
+	}
+	for (int cancel = 0; cancel < 4; cancel++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		assert(sys_request_WOM_now() == 0);
+		if (cancel == 0) sys_cancel_WOM();
+		if (cancel == 1) assert(sys_request_system_off() == 0);
+		if (cancel == 2) assert(sys_request_system_reboot() == 0);
+		if (cancel == 3) assert(sys_ota_reboot_reserve() == 0);
+		assert(!sys_WOM_manual_pending() && notice_phase == POWER_WOM_CANCELLED);
+	}
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_plan_WOM(false, now_ms + 10000, true) == 0);
+	test_active = true;
+	assert(sys_request_WOM_now() == -EBUSY);
+	assert(wom_planned && !wom_manual && notices == 1);
+	test_active = false;
+	assert(sys_request_WOM_now() == 0);
+	assert(notices == 3 && wom_manual && !wom_normal_timeout);
+	assert(wom_commit_at == now_ms + TRACKER_EVENT_WOM_ADVANCE_MS);
+	sys_cancel_WOM();
+#endif
+}
+
 int main(void)
 {
+	manual_wom_entry();
+#if HOST_MANUAL_ONLY
+	puts("PASS manual WOM capability/custom automatic-shutdown policy");
+	return 0;
+#endif
 	tcal_sleep_policy();
 	activation_with_competitor(SYS_POWER_REQ_NONE, 0);
 	for (int phase = 0; phase < 4; phase++) {

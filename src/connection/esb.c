@@ -264,7 +264,7 @@ static void esb_wom_receive(uint16_t minutes, uint16_t token)
 	if (wom_command.cached && minutes == wom_command.cached_minutes
 	    && token == wom_command.cached_token
 	    && (wom_command.result_flag == ESB_PING_FLAG_WOM_ERROR
-	        || minutes == ESB_WOM_TIMEOUT_CLEAR
+	        || minutes == ESB_WOM_TIMEOUT_CLEAR || minutes == ESB_WOM_ENTER
 	        || wom_timeout_get_minutes() == wom_command.result)) {
 		wom_command.response_pending = true;
 		return;
@@ -297,12 +297,14 @@ static void esb_wom_process(void)
 
 	/* Persistence and power admission run only in the radio owner, IRQs on. */
 	bool clear = minutes == ESB_WOM_TIMEOUT_CLEAR;
-	int err = token == 0 || (!clear && minutes > 35791) ? -EINVAL
+	bool enter = minutes == ESB_WOM_ENTER;
+	int err = token == 0 || (!clear && !enter && minutes > 35791) ? -EINVAL
+		: enter ? sys_request_WOM_now()
 		: clear ? wom_timeout_set_minutes(0)
 		: minutes == 0 ? 0 : wom_timeout_set_minutes(minutes);
 	uint16_t result = err ? (uint16_t)-err
-		: clear ? 0 : minutes ? minutes : wom_timeout_get_minutes();
-	if (!err && !clear && result == 0) {
+		: enter ? ESB_WOM_ENTER : clear ? 0 : minutes ? minutes : wom_timeout_get_minutes();
+	if (!err && !clear && !enter && result == 0) {
 		err = -ENOTSUP;
 		result = ENOTSUP;
 	}

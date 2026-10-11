@@ -793,7 +793,7 @@ static void wom_channel_responses(void) {
     reset(84);
     wom_command.cached = wom_command.response_pending = true;
     wom_command.cached_token = 0x1234;
-    wom_command.result = 37;
+    wom_command.result = ESB_WOM_ENTER;
     wom_command.result_flag = ESB_PING_FLAG_WOM_RESULT;
     visit(84);
     assert(last_probe[7] == ESB_PING_FLAG_CHANNEL_CONFIRM);
@@ -803,7 +803,7 @@ static void wom_channel_responses(void) {
     now = search_probe_at;
     assert(esb_channel_search_poll(false));
     assert(last_probe[7] == ESB_PING_FLAG_WOM_RESULT);
-    assert(last_probe[8] == 0 && last_probe[9] == 37);
+    assert(last_probe[8] == 0xff && last_probe[9] == 0xfe);
     assert(last_probe[10] == 0x12 && last_probe[11] == 0x34);
     assert(wom_command.sent_flag == ESB_PING_FLAG_WOM_RESULT);
     assert(wom_command.sent_token == 0x1234);
@@ -820,8 +820,8 @@ static void wom_channel_responses(void) {
     reset(84); visit(84); normal_packet(0, 1);
     assert(ESB_PONG_FLAG_WOM_CONTROL == 0x28);
     rx_payload.data[7] = ESB_PONG_FLAG_WOM_CONTROL;
-    rx_payload.data[8] = 0;
-    rx_payload.data[9] = 37;
+    rx_payload.data[8] = 0xff;
+    rx_payload.data[9] = 0xfe;
     rx_payload.data[10] = 0x12;
     rx_payload.data[11] = 0x34;
     packet_crc();

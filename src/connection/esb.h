@@ -162,8 +162,9 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks);
 #define ESB_PONG_FLAG_MAG_AUTO_OFF 0x26     // Disable online magnetometer calibration
 #define ESB_PONG_FLAG_TCAL_HEATED_START 0x27 // Request heated T-Cal with the configured default target
 #define ESB_WOM_TIMEOUT_CLEAR 0xffff
-#define ESB_PONG_FLAG_WOM_CONTROL 0x28 // BE16 operation (0=query, 0xffff=clear), BE16 token
-#define ESB_PING_FLAG_WOM_RESULT 0x29 // Response only: minutes or 0=cleared; matching token
+#define ESB_WOM_ENTER 0xfffe
+#define ESB_PONG_FLAG_WOM_CONTROL 0x28 // BE16 operation (0=query, 0xffff=clear, 0xfffe=enter), BE16 token
+#define ESB_PING_FLAG_WOM_RESULT 0x29 // Response only: minutes, 0=cleared, 0xfffe=entry accepted; matching token
 #define ESB_PING_FLAG_WOM_ERROR 0x2A // Response only: positive errno, matching token
 #define ESB_PONG_FLAG_OTA_QUERY_INFO 0x30   // Request firmware info for ESB OTA
 #define ESB_PONG_FLAG_OTA_ABORT 0x31        // Abort ESB OTA update

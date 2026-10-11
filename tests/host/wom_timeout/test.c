@@ -58,7 +58,7 @@ typedef int k_spinlock_key_t;
 static int k_spin_lock(int *lock) { return 0; }
 static void k_spin_unlock(int *lock, int key) {}
 static struct { int lock, request, ota_reboot; bool physical_started; } power_requests;
-static bool wom_planned, wom_announced, wom_force, wom_normal_timeout;
+static bool wom_planned, wom_announced, wom_force, wom_normal_timeout, wom_manual;
 static int64_t wom_deadline, wom_commit_at;
 static unsigned cancellations;
 static bool power_request_cancel_wom(void *mailbox) {
@@ -130,6 +130,9 @@ static bool console_require_args(size_t argc, size_t low, size_t high) {
     if (argc >= low && argc <= high) return true;
     console_reject(); return false;
 }
+static unsigned enter_calls;
+static int enter_result;
+static int sys_request_WOM_now(void) { enter_calls++; return enter_result; }
 #include "production.inc"
 
 static void command(const char *value) {
@@ -140,6 +143,23 @@ static void command(const char *value) {
 int main(void) {
     (void)wom_deadline;
     (void)wom_commit_at;
+    {
+    char *enter[] = {"wom", "enter", "extra", "extra"};
+    unsigned old_rejected = rejected;
+    console_cmd_wom(3, enter);
+    console_cmd_wom(4, enter);
+    assert(enter_calls == 0 && rejected == old_rejected + 2);
+    console_cmd_wom(2, enter);
+    assert(enter_calls == 1 && rejected == old_rejected + 2);
+    enter_result = -EBUSY;
+    console_cmd_wom(2, enter);
+    assert(enter_calls == 2 && rejected == old_rejected + 3);
+    enter_result = -ENOTSUP;
+    console_cmd_wom(2, enter);
+    assert(enter_calls == 3 && rejected == old_rejected + 4);
+    assert(writes == 0 && deletes == 0);
+    rejected = old_rejected;
+    }
     wom_timeout_load();
     assert(wom_timeout_get_delay_ms() == CONFIG_ACTIVE_TIMEOUT_DELAY);
 #if CONFIG_SLEEP_ON_ACTIVE_TIMEOUT

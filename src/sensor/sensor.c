@@ -1833,6 +1833,12 @@ static void sensor_update_sensor_state(bool resting)
 		last_data_time = now_ms;
 	}
 	was_ota_suppressed = ota_suppressed_now;
+	/* Manual entry ignores idle/rest policy, including automatic shutdown,
+	 * but the power owner still rechecks every safety veto before sleeping. */
+	if (sys_WOM_manual_pending()) {
+		sys_power_policy_unlock();
+		return;
+	}
 
 	if (!in_test_mode && !calibrating && !ota_suppressed_now && !suspended && resting) {
 		int64_t last_data_delta = now_ms - last_data_time;

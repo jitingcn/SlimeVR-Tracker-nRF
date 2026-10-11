@@ -1439,6 +1439,7 @@ static void print_help(void)
 	printk("System:\n");
 	printk("  wom timeout [minutes]      Query/set normal WOM timeout (1-35791 min; 0=default)\n");
 	printk("                             Low-activity wake timeout stays unchanged\n");
+	printk("  wom enter                  Request wake-on-motion sleep after >=5 s warning\n");
 	printk("  shutdown                   Power off the device\n");
 	printk("  reboot                     Soft reset the device\n");
 #if DFU_EXISTS
@@ -2214,8 +2215,22 @@ static void console_cmd_wom(size_t argc, char **argv)
 	if (!console_require_args(argc, 2, 3)) {
 		return;
 	}
+	if (strcmp(argv[1], "enter") == 0) {
+		if (!console_require_args(argc, 2, 2)) {
+			return;
+		}
+		int err = sys_request_WOM_now();
+		if (err) {
+			printk("WOM entry rejected: %d.\n", err);
+			console_reject();
+		} else {
+			printk("WOM entry accepted; at least 5 s warning before sleep "
+			       "(pending repeats keep the original deadline; safety checks still apply).\n");
+		}
+		return;
+	}
 	if (strcmp(argv[1], "timeout") != 0) {
-		printk("Usage: wom timeout [minutes: 1-35791; 0=firmware default]\n");
+		printk("Usage: wom enter | wom timeout [minutes: 1-35791; 0=firmware default]\n");
 		console_reject();
 		return;
 	}

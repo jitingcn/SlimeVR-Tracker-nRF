@@ -478,12 +478,13 @@ static void fw_info_before_normal(void)
 static void wom_response_payload(void)
 {
 	for (unsigned proof = 0; proof < 2; ++proof) {
-		for (unsigned outcome = 0; outcome < 3; ++outcome) {
+		for (unsigned outcome = 0; outcome < 4; ++outcome) {
 			reset();
 			channel_confirmed = !proof;
 			wom_command.cached = wom_command.response_pending = true;
 			wom_command.cached_token = 0x4567;
-			wom_command.result = outcome == 0 ? 35791 : outcome == 1 ? EIO : 0;
+			wom_command.result = outcome == 0 ? 35791 : outcome == 1 ? EIO
+				: outcome == 2 ? 0 : ESB_WOM_ENTER;
 			wom_command.result_flag = outcome == 1 ? ESB_PING_FLAG_WOM_ERROR
 				: ESB_PING_FLAG_WOM_RESULT;
 			uint8_t ping[13] = {ESB_PING_TYPE};

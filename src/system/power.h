@@ -19,6 +19,14 @@ int sys_interface_resume(void);
 int sys_plan_WOM(bool force, int64_t deadline, bool normal_timeout);
 void sys_cancel_WOM(void);
 
+/* Direct nonblocking entry: skip idle eligibility, not safety vetoes. Requires
+ * CONFIG_USE_IMU_WAKE_UP and an IMU interrupt. Repeats preserve the >=5 s lead.
+ * Returns 0 for acceptance (not completed sleep), -EBUSY or -ENOTSUP. */
+int sys_request_WOM_now(void);
+/* Automatic sensor policy must not withdraw or replace a direct request.
+ * Explicit lifecycle cancellation, OFF/REBOOT and OTA remain authoritative. */
+bool sys_WOM_manual_pending(void);
+
 /* Serialize a sensor policy snapshot with setting publication and the physical
  * gate. Recursive: sensor policy may call the ordinary plan/cancel helpers. */
 void sys_power_policy_lock(void);

@@ -53,7 +53,8 @@ parts.append("#if CONFIG_SENSOR_USE_TCAL\n" +
              "\n" + function(tcal, "sensor_tcal_set_auto_calibration") + "\n#endif")
 for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_power_policy_lock",
              "sys_power_policy_unlock", "sys_wom_timeout_change_begin",
-             "sys_wom_timeout_change_end", "sys_wom_ready", "sys_plan_WOM",
+             "sys_wom_timeout_change_end", "sys_WOM_manual_pending", "sys_wom_vetoed",
+             "sys_request_WOM_now", "sys_wom_ready", "sys_plan_WOM",
              "sys_power_state_request", "sys_request_system_off", "sys_request_system_reboot",
              "sys_ota_reboot_reserve", "sys_ota_reboot_resolve", "sys_power_notice",
              "sys_WOM", "sys_system_off", "sys_system_reboot"):
@@ -170,8 +171,8 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
     (void)key; assert(lock->locked); lock->locked = false;
 }
 """)
-    for variant in range(128):
-        mcuboot, imu_int = (variant // 2) % 2, variant % 2
+    for variant in range(130):
+        mcuboot, imu_int = (variant // 2) % 2, variant % 2 if variant < 128 else 1
         low_power_2 = (variant // 4) % 2
         active_delay = 5000 if (variant // 8) % 2 else 90000
         heated = (variant // 16) % 2
@@ -194,6 +195,9 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
             f"-DCONFIG_ACTIVE_TIMEOUT_DELAY={active_delay}",
             f"-DCONFIG_SENSOR_TCAL_HEATED={heated}",
             f"-DCONFIG_SENSOR_USE_TCAL={tcal_enabled}",
+            f"-DCONFIG_USE_IMU_WAKE_UP={int(variant != 128)}",
+            f"-DCONFIG_SLEEP_ON_ACTIVE_TIMEOUT={int(variant < 128)}",
+            f"-DHOST_MANUAL_ONLY={int(variant >= 128)}",
             "-DCONFIG_SOC_NRF52840=1",
             f"-DCONFIG_ESB_OTA_FORCE_RAM_ENGINE={forced_ram}",
             f"-DOTA_USE_RAM_ENGINE={forced_ram}",

@@ -69,6 +69,7 @@ static K_MUTEX_DEFINE(power_plan_lock);
 static bool wom_planned;
 static bool wom_force;
 static bool wom_normal_timeout;
+static bool wom_manual;
 static bool wom_announced;
 static int64_t wom_deadline;
 static int64_t wom_commit_at;
@@ -393,6 +394,7 @@ static void sys_cancel_WOM_locked(void)
 	}
 	wom_planned = false;
 	wom_announced = false;
+	wom_manual = false;
 }
 
 void sys_cancel_WOM(void)
@@ -436,6 +438,69 @@ void sys_wom_timeout_change_end(bool changed)
 	sys_power_policy_unlock();
 }
 
+bool sys_WOM_manual_pending(void)
+{
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	bool pending = wom_planned && wom_manual;
+	k_mutex_unlock(&power_plan_lock);
+	return pending;
+}
+
+static bool sys_wom_vetoed(void)
+{
+	bool veto = esb_ota_is_active() || connection_get_ota_suppressed() ||
+		test_mode_get() || get_status(SYS_STATUS_CALIBRATION_RUNNING) || main_imu_is_suspended();
+#if CONFIG_SENSOR_USE_TCAL
+	veto = veto || sensor_tcal_get_auto_calibration();
+#endif
+#if CONFIG_SENSOR_TCAL_HEATED
+	veto = veto || sensor_tcal_heated_busy();
+#endif
+	return veto;
+}
+
+int sys_request_WOM_now(void)
+{
+#if !CONFIG_USE_IMU_WAKE_UP || !IMU_INT_EXISTS
+	return -ENOTSUP;
+#else
+	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	k_spinlock_key_t key = k_spin_lock(&power_requests.lock);
+	bool busy = power_requests.physical_started ||
+		power_requests.ota_reboot != POWER_OTA_REBOOT_NONE ||
+		power_requests.request == SYS_POWER_REQ_SYSTEM_OFF ||
+		power_requests.request == SYS_POWER_REQ_REBOOT;
+	k_spin_unlock(&power_requests.lock, key);
+	if (busy || sys_wom_vetoed()) {
+		k_mutex_unlock(&power_plan_lock);
+		return -EBUSY;
+	}
+	if (wom_planned && wom_manual) {
+		k_mutex_unlock(&power_plan_lock);
+		return 0;
+	}
+	/* All producer admission and the physical gate hold power_plan_lock:
+	 * only after passing admission may we replace an automatic plan. */
+	sys_cancel_WOM_locked();
+	int err = power_request_submit(&power_requests, SYS_POWER_REQ_WOM_FORCE, &power_wake_sem);
+	if (!err) {
+		int64_t now = k_uptime_get();
+		wom_planned = true;
+		wom_manual = true;
+		wom_force = true;
+		wom_normal_timeout = false;
+		wom_deadline = now;
+		wom_last_eligible = now;
+		wom_commit_at = now + TRACKER_EVENT_WOM_ADVANCE_MS;
+		wom_announced = true;
+		tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WILL_WOM, POWER_WOM_FORCED);
+		tracker_events_notify();
+	}
+	k_mutex_unlock(&power_plan_lock);
+	return err;
+#endif
+}
+
 static bool sys_wom_ready(bool force, int64_t now)
 {
 #if CONFIG_DELAY_SLEEP_ON_STATUS
@@ -466,6 +531,10 @@ int sys_plan_WOM(bool force, int64_t deadline, bool normal_timeout)
 	return -ENOTSUP;
 #else
 	k_mutex_lock(&power_plan_lock, K_FOREVER);
+	if (wom_manual) {
+		k_mutex_unlock(&power_plan_lock);
+		return -EBUSY;
+	}
 	int64_t now = k_uptime_get();
 	if (wom_planned && (wom_force != force || wom_deadline != deadline ||
 			    wom_normal_timeout != normal_timeout ||
@@ -559,21 +628,14 @@ static bool sys_WOM(bool force, uint32_t generation)
 	/* These checks may race with cancellation/rearming. The final generation
 	 * gate below, under the policy mutex, must own this exact claim. */
 	k_mutex_lock(&power_plan_lock, K_FOREVER);
-	bool veto = esb_ota_is_active() || connection_get_ota_suppressed() ||
-		test_mode_get() || get_status(SYS_STATUS_CALIBRATION_RUNNING) || main_imu_is_suspended();
-#if CONFIG_SENSOR_USE_TCAL
-	veto = veto || sensor_tcal_get_auto_calibration();
-#endif
-#if CONFIG_SENSOR_TCAL_HEATED
-	veto = veto || sensor_tcal_heated_busy();
-#endif
+	bool veto = sys_wom_vetoed();
 	if (!power_request_wom_claim_current(&power_requests, generation)) {
 		k_mutex_unlock(&power_plan_lock);
 		return true;
 	}
 	int64_t now = k_uptime_get();
 	if (veto || !wom_planned ||
-	    now - wom_last_eligible >= WOM_ELIGIBILITY_LEASE_MS ||
+	    (!wom_manual && now - wom_last_eligible >= WOM_ELIGIBILITY_LEASE_MS) ||
 	    (wom_announced && !sys_wom_ready(force, now))) {
 		sys_cancel_WOM_locked();
 		k_mutex_unlock(&power_plan_lock);
@@ -594,6 +656,7 @@ static bool sys_WOM(bool force, uint32_t generation)
 	/* The intent is now irrevocable; suspend hooks must not withdraw it. */
 	wom_planned = false;
 	wom_announced = false;
+	wom_manual = false;
 	k_mutex_unlock(&power_plan_lock);
 	led_quiesce();
 	if (!configure_system_off()) {

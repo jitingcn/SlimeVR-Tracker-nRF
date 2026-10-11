@@ -166,7 +166,7 @@ for pattern in (r'^static struct power_request_mailbox power_requests;',
                 r'^#define WOM_ELIGIBILITY_LEASE_MS .*$'):
     fixture += '\n'.join(re.findall(pattern, power, re.MULTILINE)) + '\n'
 for name in ('sys_cancel_WOM_locked', 'sys_cancel_WOM', 'sys_power_policy_lock',
-             'sys_power_policy_unlock', 'sys_wom_ready', 'sys_plan_WOM'):
+             'sys_power_policy_unlock', 'sys_WOM_manual_pending', 'sys_wom_ready', 'sys_plan_WOM'):
     fixture += function(name, power) + '\n'
 for name in ('sensor_sensor_mode', 'sensor_sensor_timeout'):
     fixture += extract_block(source, rf'^enum {name} \{{', semicolon=True) + '\n'
