@@ -92,9 +92,8 @@
 		led-channel-colors = <0>; /* Pink per source, not a supported raw RGB color. */
 		led-channel-weights = <10000>;
 		int0-gpios = <&gpio0 15 0>;
-		//chg-gpios = <&gpio0 29 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
-		//chg-en-gpios = <&gpio0 29 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
-		//stby-gpios = <&gpio0 29 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		/* MCP73831 tri-state STAT, package pin 31 */
+		stat-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
 		//clk-gpios = <&gpio0 31 (GPIO_OPEN_DRAIN)>;
 	};
 

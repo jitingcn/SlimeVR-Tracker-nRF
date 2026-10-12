@@ -49,7 +49,8 @@ def board_gpio(name):
         # Independent non-USB STAT fixture: no board-specific source policy.
         user = "stat-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;"
     else:
-        path = f"boards/kemopati/sk_cheesecake_nrf_{name}/sk_cheesecake_nrf_{name}_nrf52840_uf2.dts"
+        path = "boards/nekumori/kawazu/kawazu_uf2.dts" if name == "kawazu" else (
+            f"boards/kemopati/sk_cheesecake_nrf_{name}/sk_cheesecake_nrf_{name}_nrf52840_uf2.dts")
         dts = (ROOT / path).read_text()
         user = re.search(r"zephyr,user\s*\{(.*?)\n\s*\};", dts, re.DOTALL).group(1)
     macros = []
@@ -101,6 +102,7 @@ with tempfile.TemporaryDirectory(prefix='tracker-battery-sampling-') as director
         ("gpio", 0, None, 0, 0, 0),
         ("pmic", 1, None, 0, 0, 0),
         ("no-gpio", 0, None, 0, 0, 1),
+        ("kawazu", 0, "kawazu", 0, 0, 0),
         ("generic-stat", 0, "generic-stat", 0, 0, 0),
         ("p00", 0, "p00", 1, 0, 0),
         ("p00-noheater", 0, "p00", 0, 0, 0),
@@ -135,7 +137,7 @@ with tempfile.TemporaryDirectory(prefix='tracker-battery-sampling-') as director
             ]
         if no_gpio:
             scenarios = ['feedback_no_gpio', 'poweroff']
-        if board == "generic-stat":
+        if board in ("kawazu", "generic-stat"):
             scenarios = [
                 'stat_raw_levels', 'stat_transitions',
                 'stat_config_readback', 'stat_latch', 'stat_errors', 'stat_owner',
