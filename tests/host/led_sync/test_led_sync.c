@@ -285,10 +285,10 @@ static void low_guarantee_and_admission(void)
 	host_step(10000); assert(engine.winner.semantic==LED_LOW_BATTERY);
 	host_step(10350); assert(host_value==0);
 	host_step(12000); assert(engine.winner.semantic==LED_FAILED && host_value==10000);
-	/* True low clear / actual charging cancels an admitted warning immediately. */
+	/* True low clear / actual charging cancels LOW; unknown power does not. */
 	led_power_publish(LED_POWER_BATTERY,false); host_step(12010);
-	led_power_publish(LED_POWER_BATTERY,true); host_step(12020);
-	assert(engine.winner.semantic==LED_LOW_BATTERY);
+	led_power_publish(LED_POWER_EXTERNAL_UNKNOWN,true); host_step(12020);
+	assert(engine.winner.semantic==LED_LOW_BATTERY && engine.low && engine.power==LED_POWER_EXTERNAL_UNKNOWN);
 	led_power_publish(LED_POWER_CHARGING,true); host_step(12021);
 	assert(engine.winner.semantic!=LED_LOW_BATTERY && !engine.low);
 	/* Exact fit is allowed: the complete black tail ends at the next LOW
@@ -372,11 +372,49 @@ static void immediate_ready_and_blockers(void)
 	host_step(6000); assert(engine.winner.semantic==LED_READY && !host_value);
 	host_step(10000); assert(engine.winner.semantic==LED_READY && host_value==10000);
 }
+static void external_unknown_breathing_transitions(void)
+{
+	const enum led_capability capabilities[]={LED_CAP_MONO_PWM,LED_CAP_RGB_PWM,LED_CAP_MONO_GPIO};
+	static const struct { uint32_t age; uint16_t pwm_value, gpio_value; } samples[]={
+		{0,0,10000}, {1000,7000,10000}, {2000,10000,10000}, {4000,0,0}, {5000,0,10000}
+	};
+	for (unsigned cap=0;cap<sizeof(capabilities)/sizeof(capabilities[0]);++cap) {
+		host_reset(capabilities[cap]);
+		struct led_connection_facts facts={.radio_required=true,.paired=true};
+		led_connection_publish(&facts); host_step(0);
+		assert(engine.winner.semantic==LED_RECONNECTING);
+		/* A fresh network clock must not change unknown's local breathing phase. */
+		host_network_available=true; host_network_raw=65536;
+		host_now_ms=100; led_power_publish(LED_POWER_EXTERNAL_UNKNOWN,false);
+		for (unsigned sample=0;sample<sizeof(samples)/sizeof(samples[0]);++sample) {
+			if (sample==1) {
+				host_now_ms=600; led_power_publish(LED_POWER_EXTERNAL_UNKNOWN,false);
+			}
+			host_step(100+samples[sample].age);
+			assert(engine.power==LED_POWER_EXTERNAL_UNKNOWN && engine.winner.semantic==LED_EXTERNAL_POWER_UNKNOWN);
+			assert(!engine.winner.network && engine.winner.origin_ms==100);
+			assert(host_role==LED_ROLE_POWER && host_level==LED_LEVEL_TASK);
+			assert(host_value==(capabilities[cap]==LED_CAP_MONO_GPIO
+				? samples[sample].gpio_value : samples[sample].pwm_value));
+		}
+		led_power_publish(LED_POWER_CHARGED,false); host_step(5101);
+		assert(engine.winner.semantic==LED_CHARGED && host_value==10000);
+		assert(host_role==LED_ROLE_POSITIVE && host_level==LED_LEVEL_BACKGROUND);
+		host_step(7101); assert(engine.winner.semantic==LED_CHARGED && host_value==10000);
+		led_power_publish(LED_POWER_EXTERNAL_UNKNOWN,false); host_step(7102);
+		assert(engine.power==LED_POWER_EXTERNAL_UNKNOWN && engine.winner.semantic==LED_EXTERNAL_POWER_UNKNOWN);
+		assert(host_value==(capabilities[cap]==LED_CAP_MONO_GPIO ? 10000 : 0));
+		host_step(8102);
+		assert(host_role==LED_ROLE_POWER && host_level==LED_LEVEL_TASK);
+		assert(host_value==(capabilities[cap]==LED_CAP_MONO_GPIO ? 10000 : 7000));
+	}
+}
+
 static void external_power_priority_and_identify(void)
 {
 	const enum led_power_state powers[]={LED_POWER_CHARGING,LED_POWER_CHARGED,LED_POWER_EXTERNAL_UNKNOWN};
 	const enum led_semantic semantics[]={LED_CHARGING,LED_CHARGED,LED_EXTERNAL_POWER_UNKNOWN};
-	const enum led_role roles[]={LED_ROLE_POWER,LED_ROLE_POSITIVE,LED_ROLE_NEUTRAL};
+	const enum led_role roles[]={LED_ROLE_POWER,LED_ROLE_POSITIVE,LED_ROLE_POWER};
 	for (unsigned power=0;power<sizeof(powers)/sizeof(powers[0]);++power) {
 		for (unsigned link=0;link<4;++link) {
 			host_reset(LED_CAP_RGB_PWM);
@@ -411,6 +449,7 @@ static void external_power_priority_and_identify(void)
 			host_now_ms=13006; led_state(heated,2,LED_NONE);
 			led_operation_publish(LED_OWNER_TCAL,false,false); host_step(13006);
 			assert(engine.winner.semantic==semantic);
+			if (powers[power]==LED_POWER_EXTERNAL_UNKNOWN) assert(host_value==0); /* Local breathing restarts after preemption. */
 			led_power_publish(LED_POWER_BATTERY,false); host_step(13007);
 			assert(engine.winner.semantic==(link==0 ? LED_UNPAIRED_IDLE : link==1 ? LED_RECONNECTING
 				: link==2 ? LED_PAIRING : LED_READY));
@@ -876,6 +915,7 @@ int main(void)
 	breathing_grid_and_idle_wakes();
 	expired_success_and_interrupted_result(); low_guarantee_and_admission();
 	safety_record_and_reject_preserves_ota(); immediate_ready_and_blockers();
+	external_unknown_breathing_transitions();
 	external_power_priority_and_identify(); foreground_order_exit_and_quiesce();
 	request_flood_tie_break_and_wrap(); invisible_effects_and_driver_black_failure();
 	same_class_pending_and_input_merge(); actual_clock_wrap();

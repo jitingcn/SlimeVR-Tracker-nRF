@@ -21,7 +21,6 @@ enum behavior_id {
 	BEHAVIOR_INITIALIZING,
 	BEHAVIOR_CHARGING,
 	BEHAVIOR_CHARGED,
-	BEHAVIOR_EXTERNAL,
 	BEHAVIOR_LOW,
 	BEHAVIOR_FAULT,
 	BEHAVIOR_SAFETY,
@@ -104,10 +103,6 @@ static const struct led_behavior behaviors[] = {
 		.style = LED_STYLE_SOLID, .role = LED_ROLE_POSITIVE, .level = LED_LEVEL_BACKGROUND,
 		.extent = LED_HOLD, .priority = LED_PRIORITY_BACKGROUND
 	},
-	[BEHAVIOR_EXTERNAL] = {
-		.style = LED_STYLE_SOLID, .role = LED_ROLE_NEUTRAL, .level = LED_LEVEL_BACKGROUND,
-		.extent = LED_HOLD, .priority = LED_PRIORITY_BACKGROUND
-	},
 	[BEHAVIOR_LOW] = {
 		.style = LED_STYLE_LOW, .role = LED_ROLE_POWER, .level = LED_LEVEL_NOTICE,
 		.extent = LED_FINITE, .duration_ms = 2000, .priority = LED_PRIORITY_LOW
@@ -165,7 +160,7 @@ static const uint8_t semantic_behaviors[] = {
 	BEHAVIOR_INITIALIZING,
 	BEHAVIOR_CHARGING,
 	BEHAVIOR_CHARGED,
-	BEHAVIOR_EXTERNAL,
+	BEHAVIOR_CHARGING, /* LED_EXTERNAL_POWER_UNKNOWN shares appearance, not charging truth */
 	BEHAVIOR_LOW,
 	BEHAVIOR_FAULT, /* LED_SENSOR_MISSING */
 	BEHAVIOR_FAULT, /* LED_SENSOR_FAULT */

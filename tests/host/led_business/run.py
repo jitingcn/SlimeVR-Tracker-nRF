@@ -58,7 +58,8 @@ button_production = "\n".join(function(system, name) for name in (
     "button_interrupt_handler", "button_press_cancel", "button_status_clear_if_idle", "button_thread",
 ))
 button_production = function(status, "status_ready") + "\n" + button_production
-manual_production = "\n".join(function(power, name) for name in (
+manual_production = function(system, "sys_enter_poweroff") + "\n"
+manual_production += "\n".join(function(power, name) for name in (
     "sys_power_state_request", "sys_request_system_off", "sys_request_system_reboot", "sys_user_reboot",
     "sys_exit_feedback_allowed", "sys_power_notice", "sys_system_off", "sys_system_reboot",
 ))

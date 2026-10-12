@@ -15,6 +15,7 @@
 #define CONFIG_SENSOR_USE_TCAL 0
 #define CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN 0
 #define IMU_INT_EXISTS 0
+#define CHARGER_STAT_EXISTS 0
 #define ADAFRUIT_BOOTLOADER 0
 #define SYS_REGULATOR_LDO 0
 #define SYS_REBOOT_COLD 0
@@ -36,6 +37,8 @@ static struct k_sem power_wake_sem;
 static int64_t press_time, last_press_duration, last_press_started_at;
 static uint32_t press_generation, last_press_generation;
 static bool button_held_from_init, physical_pressed, ota_busy;
+static bool host_vbus_present;
+static uint32_t host_reset_reason;
 static bool button_status;
 static int button_thread_id;
 static unsigned pair_requests, reset_requests, click_notices, physical_offs, physical_reboots;
@@ -96,7 +99,8 @@ static int power_battery_current_pptt(void) { return 5000; }
 static bool power_battery_device_plugged(void) { return false; }
 static void sys_update_battery_tracker(int pptt, bool plugged) { (void)pptt; (void)plugged; }
 static void wait_for_logging(void) {}
-static void sys_poweroff(void) { ++physical_offs; }
+static void sys_poweroff(void)
+{ assert(irq_depth); ++physical_offs; irq_depth = 0; /* Model the terminal return. */ }
 static void sys_reboot(int mode) { (void)mode; ++physical_reboots; }
 static void k_msleep(int milliseconds);
 static void k_thread_abort(int thread)
@@ -189,6 +193,7 @@ static void reset_case(enum led_capability capability)
 	press_generation = last_press_generation = 0;
 	irq_depth = 0; irq_deferred = NULL;
 	button_held_from_init = physical_pressed = ota_busy = button_status = false;
+	host_vbus_present = false; host_reset_reason = 0;
 	pair_requests = reset_requests = click_notices = physical_offs = physical_reboots = 0;
 	abort_at_ms = hold_first_ms = hold_last_ms = exit_origin_ms = power_notice_ms = 0;
 	saw_exit = saw_cancel = saw_failed = false;
@@ -476,12 +481,15 @@ static void stale_hold_and_command_budget(void)
 	assert(engine.owners[LED_OWNER_SYSTEM].semantic != LED_MANUAL_EXIT);
 }
 #define DT_NODE_HAS_PROP(...) 0
-#define IGNORE_RESET 1
+#define IGNORE_RESET 0
+#define POWER_RESETREAS_RESETPIN_Msk 1U
+static uint32_t sys_get_reset_reason(void) { return host_reset_reason; }
 static uint8_t reboot_counter_read(void) { return 100; }
 static bool dock_read(void) { return false; }
 static bool chg_read(void) { return false; }
 static bool stby_read(void) { return false; }
 static bool vin_read(void) { return false; }
+static bool vbus_read(void) { return host_vbus_present; }
 static int64_t system_uptime_since_boot_ms(void) { return host_now_ms; }
 static void k_usleep(int microseconds) { (void)microseconds; }
 #define main startup_main
@@ -496,10 +504,30 @@ static void startup_does_not_fake_button_input(void)
 	assert(host_value == 0 && engine.winner.semantic == LED_NONE && !engine.ready);
 }
 
+static void startup_usb_prevents_unplugged_shutdown(void)
+{
+#if USER_SHUTDOWN_ENABLED
+	for (unsigned plugged = 0; plugged < 2; ++plugged) {
+		reset_case(LED_CAP_RGB_PWM);
+		host_reset_reason = POWER_RESETREAS_RESETPIN_Msk;
+		host_vbus_present = plugged != 0; /* VIN remains absent independently. */
+		assert(startup_main() == 0);
+		if (plugged) {
+			assert(power_requests.request == SYS_POWER_REQ_NONE && manual_request_attempts == 0);
+			assert(!saw_exit && physical_offs == 0 && physical_reboots == 0);
+		} else {
+			assert(power_requests.request == SYS_POWER_REQ_SYSTEM_OFF && manual_request_attempts == 1);
+			assert(saw_exit);
+		}
+	}
+#endif
+}
+
 int main(void)
 {
 	qualified_release_preempts_older_click_deadline();
 	startup_does_not_fake_button_input();
+	startup_usb_prevents_unplugged_shutdown();
 	held_release_and_complete(); short_hold_release_and_single_click();
 	fresh_input_survives_late_veto(); invisible_output_never_adds_manual_wait();
 	irq_delivery_cannot_split_identity_and_clear();

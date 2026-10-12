@@ -216,10 +216,19 @@ static void one_and_several_presses(void)
 		assert(reboot_requests == 0);
 		assert(reset_requests == (CONFIG_USER_EXTRA_ACTIONS ? 1U : 0U));
 		if (CONFIG_USER_EXTRA_ACTIONS) assert(reset_mode == count - 1);
-		assert(host_value != 0 && engine.winner.semantic == LED_EXTERNAL_POWER_UNKNOWN);
-		/* The final off tail belongs to the train even above a solid lamp. */
+		assert(engine.winner.semantic == LED_EXTERNAL_POWER_UNKNOWN);
+		/* The final off tail belongs to the train even above a breathing background. */
 		uint32_t tail = pulses[count - 1].end_ms;
 		assert(last_train_end_ms == tail + 420);
+		uint32_t next_cycle = engine.winner.origin_ms
+			+ ((host_now_ms - engine.winner.origin_ms) / 5000 + 1) * 5000;
+		host_step(next_cycle);
+		assert(engine.winner.semantic == LED_EXTERNAL_POWER_UNKNOWN && host_value == 0);
+		host_step(next_cycle + 1000);
+		assert(engine.winner.semantic == LED_EXTERNAL_POWER_UNKNOWN && host_value == 7000);
+		assert(host_role == LED_ROLE_POWER && host_level == LED_LEVEL_TASK);
+		host_step(next_cycle + 4000);
+		assert(engine.winner.semantic == LED_EXTERNAL_POWER_UNKNOWN && host_value == 0);
 	}
 }
 static void held_press_spans_previous_group_expiry(void)

@@ -127,9 +127,15 @@ int main(void)
 	}
 
 #if USER_SHUTDOWN_ENABLED
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), stat_gpios)
+	bool charging = false, charged = false;
+	(void)sys_charger_snapshot(&charging, &charged);
+#else
 	bool charging = chg_read();
 	bool charged = stby_read();
-	bool plugged = vin_read();
+#endif
+	/* STAT high-Z does not establish external-power absence. */
+	bool plugged = vin_read() || vbus_read();
 
 	if (reset_mode == 0 && !booting_from_shutdown && !charging && !charged
 		&& !plugged) { // Reset mode user shutdown, only if unplugged and undocked

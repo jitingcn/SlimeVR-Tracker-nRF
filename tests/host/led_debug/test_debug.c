@@ -398,6 +398,37 @@ static void test_ready_preview_cannot_change_link_truth(void)
 	assert(engine.winner.semantic==LED_READY && !host_value);
 }
 
+static void test_external_unknown_status_and_preview(void)
+{
+	reset(LED_CAP_RGB_PWM);
+	host_network_available = true;
+	host_network_raw = 65536;
+	led_power_publish(LED_POWER_EXTERNAL_UNKNOWN, false);
+	host_step(0); assert(host_value == 0);
+	host_step(1000);
+	assert(host_value == 7000 && host_role == LED_ROLE_POWER && host_level == LED_LEVEL_TASK);
+	command(1, "led status");
+	assert(strstr(response, "real_winner=external_power_unknown") != NULL);
+	assert(strstr(response, "time_source=local_monotonic") != NULL);
+	command(1, "led list");
+	assert(strstr(response, "external_power_unknown extent=loop style=breathe role=power level=task envelope_ms=5000") != NULL);
+
+	led_power_publish(LED_POWER_CHARGED, false);
+	host_step(1001); assert(host_value == 10000);
+	command(1, "led play external_power_unknown 10000");
+	assert(preview().status == LED_PREVIEW_ACTIVE && preview().semantic == LED_EXTERNAL_POWER_UNKNOWN);
+	host_step(1001); assert(host_value == 0);
+	host_step(2001);
+	assert(host_value == 7000 && host_role == LED_ROLE_POWER && host_level == LED_LEVEL_TASK);
+	command(1, "led status");
+	assert(strstr(response, "real_winner=charged") != NULL);
+	assert(strstr(response, "source=synthetic name=external_power_unknown status=active") != NULL);
+	assert(engine.power == LED_POWER_CHARGED);
+	command(1, "led stop");
+	host_step(2002);
+	assert(engine.winner.semantic == LED_CHARGED && host_value == 10000 && engine.power == LED_POWER_CHARGED);
+}
+
 static void test_status_reports_actual_clock(void)
 {
 	reset(LED_CAP_RGB_PWM);
@@ -474,6 +505,7 @@ int main(void)
 	test_capabilities_and_no_business_effects();
 	test_duration_boundary_and_uptime_wrap();
 	test_ready_preview_cannot_change_link_truth();
+	test_external_unknown_status_and_preview();
 	test_status_reports_actual_clock();
 	test_physical_feedback_cannot_use_preview_color();
 	puts("actual LED debug parser/state: invalid, identity, expiry, priority, capability and isolation passed");

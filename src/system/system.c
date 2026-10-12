@@ -16,6 +16,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/poweroff.h>
 #include <zephyr/fatal.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/drivers/flash.h>
@@ -25,6 +26,7 @@
 #include <zephyr/retention/bootmode.h>
 #endif
 #include <hal/nrf_gpio.h>
+#include <hal/nrf_power.h>
 #include <errno.h>
 
 #include "system.h"
@@ -180,6 +182,83 @@ static const struct gpio_dt_spec charger_plug = GPIO_DT_SPEC_GET(ZEPHYR_USER_NOD
 static int charger_plug_error = -ENODEV;
 #endif
 
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, stat_gpios)
+#define CHARGER_STAT_EXISTS true
+#if CHG_EXISTS || STBY_EXISTS || DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug) || \
+	DT_NODE_HAS_STATUS(DT_NODELABEL(pmic_charger), okay)
+#error "Tri-state STAT cannot be combined with CHG/STBY, full-on-plug or PMIC charger status"
+#endif
+BUILD_ASSERT(DT_GPIO_FLAGS(ZEPHYR_USER_NODE, stat_gpios) == GPIO_ACTIVE_HIGH,
+	"Tri-state STAT requires raw active-high levels without devicetree pull/drive flags");
+static const struct gpio_dt_spec charger_stat =
+	GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, stat_gpios);
+static K_MUTEX_DEFINE(charger_stat_lock);
+static bool charger_stat_sense_armed;
+static nrf_gpio_pin_sense_t charger_stat_wake_sense = NRF_GPIO_PIN_NOSENSE;
+
+static int charger_stat_verify_input(gpio_flags_t pull)
+{
+	uint32_t pin = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stat_gpios);
+	nrf_gpio_pin_pull_t expected = pull == GPIO_PULL_DOWN ?
+		NRF_GPIO_PIN_PULLDOWN : NRF_GPIO_PIN_PULLUP;
+	return nrf_gpio_pin_dir_get(pin) == NRF_GPIO_PIN_DIR_INPUT &&
+		nrf_gpio_pin_input_get(pin) == NRF_GPIO_PIN_INPUT_CONNECT &&
+		nrf_gpio_pin_pull_get(pin) == expected ? 0 : -EIO;
+}
+
+static int charger_stat_configure_input(gpio_flags_t pull)
+{
+	int err = gpio_pin_configure(charger_stat.port, charger_stat.pin, GPIO_INPUT | pull);
+	return err ? err : charger_stat_verify_input(pull);
+}
+
+static int charger_stat_read(gpio_flags_t pull)
+{
+	int err = gpio_pin_configure(charger_stat.port, charger_stat.pin, GPIO_INPUT | pull);
+	if (err) return err;
+	k_busy_wait(100);
+	err = charger_stat_verify_input(pull);
+	return err ? err : gpio_pin_get_raw(charger_stat.port, charger_stat.pin);
+}
+
+static void charger_stat_disable_sense(void)
+{
+	uint32_t pin = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stat_gpios);
+	unsigned int key = irq_lock();
+	nrf_gpio_cfg_sense_set(pin, NRF_GPIO_PIN_NOSENSE);
+#if defined(NRF_GPIO_LATCH_PRESENT)
+	nrf_gpio_pin_latch_clear(pin);
+#endif
+	irq_unlock(key);
+}
+
+/* Caller holds charger_stat_lock. A low against pull-up establishes charging;
+ * otherwise a high against pull-down establishes full. High/low may be high-Z
+ * or a transition and establishes neither. Changes after the last read and
+ * board RC settling still need electrical qualification; 100 us is not a
+ * guaranteed settling specification. */
+static int charger_stat_snapshot_locked(bool *charging, bool *charged)
+{
+	if (!gpio_is_ready_dt(&charger_stat)) return -ENODEV;
+	charger_stat_disable_sense();
+	int level = charger_stat_read(GPIO_PULL_UP);
+	if (level == 0) {
+		*charging = true;
+		*charged = false;
+		return 0; /* The verified input already has its safe idle pull-up. */
+	}
+	if (level > 0) level = charger_stat_read(GPIO_PULL_DOWN);
+	/* Attempt restoration even after a failed configuration/read. Do not
+	 * publish a snapshot when restoring the safe idle input bias failed. */
+	int restore_err = charger_stat_configure_input(GPIO_PULL_UP);
+	if (restore_err) return restore_err;
+	if (level < 0) return level;
+	*charging = false;
+	*charged = level > 0;
+	return 0;
+}
+#endif
+
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, clk_gpios)
 #define CLK_EN_EXISTS true
 static const struct gpio_dt_spec clk_en = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, clk_gpios);
@@ -241,12 +320,59 @@ void configure_sense_pins(void)
 		}
 #endif
 	}
+#if CHARGER_STAT_EXISTS
+	k_mutex_lock(&charger_stat_lock, K_FOREVER);
+	/* Sleep preparation owns this pin from now until reset. Later status
+	 * callers must not probe away the pull or SENSE selected here. */
+	charger_stat_wake_sense = NRF_GPIO_PIN_NOSENSE;
+	charger_stat_disable_sense();
+	if (!docked && !(IGNORE_CHARGE_WAKE_ON_VBUS && vbus_read())) {
+		bool charging = false, charged = false;
+		int err = charger_stat_snapshot_locked(&charging, &charged);
+		if (!err && charged) {
+			err = charger_stat_configure_input(GPIO_PULL_DOWN);
+			if (err) {
+				/* A failed wake-bias change may have partially applied. */
+				int restore_err = charger_stat_configure_input(GPIO_PULL_UP);
+				if (restore_err) err = restore_err;
+			}
+		}
+		if (!err) {
+			charger_stat_wake_sense = charging ?
+				NRF_GPIO_PIN_SENSE_HIGH : NRF_GPIO_PIN_SENSE_LOW;
+			nrf_gpio_cfg_sense_set(
+				NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stat_gpios), charger_stat_wake_sense);
+			LOG_INF("Configured tri-state STAT wake sense");
+		} else {
+			LOG_WRN("Tri-state STAT wake sense unavailable: %d", err);
+		}
+	}
+	charger_stat_sense_armed = true;
+	k_mutex_unlock(&charger_stat_lock);
+#endif
 	// Configure sw0 sense
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
 	nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(DT_ALIAS(sw0), gpios), NRF_GPIO_PIN_PULLUP);
 	nrf_gpio_cfg_sense_set(NRF_DT_GPIOS_TO_PSEL(DT_ALIAS(sw0), gpios), NRF_GPIO_PIN_SENSE_LOW);
 	LOG_INF("Configured sw0 sense");
 #endif
+}
+
+void sys_enter_poweroff(void)
+{
+	/* No ISR may rewrite the saved STAT SENSE between re-arming and SYSTEMOFF. */
+	(void)irq_lock();
+#if CHARGER_STAT_EXISTS
+	if (charger_stat_sense_armed) {
+		uint32_t pin = NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, stat_gpios);
+		nrf_gpio_cfg_sense_set(pin, NRF_GPIO_PIN_NOSENSE);
+#if defined(NRF_GPIO_LATCH_PRESENT)
+		nrf_gpio_pin_latch_clear(pin);
+#endif
+		nrf_gpio_cfg_sense_set(pin, charger_stat_wake_sense);
+	}
+#endif
+	sys_poweroff();
 }
 
 static bool nvs_init = false;
@@ -1257,6 +1383,12 @@ static int sys_gpio_init(void)
 #if STBY_EXISTS
 	gpio_pin_configure_dt(&stby, GPIO_INPUT);
 #endif
+#if CHARGER_STAT_EXISTS
+	int stat_err = gpio_is_ready_dt(&charger_stat)
+		? charger_stat_configure_input(GPIO_PULL_UP)
+		: -ENODEV;
+	if (stat_err) LOG_ERR("Tri-state STAT input unavailable: %d", stat_err);
+#endif
 #if CHARGER_FULL_ON_PLUG
 	charger_plug_error = gpio_is_ready_dt(&charger_plug)
 		? gpio_pin_configure_dt(&charger_plug, GPIO_INPUT) : -ENODEV;
@@ -1513,7 +1645,15 @@ void sys_reset_mode(uint8_t mode)
 
 int sys_charger_snapshot(bool *charging, bool *charged)
 {
-#if CHG_EXISTS
+#if CHARGER_STAT_EXISTS
+	k_mutex_lock(&charger_stat_lock, K_FOREVER);
+	int err = -EBUSY;
+	if (!charger_stat_sense_armed) {
+		err = charger_stat_snapshot_locked(charging, charged);
+	}
+	k_mutex_unlock(&charger_stat_lock);
+	return err;
+#elif CHG_EXISTS
 	if (!gpio_is_ready_dt(&chg)) return -ENODEV;
 	int charge_level = gpio_pin_get_dt(&chg);
 	if (charge_level < 0) return charge_level;

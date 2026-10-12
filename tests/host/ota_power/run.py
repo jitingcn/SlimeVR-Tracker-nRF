@@ -21,6 +21,7 @@ def function(source, name):
 
 
 power = (SRC / "system/power.c").read_text()
+system = (SRC / "system/system.c").read_text()
 ota = (SRC / "system/esb_ota.c").read_text()
 sensor = (SRC / "sensor/sensor.c").read_text()
 ota_header = (SRC / "system/esb_ota.h").read_text()
@@ -51,6 +52,7 @@ parts.append("#if CONFIG_SENSOR_USE_TCAL\n" +
              "\n" + function(tcal, "sensor_tcal_get_enabled") +
              "\n" + function(tcal, "sensor_tcal_get_auto_calibration") +
              "\n" + function(tcal, "sensor_tcal_set_auto_calibration") + "\n#endif")
+parts.append(function(system, "sys_enter_poweroff"))
 for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_power_policy_lock",
              "sys_power_policy_unlock", "sys_wom_timeout_change_begin",
              "sys_wom_timeout_change_end", "sys_WOM_manual_pending", "sys_wom_vetoed",

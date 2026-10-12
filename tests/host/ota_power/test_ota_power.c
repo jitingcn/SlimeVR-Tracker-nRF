@@ -21,6 +21,15 @@ static bool timeout_reported;
 #define CONFIG_DELAY_SLEEP_ON_STATUS 1
 #define ADAFRUIT_BOOTLOADER 0
 #define CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN 0
+#define CHARGER_STAT_EXISTS 0
+static unsigned irq_depth;
+static bool irq_locked;
+static unsigned irq_lock(void)
+{
+	unsigned key = irq_depth++;
+	irq_locked = true;
+	return key;
+}
 #define OTA_FLASH_PAGE_SIZE 4096
 #define OTA_SUPPORTED 1
 #define OTA_FLASH_BASE 0x1000
@@ -119,7 +128,7 @@ static int sensor_shutdown(void) { sensor_shutdown_calls++; return shutdown_resu
 static unsigned ram_launches;
 #if OTA_USE_RAM_ENGINE
 static void ota_launch_ram_engine(void);
-static bool irq_locked, ram_engine_irq_disabled;
+static bool ram_engine_irq_disabled;
 static unsigned radio_disables;
 static struct { uint32_t CTRL; } mpu_registers;
 static struct {
@@ -130,8 +139,12 @@ static struct {
 #define MPU (&mpu_registers)
 #define BOOTLOADER_SETTINGS_ADDR 0xFF000
 #define IS_ENABLED(option) OTA_USE_MCUBOOT
-static unsigned irq_lock(void) { assert(!irq_locked); irq_locked = true; return 0; }
-static void irq_unlock(unsigned key) { (void)key; assert(irq_locked); irq_locked = false; }
+static void irq_unlock(unsigned key)
+{
+	assert(irq_locked && irq_depth == key + 1);
+	irq_depth = key;
+	irq_locked = irq_depth != 0;
+}
 static void __DSB(void) {}
 static void __ISB(void) {}
 static uint8_t connection_get_id(void) { return 3; }
@@ -205,7 +218,12 @@ static int power_battery_current_pptt(void) { return 5000; }
 static bool power_battery_device_plugged(void) { return false; }
 static void sys_update_battery_tracker(int pptt, bool plugged) { (void)pptt; (void)plugged; }
 static void wait_for_logging(void) {}
-static void sys_poweroff(void) { physical_offs++; }
+static void sys_poweroff(void)
+{
+	assert(irq_locked && irq_depth);
+	physical_offs++;
+	irq_depth = 0; irq_locked = false; /* Model the terminal return. */
+}
 static void sys_reboot(int mode) { (void)mode; physical_reboots++; }
 #if OTA_USE_MCUBOOT
 static int esb_ota_flash_request_mcuboot_upgrade(void) { return prepare_upgrade(); }
@@ -250,12 +268,12 @@ static void test_mode_set(bool enabled) { test_active = enabled; }
 #if OTA_USE_RAM_ENGINE
 static void ota_ram_engine(const struct ota_ram_engine_params *params)
 {
-	assert(irq_locked && MPU->CTRL == 0);
+	assert(irq_locked && irq_depth && MPU->CTRL == 0);
 	assert(params->image_size == ota.image_size && params->page_buf == ota.page_buf);
 	ram_engine_irq_disabled = irq_locked;
 	ram_launches++;
 	/* The hardware leaf returns only for native assertions; no ARM engine runs. */
-	irq_locked = false;
+	irq_depth = 0; irq_locked = false;
 }
 #endif
 
@@ -352,8 +370,9 @@ static void fixture(void)
 	region_result = 0;
 #endif
 	ram_launches = 0;
+	irq_depth = 0; irq_locked = false;
 #if OTA_USE_RAM_ENGINE
-	irq_locked = ram_engine_irq_disabled = false;
+	ram_engine_irq_disabled = false;
 	radio_disables = 0;
 	MPU->CTRL = 1;
 #endif

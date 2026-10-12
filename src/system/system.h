@@ -41,6 +41,8 @@
 #endif
 
 void configure_sense_pins(void);
+/* Final SYSTEMOFF gate: re-arm saved STAT SENSE with interrupts disabled. */
+void sys_enter_poweroff(void);
 
 /* Complete RESETREAS snapshot captured once at PRE_KERNEL_1, before W1C. */
 uint32_t sys_get_reset_reason(void);
@@ -80,10 +82,12 @@ bool button_read_filtered(void);
 bool dock_read(void);
 bool chg_read(void);
 bool stby_read(void);
-/* Fresh charger GPIO facts; active CHG wins completion conflicts. Inactive
- * CHG requires STBY or the board's explicit charger-full-on-plug heuristic
- * for completion; CHG-only boards remain unknown. Missing/failed evidence
- * returns negative without writing either output. */
+/* Fresh complete GPIO charger tuple; errors leave both outputs untouched.
+ * stat-gpios supports only driven-low charging, driven-high full, high-Z neither.
+ * STAT verifies input direction, connection and weak bias before observations.
+ * Weak pull probing is serialized with sleep SENSE setup; -EBUSY once armed.
+ * Legacy active CHG wins completion conflicts. Inactive CHG requires STBY or
+ * explicit charger-full-on-plug; CHG-only boards remain unknown. */
 int sys_charger_snapshot(bool *charging, bool *charged);
 
 /* 0: power request accepted after a manual release-to-exit 1.8s window;

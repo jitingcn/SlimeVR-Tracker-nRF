@@ -702,7 +702,7 @@ static bool sys_WOM(bool force, uint32_t generation)
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	sys_skip_dfu();
 #endif
-	sys_poweroff();
+	sys_enter_poweroff();
 	return true;
 #else
 	sys_cancel_WOM_locked();
@@ -776,7 +776,7 @@ static bool sys_system_off(void) // TODO: add timeout
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	sys_skip_dfu();
 #endif
-	sys_poweroff();
+	sys_enter_poweroff();
 	return true;
 }
 
@@ -830,7 +830,7 @@ static int sys_power_state_request(enum sys_power_request id)
 	return err;
 }
 
-bool vin_read(void) // blocking
+bool vin_read(void)
 {
 	while (!power_init)
 		k_usleep(1); // wait for first battery read
@@ -964,23 +964,24 @@ static void power_thread(void)
 		power_request_finish(&power_requests, requested, generation, consumed);
 
 		bool docked = dock_read();
-#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug)
 		bool charging = false, charged = false;
-#else
-		bool charging = chg_read();
-		bool charged = stby_read();
-#endif
-		bool pmic_plugged = false;
+		bool pmic_plugged = false, gpio_plugged = false;
 		int charger_state_err = battery_charger_state(&pmic_plugged, &charging, &charged);
-#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug)
 		int gpio_charge_err = -ENOTSUP;
 		if (charger_state_err == -ENOTSUP) {
-			/* Share one complete board-authorized tuple with battery telemetry
-			 * and LED feedback. Failed reads cannot retain a stale full fact. */
+			/* One complete GPIO tuple supplies charge/full classification.
+			 * A failed tuple may still leave independently readable presence. */
 			gpio_charge_err = sys_charger_snapshot(&charging, &charged);
 			charger_state_err = gpio_charge_err;
+			if (gpio_charge_err) {
+				charging = chg_read();
+				charged = stby_read();
+			}
+			gpio_plugged = charging || charged;
+		} else if (charger_state_err) {
+			charging = false;
+			charged = false;
 		}
-#endif
 		if (charger_state_err != 0 && charger_state_err != -ENOTSUP) {
 			LOG_WRN("Failed to read charger state: %d", charger_state_err);
 		}
@@ -1011,6 +1012,19 @@ static void power_thread(void)
 			if (battery_pptt < 0)
 				LOG_ERR("Failed to read battery voltage: %d", battery_pptt);
 		}
+
+		/* Qualify charge/full after the owner sample, then share this tuple with
+		 * telemetry and LED feedback. Failed GPIO tuples remain unqualified. */
+		bool sampled_plugged = false, confirmed_charging = false, confirmed_charged = false;
+		int charge_snapshot_err = battery_charger_snapshot(
+			&sampled_plugged, &confirmed_charging, &confirmed_charged);
+		if (charge_snapshot_err == -ENOTSUP) {
+			charge_snapshot_err = gpio_charge_err;
+			confirmed_charging = charging;
+			confirmed_charged = charged;
+		}
+		confirmed_charging = charge_snapshot_err == 0 && confirmed_charging;
+		confirmed_charged = charge_snapshot_err == 0 && confirmed_charged && !confirmed_charging;
 		bool battery_pptt_valid = power_battery_pptt_is_valid(battery_pptt);
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
@@ -1020,7 +1034,8 @@ static void power_thread(void)
 			plugged = true;
 		else if ((plugged && battery_mV <= 4250) || abnormal_reading)
 			plugged = false;
-		bool raw_device_plugged = charging || charged || plugged || usb_plugged || pmic_plugged;
+		bool raw_device_plugged = confirmed_charging || confirmed_charged || plugged
+			|| usb_plugged || pmic_plugged || sampled_plugged || gpio_plugged;
 #if CONFIG_SENSOR_TCAL_HEATED
 		raw_device_plugged = raw_device_plugged || heater_external_power_present();
 #endif
@@ -1030,8 +1045,8 @@ static void power_thread(void)
 		bool battery_discharged = !plug_signal_settling && battery_available
 			&& (average_pptt >= 0 ? average_pptt : battery_pptt) == 0;
 
-		power_battery_set_charged(charged);
 		bool device_plugged = power_battery_device_plugged();
+		power_battery_set_charged(device_plugged && confirmed_charged);
 		bool device_charged = power_battery_device_charged();
 
 		if (!power_init)
@@ -1073,25 +1088,15 @@ static void power_thread(void)
 			battery_mV
 		);
 
-		/* Complete feedback tuple; reuse the opted-in GPIO owner's facts. */
-		bool led_plugged = false, led_charging = false, led_charged = false;
-		int led_charge_err = battery_charger_snapshot(&led_plugged, &led_charging, &led_charged);
-		if (led_charge_err == -ENOTSUP) {
-#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, charger_full_on_plug)
-			led_charge_err = gpio_charge_err;
-			led_charging = charging;
-			led_charged = charged;
-#else
-			led_charge_err = sys_charger_snapshot(&led_charging, &led_charged);
-#endif
-		}
 		enum led_power_state led_power = LED_POWER_BATTERY;
-		if (led_charge_err == 0 && led_charging) {
-			led_power = LED_POWER_CHARGING;
-		} else if (led_charge_err == 0 && led_charged) {
-			led_power = LED_POWER_CHARGED;
-		} else if (raw_device_plugged || led_plugged) {
-			led_power = LED_POWER_EXTERNAL_UNKNOWN;
+		if (device_plugged) {
+			if (confirmed_charging) {
+				led_power = LED_POWER_CHARGING;
+			} else if (device_charged) {
+				led_power = LED_POWER_CHARGED;
+			} else {
+				led_power = LED_POWER_EXTERNAL_UNKNOWN;
+			}
 		}
 		led_power_publish(led_power, power_battery_is_low());
 

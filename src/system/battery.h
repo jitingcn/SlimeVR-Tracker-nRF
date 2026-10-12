@@ -26,8 +26,8 @@ int battery_measure_enable(bool enable);
 int battery_sample(void);
 
 int battery_charger_state(bool *plugged, bool *charging, bool *charged);
-/* LED facts only: successful complete owner sample within 1500 ms and both
- * charger fields read successfully; no new fetch and no partial output writes. */
+/* Qualified power facts: successful complete owner sample within 1500 ms and
+ * both charger fields read successfully; no new fetch or partial output writes. */
 int battery_charger_snapshot(bool *plugged, bool *charging, bool *charged);
 
 /** A point in a battery discharge curve sequence.
