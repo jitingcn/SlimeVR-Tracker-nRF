@@ -494,10 +494,12 @@ config VQF_ADAPTIVE_TAU_ACC
     default n
     depends on SENSOR_USE_VQF
     help
-        Enable adaptive tauAcc adjustment based on motion intensity.
-        Uses a three-regime strategy (rest / gentle / aggressive) with
-        smoothed transitions to avoid Butterworth LP filter transients.
-        This feature is experimental and may affect heading stability.
+        Adapt tauAcc within 0.5–8 seconds using acceleration norm deviation
+        and bias-corrected angular speed. The quiet target is 2 seconds;
+        startup remains 3.264 seconds. Log-domain response uses 0.5 seconds
+        upward and 1.5 seconds downward, with updates every 0.5 seconds.
+        This improves measured drift but can worsen inclination under
+        simultaneous rotation and translation. Disable for fixed tauAcc.
 
 config VQF_BENCH
     bool "Enable VQF benchmark console command"

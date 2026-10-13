@@ -344,9 +344,10 @@ void sensor_diagnostics_output(
 			);
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 			printk(
-				"     Adapt: tauAcc:%.2fs motInt:%.3f\n",
+				"     Adapt: tauAcc:%.2fs accDev:%.3f gyrSpeed:%.3f\n",
 				(double)vqf_info.tau_acc,
-				(double)vqf_info.motion_intensity
+				(double)vqf_info.acc_deviation,
+				(double)vqf_info.angular_speed
 			);
 #endif
 			printk(

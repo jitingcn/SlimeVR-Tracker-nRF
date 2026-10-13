@@ -101,7 +101,8 @@ typedef struct {
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
     // Adaptive tauAcc state
     float tau_acc;             // current tauAcc value (seconds)
-    float motion_intensity;    // motion intensity estimate [0, 1]
+    float acc_deviation;       // normalized acceleration norm deviation [0, 1]
+    float angular_speed;       // normalized bias-corrected angular speed [0, 1]
 #endif
     // Rest detection diagnostics (cumulative since boot/init)
     uint32_t rest_enter_count;     // number of transitions to rest
