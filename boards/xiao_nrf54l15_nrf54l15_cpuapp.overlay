@@ -6,6 +6,8 @@
  * Base variant: no onboard IMU. An external tracker IMU is expected on the
  * XIAO connector, either on I2C (D4/D5 = i2c22) or on SPI
  * (D8/D9/D10 = spi00, chip select on D2, interrupt on D3).
+ * D0 (P1.04) enables sensor power; D1 (P1.05) enables the external
+ * 32.768 kHz oscillator. Both controls are active high.
  */
 
 /* Unused onboard peripherals: the PDM mic (P1.12/P1.13), the onboard-IMU
@@ -67,6 +69,8 @@
 		led-channel-gpios = <&gpio2 0 GPIO_ACTIVE_LOW>;
 		led-channel-colors = <0>; /* SDK calls it LED 0, not a named color. */
 		led-channel-weights = <10000>;
+		pwr-gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+		clk-gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;
 		/* External tracker IMU interrupt on XIAO D3. */
 		int0-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;
 	};
