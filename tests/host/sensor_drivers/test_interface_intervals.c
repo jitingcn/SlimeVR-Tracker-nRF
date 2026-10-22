@@ -275,6 +275,57 @@ static int test_seven_byte_frame_and_prefetch(void)
 	return EXIT_SUCCESS;
 }
 
+static int async_result, async_calls;
+static int async_read(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t len)
+{
+	CHECK(addr == 0x30 && reg == 0 && len == 9);
+	async_calls++;
+	if (async_result)
+		return async_result;
+	memcpy(buf, ext_registers, len);
+	return 0;
+}
+
+static int test_nonblocking_routing(void)
+{
+	const sensor_ext_ssi_t proxy = {
+		.ext_write = ext_write, .ext_write_read = ext_write_read, .ext_burst = 7,
+		.ext_read_nonblocking = async_read,
+	};
+	reset_counts();
+	ext_capacity = 7;
+	sensor_interface_ext_configure(&proxy);
+	CHECK(sensor_interface_register_sensor_mag_ext(0x30, 6, 9) == 0);
+	uint8_t out[9];
+	memset(out, 0xa5, sizeof(out));
+	async_result = -EAGAIN;
+	CHECK(ssi_burst_read_nonblocking(SENSOR_INTERFACE_DEV_MAG, 0, out, 9) == -EAGAIN);
+	CHECK(async_calls == 1 && ext_read_calls == 0 && out[0] == 0xa5 && out[8] == 0xa5);
+	async_result = -EIO;
+	CHECK(ssi_burst_read_nonblocking(SENSOR_INTERFACE_DEV_MAG, 0, out, 9) == -EIO);
+	CHECK(ext_read_calls == 0);
+	async_result = 0;
+	CHECK(ssi_burst_read_nonblocking(SENSOR_INTERFACE_DEV_MAG, 0, out, 9) == 0);
+	CHECK(ext_read_calls == 0 && memcmp(out, ext_registers, 9) == 0);
+	async_result = -ENOTSUP;
+	CHECK(ssi_burst_read_nonblocking(SENSOR_INTERFACE_DEV_MAG, 0, out, 9) == 0);
+	CHECK(ext_read_calls == 2 && ext_read_lengths[0] == 7 && ext_read_lengths[1] == 2);
+	CHECK(ext_read_regs[0] == 0 && ext_read_regs[1] == 7);
+	CHECK(memcmp(out, ext_registers, 9) == 0);
+	// A backend with no callback and direct I2C retain their existing route.
+	sensor_ext_ssi_t synchronous = proxy;
+	synchronous.ext_read_nonblocking = NULL;
+	sensor_interface_ext_configure(&synchronous);
+	CHECK(ssi_burst_read_nonblocking(SENSOR_INTERFACE_DEV_MAG, 0, out, 9) == 0);
+	CHECK(ext_read_calls == 4);
+	struct i2c_dt_spec dev = {0};
+	sensor_interface_register_sensor_mag_i2c(&dev);
+	CHECK(ssi_burst_read_nonblocking(SENSOR_INTERFACE_DEV_MAG, 0, out, 9) == 0);
+	CHECK(i2c_write_read_calls == 1);
+	sensor_interface_ext_configure(NULL);
+	return EXIT_SUCCESS;
+}
+
 int main(void)
 {
 	struct i2c_dt_spec dev = {0};
@@ -349,6 +400,7 @@ int main(void)
 	CHECK(ext_read_calls == 0);
 
 	CHECK(test_seven_byte_frame_and_prefetch() == EXIT_SUCCESS);
+	CHECK(test_nonblocking_routing() == EXIT_SUCCESS);
 
 	printf("All interface interval tests passed\n");
 	return EXIT_SUCCESS;

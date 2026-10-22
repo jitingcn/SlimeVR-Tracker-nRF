@@ -72,6 +72,7 @@ static bool ext_continuous_active = false;
 static uint8_t ext_cont_addr = 0;
 static uint8_t ext_cont_sub = 0;
 static uint8_t ext_cont_len = 0;
+static int64_t ext_cont_deadline_ms;
 static bool ext_prefetch_enabled = true;
 static int lsm_ext_stop_continuous(void);
 
@@ -748,12 +749,18 @@ static int lsm_ext_arm_quiesced(uint8_t addr, uint8_t sub_addr, uint8_t num_read
 	if (!err) {
 		err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status);
 	}
-	if (!err && (status & (LSM6DSV_SENS_HUB_ENDOP | LSM6DSV_WR_ONCE_DONE | LSM6DSV_SLAVE0_NACK))) {
+	if (!err && (status & (LSM6DSV_SENS_HUB_ENDOP | LSM6DSV_WR_ONCE_DONE | LSM6DSV_SLAVE0_NACK
+						| (num_read > 7 ? LSM6DSV_SLAVE1_NACK : 0)))) {
 		err = -EIO;
 	}
-	uint8_t slv0[3] = {(addr << 1) | (write_data ? 0 : 1), sub_addr, LSM6DSV_SHUB_ODR_240HZ | num_read};
+	// Two hardware slots fetch a long register range in the same hub cycle.
+	// NUMOP is three bits per slot; SLV1_CONFIG bit 4 must be set (DS13476).
+	uint8_t slv0[6] = {
+		(addr << 1) | (write_data ? 0 : 1), sub_addr, LSM6DSV_SHUB_ODR_240HZ | (num_read > 7 ? 7 : num_read),
+		(addr << 1) | 1, (uint8_t)(sub_addr + 7), LSM6DSV_SLV1_REQUIRED_BIT | (num_read > 7 ? num_read - 7 : 0)
+	};
 	if (!err) {
-		err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, sizeof(slv0));
+		err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, num_read > 7 ? 6 : 3);
 	}
 	if (!err && write_data) {
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_DATAWRITE_SLV0, *write_data);
@@ -762,7 +769,7 @@ static int lsm_ext_arm_quiesced(uint8_t addr, uint8_t sub_addr, uint8_t num_read
 		err = ssi_reg_write_byte(
 			SENSOR_INTERFACE_DEV_IMU,
 			LSM6DSV_MASTER_CONFIG,
-			LSM6DSV_MASTER_ON | (write_data ? LSM6DSV_WRITE_ONCE : 0)
+			LSM6DSV_MASTER_ON | (write_data ? LSM6DSV_WRITE_ONCE : 0) | (num_read > 7 ? LSM6DSV_AUX_TWO_SENSORS : 0)
 		);
 	}
 	return err ? lsm_ext_fail(err) : 0;
@@ -781,8 +788,7 @@ static int lsm_ext_begin(uint8_t addr, uint8_t sub_addr, uint8_t num_read, const
 /** Rearm the already-quiesced hub after consuming its unread epoch. */
 static int lsm_ext_start_continuous(uint8_t addr, uint8_t sub_addr, uint8_t num_bytes)
 {
-	// NUMOP is three bits; bit 3 is FIFO batching, not length 8.
-	if (!ext_prefetch_enabled || addr > 0x7f || num_bytes < 1 || num_bytes > 7) {
+	if (!ext_prefetch_enabled || addr > 0x7f || num_bytes < 1 || num_bytes > 9) {
 		return -EINVAL;
 	}
 	int err = lsm_ext_arm_quiesced(addr, sub_addr, num_bytes, NULL);
@@ -796,6 +802,7 @@ static int lsm_ext_start_continuous(uint8_t addr, uint8_t sub_addr, uint8_t num_
 	ext_cont_addr = addr;
 	ext_cont_sub = sub_addr;
 	ext_cont_len = num_bytes;
+	ext_cont_deadline_ms = k_uptime_get() + LSM6DSV_SHUB_XLDA_TIMEOUT_MS + LSM6DSV_SHUB_OP_TIMEOUT_MS;
 	ext_continuous_active = true;
 	return 0;
 }
@@ -818,16 +825,25 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	return lsm_ext_fail(err);
 }
 
-int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
+static int lsm_ext_read(uint8_t addr, uint8_t sub_addr, void *read_buf, size_t num_read, bool nonblocking)
 {
-	if (!write_buf || !read_buf || addr > 0x7f || num_write != 1 || num_read < 1 || num_read > 7) {
+	if (!read_buf || addr > 0x7f || num_read < 1 || num_read > (nonblocking ? 9 : 7)) {
 		return -EINVAL;
 	}
-	uint8_t sub_addr = ((const uint8_t *)write_buf)[0];
 	bool pending = ext_prefetch_enabled && ext_continuous_active && addr == ext_cont_addr && sub_addr == ext_cont_sub
 				&& num_read == ext_cont_len;
-	// Consume software ownership before any fallible page/status/data access.
-	ext_continuous_active = false;
+	if (nonblocking && !pending) {
+		int err = lsm_ext_stop_continuous();
+		if (!err) {
+			err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, LSM6DSV_SHUB_REG_ACCESS);
+		}
+		if (!err) {
+			err = lsm_ext_start_continuous(addr, sub_addr, num_read);
+		}
+		return err ? lsm_ext_fail(err) : -EAGAIN;
+	}
+	// Only a nonblocking retry may retain ownership of an unfinished epoch.
+	ext_continuous_active = nonblocking && pending;
 	int err;
 	if (pending) {
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, LSM6DSV_SHUB_REG_ACCESS);
@@ -837,18 +853,31 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 			err = lsm_ext_wait_xlda();
 		}
 	}
-	uint8_t status;
+	uint8_t status = 0;
+	uint8_t nack_mask = LSM6DSV_SLAVE0_NACK | (num_read > 7 ? LSM6DSV_SLAVE1_NACK : 0);
 	if (!err) {
-		err = lsm_ext_wait(
+		err = nonblocking ? ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status) : lsm_ext_wait(
 			LSM6DSV_STATUS_MASTER,
 			LSM6DSV_SENS_HUB_ENDOP,
 			LSM6DSV_SHUB_OP_TIMEOUT_MS + (pending ? LSM6DSV_SHUB_XLDA_TIMEOUT_MS : 0),
 			&status
 		);
 	}
+	if (!err && (status & nack_mask)) {
+		err = -EIO;
+	}
+	if (!err && nonblocking && !(status & LSM6DSV_SENS_HUB_ENDOP)) {
+		if (k_uptime_get() >= ext_cont_deadline_ms) {
+			return lsm_ext_fail(-ETIMEDOUT);
+		}
+		// Keep the pending epoch; let the main loop process IMU FIFO meanwhile.
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
+		return err ? lsm_ext_fail(err) : -EAGAIN;
+	}
 	if (err) {
 		return lsm_ext_fail(err);
 	}
+	ext_continuous_active = false;
 
 	// Freeze the output before copying it. WRITE_ONCE limits writes only:
 	// under preemption the periodic hub may perform multiple physical reads
@@ -863,11 +892,12 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	// above remains authoritative even if reading STATUS clears it.
 	uint8_t stopped_status;
 	err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &stopped_status);
-	if (!err && ((status | stopped_status) & LSM6DSV_SLAVE0_NACK)) {
+	if (!err && ((status | stopped_status) & nack_mask)) {
 		err = -EIO;
 	}
+	uint8_t raw[9];
 	if (!err) {
-		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, read_buf, num_read);
+		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, nonblocking ? raw : read_buf, num_read);
 	}
 	if (err) {
 		return lsm_ext_fail(err);
@@ -876,10 +906,30 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	// Reset/rearm gives the next request a provably separate completion epoch.
 	// Scanning and destructive-read sensors must not deliberately rearm.
 	if (!ext_scanning_mode && ext_prefetch_enabled) {
-		return lsm_ext_start_continuous(addr, sub_addr, num_read);
+		err = lsm_ext_start_continuous(addr, sub_addr, num_read);
+	} else {
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
 	}
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
+	if (!err && nonblocking) {
+		memcpy(read_buf, raw, num_read);
+	}
 	return err ? lsm_ext_fail(err) : 0;
+}
+
+int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
+{
+	if (!write_buf || num_write != 1) {
+		return -EINVAL;
+	}
+	return lsm_ext_read(addr, *(const uint8_t *)write_buf, read_buf, num_read, false);
+}
+
+static int lsm_ext_read_nonblocking(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t num_bytes)
+{
+	if (ext_scanning_mode || !ext_prefetch_enabled || num_bytes != 9) {
+		return -ENOTSUP;
+	}
+	return lsm_ext_read(addr, reg, buf, num_bytes, true);
 }
 
 const sensor_imu_t sensor_imu_lsm6dsv = {
@@ -906,4 +956,5 @@ const sensor_ext_ssi_t sensor_ext_lsm6dsv = {
 	.ext_write_read = lsm_ext_write_read,
 	.ext_burst = 7,
 	.ext_set_prefetch = lsm_ext_set_prefetch,
+	.ext_read_nonblocking = lsm_ext_read_nonblocking,
 };

@@ -45,9 +45,19 @@ static void advance(uint64_t us)
 	if (!hw.error) {
 		uint8_t sub = hw.hub[LSM6DSV_SLV0_SUBADD];
 		if (reading) {
-			unsigned len = hw.hub[LSM6DSV_SLV0_CONFIG] & 7;
-			for (unsigned i = 0; i < len; i++)
-				hw.hub[LSM6DSV_SENSOR_HUB_1 + i] = hw.external[(uint8_t)(sub + i)];
+			unsigned offset = 0;
+			unsigned slots = (hw.hub[LSM6DSV_MASTER_CONFIG] & 3) + 1;
+			for (unsigned slot = 0; slot < slots; slot++) {
+				unsigned base = LSM6DSV_SLV0_ADD + 3 * slot;
+				assert(hw.hub[base] & 1);
+				assert(hw.hub[base] == hw.hub[LSM6DSV_SLV0_ADD]);
+				unsigned len = hw.hub[base + 2] & 7;
+				assert(len && offset + len <= 18);
+				if (slot == 1)
+					assert((hw.hub[base + 2] & 0xf8) == 0x10);
+				for (unsigned i = 0; i < len; i++)
+					hw.hub[LSM6DSV_SENSOR_HUB_1 + offset++] = hw.external[(uint8_t)(hw.hub[base + 1] + i)];
+			}
 		} else {
 			hw.external[sub] = hw.hub[LSM6DSV_DATAWRITE_SLV0];
 			hw.writes++;
@@ -393,8 +403,117 @@ static void test_shutdown_after_stop_failure(void)
 	}
 }
 
+static int nonblocking_sample(uint8_t *out)
+{
+	return hw.ext->ext_read_nonblocking(0x30, 0, out, 9);
+}
+
+static void test_nonblocking_long_read(bool clear_status)
+{
+	uint8_t out[9];
+	reset_model(true, clear_status);
+	for (unsigned i = 0; i < sizeof(out); i++)
+		hw.external[i] = 0x80 + i;
+	memset(out, 0xa5, sizeof(out));
+	unsigned starts = hw.starts, reads = hw.data_reads;
+	uint64_t start = hw.now;
+	assert(nonblocking_sample(out) == -EAGAIN);
+	assert(hw.now - start < 3000 && hw.starts == starts + 1 && !hw.bank);
+	assert(hw.hub[LSM6DSV_SLV0_CONFIG] == (0xa0 | 7));
+	assert(hw.hub[LSM6DSV_SLV1_SUBADD] == 7 && hw.hub[LSM6DSV_SLV1_CONFIG] == 0x12);
+	for (unsigned i = 0; i < 3; i++) {
+		start = hw.now;
+		assert(nonblocking_sample(out) == -EAGAIN);
+		assert(hw.now - start < 1000 && hw.starts == starts + 1 && !hw.bank);
+	}
+	for (unsigned i = 0; i < sizeof(out); i++)
+		assert(out[i] == 0xa5);
+	assert(hw.data_reads == reads);
+	advance(5000);
+	assert(nonblocking_sample(out) == 0);
+	assert(memcmp(out, hw.external, sizeof(out)) == 0);
+	assert(hw.data_reads == reads + 1 && hw.starts == starts + 2 && !hw.bank);
+	// An old completion/output cannot be consumed as a second new sample.
+	memset(hw.external, 0x62, sizeof(out));
+	assert(nonblocking_sample(out) == -EAGAIN);
+	advance(5000);
+	assert(nonblocking_sample(out) == 0);
+	assert(memcmp(out, hw.external, sizeof(out)) == 0);
+	// Low-rate callers may leave a completed background read pending >100 ms.
+	advance(1000000);
+	assert(nonblocking_sample(out) == 0);
+	assert(memcmp(out, hw.external, sizeof(out)) == 0);
+}
+
+static void test_nonblocking_failures(void)
+{
+	uint8_t out[9], sentinel[9];
+	memset(sentinel, 0xa5, sizeof(sentinel));
+	reset_model(true, false);
+	unsigned initial_starts = hw.starts;
+	uint64_t initial_time = hw.now;
+	assert(hw.ext->ext_read_nonblocking(0x30, 0, out, 8) == -ENOTSUP);
+	assert(hw.now == initial_time && hw.starts == initial_starts);
+	uint8_t reg = 0;
+	assert(hw.ext->ext_write_read(0x30, &reg, 1, out, 9) == -EINVAL);
+	assert(hw.now == initial_time && hw.starts == initial_starts);
+	for (unsigned scenario = 0; scenario < 7; scenario++) {
+		reset_model(true, false);
+		memcpy(out, sentinel, sizeof(out));
+		assert(nonblocking_sample(out) == -EAGAIN);
+		advance(5000);
+		switch (scenario) {
+		case 0: hw.error = NACK; hw.status |= NACK; break;
+		case 1: hw.error = LSM6DSV_SLAVE1_NACK; hw.status |= LSM6DSV_SLAVE1_NACK; break;
+		case 2: hw.late_nack = true; break;
+		case 3: fail_on(READ, true, LSM6DSV_STATUS_MASTER, -1, 0); break;
+		case 4: fail_on(READ, true, LSM6DSV_SENSOR_HUB_1, -1, 0); break;
+		case 5: fail_on(WRITE, true, LSM6DSV_MASTER_CONFIG, MASTER_ON | 1, 0); break;
+		case 6: fail_on(WRITE, true, LSM6DSV_FUNC_CFG_ACCESS, 0, 0); break;
+		}
+		assert(nonblocking_sample(out) < 0);
+		assert(memcmp(out, sentinel, sizeof(out)) == 0);
+		assert(!hw.master && !hw.bank);
+		hw.error = 0;
+		hw.late_nack = false;
+		assert(nonblocking_sample(out) == -EAGAIN);
+		advance(5000);
+		assert(nonblocking_sample(out) == 0);
+	}
+	reset_model(true, false);
+	hw.stalled = true;
+	assert(nonblocking_sample(out) == -EAGAIN);
+	unsigned starts = hw.starts;
+	for (unsigned i = 0; i < 9; i++) {
+		advance(10000);
+		assert(nonblocking_sample(out) == -EAGAIN);
+		assert(hw.starts == starts);
+	}
+	advance(15000);
+	assert(nonblocking_sample(out) == -ETIMEDOUT);
+	assert(!hw.master && !hw.bank);
+
+	reset_model(false, false);
+	starts = hw.starts;
+	assert(nonblocking_sample(out) == -ENOTSUP);
+	assert(hw.starts == starts && !hw.bank);
+	reset_model(true, false);
+	assert(nonblocking_sample(out) == -EAGAIN);
+	assert(hw.ext->ext_set_prefetch(false) == 0);
+	assert(!hw.master && nonblocking_sample(out) == -ENOTSUP);
+	// Synchronous register access cancels the grouped epoch and uses one slot.
+	assert(hw.ext->ext_set_prefetch(true) == 0);
+	assert(nonblocking_sample(out) == -EAGAIN);
+	expect_sample(out);
+	assert((hw.hub[LSM6DSV_MASTER_CONFIG] & 3) == 0);
+	assert(nonblocking_sample(out) == -EAGAIN);
+}
+
 int main(void)
 {
+	test_nonblocking_long_read(false);
+	test_nonblocking_long_read(true);
+	test_nonblocking_failures();
 	test_nack(false);
 	test_nack(true);
 	test_configuration_failfast();
