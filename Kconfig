@@ -461,7 +461,7 @@ config SENSOR_STARTUP_DISCARD_MS
 
 config SENSOR_MAG_ODR
     int "Magnetometer ODR (Hz)"
-    default 200
+    default 50
     help
         Requested magnetometer output data rate in Hz.
         Fixed at magnetometer init for the session (nearest supported continuous rate).
