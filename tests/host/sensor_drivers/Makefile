@@ -23,12 +23,13 @@ HOST_HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h hal/*.h)
 
 .PHONY: check clean
 
-check: test_mag_failures test_interface_intervals test_ict153xx test_icm45686 test_lsm6dsv
+check: test_mag_failures test_interface_intervals test_ict153xx test_icm45686 test_lsm6dsv test_lsm6dso
 	./test_mag_failures
 	./test_interface_intervals
 	./test_ict153xx
 	./test_icm45686
 	./test_lsm6dsv
+	./test_lsm6dso
 
 test_mag_failures: test_mag_failures.c $(MAG_SOURCES) $(MAG_SOURCES:.c=.h) $(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ test_mag_failures.c $(MAG_SOURCES) $(LDLIBS)
@@ -49,5 +50,13 @@ test_lsm6dsv: test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c ../../../src/sens
 		$(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) -o $@ test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c $(LDLIBS)
 
+test_lsm6dso: test_lsm6dso.c ../../../src/sensor/imu/LSM6DSO.c ../../../src/sensor/interface.c \
+		../../../src/sensor/mag/QMC6309.c ../../../src/sensor/imu/LSM6DSO.h \
+		../../../src/sensor/imu/LSM6DSV.h ../../../src/sensor/mag/QMC6309.h \
+		$(COMMON_HEADERS) $(HOST_HEADERS) Makefile
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections -o $@ \
+		test_lsm6dso.c ../../../src/sensor/imu/LSM6DSO.c ../../../src/sensor/interface.c \
+		../../../src/sensor/mag/QMC6309.c $(LDLIBS)
+
 clean:
-	$(RM) test_mag_failures test_interface_intervals test_ict153xx test_icm45686 test_lsm6dsv
+	$(RM) test_mag_failures test_interface_intervals test_ict153xx test_icm45686 test_lsm6dsv test_lsm6dso

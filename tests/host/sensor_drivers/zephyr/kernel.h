@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include "../../harness/include/driver_util.h"
+#define BIT(n) (1UL << (n))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 /* Host SPI model has no devicetree-selected bitbang controller. */
 #define DT_NODE_HAS_COMPAT(node_id, compat) 0

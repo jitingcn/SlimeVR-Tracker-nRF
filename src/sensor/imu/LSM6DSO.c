@@ -32,6 +32,7 @@ int lsm6dso_init(
 	float *gyro_actual_period_s
 )
 {
+	ARG_UNUSED(clock_rate);
 	// setup interface for SPI
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(10), 0);
 	int err = ssi_reg_write_byte(
@@ -355,6 +356,10 @@ uint8_t lsm6dso_setup_WOM(void)
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
+enum {
+	DSO_SHUB_MAX_READ = 7,
+	DSO_SHUB_SLAVE0_NACK = 0x08,
+};
 int lsm6dso_ext_setup(enum sensor_ext_mode mode)
 {
 	if (mode == SENSOR_EXT_MODE_OFF || mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH) {
@@ -430,7 +435,7 @@ int lsm6dso_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
 	k_usleep(350);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
-	if (status & 0x04)                                                                  // SLAVE0_NACK
+	if (status & DSO_SHUB_SLAVE0_NACK) // SLAVE0_NACK
 	{
 		LOG_DBG("Ext I2C write NACK from address 0x%02X", addr);
 		return -1;
@@ -444,7 +449,7 @@ int lsm6dso_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes
 
 int lsm6dso_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
 {
-	if (num_write != 1 || num_read < 1 || num_read > 8) {
+	if (num_write != 1 || num_read < 1 || num_read > DSO_SHUB_MAX_READ) {
 		LOG_ERR("Unsupported write_read");
 		return -1;
 	}
@@ -479,19 +484,21 @@ int lsm6dso_ext_write_read(const uint8_t addr, const void *write_buf, size_t num
 		0x40
 	); // switch to sensor hub registers
 	uint8_t master_status = 0;
-	ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER, &master_status);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER, &master_status);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
 	k_usleep(350);
-	if ((master_status & 0x04) || !(status & 0x01)) // SLAVE0_NACK or timeout
+	if (err || (master_status & DSO_SHUB_SLAVE0_NACK) || !(status & 0x01))
 	{
-		if (master_status & 0x04) {
+		if (err) {
+			LOG_ERR("Communication error");
+		} else if (master_status & DSO_SHUB_SLAVE0_NACK) {
 			LOG_DBG("Ext I2C NACK from address 0x%02X", addr);
 		} else {
 			LOG_DBG("Ext I2C read timeout for address 0x%02X", addr);
 		}
 		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00);
 		memset(read_buf, 0, num_read);
-		return -1;
+		return err ? err : -1;
 	}
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SENSOR_HUB_1, read_buf, num_read);
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
@@ -524,7 +531,7 @@ const sensor_imu_t sensor_imu_lsm6dso = {
 const sensor_ext_ssi_t sensor_ext_lsm6dso = {
 	.ext_write = lsm6dso_ext_write,
 	.ext_write_read = lsm6dso_ext_write_read,
-	.ext_burst = 8,
+	.ext_burst = DSO_SHUB_MAX_READ,
 	.ext_set_prefetch = NULL,
 };
 #endif
