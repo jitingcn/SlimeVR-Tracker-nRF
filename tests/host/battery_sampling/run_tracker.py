@@ -29,7 +29,8 @@ with tempfile.TemporaryDirectory(prefix="battery-tracker-") as directory:
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-type-limits",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
-        "-fno-omit-frame-pointer", "-fno-pie", "-no-pie", f"-I{tmp}",
+        "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", f"-I{tmp}",
         str(HERE / "test_tracker.c"), "-o", str(binary)], check=True)
     for scenario in ("retry", "short", "partial", "curve", "curve_failure", "reset", "reset_failure", "migration", "insufficient", "gaps", "console"):
         subprocess.run([str(binary), scenario], check=True)

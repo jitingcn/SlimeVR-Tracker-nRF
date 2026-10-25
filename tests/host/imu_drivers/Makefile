@@ -1,6 +1,7 @@
 CC ?= cc
 CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra
 CFLAGS += -ffunction-sections -fdata-sections -I. -I../../../src -include zephyr/kernel.h
+CFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1
 LDFLAGS += -Wl,--gc-sections
 LDLIBS += -lm
 

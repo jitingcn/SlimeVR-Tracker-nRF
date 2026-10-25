@@ -225,6 +225,7 @@ static int64_t remote_command_receive_time = 0;
 static uint32_t received_channel_value = 0; // Store channel value from PONG data[8-11]
 static uint32_t executing_channel_value;
 static uint32_t received_test_rate_tps = 0; // Optional target TPS riding on TEST_MODE_ON (data[8-9])
+#if CONFIG_CONNECTION_RAW_COLLECTION
 static uint8_t received_batch_rate_hz;
 static uint8_t acked_batch_rate_hz;
 static uint8_t executing_batch_rate_hz;
@@ -232,6 +233,7 @@ static uint8_t received_metadata_mask;
 static uint8_t received_metadata_chunk;
 static uint16_t received_metadata_token;
 static bool metadata_echo_pending;
+#endif
 static uint8_t received_sens_auto_axis;
 static uint16_t received_sens_auto_revolutions;
 static float received_sens_data[3] = {0};
@@ -695,6 +697,7 @@ static void esb_remote_cmd_tcal_boot_off(void)
 #endif
 }
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 static void esb_remote_cmd_data_collect_on(void)
 {
 	LOG_INF("Executing remote command: DATA_COLLECT_ON");
@@ -731,6 +734,7 @@ static void esb_remote_cmd_data_collect_batch_off(void)
 	test_mode_set(false);
 	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_SUCCESS);
 }
+#endif
 
 static void esb_remote_cmd_ota_query_info(void)
 {
@@ -796,11 +800,13 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_TDMA_OFF, "TDMA_OFF", esb_remote_cmd_tdma_off},
 	{ESB_PONG_FLAG_TEST_MODE_ON, "TEST_MODE_ON", esb_remote_cmd_test_mode_on},
 	{ESB_PONG_FLAG_TEST_MODE_OFF, "TEST_MODE_OFF", esb_remote_cmd_test_mode_off},
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	{ESB_PONG_FLAG_DATA_COLLECT_ON, "DATA_COLLECT_ON", esb_remote_cmd_data_collect_on},
 	{ESB_PONG_FLAG_DATA_COLLECT_OFF, "DATA_COLLECT_OFF", esb_remote_cmd_data_collect_off},
 	{ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, "DATA_COLLECT_BATCH_ON", NULL},
 	{ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, "DATA_COLLECT_BATCH_OFF", esb_remote_cmd_data_collect_batch_off},
 	{ESB_PONG_FLAG_DATA_COLLECT_METADATA, "DATA_COLLECT_METADATA", NULL},
+#endif
 	{ESB_PONG_FLAG_OTA_QUERY_INFO, "OTA_QUERY_INFO", esb_remote_cmd_ota_query_info},
 	{ESB_PONG_FLAG_OTA_ABORT, "OTA_ABORT", esb_remote_cmd_ota_abort},
 	{ESB_PONG_FLAG_OTA_SUPPRESS, "OTA_SUPPRESS", esb_remote_cmd_ota_suppress},
@@ -951,15 +957,40 @@ static void remote_print_meow(void)
 }
 
 
+static bool esb_remote_command_supported(uint8_t cmd)
+{
+	switch (cmd) {
+#if !CONFIG_CONNECTION_RAW_COLLECTION
+	case ESB_PONG_FLAG_DATA_COLLECT_ON:
+	case ESB_PONG_FLAG_DATA_COLLECT_OFF:
+	case ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON:
+	case ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF:
+	case ESB_PONG_FLAG_DATA_COLLECT_METADATA:
+#endif
+#if !CONFIG_CONNECTION_RAW_COLLECTION
+		return false;
+#endif
+	default:
+		return true;
+	}
+}
+
 static int esb_remote_command_execute(uint8_t cmd)
 {
+	if (!esb_remote_command_supported(cmd)) {
+		LOG_WRN("Remote command 0x%02X unavailable in this firmware", cmd);
+		led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_REJECTED);
+		return -ENOTSUP;
+	}
 	/* These requests may be refused. Do not acknowledge them until accepted. */
 	if (cmd == ESB_PONG_FLAG_SHUTDOWN) {
 		return esb_remote_cmd_shutdown();
 	}
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	if (cmd == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 		return esb_remote_cmd_data_collect_batch_on();
 	}
+#endif
 	for (size_t i = 0; i < ARRAY_SIZE(esb_remote_cmds); i++) {
 		if (esb_remote_cmds[i].flag == cmd) {
 			if (esb_remote_cmds[i].fn) {
@@ -1718,9 +1749,12 @@ void event_handler(struct esb_evt const *event)
 					}
 
 					if (pong_flags == ESB_PONG_FLAG_WOM_CONTROL) {
+#if CONFIG_CONNECTION_RAW_COLLECTION
 						metadata_echo_pending = false;
+#endif
 						esb_wom_receive(sys_get_be16(&rx_payload.data[8]),
 							sys_get_be16(&rx_payload.data[10]));
+#if CONFIG_CONNECTION_RAW_COLLECTION
 					} else if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
 						received_metadata_mask = rx_payload.data[8];
 						received_metadata_chunk = rx_payload.data[9];
@@ -1728,22 +1762,32 @@ void event_handler(struct esb_evt const *event)
 						connection_request_raw_metadata(
 							received_metadata_mask, received_metadata_chunk, received_metadata_token);
 						metadata_echo_pending = true;
+#endif
 					} else if (pong_flags != ESB_PONG_FLAG_NORMAL) {
 						/* Real controls may supersede a pending metadata echo. */
+#if CONFIG_CONNECTION_RAW_COLLECTION
 						metadata_echo_pending = false;
+#endif
 						esb_wom_reset();
 						uint16_t pong_test_rate_tps = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
 							&& rx_payload.length >= 10 ? sys_get_be16(&rx_payload.data[8]) : 0;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 						uint8_t pong_batch_rate_hz = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
 							&& rx_payload.length >= 9 ? rx_payload.data[8] : 0;
+#endif
 						bool test_rate_changed = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
 							&& pong_test_rate_tps != received_test_rate_tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 						bool batch_rate_changed = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
 							&& pong_batch_rate_hz != received_batch_rate_hz;
+#endif
 						bool channel_changed = pong_flags == ESB_PONG_FLAG_SET_CHANNEL
 							&& sys_get_be32(&rx_payload.data[8]) != received_channel_value;
 						if (received_remote_command == ESB_PONG_FLAG_NORMAL
-						    || test_rate_changed || batch_rate_changed || channel_changed
+						    || test_rate_changed || channel_changed
+#if CONFIG_CONNECTION_RAW_COLLECTION
+						    || batch_rate_changed
+#endif
 						    || ((received_remote_command == acked_remote_command || remote_command_rejected)
 						        && pong_flags != received_remote_command)) {
 							if (channel_changed && acked_remote_command == ESB_PONG_FLAG_SET_CHANNEL) {
@@ -1764,8 +1808,10 @@ void event_handler(struct esb_evt const *event)
 								received_sens_auto_revolutions = pong_sens_auto_revolutions;
 							} else if (pong_flags == ESB_PONG_FLAG_TEST_MODE_ON) {
 								received_test_rate_tps = pong_test_rate_tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 							} else if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 								received_batch_rate_hz = pong_batch_rate_hz;
+#endif
 							}
 							LOG_INF("Remote command %s (0x%02X) received",
 								esb_remote_cmd_name(pong_flags), pong_flags);
@@ -1773,14 +1819,17 @@ void event_handler(struct esb_evt const *event)
 					} else if (!channel_wait_normal && !channel_search) {
 						/* A requested proof NORMAL did not consume the low-bit
 						 * command/metadata echo. Keep it for the post-proof PING. */
+#if CONFIG_CONNECTION_RAW_COLLECTION
 						metadata_echo_pending = false;
+#endif
 						if (wom_command.response_pending
 						    && wom_command.sent_token == wom_command.cached_token
 						    && wom_command.sent_flag == wom_command.result_flag) {
 							wom_command.response_pending = false;
 							wom_command.cached = false;
 						}
-						if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
+						if (acked_remote_command != ESB_PONG_FLAG_NORMAL
+						    || !esb_remote_command_supported(received_remote_command)) {
 							received_remote_command = ESB_PONG_FLAG_NORMAL;
 							acked_remote_command = ESB_PONG_FLAG_NORMAL;
 							remote_command_receive_time = 0;
@@ -1794,6 +1843,7 @@ void event_handler(struct esb_evt const *event)
 				// received other tracker's sensor data, likely due to shared pipe, just ignore
 			} break;
 			default:
+#if CONFIG_CONNECTION_RAW_COLLECTION
 				/* ACK payload from receiver carrying ARQ retransmit requests */
 				if (rx_payload.length >= 4 &&
 				    rx_payload.data[0] == RAW_ARQ_MARKER) {
@@ -1810,7 +1860,9 @@ void event_handler(struct esb_evt const *event)
 				/* OTA packets from receiver (in ACK payload) —
 				 * queue for deferred processing in thread context
 				 * (flash ops and logging not safe in ISR) */
-				else if (rx_payload.length >= 2 &&
+				else
+#endif
+				if (rx_payload.length >= 2 &&
 					 rx_payload.data[0] >= ESB_OTA_DATA_TYPE &&
 					 rx_payload.data[0] <= ESB_OTA_ACTIVATE_TYPE) {
 					uint8_t next = (ota_rx_head + 1) % OTA_RX_QUEUE_SIZE;
@@ -2866,13 +2918,18 @@ uint8_t esb_get_ping_ack_flag(void)
 	if (!channel_confirmed && !channel_legacy_peer) {
 		return ESB_PING_FLAG_CHANNEL_CONFIRM;
 	}
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	/* A metadata PONG can replace the normal confirmation of a prior
 	 * control command; acknowledge its token before that older flag. */
 	if (metadata_echo_pending) {
 		return ESB_PONG_FLAG_DATA_COLLECT_METADATA;
 	}
+#endif
 	if (wom_command.response_pending) {
 		return wom_command.result_flag;
+	}
+	if (!esb_remote_command_supported(received_remote_command)) {
+		return ESB_PONG_FLAG_NORMAL;
 	}
 	if (acked_remote_command != ESB_PONG_FLAG_NORMAL) {
 		return acked_remote_command;
@@ -2891,6 +2948,7 @@ void esb_get_ping_request_data(uint8_t out[4])
 		uint16_t tps = test_mode_get_target_tps();
 		out[0] = (uint8_t)(tps >> 8);
 		out[1] = (uint8_t)tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	} else if (flag == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 		out[0] = (uint8_t)connection_get_data_collection_batch_rate();
 	} else if (flag == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
@@ -2898,6 +2956,7 @@ void esb_get_ping_request_data(uint8_t out[4])
 		out[1] = received_metadata_chunk;
 		out[2] = (uint8_t)(received_metadata_token >> 8);
 		out[3] = (uint8_t)received_metadata_token;
+#endif
 	} else if (flag == ESB_PING_FLAG_WOM_RESULT
 	           || flag == ESB_PING_FLAG_WOM_ERROR) {
 		out[0] = wom_command.result >> 8;
@@ -3063,15 +3122,20 @@ static void esb_thread(void)
 
 		bool command_pending = (channel_confirmed || channel_legacy_peer) && !channel_redirect_pending
 			&& received_remote_command != ESB_PONG_FLAG_NORMAL
+#if CONFIG_CONNECTION_RAW_COLLECTION
 			&& received_remote_command != ESB_PONG_FLAG_DATA_COLLECT_METADATA
+#endif
+			&& !(remote_command_rejected && !esb_remote_command_supported(received_remote_command))
 			&& remote_command_receive_time > 0;
 		if (command_pending) {
 			if (received_remote_command == ESB_PONG_FLAG_TEST_MODE_ON) {
 				command_pending = acked_remote_command != ESB_PONG_FLAG_TEST_MODE_ON
 					|| received_test_rate_tps != acked_test_rate_tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 			} else if (received_remote_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 				command_pending = acked_remote_command != ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
 					|| received_batch_rate_hz != acked_batch_rate_hz;
+#endif
 			} else {
 				command_pending = received_remote_command != acked_remote_command;
 			}
@@ -3085,7 +3149,9 @@ static void esb_thread(void)
 				uint32_t executing_generation = remote_command_generation;
 				executing_shutdown_generation = executing_generation;
 				if (executing_command == ESB_PONG_FLAG_TEST_MODE_ON) executing_test_rate_tps = received_test_rate_tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 				else if (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) executing_batch_rate_hz = received_batch_rate_hz;
+#endif
 				else if (executing_command == ESB_PONG_FLAG_SET_CHANNEL) executing_channel_value = received_channel_value;
 				irq_unlock(key);
 				int err = esb_remote_command_execute(executing_command);
@@ -3098,7 +3164,9 @@ static void esb_thread(void)
 					if (consumed) {
 						acked_remote_command = executing_command;
 						if (executing_command == ESB_PONG_FLAG_TEST_MODE_ON) acked_test_rate_tps = executing_test_rate_tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 						else if (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) acked_batch_rate_hz = executing_batch_rate_hz;
+#endif
 					}
 				}
 				irq_unlock(key);

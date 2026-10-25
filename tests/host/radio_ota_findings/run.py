@@ -45,7 +45,9 @@ with tempfile.TemporaryDirectory(prefix="radio-ota-findings-") as directory:
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
             "-g", "-O1", "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
-            f"-DLEGACY_CRC16={int(legacy)}", "-I", str(temporary),
+            f"-DLEGACY_CRC16={int(legacy)}",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            "-I", str(temporary),
             str(HERE / "test.c"), "-o", str(binary)]
         if diagnostics:
             command.append("-DCONFIG_TDMA_DIAGNOSTICS=1")

@@ -121,7 +121,9 @@ with tempfile.TemporaryDirectory(prefix="tracker-led-business-") as directory:
         binary = temporary / f"{Path(fixture).stem}_{index}"
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + list(defines) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-parameter",
-            "-g", "-fsanitize=address,undefined", "-fno-pie", "-no-pie", f"-I{temporary}", f"-I{HERE.parent / 'led_sync'}",
+            "-g", "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            f"-I{temporary}", f"-I{HERE.parent / 'led_sync'}",
             str(HERE / fixture), *(str(SRC / "system" / name) for name in ("led_policy.c", "led_behavior.c", "led_timeline.c")),
             "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)

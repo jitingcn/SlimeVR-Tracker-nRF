@@ -13,3 +13,4 @@ add_custom_command(
 )
 target_sources(app PRIVATE src/main.c ${GENERATED_SENSOR})
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ../../../src)
+target_compile_definitions(app PRIVATE CONFIG_CONNECTION_RAW_COLLECTION=1 CONFIG_SENSOR_USE_MAGNETOMETER=1)

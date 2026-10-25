@@ -323,7 +323,7 @@ static void legacy_parse(void) {
         c = Path(directory) / "transport.c"
         binary = Path(directory) / "transport"
         c.write_text("\n\n".join(parts))
-        subprocess.run(shlex.split(os.environ.get("CC", "cc")) + ["-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-sign-compare", "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie", "-I", str(ROOT / "src"), str(c), "-o", str(binary)], check=True)
+        subprocess.run(shlex.split(os.environ.get("CC", "cc")) + ["-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-sign-compare", "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie", "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-I", str(ROOT / "src"), str(c), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
     env = dict(os.environ, RADIO_CASE="payload")
     env.pop("RADIO_SCENARIO", None)

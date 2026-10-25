@@ -285,6 +285,8 @@ with tempfile.TemporaryDirectory(prefix="slimenrf-deadline-smoke-") as directory
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-        "-fno-pie", "-no-pie", str(source), "-o", str(binary)], check=True)
+        "-fno-pie", "-no-pie",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+        str(source), "-o", str(binary)], check=True)
     for selected in (["deadlines", "ping", "data-ping", "stall"] if case == "all" else [case]):
         subprocess.run([str(binary), selected], check=True)

@@ -1,6 +1,7 @@
 CC ?= cc
 CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra -Werror
 CFLAGS += -DHOST_SENSOR_DRIVER_TEST -fsanitize=undefined -fno-sanitize-recover=undefined -I. -I../../../src -include zephyr/kernel.h
+CFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1
 LDLIBS += -lm -fsanitize=undefined
 
 MAG_SOURCES := \

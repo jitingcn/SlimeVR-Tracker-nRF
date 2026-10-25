@@ -52,6 +52,15 @@ void connection_update_status(int status);
 
 // Raw sensor data collection (runtime controlled via PONG command)
 
+bool connection_get_data_collection(void);
+bool connection_get_data_collection_batch(void);
+uint16_t connection_get_data_collection_batch_rate(void);
+
+// OTA suppression: reduce poll rate when another tracker is being updated
+void connection_set_ota_suppressed(bool suppressed);
+bool connection_get_ota_suppressed(void);
+
+#if CONFIG_CONNECTION_RAW_COLLECTION
 struct raw_imu_sample {
 	float gyr_quat[4];  // accumulated raw gyro quaternion (w,x,y,z)
 	float accel[3];     // g from fifo_process
@@ -60,16 +69,9 @@ struct raw_imu_sample {
 
 // Enable/disable data collection (called from PONG command handler)
 void connection_set_data_collection(bool enable);
-bool connection_get_data_collection(void);
 
 // Returns -EBUSY for an active session's rate change; stop before restarting.
 int connection_set_data_collection_batch(bool enable, uint16_t rate_hz);
-bool connection_get_data_collection_batch(void);
-uint16_t connection_get_data_collection_batch_rate(void);
-
-// OTA suppression: reduce poll rate when another tracker is being updated
-void connection_set_ota_suppressed(bool suppressed);
-bool connection_get_ota_suppressed(void);
 
 // Queue a raw IMU sample for transmission (called from sensor thread).
 // Samples during the first five seconds of a session are intentionally
@@ -98,6 +100,7 @@ int connection_request_raw_retransmit(uint16_t sequence);
 // Drain queued raw data and transmit (called from connection thread)
 // Returns true if a packet was sent or an admission was deliberately retried.
 bool connection_process_raw_data(void);
+#endif
 
 
 #endif

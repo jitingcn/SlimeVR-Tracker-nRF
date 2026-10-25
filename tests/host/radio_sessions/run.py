@@ -77,6 +77,7 @@ commands = [constants, block(esb, r"^struct esb_remote_cmd \{", True)]
 commands.extend(re.findall(r"^static (?:bool remote_command_rejected|uint32_t remote_command_generation);", esb, re.MULTILINE))
 commands.extend(re.findall(r"^static uint32_t (?:executing_shutdown_generation|shutdown_feedback_generation, shutdown_feedback_request|shutdown_accepted_event, shutdown_terminal_event);", esb, re.MULTILINE))
 commands.append(wom_state)
+commands.append(function(esb, "esb_remote_command_supported"))
 for name in ("esb_wom_reset", "esb_wom_receive", "esb_wom_process",
              "esb_wom_prepare_ping", "esb_get_ping_ack_flag", "esb_get_ping_request_data"):
     commands.append(function(esb, name))
@@ -96,8 +97,12 @@ commands.append("static void receive_control(uint8_t pong_flags) {\n"
                 + "float pong_sens_data[3] = {0}; uint8_t pong_sens_auto_axis = 0; uint16_t pong_sens_auto_revolutions = 0;\n"
                 + esb[start:end] + "\n}")
 commands.append("static void receive_stop(void) { receive_control(ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF); }")
+commands.append(re.search(r"^static uint32_t g_last_rx_raw_ticks = [^;]+;", esb, re.MULTILINE).group(0))
+restart_tick_start = esb.index("\t\t\t\t\tuint32_t ping_rx_ticks =")
+restart_tick_end = esb.index(";\n", restart_tick_start) + 1
 commands.append("static unsigned host_receiver_restart(void) {\n"
                 + "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
+                + esb[restart_tick_start:restart_tick_end] + "\n"
                 + block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
                 + "\nreturn receiver_restart_detections;\n}")
 collection = []
@@ -125,6 +130,7 @@ channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_encode\
 channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_decode\([^;{]*\)\s*\{", False)
 channels += "\n" + function(esb, "esb_pong_is_legacy")
 channels += "\n" + wom_state + "\n" + function(esb, "esb_wom_reset")
+channels += "\n" + function(esb, "esb_remote_command_supported")
 channels += "\n" + function(esb, "esb_get_ping_ack_flag")
 channels += "\n" + function(esb, "esb_get_ping_request_data")
 # Reuse actual successful-PING accounting without pulling hardware admission
@@ -207,6 +213,7 @@ int main(void) {
         binary = temporary / name
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-g", "-O1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
             "-I", str(temporary), "-I", str(SRC), "-I", str(HERE / "../raw_collection"),
             str(event_payload if name == "payload" else HERE / f"test_{name}.c"), "-lm", "-o", str(binary),
@@ -216,3 +223,39 @@ int main(void) {
         if name == "commands":
             subprocess.run(command + ["-DCONFIG_SENSOR_TCAL_HEATED=1"], check=True)
             subprocess.run([str(binary)], check=True)
+    if os.environ.get("RADIO_CASE") in (None, "capabilities"):
+        actual = set(actual_handlers) | {
+            "esb_remote_cmd_data_collect_on", "esb_remote_cmd_data_collect_off",
+            "esb_remote_cmd_mag_clear", "esb_remote_cmd_mag_cal", "esb_remote_cmd_mag_on",
+            "esb_remote_cmd_mag_off", "esb_remote_cmd_mag_auto_on", "esb_remote_cmd_mag_auto_off",
+            "esb_remote_cmd_ping",
+        }
+        matrix_parts = list(commands)
+        for name in sorted(actual - set(actual_handlers)):
+            stub = f"static void {name}(void) {{ }}"
+            guard = "CONFIG_SENSOR_USE_MAGNETOMETER" if "_mag_" in name else "CONFIG_CONNECTION_RAW_COLLECTION"
+            body = function(esb, name)
+            if name != "esb_remote_cmd_ping":
+                body = f"#if {guard}\n{body}\n#endif"
+            matrix_parts[matrix_parts.index(stub)] = body
+        for name in ("esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off"):
+            body = function(esb, name)
+            matrix_parts[matrix_parts.index(body)] = f"#if CONFIG_CONNECTION_RAW_COLLECTION\n{body}\n#endif"
+        ingress_start = esb.index("\n\t\t\tdefault:\n") + len("\n\t\t\tdefault:\n")
+        ota_end = esb.index("\n\t\t\t} // end of rx_payload length switch", ingress_start)
+        matrix_parts.append("static void receive_auxiliary(void) {\n" + esb[ingress_start:ota_end] + "\n}")
+        (temporary / "commands.inc").write_text("\n\n".join(matrix_parts))
+        for raw_enabled in (0, 1):
+            for mag_enabled in (1,):
+                binary = temporary / f"capabilities-{raw_enabled}-{mag_enabled}"
+                command = shlex.split(os.environ.get("CC", "cc")) + [
+                    "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+                    "-Wno-unused-function", "-Wno-unused-variable", "-g", "-O1",
+                    "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
+                    f"-DCONFIG_CONNECTION_RAW_COLLECTION={raw_enabled}",
+                    f"-DCONFIG_SENSOR_USE_MAGNETOMETER={mag_enabled}", "-DHOST_CAPABILITY_MATRIX=1",
+                    "-I", str(temporary), "-I", str(SRC), "-I", str(HERE / "../raw_collection"),
+                    str(HERE / "test_capabilities.c"), "-lm", "-o", str(binary),
+                ]
+                subprocess.run(command, check=True)
+                subprocess.run([str(binary)], check=True)

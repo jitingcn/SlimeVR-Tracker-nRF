@@ -462,7 +462,7 @@ with tempfile.TemporaryDirectory(prefix='sensor-events-') as tmp:
     c = tmp / 'sensor.c'
     c.write_text('#include "leaves.h"\n#include "' + str(ROOT / 'src/connection/tracker_events.c') + '"\n' + fixture + '\n#include "' + str(ROOT / 'src/util.c') + '"\n')
     binary = tmp / 'sensor'
-    subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + ['-std=gnu11', '-O0', '-g', '-Wall', '-Wextra', '-Wno-unused-function', '-Wno-unused-variable', '-I', str(tmp), '-I', str(ROOT / 'src'), str(c), str(ROOT / 'src/sensor/motion_state.c'), '-lm', '-o', str(binary)], check=True)
+    subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + ['-std=gnu11', '-O0', '-g', '-DCONFIG_CONNECTION_RAW_COLLECTION=1', '-Wall', '-Wextra', '-Wno-unused-function', '-Wno-unused-variable', '-I', str(tmp), '-I', str(ROOT / 'src'), str(c), str(ROOT / 'src/sensor/motion_state.c'), '-lm', '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
 
 # The heater consumes a different, coherent temperature observation contract.
@@ -552,6 +552,7 @@ with tempfile.TemporaryDirectory(prefix='sensor-temperature-') as tmp:
     binary = tmp / 'temperature'
     subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
         '-std=gnu11', '-O2', '-ffast-math', '-g', '-Wall', '-Wextra',
+        '-DCONFIG_CONNECTION_RAW_COLLECTION=1',
         '-Wno-unused-function', '-Wno-unused-variable', '-I', str(tmp),
         '-I', str(ROOT / 'src'), str(c), '-lm', '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

@@ -418,7 +418,9 @@ def main():
         path = Path(directory)
         (path / "test.c").write_text(source)
         cc = shlex.split(os.environ.get("CC", "cc"))
-        subprocess.run(cc + ["-std=gnu11", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test")], check=True)
+        subprocess.run(cc + ["-std=gnu11", "-Wall", "-Wextra", "-Werror",
+                             "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+                             "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test")], check=True)
         subprocess.run([str(path / "test")], check=True)
 
 

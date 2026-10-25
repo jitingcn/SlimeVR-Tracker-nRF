@@ -122,6 +122,7 @@ def main():
                     "-Wno-unused-function", "-pthread", *flags,
                     f"-DACTUAL_OWNERSHIP={int(actual_ownership)}",
                     f"-DCONFIG_SENSOR_TCAL_HEATED={int(not actual_ownership)}",
+                    "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
                     "-I", str(work), "-I", str(HERE), str(source), "-lm", "-o", str(binary),
                 ], check=True)
                 if args.export:

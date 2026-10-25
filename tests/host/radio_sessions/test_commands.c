@@ -6,6 +6,29 @@
 #include <errno.h>
 #include <setjmp.h>
 #include <math.h>
+#include <stdarg.h>
+#include "connection/tracker_event_protocol.h"
+static unsigned warning_count;
+static char last_warning[256];
+static void host_warning(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    vsnprintf(last_warning, sizeof(last_warning), format, args);
+    va_end(args);
+    warning_count++;
+}
+#ifdef HOST_CAPABILITY_MATRIX
+static unsigned rejected_events, event_notifications;
+static uint8_t rejected_kind, rejected_reason;
+static void cal_event_reject(uint8_t kind, uint8_t reason)
+{
+    rejected_events++;
+    rejected_kind = kind;
+    rejected_reason = reason;
+}
+static void tracker_events_notify(void) { event_notifications++; }
+#endif
 #include "../led_feedback_stub.h"
 #ifndef CONFIG_SENSOR_TCAL_HEATED
 #define CONFIG_SENSOR_TCAL_HEATED 0
@@ -22,7 +45,7 @@
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define LOG_DBG(...) ((void)0)
 #define LOG_INF(...) ((void)0)
-#define LOG_WRN(...) ((void)0)
+#define LOG_WRN(...) host_warning(__VA_ARGS__)
 #define LOG_ERR(...) ((void)0)
 static uint8_t received_remote_command, acked_remote_command;
 static uint16_t received_test_rate_tps, executing_test_rate_tps, acked_test_rate_tps;
@@ -41,7 +64,16 @@ static uint32_t sys_get_be32(const uint8_t *p)
 {
 	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
-static void connection_request_raw_metadata(uint8_t mask, uint8_t chunk, uint16_t token) {}
+static unsigned metadata_requests;
+static uint8_t metadata_mask, metadata_chunk;
+static uint16_t metadata_token;
+static void connection_request_raw_metadata(uint8_t mask, uint8_t chunk, uint16_t token)
+{
+    metadata_requests++;
+    metadata_mask = mask;
+    metadata_chunk = chunk;
+    metadata_token = token;
+}
 static unsigned irq_depth;
 static inline unsigned irq_lock(void) { return irq_depth++; }
 static inline void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
@@ -106,6 +138,11 @@ static int get_ping_interval_ms(void) { return 997; }
 int sys_command_shutdown(void);
 static int connection_set_data_collection_batch(bool enabled, uint16_t rate)
 {
+#ifdef HOST_CAPABILITY_MATRIX
+    batch_calls++;
+    last_batch_enabled = enabled;
+    last_batch_rate = rate;
+#endif
     if (!enabled) { batch_active = false; return 0; }
     return batch_result;
 }

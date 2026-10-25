@@ -319,5 +319,5 @@ with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
     for name, text, extra in jobs:
         source = tmp/(name+'.c'); source.write_text(text)
         executable = tmp/name
-        subprocess.run(cc+['-std=gnu11','-O1','-g',str(source)]+extra+['-lm','-o',str(executable)],check=True)
+        subprocess.run(cc+['-std=gnu11','-O1','-g','-DCONFIG_CONNECTION_RAW_COLLECTION=1',str(source)]+extra+['-lm','-o',str(executable)],check=True)
         subprocess.run([str(executable)],check=True)

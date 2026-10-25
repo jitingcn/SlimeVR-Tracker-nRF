@@ -59,7 +59,9 @@
 
 #include "sensor.h"
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 #include "raw_collection.h"
+#endif
 #define SPI_OP SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_WORD_SET(8)
 
 
@@ -245,7 +247,9 @@ static struct led_token initialization_feedback;
 #define FUSION_REQUEST_BIAS BIT(0)
 #define FUSION_REQUEST_RESET BIT(1)
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 static void sensor_send_raw_metadata(void);
+#endif
 
 static float sensor_actual_time;
 static int16_t sensor_fifo_threshold;
@@ -1583,9 +1587,11 @@ int sensor_set_mag_enabled(bool enabled)
 	sensor_mag_ref_reset();
 	sensor_refresh_sensor_ids();
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	if (connection_get_data_collection() || connection_get_data_collection_batch()) {
 		sensor_send_raw_metadata();
 	}
+#endif
 
 	main_imu_resume();
 	LOG_INF("Magnetometer %s", enabled ? "enabled" : "disabled");
@@ -2137,6 +2143,7 @@ static int64_t max_loop_time = 0;
 static float processing_work_time_ema_ms; /* elapsed processing work before the loop wait */
 
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 static void sensor_send_raw_metadata(void)
 {
 	const struct sensor_raw_collection_config config = {
@@ -2152,6 +2159,7 @@ static void sensor_send_raw_metadata(void)
 	};
 	sensor_raw_collection_send_metadata(&config);
 }
+#endif
 
 #if DEBUG
 static int64_t last_acquisition_time = INT64_MAX;
@@ -2230,7 +2238,9 @@ static bool sensor_mag_gravity(const float accel_sum[3], int accel_count, float 
 
 typedef struct {
 	uint32_t sensor_epoch;
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	bool dc_active;
+#endif
 	uint16_t packets;
 	float raw_m[3];
 	bool new_mag_data;
@@ -2557,6 +2567,7 @@ static void feed_accel_sample(
 #endif
 }
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 static void sensor_loop_handle_data_collection(bool *dc_active)
 {
 	if (sensor_raw_collection_begin_frame(dc_active)) {
@@ -2569,6 +2580,7 @@ static void sensor_loop_handle_data_collection(bool *dc_active)
 		LOG_INF("Data collection activated: metadata snapshot queued");
 	}
 }
+#endif
 
 static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 {
@@ -2742,10 +2754,12 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 			}
 		}
 	}
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	if (frame->new_mag_data
 	    && (connection_get_data_collection() || connection_get_data_collection_batch())) {
 		connection_queue_raw_mag(frame->raw_m);
 	}
+#endif
 
 	if (reconfig) // TODO: get rid of reconfig?
 	{
@@ -2792,7 +2806,9 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 			continue; // skip on error
 		}
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 		sensor_raw_collection_on_sample(raw_a, raw_g, frame->raw_collect_temp_c, frame->dc_active);
+#endif
 
 		sensor_diagnostics_on_decoded_gyro(raw_g);
 
@@ -3382,11 +3398,13 @@ void sensor_loop(void)
 #endif
 			sensor_apply_calibration_frame();
 			frame.sensor_epoch = tracker_events_sensor_epoch();
+#if CONFIG_CONNECTION_RAW_COLLECTION
 			sensor_loop_handle_data_collection(&frame.dc_active);
 			if (!main_ok) {
 				sensor_loop_wait(time_begin);
 				continue;
 			}
+#endif
 			int64_t acq_begin_ticks = k_uptime_ticks();
 			sensor_loop_acquire(&frame);
 			if (!main_ok) {

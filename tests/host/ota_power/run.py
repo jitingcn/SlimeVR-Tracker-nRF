@@ -203,6 +203,7 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
             "-DCONFIG_SOC_NRF52840=1",
             f"-DCONFIG_ESB_OTA_FORCE_RAM_ENGINE={forced_ram}",
             f"-DOTA_USE_RAM_ENGINE={forced_ram}",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
             "-I", str(temporary), "-I", str(SRC), str(HERE / "test_ota_power.c"),
             "-o", str(binary),
         ]

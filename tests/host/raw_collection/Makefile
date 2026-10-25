@@ -1,6 +1,7 @@
 CC ?= cc
 CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra -Werror
 CFLAGS += -fsanitize=undefined -fno-sanitize-recover=undefined -I. -I../../../src
+CFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1
 LDLIBS += -lm -fsanitize=undefined
 
 SOURCES := test_raw_collection.c ../../../src/sensor/raw_collection.c

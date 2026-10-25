@@ -99,7 +99,9 @@ float sensor_get_mag_feed_hz(void); /* measured fusion feed Hz; 0.0f => n/a */
 float sensor_get_fusion_rate(void); /* effective gyro feed into fusion */
 
 /* Batch raw collection: fractional-rate emission, 0 = accelerometer ODR. */
+#if CONFIG_CONNECTION_RAW_COLLECTION
 void sensor_set_batch_collect(bool active, float emit_hz);
+#endif
 float sensor_get_processing_work_time_ms(void); /* processing-work EMA, not full loop period */
 
 #include "diagnostics.h"

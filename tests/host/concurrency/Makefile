@@ -1,5 +1,6 @@
 CC ?= cc
 CFLAGS ?= -O2 -std=c11 -Wall -Wextra -Werror -pthread -DHOST_CONCURRENCY_STRESS -I.
+CFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1
 
 .PHONY: check clean
 

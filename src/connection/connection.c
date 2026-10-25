@@ -23,13 +23,17 @@
 #include "globals.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
+#if CONFIG_CONNECTION_RAW_COLLECTION
 #include "sensor/calibration/online_mag.h"
+#endif
 #include "connection.h"
 #include "util.h"
 #include "esb.h"
 #include "sensor_data_snapshot.h"
 #include "tracker_events.h"
+#if CONFIG_CONNECTION_RAW_COLLECTION
 #include "raw_retx.h"
+#endif
 #include "tdma.h"
 #include "build_defines.h"
 #include "hid.h"
@@ -590,6 +594,11 @@ static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 static int64_t last_runtime_time = 0;
 
+static volatile bool ota_suppressed = false; /* Reduce poll rate during parallel OTA */
+static int64_t ota_suppress_start_time = 0;  /* Timestamp when suppress was enabled */
+#define OTA_SUPPRESS_TIMEOUT_MS (10 * 60 * 1000)
+
+#if CONFIG_CONNECTION_RAW_COLLECTION
 /*
  * Raw sensor data collection subsystem.
  *
@@ -641,9 +650,6 @@ static int64_t dc_conn_error_start;
  * side minimally alive; 10 TPS leaves the radio almost fully to raw+TDMA.
  * 0 restores the built-in 100 TPS default on every batch exit path. */
 #define DC_BATCH_FUSION_TPS 10U
-static volatile bool ota_suppressed = false; /* Reduce poll rate during parallel OTA */
-static int64_t ota_suppress_start_time = 0;  /* Timestamp when suppress was enabled */
-#define OTA_SUPPRESS_TIMEOUT_MS (10 * 60 * 1000)
 
 /*
  * ARQ ring buffer: stores the last RAW_RING_SIZE sent packets for
@@ -866,16 +872,19 @@ static bool connection_raw_collection_active(void)
 {
 	return connection_get_data_collection() || connection_get_data_collection_batch();
 }
+#endif
 
 void connection_feedback_maintenance_update(void)
 {
-	bool active = connection_raw_collection_active() || sensor_diagnostics_maintenance_active();
+	bool active = connection_get_data_collection() || connection_get_data_collection_batch()
+		|| sensor_diagnostics_maintenance_active();
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 	active = active || radio_capture_user_active();
 #endif
 	led_maintenance_publish(LED_OWNER_SENSOR, active);
 }
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 static void connection_reset_raw_collection(bool reset_arq)
 {
 	k_msgq_purge(&raw_imu_msgq);
@@ -924,12 +933,18 @@ void connection_set_data_collection(bool enable)
 	LOG_INF("Data collection %s", enable ? "STARTED" : "STOPPED");
 	connection_feedback_maintenance_update();
 }
+#endif
 
 bool connection_get_data_collection(void)
 {
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	return atomic_get(&data_collection_active) != 0;
+#else
+	return false;
+#endif
 }
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 int connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
 {
 	bool was_active = connection_get_data_collection_batch();
@@ -966,15 +981,24 @@ int connection_set_data_collection_batch(bool enable, uint16_t rate_hz)
 	connection_feedback_maintenance_update();
 	return 0;
 }
+#endif
 
 bool connection_get_data_collection_batch(void)
 {
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	return atomic_get(&data_collection_batch_active) != 0;
+#else
+	return false;
+#endif
 }
 
 uint16_t connection_get_data_collection_batch_rate(void)
 {
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	return data_collection_batch_rate_hz;
+#else
+	return 0;
+#endif
 }
 
 
@@ -995,6 +1019,7 @@ bool connection_get_ota_suppressed(void)
 }
 
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 bool connection_raw_collection_startup_done(void)
 {
 	return connection_raw_collection_active() && (k_uptime_get() - raw_collection_start_ms >= 5000);
@@ -1290,6 +1315,7 @@ bool connection_process_raw_data(void)
 
 	return false;
 }
+#endif
 
 /* Exact test-mode rate schedule in local monotonic microseconds. TDMA still
  * owns slot admission; this schedule only selects which slot opportunities
@@ -1648,6 +1674,7 @@ void connection_thread(void)
 			ping_interval_ms = PING_INTERVAL_MS;
 		}
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 		/* Collection lifetime is independent of transport admission: channel
 		 * search, PING retries and OTA can all bypass the sending path. */
 		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
@@ -1665,6 +1692,7 @@ void connection_thread(void)
 		} else {
 			dc_conn_error_start = 0;
 		}
+#endif
 
 		if (!radio_ready && !hid_ready) {
 			k_msleep(100);
@@ -1781,6 +1809,7 @@ void connection_thread(void)
 				continue;
 			}
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 			/* Raw streams yield one admission to a due event; test mode may
 			 * only carry events on its scheduled real pose packet. */
 			if (connection_raw_collection_active() && connection_send_tracker_event()) {
@@ -1790,8 +1819,10 @@ void connection_thread(void)
 			if (connection_process_raw_data()) {
 				continue;
 			}
+#endif
 		} // end of radio_ready block
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 		/* During data collection, throttle fusion data
 		 * to leave radio bandwidth for raw data. */
 		if (radio_ready && connection_raw_collection_active()) {
@@ -1802,6 +1833,7 @@ void connection_thread(void)
 			}
 			last_fusion_dc_time = now;
 		}
+#endif
 
 		/* TDMA is the sole frame scheduler. In normal mode a fresh snapshot
 		 * enters admission immediately. In test mode the configured interval

@@ -607,6 +607,14 @@ config RADIO_RETRANSMIT_DELAY
     help
         Radio retransmit delay.
 
+config CONNECTION_RAW_COLLECTION
+    bool "Compile in raw sensor data collection"
+    default y
+    help
+        Include raw sample transport, retransmit history, metadata, and
+        calibration snapshots. Disabling this rejects collection commands.
+        Orientation output, local calibration, T-Cal, and OTA remain available.
+
 config CONNECTION_ENABLE_ACK
     bool "Enable connection ACK"
     default y
