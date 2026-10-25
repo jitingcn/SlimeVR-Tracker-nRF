@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix="battery-tracker-") as directory:
         "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-type-limits",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
         "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", f"-I{tmp}",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1", f"-I{tmp}",
         str(HERE / "test_tracker.c"), "-o", str(binary)], check=True)
     for scenario in ("retry", "short", "partial", "curve", "curve_failure", "reset", "reset_failure", "migration", "insufficient", "gaps", "console"):
         subprocess.run([str(binary), scenario], check=True)

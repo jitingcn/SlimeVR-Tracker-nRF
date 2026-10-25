@@ -65,9 +65,11 @@ static struct {
 	float debug_cal_g_sum[3];
 	int debug_g_samples;
 	int debug_a_samples;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	float debug_raw_m[3];
 	float debug_cal_m[3];
 	bool debug_mag_valid;
+#endif
 } frame;
 
 #if CONFIG_SENSOR_RANGE_STATS
@@ -164,6 +166,7 @@ void sensor_diagnostics_reset_frame(void)
 	frame.debug_cal_g_sum[2] = 0;
 	frame.debug_g_samples = 0;
 	frame.debug_a_samples = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	frame.debug_raw_m[0] = 0;
 	frame.debug_raw_m[1] = 0;
 	frame.debug_raw_m[2] = 0;
@@ -171,6 +174,7 @@ void sensor_diagnostics_reset_frame(void)
 	frame.debug_cal_m[1] = 0;
 	frame.debug_cal_m[2] = 0;
 	frame.debug_mag_valid = false;
+#endif
 	frame.session = sensor_debug_session();
 }
 
@@ -225,6 +229,7 @@ void sensor_diagnostics_on_cal_accel(const float a[3])
 }
 #endif
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_diagnostics_on_mag(const float raw[3], const float calibrated[3])
 {
 	if (sensor_debug_frame_is_active()) {
@@ -233,12 +238,13 @@ void sensor_diagnostics_on_mag(const float raw[3], const float calibrated[3])
 		frame.debug_mag_valid = true;
 	}
 }
+#endif
 
 void sensor_diagnostics_output(
 	const float q[4], const float lin_a[3], const float avg_a[3], float temp, bool mag_enabled
 )
 {
-#if !CONFIG_SENSOR_USE_VQF
+#if !CONFIG_SENSOR_USE_VQF || !CONFIG_SENSOR_USE_MAGNETOMETER
 	ARG_UNUSED(mag_enabled);
 #endif
 	// Debug mode output - based on accel sample count, not time interval
@@ -292,6 +298,7 @@ void sensor_diagnostics_output(
 				(double)avg_cal_g[2]
 			);
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 			if (frame.debug_mag_valid) {
 				printk(
 					"     MAG: RAW[%.2f,%.2f,%.2f] CAL[%.2f,%.2f,%.2f]\n",
@@ -303,6 +310,7 @@ void sensor_diagnostics_output(
 					(double)frame.debug_cal_m[2]
 				);
 			}
+#endif
 
 #if CONFIG_SENSOR_USE_VQF
 			printk(
@@ -382,6 +390,7 @@ void sensor_diagnostics_output(
 					printk("\n");
 				}
 			}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 			if (mag_enabled) {
 				printk(
 					"     Mag: DisAng:%.2f° CorrRate:%.2f°/s\n",
@@ -405,6 +414,7 @@ void sensor_diagnostics_output(
 					(double)vqf_info.mag_candidate_dip
 				);
 			}
+#endif
 #else
 			printk(
 				"     Q[%.3f,%.3f,%.3f,%.3f] LinA[%.2f,%.2f,%.2f]\n",

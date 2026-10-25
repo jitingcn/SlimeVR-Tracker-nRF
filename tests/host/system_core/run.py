@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-system-core-") as directory:
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
         "-Wno-unused-variable", "-g", "-O1", "-fsanitize=address,undefined",
         "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-        "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
         "-I", str(temp),
         "-I", str(SRC), str(HERE / "test.c"), "-o", str(binary),
     ], check=True)

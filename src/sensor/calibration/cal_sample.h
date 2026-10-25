@@ -49,8 +49,10 @@ bool sensor_peek_accel_fresh(float a[3], int64_t max_age_ms);
 #endif
 void sensor_sample_gyro(const float g[3]);
 int sensor_wait_gyro(float g[3], k_timeout_t timeout);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_sample_mag(const float m[3]);
 int sensor_wait_mag(float m[3], k_timeout_t timeout);
+#endif
 bool wait_for_motion(bool motion, int samples);
 
 #endif /* SLIMENRF_CAL_SAMPLE_H */

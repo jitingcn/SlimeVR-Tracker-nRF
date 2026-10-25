@@ -115,7 +115,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-reset-reason-") as directory:
                     "-Wno-unused-variable", "-Wno-unused-parameter", "-g", "-O1",
                     "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
                     f"-DMODEL_SOC={soc}", f"-DIGNORE_RESET={ignore_reset}",
-                    "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+                    "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
                     "-I", str(temporary), "-I", str(SRC), str(HERE / "test_reset_reason.cpp"),
                     "-o", str(binary),
                 ]

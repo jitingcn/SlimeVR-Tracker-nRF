@@ -219,6 +219,7 @@ int main(void) {
 
 def main():
     owners = (
+        "calibration_mag_pending",
         "calibration_next_generation", "calibration_led_owner", "calibration_led_accept",
         "sensor_calibration_current_feedback", "sensor_calibration_current_generation",
         "sensor_calibration_generation_valid", "sensor_calibration_invalidate_requests",
@@ -248,6 +249,7 @@ def main():
         subprocess.run(shlex.split(os.environ.get("CC") or "cc") + [
             "-std=gnu11", "-Wall", "-Wextra", "-Werror",
             "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=1", "-DCONFIG_SENSOR_TCAL_HEATED=1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
             "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test"),
         ], check=True)
         subprocess.run([str(path / "test")], check=True)

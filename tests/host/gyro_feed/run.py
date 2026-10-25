@@ -195,7 +195,7 @@ with tempfile.TemporaryDirectory(prefix='sensor-fast-') as directory:
     failures = []
     for compiled, runtime in scenarios:
         binary = tmp/f'gyro-{compiled}'
-        subprocess.run(shlex.split(os.environ.get('CC','cc')) + ['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie',f'-DCONFIG_SENSOR_GYRO_OVERSAMPLING={compiled}','-I',str(tmp),'-I',str(ROOT/'src'),str(unit),str(ROOT/'src/sensor/motion_state.c'),str(ROOT/'src/util.c'),'-lm','-o',str(binary)],check=True)
+        subprocess.run(shlex.split(os.environ.get('CC','cc')) + ['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie',f'-DCONFIG_SENSOR_GYRO_OVERSAMPLING={compiled}','-DCONFIG_CONNECTION_RAW_COLLECTION=1','-DCONFIG_SENSOR_USE_MAGNETOMETER=1','-I',str(tmp),'-I',str(ROOT/'src'),str(unit),str(ROOT/'src/sensor/motion_state.c'),str(ROOT/'src/util.c'),'-lm','-o',str(binary)],check=True)
         for scenario in (None, "rebase", "physical"):
             result = subprocess.run([str(binary), str(runtime)] + ([scenario] if scenario else []))
             if result.returncode:

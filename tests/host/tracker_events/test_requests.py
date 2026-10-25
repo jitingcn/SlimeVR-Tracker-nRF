@@ -174,11 +174,11 @@ def main():
     heated_names = ("sensor_tcal_heated_lock", "sensor_tcal_heated_unlock", "sensor_calibration_heated_reserve_locked", "sensor_calibration_heated_release_locked", "sensor_calibration_maintenance_begin", "sensor_calibration_maintenance_end")
     for heated in (False, True):
         selected = heated_names + names if heated else names
-        source = PRELUDE + "\n".join(function(name) for name in selected) + TEST
+        source = PRELUDE + function("calibration_mag_pending") + "\n".join(function(name) for name in selected) + TEST
         with tempfile.TemporaryDirectory(prefix="cal-request-") as directory:
             path = Path(directory)
             (path / "test.c").write_text(source)
-            subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=1", f"-DCONFIG_SENSOR_TCAL_HEATED={int(heated)}", "-I", str(ROOT / "src"), str(path / "test.c"), "-o", str(path / "test")], check=True)
+            subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1", "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=1", f"-DCONFIG_SENSOR_TCAL_HEATED={int(heated)}", "-I", str(ROOT / "src"), str(path / "test.c"), "-o", str(path / "test")], check=True)
             subprocess.run([str(path / "test")], check=True)
     print("calibration request ownership (heated off/on): PASS")
 

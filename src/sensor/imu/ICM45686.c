@@ -38,6 +38,7 @@ static uint8_t last_gyro_mode = 0xff;
 static const float clock_reference_hz = 32000;
 static float clock_scale = 1; // ODR multiplier: clock_rate_hz / clock_reference_hz.
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 // Host-triggered, one-read-ahead I2CM state, not autonomous sensor-hub sampling.
 // A matching request validates completion, reads I2CM_RD_DATA, then starts the
 // next GO. External data is not enabled in FIFO_CONFIG3 or decoded by FIFO APIs.
@@ -48,6 +49,7 @@ static uint8_t ext_read_ahead_len = 0;
 static bool ext_scanning_mode = true;
 static bool ext_prefetch_enabled = true;
 static int icm45_ext_drain_read_ahead(void);
+#endif
 
 // Cache the mean temperature of accepted-header packets in the latest FIFO read.
 // Empty or failed acquisition invalidates the cache.
@@ -379,10 +381,13 @@ int icm45_init(
 	fifo_temp_valid = false;
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(24), 0);
 
-	int err = icm45_ext_drain_read_ahead();
+	int err = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	err = icm45_ext_drain_read_ahead();
 	if (err) {
 		return err;
 	}
+#endif
 
 	// sensor_init() already issued shutdown/reset before calling init.
 	uint8_t who_am_i = 0;
@@ -467,19 +472,26 @@ int icm45_init(
 			LOG_INF("External CLKIN verified: FIFO count=%d", fifo_count);
 		}
 	}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	ext_scanning_mode = false;
+#endif
 	return 0;
 }
 
 void icm45_shutdown(void)
 {
-	int err = icm45_ext_drain_read_ahead();
+	int err = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	err = icm45_ext_drain_read_ahead();
+#endif
 	icm45_invalidate_odr_cache();
 	fifo_temp_c = 25.0f;
 	fifo_temp_valid = false;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (err) {
 		LOG_ERR("Failed to stop I2CM: %d", err);
 	}
+#endif
 	// Global reset terminates even a stuck/uncertain GO; unlike command changes,
 	// reset recovery must remain available when the bounded idle drain fails.
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
@@ -817,10 +829,13 @@ uint8_t icm45_setup_DRDY(uint16_t threshold)
 
 uint8_t icm45_setup_WOM(void) // TODO: check if working
 {
-	int err = icm45_ext_drain_read_ahead();
+	int err = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	err = icm45_ext_drain_read_ahead();
 	if (err) {
 		goto fail;
 	}
+#endif
 	// Disable FIFO acquisition and flush before entering WOM mode.
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG3, 0x00);
 	if (err) {
@@ -879,6 +894,7 @@ fail:
 	return 0xFF;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 /** Capture the terminal STATUS once: DONE is cleared by a STATUS read. */
 static int icm45_i2cm_wait_done(uint8_t *status)
 {
@@ -1152,6 +1168,7 @@ int icm45_ext_setup(enum sensor_ext_mode mode)
 	sensor_interface_ext_configure(&sensor_ext_icm45686);
 	return 0;
 }
+#endif
 
 const sensor_imu_t sensor_imu_icm45686 = {
 	icm45_init,
@@ -1169,5 +1186,7 @@ const sensor_imu_t sensor_imu_icm45686 = {
 	icm45_setup_DRDY,
 	icm45_setup_WOM,
 
-	icm45_ext_setup,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	.ext_setup = icm45_ext_setup,
+#endif
 };

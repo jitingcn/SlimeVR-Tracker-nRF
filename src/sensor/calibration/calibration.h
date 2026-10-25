@@ -58,7 +58,9 @@ void sensor_calibration_process_accel(float a[3]);
 bool sensor_calibration_process_gyro(float g[3], float reference_delta[3]);
 void sensor_calibration_reset_gyro_reference(void);
 bool sensor_calibration_gyro_reference_pending(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_calibration_process_mag(float m[3]);
+#endif
 
 void sensor_calibration_update_sensor_ids(int imu);
 uint8_t sensor_calibration_get_imu_id(void);
@@ -91,16 +93,22 @@ void sensor_calibration_prepare_power_down(void);
  * Waits for in-flight persistence and cancels all pre-clear IMU transactions. */
 void sensor_calibration_clear_begin(void);
 void sensor_calibration_clear_end(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 /* Reset-all caller holds the storage lock; current live coefficients survive. */
 void sensor_calibration_online_mag_cancel_pending(void);
+#endif
 
 int sensor_calibration_set_sensitivity(const float degrees[3]);
 int sensor_calibration_reset_sensitivity(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_calibration_validate_mag(float m_inv[][3], bool write);
+#endif
 
 /* Candidate initialization only; live coefficients change through commits. */
 void sensor_calibration_identity_accel(float matrix[4][3]);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_calibration_clear_mag(float m_inv[][3], bool write, bool user_feedback);
+#endif
 
 enum sensor_calibration_request_id {
 	CAL_REQUEST_CLEAR = -1,
@@ -142,10 +150,13 @@ void sensor_calibration_invalidate_kind(int kind);
 
 int sensor_request_calibration(void);
 int sensor_request_calibration_accel(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_request_calibration_mag(void);
+#endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions);
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 /* Always service ownership, even when disabled. Gravity is reliable independent
  * 6D up expressed in the raw magnetometer axis basis, never magnetic heading. */
 void sensor_calibration_online_mag_sample(const float raw[3], const float gravity_raw[3], bool gravity_valid);
@@ -158,6 +169,7 @@ void sensor_calibration_online_mag_retained_save(void);
 void sensor_calibration_online_mag_retained_clear(void);
 void sensor_calibration_online_mag_cold_start(void);
 void sensor_calibration_online_mag_prepare_power_down(void);
+#endif
 
 #if CONFIG_SENSOR_USE_TCAL
 

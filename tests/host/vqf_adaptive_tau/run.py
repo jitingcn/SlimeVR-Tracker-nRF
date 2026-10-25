@@ -14,7 +14,7 @@ def translation_unit():
     source = (ROOT / 'src/sensor/fusion/vqf/vqf.c').read_text()
     # Compile the actual wrapper through the accel entry point, including its
     # controller, init/load/save and input checks; only platform headers stubbed.
-    source = source[:source.index('void vqf_update_mag(')]
+    source = source[:source.index('#if CONFIG_SENSOR_USE_MAGNETOMETER\nvoid vqf_update_mag(')]
     source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.M)
     return r'''
 #include <assert.h>
@@ -112,7 +112,7 @@ def main():
         for enabled in [0, 1]:
             # Match the GNU math constants of the frozen native reference.
             # Strict C hides M_SQRT2 and activates VQF's float fallback.
-            common = ['rtk', 'proxy', 'cc', '-std=gnu11', '-O2', '-D' + f'CONFIG_VQF_ADAPTIVE_TAU_ACC={enabled}', '-I'+str(ROOT/'vqf-c/src'), str(source), str(ROOT/'vqf-c/src/vqf.c'), '-lm']
+            common = ['rtk', 'proxy', 'cc', '-std=gnu11', '-O2', '-D' + f'CONFIG_VQF_ADAPTIVE_TAU_ACC={enabled}', '-DCONFIG_CONNECTION_RAW_COLLECTION=1', '-DCONFIG_SENSOR_USE_MAGNETOMETER=1', '-I'+str(ROOT/'vqf-c/src'), str(source), str(ROOT/'vqf-c/src/vqf.c'), '-lm']
             binary = directory / f'check-{enabled}'
             subprocess.run(common + ['-fsanitize=undefined', '-fno-sanitize-recover=all', '-o', str(binary)], check=True)
             subprocess.run(['rtk', 'proxy', str(binary)], check=True)

@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix="radio-ota-findings-") as directory:
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
             "-g", "-O1", "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
             f"-DLEGACY_CRC16={int(legacy)}",
-            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
             "-I", str(temporary),
             str(HERE / "test.c"), "-o", str(binary)]
         if diagnostics:

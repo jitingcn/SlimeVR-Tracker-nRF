@@ -354,6 +354,7 @@ uint8_t lsm6dso_setup_WOM(void)
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int lsm6dso_ext_setup(enum sensor_ext_mode mode)
 {
 	if (mode == SENSOR_EXT_MODE_OFF || mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH) {
@@ -496,6 +497,7 @@ int lsm6dso_ext_write_read(const uint8_t addr, const void *write_buf, size_t num
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 	return err;
 }
+#endif
 
 const sensor_imu_t sensor_imu_lsm6dso = {
 	*lsm6dso_init,
@@ -513,12 +515,16 @@ const sensor_imu_t sensor_imu_lsm6dso = {
 	*lsm_setup_DRDY,
 	*lsm6dso_setup_WOM,
 
-	*lsm6dso_ext_setup,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	.ext_setup = lsm6dso_ext_setup,
+#endif
 };
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 const sensor_ext_ssi_t sensor_ext_lsm6dso = {
 	.ext_write = lsm6dso_ext_write,
 	.ext_write_read = lsm6dso_ext_write_read,
 	.ext_burst = 8,
 	.ext_set_prefetch = NULL,
 };
+#endif

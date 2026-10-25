@@ -28,6 +28,10 @@ parts += [function(name, (SRC / "parse_args.c").read_text()) for name in
 parts += [function(name) for name in ("console_reject", "console_require_args",
           "console_reset_cancel", "console_reset_confirm", "cmd_sens_set",
           "console_cmd_sens", "console_cmd_reset", "console_cmd_channel", "print_connection")]
+parts.append(function("console_cmd_unavailable"))
+parts.append("#if CONFIG_SENSOR_USE_MAGNETOMETER\n" +
+             function("print_mag_calibration_status") + "\n" +
+             function("console_cmd_mag") + "\n#endif")
 declaration_start = source.index("typedef void (*console_cmd_fn)")
 parts.append(source[declaration_start:source.index("\n};", declaration_start) + 3])
 parts += [function(name) for name in ("console_calibrate_acc", "console_cmd_calibrate", "console_cmd_calibrate_acc_alias")]
@@ -36,7 +40,8 @@ table = source[table_start:source.index("\n};", table_start) + 3]
 # Keep the actual registration and dispatch; unrelated command leaves are inert.
 for handler in sorted(set(re.findall(r'\{"[^"]+", (console_cmd_\w+)(?:, \w+)?\}', table))):
     if handler not in ("console_cmd_calibrate", "console_cmd_calibrate_acc_alias",
-                       "console_cmd_sens", "console_cmd_reset", "console_cmd_channel"):
+                       "console_cmd_sens", "console_cmd_reset", "console_cmd_channel",
+                       "console_cmd_mag", "console_cmd_unavailable"):
         parts.append(f"#define {handler} handle_command")
 parts.append(table)
 parts += [function(name) for name in ("console_find_command", "console_command_mutates")]
@@ -45,12 +50,16 @@ with tempfile.TemporaryDirectory(prefix="tracker-console-lifecycle-") as directo
     temporary = Path(directory)
     (temporary / "production.inc").write_text("\n\n".join(parts))
     for accel_enabled in (0, 1):
-        binary = temporary / f"console-lifecycle-accel-{accel_enabled}"
-        subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
-            "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-            "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-            "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(SRC),
-            f"-DCONFIG_SENSOR_USE_ACCEL_CALIBRATION={accel_enabled}",
-            str(HERE / "test_console.c"), "-o", str(binary),
-        ], check=True)
-        subprocess.run([str(binary)], check=True)
+        for raw_enabled in (0, 1):
+            for mag_enabled in (0, 1):
+                binary = temporary / f"console-lifecycle-{accel_enabled}-{raw_enabled}-{mag_enabled}"
+                subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+                    "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+                    "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                    "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(SRC),
+                    f"-DCONFIG_SENSOR_USE_ACCEL_CALIBRATION={accel_enabled}",
+                    f"-DCONFIG_CONNECTION_RAW_COLLECTION={raw_enabled}",
+                    f"-DCONFIG_SENSOR_USE_MAGNETOMETER={mag_enabled}",
+                    str(HERE / "test_console.c"), "-o", str(binary),
+                ], check=True)
+                subprocess.run([str(binary)], check=True)

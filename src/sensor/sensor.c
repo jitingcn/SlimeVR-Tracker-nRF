@@ -32,8 +32,10 @@
 #include "connection/tracker_events.h"
 #include "calibration/calibration.h"
 #include "calibration/imu_calibration.h"
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 #include "calibration/mag_common.h"
 #include "calibration/online_mag.h"
+#endif
 #if CONFIG_SENSOR_USE_TCAL
 #include "calibration/tcal_mls_lut.h"
 #endif
@@ -92,6 +94,7 @@ static struct i2c_dt_spec sensor_imu_dev = {0};
 #endif
 static uint8_t sensor_imu_dev_reg = 0xFF;
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(mag_spi), okay)
 #define SENSOR_MAG_SPI_EXISTS true
 #define SENSOR_MAG_SPI_NODE DT_NODELABEL(mag_spi)
@@ -111,6 +114,7 @@ static struct i2c_dt_spec sensor_mag_dev = {0};
 #warning "Magnetometer node does not exist"
 #endif
 static uint8_t sensor_mag_dev_reg = 0xFF;
+#endif
 
 static float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};      // vector to hold quaternion
 static float last_q[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // vector to hold quaternion
@@ -159,17 +163,22 @@ static int force_scan_request_count = 0;
 // Periodic retained save interval (ms) for crash recovery
 #define RETAINED_SAVE_INTERVAL_MS 5000
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 /* Magnetometer reads share one deadline regardless of the selected bus backend. */
 static int64_t mag_read_period_ticks = 1;
 static int64_t next_mag_read_ticks;
 /* Wall-clock tick of the most recent successful fusion feed. */
 static int64_t last_mag_fusion_ticks;
+#endif
 
 static float accel_actual_time;
 static float gyro_actual_time;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static float mag_actual_time;
+#endif
 int sensor_update_time_ms = 6;
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void sensor_mag_timing_reset(void)
 {
 	next_mag_read_ticks = 0;
@@ -185,6 +194,7 @@ static void sensor_mag_timing_configure(void)
 	}
 	sensor_mag_timing_reset();
 }
+#endif
 
 #if CONFIG_SENSOR_USE_LOW_POWER_2
 #define SENSOR_FIFO_RAW_BUFFER_SIZE 2048
@@ -306,12 +316,14 @@ static void sensor_life_mark_scan_done(void)
 	k_event_post(&sensor_life_events, SENSOR_LIFE_SCAN_DONE);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static bool mag_available;
 static bool mag_enabled;    // initialized from retained->mag_enabled in sensor_scan()
 static bool mag_calibrated; // true if magnetometer calibration data is valid
 static atomic_t mag_persistence_error;
 // set when mag toggle reboot is pending, prevents sensor_retained_write from saving fusion state
 static bool skip_fusion_save;
+#endif
 
 #if CONFIG_SENSOR_USE_VQF
 static const sensor_fusion_t *sensor_fusion = &sensor_fusion_vqf; // TODO: change from server
@@ -329,6 +341,7 @@ bool sensor_fusion_get_rest_detected(void)
 	return sensor_fusion->get_rest_detected();
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 bool sensor_fusion_get_mag_dist_detected(void)
 {
 	if (!sensor_fusion || !sensor_fusion->get_mag_dist_detected) {
@@ -385,11 +398,16 @@ bool sensor_fusion_get_mag_ref(float *norm, float *dip)
 	sensor_fusion->get_mag_ref(norm, dip);
 	return true;
 }
+#endif
 
 static int sensor_imu_id = -1;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static int sensor_mag_id = -1;
+#endif
 static const sensor_imu_t *sensor_imu = &sensor_imu_none;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static const sensor_mag_t *sensor_mag = &sensor_mag_none;
+#endif
 
 #if CONFIG_SENSOR_USE_TCAL
 /* Single LPF: τ=500ms without active curve, τ=100ms when LUT/MLS apply ready. */
@@ -824,6 +842,7 @@ bool sensor_output_ready(void)
 		!atomic_get(&main_suspended) && sensor_calibration_imu_ready();
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static const char *sensor_mag_display_name(int mag_id, uint16_t addr)
 {
 	if (mag_id == MAG_QMC6309 && (addr & 0x7f) == 0x0c) {
@@ -831,13 +850,18 @@ static const char *sensor_mag_display_name(int mag_id, uint16_t addr)
 	}
 	return dev_mag_names[mag_id];
 }
+#endif
 
 const char *sensor_get_sensor_mag_name(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (sensor_mag_id < 0) {
 		return "None";
 	}
 	return sensor_mag_display_name(sensor_mag_id, sensor_mag_dev.addr);
+#else
+	return "None";
+#endif
 }
 
 const char *sensor_get_sensor_fusion_name(void)
@@ -999,6 +1023,7 @@ int sensor_scan(void)
 		return -1; // no IMU detected! something is very wrong
 	}
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	int mag_id = -1;
 #if SENSOR_MAG_SPI_EXISTS
 	// for SPI scan, set frequency of 10MHz, it will be set later by the driver initialization if needed
@@ -1124,9 +1149,11 @@ int sensor_scan(void)
 		sensor_mag = &sensor_mag_none;
 		mag_available = false; // marked as not available
 	}
+#endif
 
 	sensor_scan_write();
 	sensor_imu_id = imu_id;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_mag_id = mag_id;
 
 	mag_enabled = retained->mag_enabled;
@@ -1134,10 +1161,11 @@ int sensor_scan(void)
 		LOG_WRN("Magnetometer enabled in settings but no hardware detected");
 	}
 	LOG_INF("Magnetometer: %s (available: %s)", mag_enabled ? "enabled" : "disabled", mag_available ? "yes" : "no");
+#endif
 
 	// Must be called after mag_enabled is set, so get_server_constant_mag_id()
 	// can correctly report SVR_MAG_STATUS_ENABLED / SVR_MAG_STATUS_DISABLED
-	connection_update_sensor_ids(imu_id, mag_id);
+	sensor_refresh_sensor_ids();
 
 	sensor_sensor_init = true; // successfully initialized
 	sensor_life_mark_scan_done();
@@ -1238,9 +1266,13 @@ int sensor_request_scan(bool force, bool user_feedback)
 	main_ok = false;
 	if (force) {
 		sensor_imu_dev.addr = 0x00;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		sensor_mag_dev.addr = 0x00;
+#endif
 		sensor_imu_dev_reg = 0xFF;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		sensor_mag_dev_reg = 0xFF;
+#endif
 		LOG_INF("Requested sensor scan");
 	}
 	k_thread_create(
@@ -1287,6 +1319,7 @@ void sensor_scan_read(void) // TODO: move some of this to sys?
 		sensor_imu_dev.addr = retained->imu_addr;
 		sensor_imu_dev_reg = retained->imu_reg;
 	}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (retained->mag_addr != 0) {
 		sensor_mag_dev.addr = retained->mag_addr;
 		sensor_mag_dev_reg = retained->mag_reg;
@@ -1298,25 +1331,36 @@ void sensor_scan_read(void) // TODO: move some of this to sys?
 		sensor_mag_dev.addr = 0x00;
 		sensor_mag_dev_reg = 0xFF;
 	}
+#endif
 	LOG_INF("IMU address: 0x%02X, register: 0x%02X", sensor_imu_dev.addr, sensor_imu_dev_reg);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	LOG_INF("Magnetometer address: 0x%02X, register: 0x%02X", sensor_mag_dev.addr, sensor_mag_dev_reg);
+#endif
 }
 
 void sensor_scan_write(void) // TODO: move some of this to sys?
 {
 	retained->imu_addr = sensor_imu_dev.addr;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	retained->mag_addr = sensor_mag_dev.addr;
+#endif
 	retained->imu_reg = sensor_imu_dev_reg;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	retained->mag_reg = sensor_mag_dev_reg;
+#endif
 	retained_update();
 }
 
 void sensor_scan_clear(void) // TODO: move some of this to sys?
 {
 	retained->imu_addr = 0x00;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	retained->mag_addr = 0x00;
+#endif
 	retained->imu_reg = 0xFF;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	retained->mag_reg = 0xFF;
+#endif
 	retained_update();
 }
 
@@ -1347,6 +1391,7 @@ void sensor_retained_read(void) // TODO: move some of this to sys? or move to ca
 		(double)retained->gyroBias[1],
 		(double)retained->gyroBias[2]
 	);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (mag_available && mag_enabled) {
 		//		LOG_INF("Magnetometer bridge offset: %.5f %.5f %.5f", (double)retained->magBias[0],
 		//(double)retained->magBias[1], (double)retained->magBias[2]);
@@ -1361,6 +1406,7 @@ void sensor_retained_read(void) // TODO: move some of this to sys? or move to ca
 			);
 		}
 	}
+#endif
 	if (retained->fusion_id) {
 		LOG_INF("Fusion data recovered");
 	}
@@ -1371,8 +1417,12 @@ void sensor_retained_write(void) // TODO: move to sys?
 #if CONFIG_SENSOR_USE_TCAL
 	sensor_tcal_lock();
 #endif
-	if (skip_fusion_save || atomic_get(&fusion_requests) || sensor_calibration_fusion_stale() ||
-	    sensor_calibration_gyro_reference_pending()) {
+	if (atomic_get(&fusion_requests) || sensor_calibration_fusion_stale() ||
+	    sensor_calibration_gyro_reference_pending()
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	    || skip_fusion_save
+#endif
+	) {
 		/* Never save fusion against a baseline not yet consumed by the sensor. */
 		retained->fusion_id = 0;
 	} else if (sensor_fusion_init) {
@@ -1421,7 +1471,9 @@ int sensor_shutdown(void) // Communicate all imus to shut down
 	 * be unavailable, so a probe fails and raises SENSOR_ERROR. Shutdown only talks
 	 * to drivers that are already bound.
 	 */
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_mag_timing_reset();
+#endif
 	if (!sensor_sensor_init || sensor_imu == NULL || sensor_imu == &sensor_imu_none) {
 		LOG_INF("sensor_shutdown: sensors not initialized, skip");
 		return 0;
@@ -1431,9 +1483,11 @@ int sensor_shutdown(void) // Communicate all imus to shut down
 	if (resume_err) {
 		return resume_err;
 	}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (mag_available && mag_enabled && sensor_mag != NULL && sensor_mag != &sensor_mag_none) {
 		sensor_mag->shutdown();
 	}
+#endif
 	sensor_imu->shutdown();
 	return sys_interface_suspend();
 }
@@ -1456,6 +1510,7 @@ int sensor_setup_WOM(void)
 	return pin_config == 0xFF ? -EIO : pin_config;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static bool sensor_mag_uses_i2c_passthrough(void)
 {
 	return (sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80);
@@ -1597,25 +1652,42 @@ int sensor_set_mag_enabled(bool enabled)
 	LOG_INF("Magnetometer %s", enabled ? "enabled" : "disabled");
 	return sensor_operation_result(LED_OWNER_MAG, storage_err, true);
 }
+#endif
 
 bool sensor_get_mag_enabled(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	return mag_enabled;
+#else
+	return false;
+#endif
 }
 
 bool sensor_get_mag_available(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	return mag_available;
+#else
+	return false;
+#endif
 }
 
 bool sensor_get_mag_calibrated(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	return mag_calibrated;
+#else
+	return false;
+#endif
 }
 
 void sensor_refresh_sensor_ids(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	connection_update_sensor_ids(sensor_imu_id, sensor_mag_id);
+#else
+	connection_update_sensor_ids(sensor_imu_id, -1);
+#endif
 }
 
 int sensor_request_fusion_reset(bool user_feedback)
@@ -1643,7 +1715,9 @@ void sensor_request_fusion_bias_reset(void)
  * calibration: BMI retrim, power and rescan can have it suspended. */
 static void sensor_apply_calibration_frame(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	magneto_online_apply_pending();
+#endif
 	enum sensor_calibration_effect effect = sensor_calibration_apply_pending();
 	k_spinlock_key_t key = k_spin_lock(&fusion_feedback_lock);
 	atomic_val_t requests = atomic_set(&fusion_requests, 0);
@@ -1931,10 +2005,13 @@ int sensor_init(void)
 	tracker_events_sensor_invalidate(TRACKER_REST_INITIALIZING);
 	tracker_events_notify();
 	int err;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_mag_timing_reset();
+#endif
 	sensor_diagnostics_reset_frame();
 	sensor_update_frame_transform_cache();
 	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (mag_available && mag_enabled) // shutdown magnetometer first only when enabled
 	{
 		if (sensor_mag_uses_i2c_passthrough()) {
@@ -1942,6 +2019,7 @@ int sensor_init(void)
 		}
 		sensor_mag->shutdown(); // TODO: is this needed?
 	}
+#endif
 	bool fast_wom_wake = sensor_wom_fast_wake_resume_pending && sensor_imu_fast_wom_wake_supported();
 	sensor_wom_fast_wake_resume_pending = false;
 	if (fast_wom_wake) {
@@ -1969,7 +2047,9 @@ int sensor_init(void)
 
 	// setup sensor, set ODR
 	float accel_initial_time = 1.0f / CONFIG_SENSOR_ACCEL_ODR; // configure with accel ODR from config
-	float mag_initial_time = 1.0f / CONFIG_SENSOR_MAG_ODR;     // configure with mag ODR from config
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	float mag_initial_time = 1.0f / CONFIG_SENSOR_MAG_ODR;
+#endif
 	/*
 	 * Gyro request: SPI keeps CONFIG ODR + INT_merge N.
 	 * I2C: bus cannot drain hi-res FIFO at high ODR — drop merge, request
@@ -2000,6 +2080,7 @@ int sensor_init(void)
 		return err;
 	}
 	// 55-66ms to wait, get chip ids, and setup icm (50ms spent waiting for accel and gyro to start)
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (mag_available && mag_enabled) {
 		// Proxy mode is restored by the IMU init; passthrough must be explicit.
 		if (sensor_mag_uses_i2c_passthrough()) {
@@ -2016,6 +2097,7 @@ int sensor_init(void)
 		sensor_mag_timing_configure();
 		// 0-1ms to setup mmc
 	}
+#endif
 	LOG_INF("Initialized sensors");
 
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
@@ -2061,9 +2143,11 @@ int sensor_init(void)
 	if (retained->fusion_id == fusion_id) // Check if the retained fusion data is valid and matches the selected fusion
 	{                                     // Load state if the data is valid (fusion was initialized before)
 		sensor_fusion->load(retained->fusion_data);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		/* Retained fusion may describe an unconfirmed trial matrix from before
 		 * sleep. Reacquire only its magnetic domain against confirmed storage. */
 		sensor_fusion_reset_mag_ref();
+#endif
 		retained->fusion_id = 0; // Invalidate retained fusion data
 		retained_update();
 	} else {
@@ -2079,7 +2163,11 @@ int sensor_init(void)
 #else
 		float fusion_accel_time = accel_actual_time;
 #endif
-		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, mag_actual_time); // mag rate from sensor driver
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, mag_actual_time);
+#else
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, 0.0f);
+#endif
 	}
 
 	sensor_calibration_update_sensor_ids(sensor_imu_id);
@@ -2129,7 +2217,9 @@ int sensor_init(void)
 	LOG_INF("Initialized fusion");
 	sensor_fusion_init = true;
 	sensor_calibration_reset_gyro_reference();
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_mag_timing_reset();
+#endif
 
 
 	return 0;
@@ -2149,13 +2239,19 @@ static void sensor_send_raw_metadata(void)
 	const struct sensor_raw_collection_config config = {
 		.gyro_period = gyro_actual_time,
 		.accel_period = accel_actual_time,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		.mag_period = mag_actual_time,
+#endif
 		.gyro_range = gyro_actual_range,
 		.accel_range = accel_actual_range,
 		.gyro_oversample_n = gyro_oversample_n,
 		.imu_id = (uint8_t)sensor_imu_id,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		.mag_id = (uint8_t)sensor_mag_id,
 		.mag_active = mag_available && mag_enabled,
+#else
+		.mag_id = UINT8_MAX,
+#endif
 	};
 	sensor_raw_collection_send_metadata(&config);
 }
@@ -2171,6 +2267,7 @@ static uint64_t total_accel_samples = 0;
 static uint64_t total_loop_time = 0;
 static uint64_t total_loop_iterations = 0;
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 // Count actual mag samples fed to VQF since last status report (always tracked)
 static uint32_t mag_vqf_updates_since_status = 0;
 static float mag_feed_hz; /* last STATUS_INTERVAL window */
@@ -2235,6 +2332,7 @@ static bool sensor_mag_gravity(const float accel_sum[3], int accel_count, float 
 	}
 	return true;
 }
+#endif
 
 typedef struct {
 	uint32_t sensor_epoch;
@@ -2242,8 +2340,10 @@ typedef struct {
 	bool dc_active;
 #endif
 	uint16_t packets;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	float raw_m[3];
 	bool new_mag_data;
+#endif
 	float raw_collect_temp_c;
 	int g_count;
 	float a_sum[3];
@@ -2736,6 +2836,7 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 	last_acquisition_time = acquisition_time;
 #endif
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	// Read magnetometer
 	frame->raw_m[0] = 0;
 	frame->raw_m[1] = 0;
@@ -2759,6 +2860,7 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 	    && (connection_get_data_collection() || connection_get_data_collection_batch())) {
 		connection_queue_raw_mag(frame->raw_m);
 	}
+#endif
 #endif
 
 	if (reconfig) // TODO: get rid of reconfig?
@@ -2845,6 +2947,7 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 #endif
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 {
 	if (mag_available && mag_enabled && frame->new_mag_data) {
@@ -2898,6 +3001,7 @@ static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 		connection_update_sensor_mag(mag_device);
 	}
 }
+#endif
 
 static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_begin)
 {
@@ -3109,7 +3213,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	}
 	atomic_set(&output_ready, v_finite(lin_a, 3));
 
-	sensor_diagnostics_output(q, lin_a, sensor_loop_avg_a, temp, mag_enabled);
+	sensor_diagnostics_output(q, lin_a, sensor_loop_avg_a, temp, sensor_get_mag_enabled());
 
 	// Update orientation
 	bool send_quat_data = !q_epsilon(q, last_q, 0.001f);
@@ -3257,6 +3361,7 @@ static void sensor_loop_wait(int64_t time_begin)
 			sensor_window_resume_max_us = 0;
 			sensor_window_fifo_max_us = 0;
 		}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		if (mag_available && mag_enabled) {
 			mag_feed_hz = mag_vqf_updates_since_status * 1000.0f / (float)STATUS_INTERVAL_MS;
 			// Report actual rate of mag samples fed into VQF (target: mag ODR, e.g. 50Hz)
@@ -3273,6 +3378,7 @@ static void sensor_loop_wait(int64_t time_begin)
 		} else {
 			mag_feed_hz = 0.0f;
 		}
+#endif
 #if DEBUG
 		LOG_DBG(
 			"loop iterations: %llu, packets read: %llu, processed: %llu, gyro samples: %llu, accel samples: %llu, "
@@ -3440,7 +3546,9 @@ void sensor_loop(void)
 				}
 				sensor_loop_process_fifo(&frame);
 				sensor_window_vqf_us += k_ticks_to_us_near64(k_uptime_ticks() - vqf_begin_ticks);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 				sensor_loop_process_mag(&frame);
+#endif
 				sensor_loop_check_packets(&frame, time_begin);
 				sensor_loop_publish(&frame);
 				uint64_t proc_us = k_ticks_to_us_near64(k_uptime_ticks() - proc_begin_ticks);
@@ -3545,7 +3653,9 @@ int main_imu_restart(void)
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
 	tracker_events_notify();
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_mag_timing_reset();
+#endif
 	if (main_ok) // only restart fusion if initialized
 	{
 		// Determine effective gyro time step for fusion (must match sensor_init logic)
@@ -3560,6 +3670,7 @@ int main_imu_restart(void)
 #else
 		float fusion_accel_time = accel_actual_time;
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		// Prefer mag_actual_time; some drivers can still return INFINITY from update_odr.
 		float fusion_mag_time
 			= (mag_actual_time > 0.0f && mag_actual_time < 10.0f) ? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
@@ -3569,6 +3680,9 @@ int main_imu_restart(void)
 		if (had_mag_ref && saved_ref_norm > 0) {
 			sensor_fusion_set_mag_ref(saved_ref_norm, saved_ref_dip);
 		}
+#else
+		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, 0.0f);
+#endif
 	}
 #if CONFIG_SENSOR_TCAL_HEATED
 	sensor_temperature_resume();
@@ -3603,6 +3717,7 @@ float sensor_get_gyro_odr(void)
 
 float sensor_get_mag_odr(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (!mag_available) {
 		return 0.0f;
 	}
@@ -3614,15 +3729,20 @@ float sensor_get_mag_odr(void)
 	if (mag_enabled) {
 		return (float)CONFIG_SENSOR_MAG_ODR;
 	}
+#endif
 	return 0.0f;
 }
 
 float sensor_get_mag_feed_hz(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (!mag_available || !mag_enabled) {
 		return 0.0f;
 	}
 	return mag_feed_hz;
+#else
+	return 0.0f;
+#endif
 }
 
 float sensor_get_fusion_rate(void)

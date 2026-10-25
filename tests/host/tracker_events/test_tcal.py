@@ -43,6 +43,7 @@ def active_functions(text):
     command = shlex.split(os.environ.get("CC", "cc")) + [
         "-E", "-P", "-x", "c", "-DCONFIG_SENSOR_USE_TCAL=1",
         "-DCONFIG_SENSOR_TCAL_HEATED=0", "-DCONFIG_CMSIS_DSP=0",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
         "-DIS_ENABLED(x)=0", "-",
     ]
     return subprocess.run(command, input=without_includes, text=True,
@@ -689,6 +690,7 @@ with tempfile.TemporaryDirectory(prefix="tcal-events-") as directory:
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
         "-fno-pie", "-no-pie", "-I", str(ROOT / "src"), str(unit), "-lm", "-o", str(binary),
     ], check=True)
     for scenario in scenarios:

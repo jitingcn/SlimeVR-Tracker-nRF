@@ -72,7 +72,7 @@ def main():
     ownership = '#include "ownership.h"\n'
     for name in ("sensor_calibration_request_id", "cal_request_origin"):
         ownership += extract_block(header, rf"^enum {name}\s*\{{", semicolon=True) + "\n"
-    for name in ("sensor_calibration_maintenance_begin", "sensor_calibration_maintenance_end", "sensor_calibration_request"):
+    for name in ("calibration_mag_pending", "sensor_calibration_maintenance_begin", "sensor_calibration_maintenance_end", "sensor_calibration_request"):
         ownership += function(calibration, name) + "\n"
     accum_end = runtime.index("} tcal_accum;") + len("} tcal_accum;")
     accum_start = runtime.rindex("static struct {", 0, accum_end)
@@ -122,7 +122,7 @@ def main():
                     "-Wno-unused-function", "-pthread", *flags,
                     f"-DACTUAL_OWNERSHIP={int(actual_ownership)}",
                     f"-DCONFIG_SENSOR_TCAL_HEATED={int(not actual_ownership)}",
-                    "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+                    "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
                     "-I", str(work), "-I", str(HERE), str(source), "-lm", "-o", str(binary),
                 ], check=True)
                 if args.export:

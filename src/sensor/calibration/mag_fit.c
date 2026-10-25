@@ -6,7 +6,6 @@
 #include <math.h>
 #include <string.h>
 
-union mag_cal_workspace mag_cal_workspace;
 #define W (mag_cal_workspace.fit)
 #define HUBER 0.06f
 

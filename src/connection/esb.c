@@ -397,6 +397,7 @@ static void esb_remote_cmd_scan(void)
 	sensor_request_scan(true, true);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void esb_remote_cmd_mag_clear(void)
 {
 	LOG_INF("Executing remote command: MAG_CLEAR");
@@ -432,6 +433,7 @@ static void esb_remote_cmd_mag_auto_off(void)
 	LOG_INF("Executing remote command: MAG_AUTO_OFF");
 	sensor_calibration_set_online_mag_enabled(false);
 }
+#endif
 
 static void esb_remote_cmd_tcal_on(void)
 {
@@ -768,12 +770,14 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_CALIBRATE_ACC, "CALIBRATE_ACC", esb_remote_cmd_calibrate_acc},
 	{ESB_PONG_FLAG_MEOW, "MEOW", esb_remote_cmd_meow},
 	{ESB_PONG_FLAG_SCAN, "SCAN", esb_remote_cmd_scan},
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	{ESB_PONG_FLAG_MAG_CLEAR, "MAG_CLEAR", esb_remote_cmd_mag_clear},
 	{ESB_PONG_FLAG_MAG_CAL, "MAG_CAL", esb_remote_cmd_mag_cal},
 	{ESB_PONG_FLAG_MAG_ON, "MAG_ON", esb_remote_cmd_mag_on},
 	{ESB_PONG_FLAG_MAG_OFF, "MAG_OFF", esb_remote_cmd_mag_off},
 	{ESB_PONG_FLAG_MAG_AUTO_ON, "MAG_AUTO_ON", esb_remote_cmd_mag_auto_on},
 	{ESB_PONG_FLAG_MAG_AUTO_OFF, "MAG_AUTO_OFF", esb_remote_cmd_mag_auto_off},
+#endif
 	{ESB_PONG_FLAG_REBOOT, "REBOOT", esb_remote_cmd_reboot},
 	{ESB_PONG_FLAG_CLEAR, "CLEAR", esb_remote_cmd_clear},
 	{ESB_PONG_FLAG_DFU, "DFU", esb_remote_cmd_dfu},
@@ -967,7 +971,15 @@ static bool esb_remote_command_supported(uint8_t cmd)
 	case ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF:
 	case ESB_PONG_FLAG_DATA_COLLECT_METADATA:
 #endif
-#if !CONFIG_CONNECTION_RAW_COLLECTION
+#if !CONFIG_SENSOR_USE_MAGNETOMETER
+	case ESB_PONG_FLAG_MAG_ON:
+	case ESB_PONG_FLAG_MAG_OFF:
+	case ESB_PONG_FLAG_MAG_CLEAR:
+	case ESB_PONG_FLAG_MAG_CAL:
+	case ESB_PONG_FLAG_MAG_AUTO_ON:
+	case ESB_PONG_FLAG_MAG_AUTO_OFF:
+#endif
+#if !CONFIG_CONNECTION_RAW_COLLECTION || !CONFIG_SENSOR_USE_MAGNETOMETER
 		return false;
 #endif
 	default:
@@ -979,7 +991,20 @@ static int esb_remote_command_execute(uint8_t cmd)
 {
 	if (!esb_remote_command_supported(cmd)) {
 		LOG_WRN("Remote command 0x%02X unavailable in this firmware", cmd);
-		led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_REJECTED);
+		enum led_owner owner = LED_OWNER_SENSOR;
+		if (cmd == ESB_PONG_FLAG_MAG_ON || cmd == ESB_PONG_FLAG_MAG_OFF
+		    || cmd == ESB_PONG_FLAG_MAG_CLEAR || cmd == ESB_PONG_FLAG_MAG_CAL
+		    || cmd == ESB_PONG_FLAG_MAG_AUTO_ON || cmd == ESB_PONG_FLAG_MAG_AUTO_OFF) {
+			owner = LED_OWNER_MAG;
+			if (cmd == ESB_PONG_FLAG_MAG_CAL) {
+				cal_event_reject(CAL_KIND_MAG_MANUAL, CAL_REASON_UNSUPPORTED);
+				tracker_events_notify();
+			} else if (cmd == ESB_PONG_FLAG_MAG_AUTO_ON || cmd == ESB_PONG_FLAG_MAG_AUTO_OFF) {
+				cal_event_reject(CAL_KIND_MAG_ONLINE, CAL_REASON_UNSUPPORTED);
+				tracker_events_notify();
+			}
+		}
+		led_request_event(owner, led_request_id(), led_event_id(), LED_REJECTED);
 		return -ENOTSUP;
 	}
 	/* These requests may be refused. Do not acknowledge them until accepted. */

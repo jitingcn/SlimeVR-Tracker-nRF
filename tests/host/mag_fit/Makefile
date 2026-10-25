@@ -2,7 +2,7 @@ CC ?= cc
 SOURCE_ROOT ?= ../../..
 CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra -Werror
 CFLAGS += -fsanitize=address,undefined -fno-sanitize-recover=undefined -I../magneto -I$(SOURCE_ROOT)/src
-CFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1
+CFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1 -DCONFIG_SENSOR_USE_MAGNETOMETER=1
 LDLIBS += -lm -fsanitize=address,undefined
 
 .PHONY: check clean test_mag_fit

@@ -213,7 +213,7 @@ int main(void) {
         binary = temporary / name
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-g", "-O1",
-            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
             "-I", str(temporary), "-I", str(SRC), "-I", str(HERE / "../raw_collection"),
             str(event_payload if name == "payload" else HERE / f"test_{name}.c"), "-lm", "-o", str(binary),
@@ -246,7 +246,7 @@ int main(void) {
         matrix_parts.append("static void receive_auxiliary(void) {\n" + esb[ingress_start:ota_end] + "\n}")
         (temporary / "commands.inc").write_text("\n\n".join(matrix_parts))
         for raw_enabled in (0, 1):
-            for mag_enabled in (1,):
+            for mag_enabled in (0, 1):
                 binary = temporary / f"capabilities-{raw_enabled}-{mag_enabled}"
                 command = shlex.split(os.environ.get("CC", "cc")) + [
                     "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",

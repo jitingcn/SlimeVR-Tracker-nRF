@@ -83,7 +83,7 @@ def main():
         (temp / "leaves.h").write_text(LEAVES)
         source = temp / "core.c"
         source.write_text('#include "leaves.h"\n#include "' + str(ROOT / "src/connection/tracker_events.c") + '"\n' + (HERE / "test_core.c").read_text())
-        flags = ["-std=c11", "-Wall", "-Wextra", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-misleading-indentation", "-O0", "-g", "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-I", str(temp), "-I", str(ROOT / "src")]
+        flags = ["-std=c11", "-Wall", "-Wextra", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-misleading-indentation", "-O0", "-g", "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1", "-I", str(temp), "-I", str(ROOT / "src")]
         motion = temp / "motion"
         subprocess.run(cc + flags + [str(HERE / "test_motion.c"), str(ROOT / "src/sensor/motion_state.c"), str(ROOT / "src/util.c"), "-lm", "-o", str(motion)], check=True)
         subprocess.run([str(motion)], check=True)

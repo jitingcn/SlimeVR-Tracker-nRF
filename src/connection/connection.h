@@ -44,7 +44,9 @@ uint8_t connection_get_packet_sequence(void);
 
 void connection_update_sensor_ids(int imu_id, int mag_id);
 void connection_update_sensor_data(float *q, float *a, int64_t data_time); // ticks
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void connection_update_sensor_mag(float *m);
+#endif
 void connection_update_sensor_temp(float temp);
 void connection_update_battery(bool battery_available, bool plugged, bool charged, uint32_t battery_pptt, int battery_mV);
 void connection_update_status(int status);
@@ -80,7 +82,9 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample);
 bool connection_raw_collection_startup_done(void);
 
 // Queue uncalibrated magnetometer data for body-frame raw transport.
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void connection_queue_raw_mag(const float mag[3]);
+#endif
 /* Raw meta: gyro_odr = raw TX rate (fusion INT_merge Hz); chip/fusion Hz after mag_id. */
 void connection_send_raw_metadata(float gyro_range, float accel_range,
 				  float gyro_odr, float accel_odr,

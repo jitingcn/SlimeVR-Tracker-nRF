@@ -41,11 +41,18 @@
 #include "cal_mag.h"
 #include "cal_sample.h"
 #include "calibration.h"
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 #include "mag_common.h"
 #include "online_mag.h"
+#endif
 
 LOG_MODULE_REGISTER(cal_mag, LOG_LEVEL_INF);
 
+union mag_cal_workspace mag_cal_workspace;
+double norm_sum;
+double sample_count;
+
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 /* Owned here; declared in mag_common.h for online_mag / calibration glue. */
 uint8_t magneto_progress;
 static uint8_t last_magneto_progress;
@@ -54,8 +61,6 @@ static int64_t magneto_progress_time;
 static int64_t mag_cal_last_status_log;
 static uint8_t mag_cal_coverage;
 
-double norm_sum;
-double sample_count;
 
 /* Direction range tracking for manual calibration: per-axis min/max of normalized direction */
 static float dir_min[3];
@@ -230,17 +235,21 @@ int sensor_calibrate_mag(void)
 	sensor_refresh_sensor_ids(); // Refresh reported mag status after calibration
 	return 0;
 }
+#endif
 
 void magneto_reset(void)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	magneto_progress = 0;
 	last_magneto_progress = 0;
 	magneto_progress_time = 0;
 	mag_cal_last_status_log = 0;
 	mag_cal_coverage = 0;
+#endif
 	memset(mag_cal_workspace.ata, 0, sizeof(mag_cal_workspace.ata));
 	norm_sum = 0;
 	sample_count = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	for (int i = 0; i < 3; i++) {
 		dir_min[i] = 2.0f;  // start high
 		dir_max[i] = -2.0f; // start low
@@ -248,8 +257,10 @@ void magneto_reset(void)
 	magneto_center_reset(&manual_center_estimator);
 	memset(manual_last_dir, 0, sizeof(manual_last_dir));
 	memset(manual_last_accel_dir, 0, sizeof(manual_last_accel_dir));
+#endif
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 /**
  * Update direction range tracking (min/max per axis of normalized direction).
  * Used only by manual calibration to ensure sufficient multi-axis rotation.
@@ -286,6 +297,7 @@ static float magneto_min_dir_range(void)
 	}
 	return min_range;
 }
+#endif
 
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 // Collect 18 distinct orientations; no fixed face/edge template is enforced.
@@ -493,6 +505,7 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 }
 #endif
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 // Collect magnetometer sample for manual calibration.
 // Accumulates into ATA and periodically runs trial calibration for quality check.
 static void sensor_sample_mag_magneto_sample(const float m[3])
@@ -599,3 +612,4 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 		}
 	}
 }
+#endif

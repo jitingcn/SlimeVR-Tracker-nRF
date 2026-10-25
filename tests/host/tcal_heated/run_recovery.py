@@ -29,7 +29,7 @@ def main():
             "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
             "-fsanitize=undefined", "-fno-sanitize-recover=undefined",
             *(["-DRECOVERY_BOOT_ONLY"] if args.boot_only else []),
-            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
             "-I", str(work), str(HERE / "test_recovery.c"), "-lm", "-o", str(executable),
         ], check=True)
         subprocess.run([str(executable)], check=True)

@@ -10,6 +10,9 @@
 static struct retained_fixture storage;
 struct retained_fixture *retained = &storage;
 float magBAinv[4][3];
+#ifdef REAL_FIT
+union mag_cal_workspace mag_cal_workspace;
+#endif
 uint8_t magneto_progress;
 #ifdef REAL_FIT
 #define FIT_HAS_STARTED true

@@ -26,7 +26,9 @@
 /* Manual magnetometer hard/soft-iron calibration and accelerometer pose capture. */
 
 void magneto_reset(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_calibrate_mag(void);
+#endif
 
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count_out);

@@ -75,7 +75,7 @@ status_fault_production += "\n" + "\n".join(function(status, name) for name in (
     "get_status", "status_publish_faults", "status_ready",
 ))
 scan = function(sensor, "sensor_scan")
-decision_end = scan.index("\n\tint mag_id = -1;")
+decision_end = scan.index("\n#if CONFIG_SENSOR_USE_MAGNETOMETER\n\tint mag_id = -1;")
 decision_start = scan.rindex("\tif (imu_id >= 0) {", 0, decision_end)
 sensor_fault_production = "static int host_sensor_scan_result(int imu_id) {\n"
 sensor_fault_production += scan[decision_start:decision_end] + "\n\treturn 0;\n}\n"
@@ -122,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-led-business-") as directory:
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) + list(defines) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-parameter",
             "-g", "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
-            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
             f"-I{temporary}", f"-I{HERE.parent / 'led_sync'}",
             str(HERE / fixture), *(str(SRC / "system" / name) for name in ("led_policy.c", "led_behavior.c", "led_timeline.c")),
             "-o", str(binary)], check=True)

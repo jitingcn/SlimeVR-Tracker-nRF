@@ -10,10 +10,14 @@ typedef struct {
 	struct k_spinlock lock;
 	float q[4];
 	float a[3];
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	float m[3];
+#endif
 	bool precise;
 	atomic_t qa_pending;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	atomic_t m_pending;
+#endif
 } sensor_data_snapshot_t;
 
 static inline bool sensor_data_snapshot_qa_pending(const sensor_data_snapshot_t *state)
@@ -21,10 +25,12 @@ static inline bool sensor_data_snapshot_qa_pending(const sensor_data_snapshot_t 
 	return atomic_get(&state->qa_pending) != 0;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static inline bool sensor_data_snapshot_m_pending(const sensor_data_snapshot_t *state)
 {
 	return atomic_get(&state->m_pending) != 0;
 }
+#endif
 
 static inline void sensor_data_snapshot_publish_qa(
 	sensor_data_snapshot_t *state,
@@ -41,6 +47,7 @@ static inline void sensor_data_snapshot_publish_qa(
 	k_spin_unlock(&state->lock, key);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static inline void sensor_data_snapshot_publish_m(
 	sensor_data_snapshot_t *state,
 	const float m[3]
@@ -51,6 +58,7 @@ static inline void sensor_data_snapshot_publish_m(
 	atomic_set(&state->m_pending, 1);
 	k_spin_unlock(&state->lock, key);
 }
+#endif
 
 static inline void sensor_data_snapshot_read_qa(
 	sensor_data_snapshot_t *state,
@@ -65,6 +73,7 @@ static inline void sensor_data_snapshot_read_qa(
 	k_spin_unlock(&state->lock, key);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static inline void sensor_data_snapshot_read_qm(
 	sensor_data_snapshot_t *state,
 	float q_out[4],
@@ -78,6 +87,7 @@ static inline void sensor_data_snapshot_read_qm(
 	atomic_set(&state->m_pending, 0);
 	k_spin_unlock(&state->lock, key);
 }
+#endif
 
 static inline bool sensor_data_snapshot_is_precise(sensor_data_snapshot_t *state)
 {

@@ -50,7 +50,9 @@ PRELUDE = r'''
 #define LOG_DBG(...) ((void)0)
 #define MAIN_GYRO_TEMP_ID 2
 #define printk(...) ((void)0)
-static struct { double ata[100]; } mag_cal_workspace;
+#include "sensor/calibration/mag_fit.h"
+union mag_cal_workspace mag_cal_workspace;
+double norm_sum, sample_count;
 static struct {
     float magBAinv[4][3];
     float gyroTemp;
@@ -419,7 +421,7 @@ def main():
         (path / "test.c").write_text(source)
         cc = shlex.split(os.environ.get("CC", "cc"))
         subprocess.run(cc + ["-std=gnu11", "-Wall", "-Wextra", "-Werror",
-                             "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+                             "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
                              "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test")], check=True)
         subprocess.run([str(path / "test")], check=True)
 

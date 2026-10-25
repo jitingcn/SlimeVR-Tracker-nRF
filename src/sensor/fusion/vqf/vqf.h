@@ -35,7 +35,9 @@ void vqf_save(void *data);
 
 void vqf_update_gyro(float *g, float time);
 void vqf_update_accel(float *a, float time);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void vqf_update_mag(float *m, float time);
+#endif
 void vqf_update(float *g, float *a, float *m, float time);
 
 void vqf_get_gyro_bias(float *g_off);
@@ -50,11 +52,13 @@ void vqf_get_lin_a(float *lin_a);
 void vqf_get_quat(float *q);
 
 bool vqf_get_rest_detected(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 bool vqf_get_mag_dist_detected(void);
 float vqf_get_mag_ref_norm(void);
 void vqf_get_mag_ref(float *norm, float *dip);
 float vqf_get_delta(void);
 void vqf_set_delta(float delta);
+#endif
 
 // Debug information structure
 //

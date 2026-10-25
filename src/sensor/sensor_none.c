@@ -124,6 +124,7 @@ const sensor_imu_t sensor_imu_none = {
 	*imu_none_ext_setup,
 };
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int mag_none_init(float time, float *actual_time)
 {
 	LOG_DBG("mag_none_init, sensor has no magnetometer or magnetometer cannot be initialized");
@@ -179,3 +180,4 @@ const sensor_mag_t sensor_mag_none
 	   *mag_none_mag_process,
 	   UINT8_MAX,
 	   UINT8_MAX};
+#endif

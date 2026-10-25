@@ -8,7 +8,8 @@
 #include <math.h>
 #include <stdarg.h>
 #include "connection/tracker_event_protocol.h"
-static unsigned warning_count;
+static unsigned warning_count, rejected_events, event_notifications;
+static uint8_t rejected_kind, rejected_reason;
 static char last_warning[256];
 static void host_warning(const char *format, ...)
 {
@@ -18,9 +19,6 @@ static void host_warning(const char *format, ...)
     va_end(args);
     warning_count++;
 }
-#ifdef HOST_CAPABILITY_MATRIX
-static unsigned rejected_events, event_notifications;
-static uint8_t rejected_kind, rejected_reason;
 static void cal_event_reject(uint8_t kind, uint8_t reason)
 {
     rejected_events++;
@@ -28,7 +26,6 @@ static void cal_event_reject(uint8_t kind, uint8_t reason)
     rejected_reason = reason;
 }
 static void tracker_events_notify(void) { event_notifications++; }
-#endif
 #include "../led_feedback_stub.h"
 #ifndef CONFIG_SENSOR_TCAL_HEATED
 #define CONFIG_SENSOR_TCAL_HEATED 0

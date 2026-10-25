@@ -66,6 +66,7 @@ static int lsm_fifo_resync(const char *reason)
 	return err;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 // One unread sensor-hub acquisition epoch may be prefetched. Hardware runs
 // periodically until consumption, but a returned epoch is never reused.
 static bool ext_continuous_active = false;
@@ -81,6 +82,7 @@ static bool ext_scanning_mode = true;
 
 #define LSM6DSV_SHUB_XLDA_TIMEOUT_MS 80
 #define LSM6DSV_SHUB_OP_TIMEOUT_MS 20
+#endif
 
 int lsm_init(
 	float clock_rate,
@@ -97,11 +99,14 @@ int lsm_init(
 
 	// sensor_init() already issued shutdown/reset before calling init.
 	// Continue from the post-reset state and rebuild runtime configuration below.
-	int err = lsm_ext_stop_continuous();
+	int err = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	err = lsm_ext_stop_continuous();
 	if (err) {
 		return err;
 	}
 	ext_scanning_mode = false; // Keep the magnetometer's prefetch policy across IMU init.
+#endif
 
 	// Read WHO_AM_I to verify communication
 	uint8_t who_am_i = 0;
@@ -126,9 +131,11 @@ int lsm_init(
 
 	// Re-enable SHUB_PU_EN if sensor hub (ext interface) was configured during scan.
 	uint8_t if_cfg = 0x18; // INT H_LACTIVE active low, PP_OD open-drain
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (sensor_interface_ext_get() != NULL) {
 		if_cfg |= 0x40; // SHUB_PU_EN: enable internal pull-up for auxiliary I2C
 	}
+#endif
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, if_cfg);
 
 	uint8_t internal_freq_raw = 0;
@@ -200,7 +207,10 @@ int lsm_init(
 
 void lsm_shutdown(void)
 {
-	int err = lsm_ext_stop_continuous();
+	int err = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	err = lsm_ext_stop_continuous();
+#endif
 	lsm_unknown_tag_count = 0;
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff;  // reset last odr
@@ -548,11 +558,14 @@ uint8_t lsm_setup_WOM(void)
 	// Enter a clean WOM state explicitly. This path is exercised right before system-off,
 	// and if FIFO / BDR / sensor-hub state is left running, wake-up can boot into a state
 	// where FIFO no longer starts producing packets reliably.
-	int err = lsm_ext_stop_continuous();
+	int err = 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	err = lsm_ext_stop_continuous();
 	if (err) {
 		LOG_ERR("Failed to stop sensor hub: %d", err);
 		return 0xFF;
 	}
+#endif
 	lsm_unknown_tag_count = 0;
 	last_accel_mode = 0xff;
 	last_gyro_mode = 0xff;
@@ -613,6 +626,7 @@ uint8_t lsm_setup_WOM(void)
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int lsm_ext_setup(enum sensor_ext_mode mode)
 {
 	if (mode != SENSOR_EXT_MODE_OFF && mode != SENSOR_EXT_MODE_I2C_PASSTHROUGH && mode != SENSOR_EXT_MODE_I2CM_PROXY) {
@@ -881,6 +895,7 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
 	return err ? lsm_ext_fail(err) : 0;
 }
+#endif
 
 const sensor_imu_t sensor_imu_lsm6dsv = {
 	lsm_init,
@@ -898,12 +913,16 @@ const sensor_imu_t sensor_imu_lsm6dsv = {
 	lsm_setup_DRDY,
 	lsm_setup_WOM,
 
-	lsm_ext_setup,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	.ext_setup = lsm_ext_setup,
+#endif
 };
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 const sensor_ext_ssi_t sensor_ext_lsm6dsv = {
 	.ext_write = lsm_ext_write,
 	.ext_write_read = lsm_ext_write_read,
 	.ext_burst = 7,
 	.ext_set_prefetch = lsm_ext_set_prefetch,
 };
+#endif

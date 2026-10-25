@@ -70,7 +70,9 @@ void sensor_diagnostics_on_decoded_gyro(const float g[3]);
 void sensor_diagnostics_on_raw_gyro(const float g[3]);
 void sensor_diagnostics_on_cal_gyro(const float g[3]);
 void sensor_diagnostics_on_raw_accel(const float a[3]);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_diagnostics_on_mag(const float raw[3], const float calibrated[3]);
+#endif
 void sensor_diagnostics_output(
 	const float q[4], const float lin_a[3], const float avg_a[3], float temp, bool mag_enabled
 );

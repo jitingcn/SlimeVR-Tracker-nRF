@@ -48,20 +48,26 @@ int sensor_shutdown(void);
 /* Return GPIO pull/sense configuration, or a negative lifecycle error. */
 int sensor_setup_WOM(void);
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_set_mag_enabled(bool enabled);
+#endif
 bool sensor_get_mag_enabled(void);
 bool sensor_get_mag_available(void);
 bool sensor_get_mag_calibrated(void);
 void sensor_refresh_sensor_ids(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_mag_ref_reset(void);
+#endif
 
 /* Fusion policy accessors (backend-agnostic; prefer over vqf_* / eqf_*). */
 bool sensor_fusion_get_rest_detected(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 bool sensor_fusion_get_mag_dist_detected(void);
 /* Thread-safe requests, applied only by sensor before the next magnetic feed. */
 void sensor_fusion_reset_mag_ref(void);
 void sensor_fusion_set_mag_ref(float norm, float dip);
 bool sensor_fusion_get_mag_ref(float *norm, float *dip);
+#endif
 
 /* Nonblocking requests consumed by the sensor at the next frame boundary. */
 int sensor_request_fusion_reset(bool user_feedback);
@@ -113,7 +119,9 @@ typedef struct sensor_fusion {
 
 	void (*update_gyro)(float *, float);  // deg/s
 	void (*update_accel)(float *, float); // g
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	void (*update_mag)(float *, float);   // any unit (usually gauss)
+#endif
 	void (*update)(float *, float *, float *, float);
 
 	void (*get_gyro_bias)(float *);
@@ -135,10 +143,12 @@ typedef struct sensor_fusion {
 	 * the sensor owner, or an exclusive lifecycle owner after the sensor
 	 * thread is confirmed stopped/suspended (not merely requested to stop). */
 	bool (*take_rest_observation)(bool *out);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	bool (*get_mag_dist_detected)(void);
 	/* Sensor-thread only: replace magnetic domain, preserving attitude/bias. */
 	void (*rebase_mag)(float norm, float dip);
 	void (*get_mag_ref)(float *norm, float *dip);
+#endif
 } sensor_fusion_t;
 
 /* How the MCU reaches an auxiliary sensor through the selected IMU.

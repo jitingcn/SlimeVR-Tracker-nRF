@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-platform-") as directory:
             "-Wno-unused-variable", "-g", "-O1", "-fsanitize=address,undefined",
             "-fno-omit-frame-pointer", "-fno-pie", "-no-pie", "-I", str(temp),
             f"-DADAFRUIT_FAULT_RECOVERY={adafruit}",
-            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
             str(HERE / "test.c"), "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True, timeout=10)

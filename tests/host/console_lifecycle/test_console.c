@@ -52,7 +52,41 @@ static void cmd_reset_bat(void) {}
 static void cmd_fusion_reset(void) {}
 static void cmd_sens_reset(void) {}
 static void cmd_sens_auto(const char *axis, const char *revolutions) {}
-static int sensor_calibration_clear_mag(void *unused, bool a, bool b) { return 0; }
+static unsigned magnetic_writes, magnetic_clears, magnetic_calibrations, online_writes, rejects;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+#include "sensor/calibration/online_mag.h"
+static bool magnetic_enabled, online_enabled, online_debug;
+static int sensor_calibration_clear_mag(void *unused, bool persist, bool feedback)
+{
+    assert(unused == NULL && persist && feedback);
+    magnetic_clears++;
+    return 0;
+}
+static int sensor_set_mag_enabled(bool enabled)
+{
+    magnetic_writes++;
+    magnetic_enabled = enabled;
+    return 0;
+}
+static bool sensor_get_mag_enabled(void) { return magnetic_enabled; }
+static const char *sensor_get_sensor_mag_name(void) { return "test-magnetometer"; }
+static int sensor_calibration_set_online_mag_enabled(bool enabled)
+{
+    online_writes++;
+    online_enabled = enabled;
+    return 0;
+}
+static bool sensor_calibration_get_online_mag_enabled(void) { return online_enabled; }
+int sensor_calibration_set_online_mag_debug(bool enabled) { online_debug = enabled; return 0; }
+bool sensor_calibration_get_online_mag_debug(void) { return online_debug; }
+static float sensor_calibration_get_mag_quality(void) { return 0.125f; }
+static int sensor_calibration_online_mag_status(float *bias) { *bias = 0; return 0; }
+void sensor_calibration_online_mag_diagnostics(struct online_mag_diagnostics *out)
+{
+    memset(out, 0, sizeof(*out));
+}
+static int sensor_request_calibration_mag(void) { magnetic_calibrations++; return 0; }
+#endif
 #define CONFIG_USE_SLIMENRF_CONSOLE 1
 #define USB_EXISTS 1
 #define UART_CONSOLE_EXISTS 0
@@ -131,6 +165,8 @@ static unsigned char rx[8192];
 static size_t rx_head, rx_count;
 static bool rx_enabled, tx_enabled;
 static size_t echoed, poll_calls;
+static uint8_t echo_bytes[512];
+static size_t echo_bytes_count;
 static void (*irq_callback)(const struct device *, void *);
 static bool device_is_ready(const struct device *dev) { return true; }
 static void uart_irq_rx_disable(const struct device *dev) { rx_enabled = false; }
@@ -169,6 +205,9 @@ static int uart_fifo_read(const struct device *dev, uint8_t *bytes, int size)
 static int uart_fifo_fill(const struct device *dev, const uint8_t *bytes, int size)
 {
     echoed += (size_t)size;
+    assert((size_t)size <= sizeof(echo_bytes) - echo_bytes_count);
+    memcpy(echo_bytes + echo_bytes_count, bytes, (size_t)size);
+    echo_bytes_count += (size_t)size;
     return size;
 }
 
@@ -198,7 +237,8 @@ uint32_t led_event_id(void) { return 1; }
 enum led_admission led_request_event(enum led_owner owner, uint32_t request, uint32_t event,
                                     enum led_semantic semantic)
 {
-    (void)owner; (void)request; (void)event; (void)semantic;
+    (void)owner; (void)request; (void)event;
+    if (semantic == LED_REJECTED) rejects++;
     return LED_ADMITTED;
 }
 #include "production.inc"
@@ -218,6 +258,7 @@ static void stage(const char *text)
 }
 static void receive(const char *text)
 {
+    echo_bytes_count = 0;
     stage(text);
     irq_callback(console_uart_dev, NULL);
 }
@@ -237,6 +278,22 @@ static void empty(void)
 {
     struct console_line_message message;
     assert(k_msgq_get(&console_line_msgq, &message, K_NO_WAIT) == -ENOMSG);
+}
+
+static void smoke_console_command(const char *input, unsigned prior_rejects)
+{
+    if (!getenv("CAPABILITY_SMOKE")) return;
+    printf("console raw=%d mag=%d accel=%d rejects=%u mag_writes=%u mag_clears=%u mag_calibrations=%u online_writes=%u zro_requests=%u accel_requests=%u input_hex=",
+           CONFIG_CONNECTION_RAW_COLLECTION, CONFIG_SENSOR_USE_MAGNETOMETER,
+           CONFIG_SENSOR_USE_ACCEL_CALIBRATION, rejects - prior_rejects,
+           magnetic_writes, magnetic_clears, magnetic_calibrations, online_writes,
+           zro_requests, accel_requests);
+    for (size_t i = 0; input[i] != '\0'; i++) printf("%02x", (unsigned char)input[i]);
+    printf(" output_hex=");
+    for (size_t i = 0; printed[i] != '\0'; i++) printf("%02x", (unsigned char)printed[i]);
+    printf(" echo_hex=");
+    for (size_t i = 0; i < echo_bytes_count; i++) printf("%02x", echo_bytes[i]);
+    putchar('\n');
 }
 
 int main(void)
@@ -344,6 +401,37 @@ int main(void)
     receive("calibrate\n");
     run_worker();
     assert(zro_requests == 2 && accel_requests == 3 * CONFIG_SENSOR_USE_ACCEL_CALIBRATION);
+    const char *magnetic_commands[] = {
+        "mag\n", "mag on\n", "mag off\n", "mag auto on\n", "mag auto off\n",
+        "mag cal\n", "mag clear\n", "reset mag\n",
+    };
+    unsigned magnetic_rejects = rejects;
+    for (size_t i = 0; i < ARRAY_SIZE(magnetic_commands); i++) {
+        printed[0] = '\0';
+        unsigned prior_rejects = rejects;
+        receive(magnetic_commands[i]);
+        run_worker();
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+        assert(rejects == prior_rejects);
+        if (i == 0) {
+            assert(strstr(printed, "Magnetometer: disabled\n") != NULL);
+            assert(strstr(printed, "Hardware: test-magnetometer\n") != NULL);
+        }
+        if (i == 1) assert(magnetic_enabled && magnetic_writes == 1);
+        if (i == 2) assert(!magnetic_enabled && magnetic_writes == 2);
+        if (i == 3) assert(online_enabled && online_writes == 1);
+        if (i == 4) assert(!online_enabled && online_writes == 2);
+        if (i == 5) assert(magnetic_calibrations == 1);
+        if (i == 6) assert(magnetic_clears == 1);
+        if (i == 7) assert(magnetic_clears == 2);
+#else
+        assert(magnetic_writes == 0 && magnetic_clears == 0 && magnetic_calibrations == 0 && online_writes == 0);
+        assert(strstr(printed, i == 7 ? "Invalid argument\n" : "Command unavailable in this firmware\n") != NULL);
+        assert(rejects == prior_rejects + (i == 0 ? 0U : 1U));
+#endif
+        smoke_console_command(magnetic_commands[i], prior_rejects);
+    }
+    assert(rejects == magnetic_rejects + (CONFIG_SENSOR_USE_MAGNETOMETER ? 0U : 7U));
 
     /* Production reset handler/worker, real DTR-close and hard-reset entrypoints. */
     receive("reset all\n"); run_worker();

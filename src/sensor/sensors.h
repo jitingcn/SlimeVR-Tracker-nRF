@@ -51,6 +51,7 @@
 #include "imu/LSM6DSV.h"
 #endif
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 #if IS_ENABLED(CONFIG_SENSOR_DRV_AK09940)
 #include "mag/AK09940.h"
 #endif
@@ -87,10 +88,13 @@
 #if IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309)
 #include "mag/QMC6309.h"
 #endif
+#endif
 
 #include "scan.h"
 #include "scan_spi.h"
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 #include "scan_ext.h"
+#endif
 #include "sensor.h"
 #include "sensors_enum.h"
 
@@ -100,13 +104,19 @@
 
 extern const char *dev_imu_names[SENSOR_DEV_IMU_COUNT];
 extern const sensor_imu_t *sensor_imus[SENSOR_DEV_IMU_COUNT];
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 extern const char *dev_mag_names[SENSOR_DEV_MAG_COUNT];
 extern const sensor_mag_t *sensor_mags[SENSOR_DEV_MAG_COUNT];
+#endif
 
 int sensor_scan_imu(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_scan_mag(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg);
+#endif
 int sensor_scan_imu_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg);
 int sensor_scan_mag_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uint8_t *ext_dev_reg);
+#endif
 
 #endif

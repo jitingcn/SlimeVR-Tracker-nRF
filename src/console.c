@@ -5,7 +5,9 @@
 #include "system/wom_timeout.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 #include "sensor/calibration/online_mag.h"
+#endif
 #include "system/led.h"
 #if CONFIG_LED_DEBUG
 #include "system/led_debug.h"
@@ -856,6 +858,7 @@ static void print_sensor_identity(void)
 	}
 	printk("Address: 0x%02X%02X\n", retained->imu_addr, retained->imu_reg);
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	printk(
 		"\nMagnetometer: %s (%s)\n",
 		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching",
@@ -876,6 +879,9 @@ static void print_sensor_identity(void)
 		printk("Interface: %s\n", mag_interface);
 	}
 	printk("Address: 0x%02X%02X\n", retained->mag_addr, retained->mag_reg);
+#else
+	printk("\nMagnetometer: unavailable in this firmware\n");
+#endif
 }
 
 static void print_odr_summary_line(void)
@@ -903,6 +909,7 @@ static void print_odr_summary_line(void)
 	}
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void print_mag_calibration_status(void)
 {
 	struct online_mag_diagnostics status;
@@ -991,6 +998,7 @@ static void print_mag_calibration_status(void)
 		);
 	}
 }
+#endif
 
 static void print_sensor_summary(void)
 {
@@ -1031,12 +1039,17 @@ static void print_sensor_detail(void)
 	sensor_imu_calibration_t calibration;
 	sensor_calibration_snapshot(&calibration);
 	printk("=== Sensor detail ===\n");
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	printk(
 		"IMU: %s | Mag: %s (%s)\n",
 		(retained->imu_addr & 0x7F) != 0x7F ? sensor_get_sensor_imu_name() : "Not searching",
 		(retained->mag_addr & 0x7F) != 0x7F ? sensor_get_sensor_mag_name() : "Not searching",
 		sensor_get_mag_enabled() ? "enabled" : "disabled"
 	);
+#else
+	printk("IMU: %s | Mag: unavailable in this firmware\n",
+		(retained->imu_addr & 0x7F) != 0x7F ? sensor_get_sensor_imu_name() : "Not searching");
+#endif
 
 	float mag_hz = sensor_get_mag_odr();
 	float mag_feed_hz = sensor_get_mag_feed_hz();
@@ -1105,6 +1118,7 @@ static void print_sensor_detail(void)
 		(double)calibration.accel_bias[2]
 	);
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	printk("Magnetometer matrix (stored):\n");
 	for (int i = 0; i < 3; i++) {
 		printk(
@@ -1116,6 +1130,7 @@ static void print_sensor_detail(void)
 		);
 	}
 	print_mag_calibration_status();
+#endif
 
 #if CONFIG_SENSOR_RANGE_STATS
 	const sensor_range_stats_t *stats = sensor_get_range_stats();
@@ -1404,12 +1419,14 @@ static void print_help(void)
 	printk("  calibrate acc              Calibrate accelerometer (18 orientations)\n");
 	printk("  6-side                     Alias for calibrate acc\n");
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	printk("  mag                        Show magnetometer status\n");
 	printk("  mag on|off                 Enable/disable magnetometer\n");
 	printk("  mag auto on|off     Enable/disable online magnetometer calibration\n");
 	printk("  mag debug on|off           Toggle online calibration logs (runtime only)\n");
 	printk("  mag clear                  Clear magnetometer calibration\n");
 	printk("  mag cal                    Start magnetometer calibration\n");
+#endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	printk("  sens <x>,<y>,<z>           Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
 	printk("  sens auto <x|y|z> [rev]    Auto-calibrate gyro sensitivity by spinning (default %u rev)\n", SENS_CAL_DEFAULT_REVOLUTIONS);
@@ -1481,7 +1498,9 @@ static void print_help(void)
 #if CONFIG_SENSOR_USE_TCAL
 	printk("  reset tcal                 Reset temperature calibration\n");
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	printk("  reset mag                  Reset magnetometer calibration\n");
+#endif
 	printk("  reset bat                  Reset battery tracker\n");
 	printk("  reset all                  Clear all settings\n");
 	printk("\n");
@@ -2085,6 +2104,7 @@ static void console_cmd_calibrate_acc_alias(size_t argc, char **argv)
 	console_calibrate_acc();
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void console_cmd_mag(size_t argc, char **argv)
 {
 	char *arg = argc > 1 ? argv[1] : NULL;
@@ -2171,6 +2191,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 		}
 	}
 }
+#endif
 
 static void console_cmd_set(size_t argc, char **argv)
 {
@@ -2529,12 +2550,14 @@ static void console_cmd_reset(size_t argc, char **argv)
 		cmd_reset_acc();
 	}
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	else if (arg && strcmp(arg, "mag") == 0) {
 		int err = sensor_calibration_clear_mag(NULL, true, true);
 		if (err) {
 			printk("Error: Magnetometer calibration reset rejected (%d)\n", err);
 		}
 	}
+#endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	else if (arg && strcmp(arg, "sens") == 0) {
 		cmd_sens_reset();
@@ -2657,7 +2680,7 @@ static void console_cmd_test(size_t argc, char **argv)
 	}
 }
 
-#if !CONFIG_SENSOR_USE_SENS_CALIBRATION || !CONFIG_SENSOR_USE_TCAL || !CONFIG_VQF_BENCH || !DFU_EXISTS
+#if !CONFIG_SENSOR_USE_MAGNETOMETER || !CONFIG_SENSOR_USE_SENS_CALIBRATION || !CONFIG_SENSOR_USE_TCAL || !CONFIG_VQF_BENCH || !DFU_EXISTS
 static void console_cmd_unavailable(size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -2698,7 +2721,11 @@ static const struct console_cmd console_cmds[] = {
 	{"tcal", console_cmd_unavailable, CONSOLE_MIXED},
 #endif
 	{"6-side", console_cmd_calibrate_acc_alias, CONSOLE_MUTATION},
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	{"mag", console_cmd_mag, CONSOLE_MIXED},
+#else
+	{"mag", console_cmd_unavailable, CONSOLE_MIXED},
+#endif
 	{"set", console_cmd_set, CONSOLE_MUTATION},
 	{"pair", console_cmd_pair, CONSOLE_MUTATION},
 	{"clear", console_cmd_clear, CONSOLE_MUTATION},

@@ -118,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix='tracker-battery-sampling-') as director
             '-Wno-unused-function',  # Capability variants omit some hardware leaves.
             '-g', '-O1', '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
             '-fno-pie', '-no-pie',
-            '-DCONFIG_CONNECTION_RAW_COLLECTION=1',
+            '-DCONFIG_CONNECTION_RAW_COLLECTION=1', '-DCONFIG_SENSOR_USE_MAGNETOMETER=1',
             f'-DTEST_PMIC={pmic}', f'-DTEST_BOARD_GPIO={int(board is not None)}',
             f'-DTEST_HEATER={heater}', f'-DTEST_CHG_ONLY={chg_only}',
             f'-DTEST_NO_GPIO={no_gpio}', f'-I{temporary}',

@@ -80,7 +80,7 @@ parts += [function(tdma, name) for name in (
     "tdma_slot_ping_frame", "tdma_data_frame_guarded", "tdma_wait_for_data_admission",
     "tdma_admission_stalled")]
 parts += [function(connection, name) for name in ("connection_next_deadline_ms", "connection_idle_wait")]
-start = connection.index("\t\tbool mag_due =")
+start = connection.index("#if CONFIG_SENSOR_USE_MAGNETOMETER\n\t\tbool mag_due =")
 end = connection.index("\n\n", start)
 parts += ["static unsigned due_mask(int64_t now) {\n bool in_test_mode = test_mode_get();\n" + connection[start:end] + "\nreturn mag_due | (info_due << 1) | (status_due << 2) | (runtime_due << 3);\n}"]
 parts += [r'''
@@ -286,7 +286,7 @@ with tempfile.TemporaryDirectory(prefix="slimenrf-deadline-smoke-") as directory
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
         "-fno-pie", "-no-pie",
-        "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
         str(source), "-o", str(binary)], check=True)
     for selected in (["deadlines", "ping", "data-ping", "stall"] if case == "all" else [case]):
         subprocess.run([str(binary), selected], check=True)

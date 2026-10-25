@@ -555,9 +555,11 @@ static int sys_retained_init(void)
 			&retained->mag_online_calibration_mode,
 			sizeof(retained->mag_online_calibration_mode)
 		);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		if (retained->mag_online_calibration_mode > MAG_ONLINE_CALIBRATION_DISABLED) {
 			retained->mag_online_calibration_mode = MAG_ONLINE_CALIBRATION_DEFAULT;
 		}
+#endif
 		retained_update();
 	} else {
 		LOG_INF("Validated RAM");
@@ -931,7 +933,9 @@ int sys_clear(void)
 		led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_FAILED);
 		return err;
 	}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_calibration_online_mag_cancel_pending();
+#endif
 #if CONFIG_SENSOR_USE_TCAL
 	/* The heated clear barrier already retired its awaited token. Drop only
 	 * the cleared epoch's receipts; never let them bind a later calibration. */

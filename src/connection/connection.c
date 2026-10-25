@@ -23,7 +23,7 @@
 #include "globals.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
-#if CONFIG_CONNECTION_RAW_COLLECTION
+#if CONFIG_CONNECTION_RAW_COLLECTION && CONFIG_SENSOR_USE_MAGNETOMETER
 #include "sensor/calibration/online_mag.h"
 #endif
 #include "connection.h"
@@ -67,10 +67,12 @@ static void connection_sensor_snap_q_a(float q_out[4], float a_out[3])
 	sensor_data_snapshot_read_qa(&sensor_data_snapshot, q_out, a_out);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void connection_sensor_snap_q_m(float q_out[4], float m_out[3])
 {
 	sensor_data_snapshot_read_qm(&sensor_data_snapshot, q_out, m_out);
 }
+#endif
 
 static bool connection_sensor_get_precise_quat(void)
 {
@@ -329,6 +331,7 @@ static int fill_sub_status(uint8_t *buf)
 	return SUB_DATA_LEN_STATUS;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static int fill_sub_mag(uint8_t *buf)
 {
 	float q[4], m[3];
@@ -343,6 +346,7 @@ static int fill_sub_mag(uint8_t *buf)
 	b[6] = TO_FIXED_10(m[2]);
 	return SUB_DATA_LEN_MAG;
 }
+#endif
 
 static int fill_sub_runtime(uint8_t *buf)
 {
@@ -375,7 +379,9 @@ static const struct sub_packet_desc sub_packet_table[] = {
 	[SUB_PACKET_QUAT_ACCEL] = {SUB_DATA_LEN_QUAT, false, fill_sub_quat_accel},
 	[SUB_PACKET_COMPACT_QUAT] = {SUB_DATA_LEN_COMPACT, true, fill_sub_compact_quat},
 	[SUB_PACKET_STATUS] = {SUB_DATA_LEN_STATUS, true, fill_sub_status},
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	[SUB_PACKET_QUAT_MAG] = {SUB_DATA_LEN_MAG, false, fill_sub_mag},
+#endif
 	[SUB_PACKET_RUNTIME] = {SUB_DATA_LEN_RUNTIME, true, fill_sub_runtime},
 };
 
@@ -506,17 +512,22 @@ void connection_update_sensor_data(float *q, float *a, int64_t data_time)
 	connection_signal_wake();
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static int64_t last_mag_time = 0;
+#endif
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void connection_update_sensor_mag(float *m)
 {
 	sensor_data_snapshot_publish_m(&sensor_data_snapshot, m);
 	connection_signal_wake();
 }
+#endif
 
 void connection_update_sensor_temp(float temp)
 {
 	// sensor_temp == zero means no data
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (sensor_get_mag_available() && sensor_get_mag_enabled()) {
 		// temp hack to display fusion mag disturbance detection status
 		if (sensor_fusion_get_mag_dist_detected()) {
@@ -526,6 +537,7 @@ void connection_update_sensor_temp(float temp)
 			}
 		}
 	}
+#endif
 	if (temp < -38.5f) {
 		sensor_temp = 1;
 	} else if (temp > 88.5f) {
@@ -733,7 +745,9 @@ static bool raw_request_token_valid;
 #define RAW_META_MASK_ALL        0x3f
 static int64_t raw_collection_start_ms;
 static bool connection_raw_collection_active(void);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void connection_align_mag_BAinv_body(float out[4][3], const float in[4][3]);
+#endif
 
 struct raw_cal_snapshot {
 	float acc_BAinv[4][3];
@@ -751,10 +765,12 @@ struct raw_cal_snapshot {
 };
 static struct raw_cal_snapshot raw_cal_snapshot;
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static struct k_spinlock latest_mag_lock;
 static float latest_mag[3];
 static uint32_t latest_mag_session;
 static bool latest_mag_valid;
+#endif
 static atomic_t raw_collection_session;
 
 
@@ -781,9 +797,13 @@ static void connection_capture_calibration_snapshot(struct raw_cal_snapshot *sna
 	memcpy(snapshot->acc_BAinv, calibration.accel_matrix, sizeof(snapshot->acc_BAinv));
 	memcpy(snapshot->gyro_bias, calibration.gyro_bias, sizeof(snapshot->gyro_bias));
 	memcpy(snapshot->gyro_scale, retained->gyroSensScale, sizeof(snapshot->gyro_scale));
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	float mag_BAinv[4][3];
 	magneto_online_snapshot_BAinv(mag_BAinv);
 	connection_align_mag_BAinv_body(snapshot->mag_BAinv, mag_BAinv);
+#else
+	memset(snapshot->mag_BAinv, 0, sizeof(snapshot->mag_BAinv));
+#endif
 	snapshot->tcal_flags = 0;
 	snapshot->tcal_count = 0;
 	snapshot->tcal_temp_min = 0.0f;
@@ -826,6 +846,7 @@ void connection_request_raw_metadata(uint8_t mask, uint8_t chunk, uint16_t token
 	connection_signal_wake();
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void connection_align_mag_body(const float in[3], float out[3])
 {
 	float mx = in[0];
@@ -867,6 +888,7 @@ static void connection_align_mag_BAinv_body(float out[4][3], const float in[4][3
 		}
 	}
 }
+#endif
 
 static bool connection_raw_collection_active(void)
 {
@@ -902,9 +924,11 @@ static void connection_reset_raw_collection(bool reset_arq)
 	k_spin_unlock(&raw_request_lock, request_key);
 	raw_collection_start_ms = k_uptime_get();
 	atomic_inc(&raw_collection_session);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	k_spinlock_key_t mag_key = k_spin_lock(&latest_mag_lock);
 	latest_mag_valid = false;
 	k_spin_unlock(&latest_mag_lock, mag_key);
+#endif
 	if (reset_arq) {
 		memset(raw_ring_valid_bits, 0, sizeof(raw_ring_valid_bits));
 		unsigned key = irq_lock();
@@ -924,11 +948,13 @@ void connection_set_data_collection(bool enable)
 	}
 	if (!enable) atomic_set(&data_collection_active, 0);
 	if (enable && !was_active) connection_reset_raw_collection(true);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (!enable && was_active) {
 		k_spinlock_key_t mag_key = k_spin_lock(&latest_mag_lock);
 		latest_mag_valid = false;
 		k_spin_unlock(&latest_mag_lock, mag_key);
 	}
+#endif
 	if (enable) atomic_set(&data_collection_active, 1);
 	LOG_INF("Data collection %s", enable ? "STARTED" : "STOPPED");
 	connection_feedback_maintenance_update();
@@ -1045,6 +1071,7 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
 	connection_signal_wake();
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void connection_queue_raw_mag(const float mag[3])
 {
 	if (!connection_raw_collection_active()) {
@@ -1063,6 +1090,7 @@ void connection_queue_raw_mag(const float mag[3])
 	}
 	k_spin_unlock(&latest_mag_lock, key);
 }
+#endif
 
 void connection_send_raw_metadata(
 	float gyro_range, float accel_range, float gyro_odr, float accel_odr,
@@ -1278,6 +1306,7 @@ bool connection_process_raw_data(void)
 		memcpy(&buf[20], &sample.accel[0], 4);
 		memcpy(&buf[24], &sample.accel[1], 4);
 		memcpy(&buf[28], &sample.accel[2], 4);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		uint8_t flags = 0;
 		float mag_snap[3] = {0};
 		bool mag_ok = false;
@@ -1297,6 +1326,7 @@ bool connection_process_raw_data(void)
 			flags |= 0x01;
 		}
 		buf[44] = flags;
+#endif
 		memcpy(&buf[45], &sample.temp_c, sizeof(sample.temp_c));
 
 		/* Only reliable single-target collection retains ARQ history. */
@@ -1592,12 +1622,14 @@ static int64_t connection_next_deadline_ms(int64_t now)
 				}
 			}
 		}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		if (sensor_data_snapshot_m_pending(&sensor_data_snapshot)) {
 			int64_t m_dl = last_mag_time + 100;
 			if (m_dl < deadline) {
 				deadline = m_dl;
 			}
 		}
+#endif
 		if (sensor_ids_set) {
 			int64_t i_dl = last_info_time + 100;
 			if (i_dl < deadline) {
@@ -1850,8 +1882,10 @@ void connection_thread(void)
 		bool quat_ready = in_test_mode ? test_send_due : pending;
 		/* In test mode all low-frequency data rides the next target-rate
 		 * packet. Standalone sends would violate the configured ceiling. */
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		bool mag_due = !in_test_mode && sensor_data_snapshot_m_pending(&sensor_data_snapshot)
 			&& (now - last_mag_time >= 100);
+#endif
 		bool info_due = !in_test_mode && sensor_ids_set && (now - last_info_time >= 100);
 		bool status_due = !in_test_mode && (now - last_status_time >= 1000);
 		bool runtime_due = !in_test_mode && (now - last_runtime_time >= 1000);
@@ -1860,12 +1894,16 @@ void connection_thread(void)
 		bool info_soon = sensor_ids_set && (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool runtime_soon = (now - last_runtime_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		bool mag_soon = sensor_data_snapshot_m_pending(&sensor_data_snapshot)
 			&& (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
+#endif
 		bool status_wanted = status_due || status_soon;
 		bool runtime_wanted = runtime_due || runtime_soon;
 		bool info_wanted = info_due || info_soon;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		bool mag_wanted = mag_due || mag_soon;
+#endif
 
 		if (quat_ready) {
 			struct composite_builder builder;
@@ -1873,11 +1911,14 @@ void connection_thread(void)
 			composite_builder_reset(&builder);
 
 			/* Primary: quat sub-packet */
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 			if (mag_wanted) {
 				/* mag includes full quat, use type 4 instead of separate quat+mag */
 				composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
 				fallback_type = SUB_PACKET_QUAT_MAG;
-			} else if (!connection_sensor_get_precise_quat() && info_wanted) {
+			} else
+#endif
+			if (!connection_sensor_get_precise_quat() && info_wanted) {
 				/* compact quat (type 2) contains batt/temp but NOT imu_id/mag_id.
 				 * Don't update last_info_time here so that a real type 0 info
 				 * sub-packet is still piggybacked to keep IMU model visible. */
@@ -1907,15 +1948,25 @@ void connection_thread(void)
 		}
 
 		/* No quat ready: all low-frequency packets may carry an event tail. */
-		if (mag_due || info_due || status_due || runtime_due) {
+		if (info_due || status_due || runtime_due
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+		    || mag_due
+#endif
+		) {
 			struct composite_builder builder;
 			composite_builder_reset(&builder);
-			uint8_t primary = mag_due ? SUB_PACKET_QUAT_MAG
-				: info_due ? SUB_PACKET_INFO
+			uint8_t primary =
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+				mag_due ? SUB_PACKET_QUAT_MAG :
+#endif
+				info_due ? SUB_PACKET_INFO
 				: status_due ? SUB_PACKET_STATUS : SUB_PACKET_RUNTIME;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 			if (mag_due) {
 				composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
-			} else if (info_due) {
+			} else
+#endif
+			if (info_due) {
 				composite_try_add_due(&builder, SUB_PACKET_INFO, true, &last_info_time, now);
 			}
 			composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);

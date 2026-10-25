@@ -100,12 +100,14 @@ static const vqf_real_t vqf_bench_acc_samples[][3] = {
 	{-0.40f, -0.20f, 9.81f},
 };
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static const vqf_real_t vqf_bench_mag_samples[][3] = {
 	{0.32f, 0.05f, -0.41f},
 	{0.28f, 0.10f, -0.39f},
 	{0.35f, -0.02f, -0.43f},
 	{0.30f, 0.08f, -0.40f},
 };
+#endif
 
 static const size_t vqf_bench_sample_count = sizeof(vqf_bench_gyr_samples) / sizeof(vqf_bench_gyr_samples[0]);
 #endif
@@ -419,6 +421,7 @@ void vqf_update_accel(float *a, float time)
 	vqf_track_rest_diag();
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void vqf_update_mag(float *m, float time)
 {
 	if (!vqf_vec3_finite(m)) {
@@ -441,6 +444,7 @@ void vqf_update_mag(float *m, float time)
 		updateMag(&params, &state, &coeffs, m);
 	}
 }
+#endif
 
 void vqf_update(float *g, float *a, float *m, float time)
 {
@@ -450,7 +454,11 @@ void vqf_update(float *g, float *a, float *m, float time)
 		vqf_update_gyro(g, time);
 	}
 	vqf_update_accel(a, time);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	vqf_update_mag(m, time);
+#else
+	(void)m;
+#endif
 }
 
 void vqf_get_gyro_bias(float *g_off)
@@ -555,7 +563,11 @@ void vqf_get_lin_a(float *lin_a)
 
 void vqf_get_quat(float *q)
 {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	getQuat9D(&state, q);
+#else
+	getQuat6D(&state, q);
+#endif
 }
 
 bool vqf_get_rest_detected(void)
@@ -573,6 +585,7 @@ static bool vqf_take_rest_observation(bool *out)
 	return pending;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 bool vqf_get_mag_dist_detected(void)
 {
 	return getMagDistDetected(&state);
@@ -596,12 +609,14 @@ static void vqf_rebase_mag(float norm, float dip)
 	state.lastMagCorrAngularRate = 0.0f;
 	state.lastMagTsUs = 0;
 }
+#endif
 
 static void vqf_get_quat6(float *q)
 {
 	getQuat6D(&state, q);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 float vqf_get_mag_ref_norm(void)
 {
 	return getMagRefNorm(&state);
@@ -622,6 +637,7 @@ void vqf_set_delta(float delta)
 {
 	state.delta = delta;
 }
+#endif
 
 void vqf_get_debug_info(vqf_debug_info_t *info)
 {
@@ -633,6 +649,7 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	getRelativeRestDeviations(&params, &state, info->rest_deviations);
 	info->bias_sigma = getBiasEstimate(&state, &coeffs, info->bias);
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	// Heading correction state
 	info->delta = getDelta(&state);
 
@@ -661,6 +678,15 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	// Filter gains
 	info->mag_k = coeffs.kMag;
 	info->mag_k_init = state.kMagInit;
+#else
+	info->delta = 0.0f;
+	info->mag_dist_detected = false;
+	info->mag_ref_norm = info->mag_ref_dip = info->mag_norm = info->mag_dip = 0.0f;
+	info->mag_dis_angle = info->mag_corr_rate = 0.0f;
+	info->mag_undisturbed_t = info->mag_reject_t = 0.0f;
+	info->mag_candidate_norm = info->mag_candidate_dip = info->mag_candidate_t = 0.0f;
+	info->mag_k = info->mag_k_init = 0.0f;
+#endif
 
 	// Convert bias from rad/s to °/s
 	for (int i = 0; i < 3; i++) {
@@ -668,6 +694,7 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 	}
 	info->bias_sigma *= RAD_TO_DEG;
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	// Convert rad-based angles to degrees
 	info->delta *= RAD_TO_DEG;
 	info->mag_ref_dip *= RAD_TO_DEG;
@@ -679,6 +706,7 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 
 	// Convert candidate dip from rad to degrees
 	info->mag_candidate_dip *= RAD_TO_DEG;
+#endif
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	// Adaptive tauAcc state
@@ -800,8 +828,10 @@ static void vqf_bench_print_stats(const char *name, uint32_t iterations, uint32_
 typedef enum {
 	VQF_BENCH_UPDATE_GYR,
 	VQF_BENCH_UPDATE_ACC,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	VQF_BENCH_UPDATE_MAG,
 	VQF_BENCH_GET_QUAT9D,
+#endif
 } vqf_bench_op_t;
 
 static uint32_t vqf_bench_measure(
@@ -817,6 +847,10 @@ static uint32_t vqf_bench_measure(
 	float quat[4]
 )
 {
+#if !CONFIG_SENSOR_USE_MAGNETOMETER
+	(void)mag_samples;
+	(void)quat;
+#endif
 	uint32_t total_cycles = 0;
 	uint32_t remaining = iterations;
 	uint32_t sample_offset = 0;
@@ -836,6 +870,7 @@ static uint32_t vqf_bench_measure(
 			case VQF_BENCH_UPDATE_ACC:
 				updateAcc(bench_params, bench_state, bench_coeffs, acc_samples[sample_idx]);
 				break;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 			case VQF_BENCH_UPDATE_MAG:
 				updateMag(bench_params, bench_state, bench_coeffs, mag_samples[sample_idx]);
 				break;
@@ -843,6 +878,7 @@ static uint32_t vqf_bench_measure(
 				getQuat9D(bench_state, quat);
 				vqf_bench_sink += quat[sample_offset & 3U];
 				break;
+#endif
 			}
 		}
 
@@ -862,6 +898,11 @@ void vqf_run_benchmark(uint32_t iterations)
 	int bench_thread_prio = k_thread_priority_get(bench_thread);
 	bool bench_prio_changed = false;
 
+	const vqf_real_t (*mag_samples)[3] = NULL;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	mag_samples = vqf_bench_mag_samples;
+#endif
+
 	if (iterations == 0) {
 		iterations = 1000;
 	}
@@ -879,8 +920,12 @@ void vqf_run_benchmark(uint32_t iterations)
 		const size_t idx = i % vqf_bench_sample_count;
 		updateGyr(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_gyr_samples[idx]);
 		updateAcc(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_acc_samples[idx]);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		updateMag(&vqf_bench_params, &vqf_bench_state, &vqf_bench_coeffs, vqf_bench_mag_samples[idx]);
 		getQuat9D(&vqf_bench_state, vqf_bench_quat);
+#else
+		getQuat6D(&vqf_bench_state, vqf_bench_quat);
+#endif
 		vqf_bench_sink += vqf_bench_quat[0];
 	}
 
@@ -914,7 +959,7 @@ void vqf_run_benchmark(uint32_t iterations)
 		iterations,
 		vqf_bench_gyr_samples,
 		vqf_bench_acc_samples,
-		vqf_bench_mag_samples,
+		mag_samples,
 		vqf_bench_sample_count,
 		&vqf_bench_params,
 		&vqf_bench_state,
@@ -931,7 +976,7 @@ void vqf_run_benchmark(uint32_t iterations)
 		iterations,
 		vqf_bench_gyr_samples,
 		vqf_bench_acc_samples,
-		vqf_bench_mag_samples,
+		mag_samples,
 		vqf_bench_sample_count,
 		&vqf_bench_params,
 		&vqf_bench_state,
@@ -940,6 +985,7 @@ void vqf_run_benchmark(uint32_t iterations)
 	);
 	vqf_bench_print_stats("updateAcc", iterations, elapsed_cycles, timer_hz);
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	vqf_bench_params = vqf_bench_warm_params;
 	vqf_bench_state = vqf_bench_warm_state;
 	vqf_bench_coeffs = vqf_bench_warm_coeffs;
@@ -948,7 +994,7 @@ void vqf_run_benchmark(uint32_t iterations)
 		iterations,
 		vqf_bench_gyr_samples,
 		vqf_bench_acc_samples,
-		vqf_bench_mag_samples,
+		mag_samples,
 		vqf_bench_sample_count,
 		&vqf_bench_params,
 		&vqf_bench_state,
@@ -965,7 +1011,7 @@ void vqf_run_benchmark(uint32_t iterations)
 		iterations,
 		vqf_bench_gyr_samples,
 		vqf_bench_acc_samples,
-		vqf_bench_mag_samples,
+		mag_samples,
 		vqf_bench_sample_count,
 		&vqf_bench_params,
 		&vqf_bench_state,
@@ -973,6 +1019,7 @@ void vqf_run_benchmark(uint32_t iterations)
 		vqf_bench_quat
 	);
 	vqf_bench_print_stats("getQuat9D", iterations, elapsed_cycles, timer_hz);
+#endif
 
 	printk("  checksum: %.6f\n", (double)vqf_bench_sink);
 
@@ -989,7 +1036,9 @@ const sensor_fusion_t sensor_fusion_vqf = {
 
 	.update_gyro = vqf_update_gyro,
 	.update_accel = vqf_update_accel,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	.update_mag = vqf_update_mag,
+#endif
 	.update = vqf_update,
 
 	.get_gyro_bias = vqf_get_gyro_bias,
@@ -1004,8 +1053,12 @@ const sensor_fusion_t sensor_fusion_vqf = {
 
 	.get_rest_detected = vqf_get_rest_detected,
 	.take_rest_observation = vqf_take_rest_observation,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	.get_mag_dist_detected = vqf_get_mag_dist_detected,
+#endif
 	.get_quat6 = vqf_get_quat6,
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	.rebase_mag = vqf_rebase_mag,
 	.get_mag_ref = vqf_get_mag_ref,
+#endif
 };

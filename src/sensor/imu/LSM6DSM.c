@@ -451,6 +451,7 @@ uint8_t lsm6dsm_setup_WOM(void)
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static int lsm6dsm_ext_setup(enum sensor_ext_mode mode)
 {
 	if (mode != SENSOR_EXT_MODE_OFF && mode != SENSOR_EXT_MODE_I2C_PASSTHROUGH) {
@@ -470,6 +471,7 @@ static int lsm6dsm_ext_setup(enum sensor_ext_mode mode)
 	}
 	return err;
 }
+#endif
 
 const sensor_imu_t sensor_imu_lsm6dsm
 	= {*lsm6dsm_init,
@@ -487,4 +489,7 @@ const sensor_imu_t sensor_imu_lsm6dsm
 	   *lsm6dsm_setup_DRDY,
 	   *lsm6dsm_setup_WOM,
 
-	   *lsm6dsm_ext_setup};
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	   .ext_setup = lsm6dsm_ext_setup,
+#endif
+	};

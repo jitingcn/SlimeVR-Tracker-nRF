@@ -2,7 +2,7 @@ CC ?= cc
 SOURCE_ROOT ?= ../../..
 CFLAGS ?= -O1 -g -std=c11 -Wall -Wextra -Werror
 CPPFLAGS += -I. -I$(SOURCE_ROOT)/src
-CPPFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1
+CPPFLAGS += -DCONFIG_CONNECTION_RAW_COLLECTION=1 -DCONFIG_SENSOR_USE_MAGNETOMETER=1
 SANITIZERS ?= -fsanitize=address,undefined -fno-sanitize-recover=undefined
 LDLIBS += -lm
 REAL_SOURCES := $(SOURCE_ROOT)/src/sensor/calibration/mag_fit.c $(SOURCE_ROOT)/src/sensor/magneto/magneto1_4.c $(SOURCE_ROOT)/src/sensor/magneto/mymathlib_matrix.c

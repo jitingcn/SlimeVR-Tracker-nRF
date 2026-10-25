@@ -31,9 +31,11 @@
 enum sensor_interface_dev
 {
 	SENSOR_INTERFACE_DEV_IMU,
-	SENSOR_INTERFACE_DEV_MAG
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	SENSOR_INTERFACE_DEV_MAG,
+#endif
+	SENSOR_INTERFACE_DEV_COUNT
 };
-#define SENSOR_INTERFACE_DEV_COUNT 2
 
 enum sensor_interface_spec
 {
@@ -61,17 +63,21 @@ typedef struct sensor_ext_ssi {
 void sensor_interface_register_sensor_imu_spi(struct spi_dt_spec *dev);
 void sensor_interface_register_sensor_imu_i2c(struct i2c_dt_spec *dev);
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_interface_register_sensor_mag_spi(struct spi_dt_spec *dev);
 void sensor_interface_register_sensor_mag_i2c(struct i2c_dt_spec *dev);
 int sensor_interface_register_sensor_mag_ext(uint8_t addr, uint8_t min_burst, uint8_t burst);
+#endif
 
 bool sensor_interface_imu_is_i2c(void);
 
 int sensor_interface_spi_configure(enum sensor_interface_dev dev, uint32_t frequency, uint32_t dummy_reads);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_interface_ext_configure(const sensor_ext_ssi_t *ext);
 const sensor_ext_ssi_t *sensor_interface_ext_get(void);
 /* Direct I2C/SPI is a no-op; EXT requires a configured backend. */
 int sensor_interface_ext_set_prefetch(bool enabled);
+#endif
 enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev);
 
 int ssi_write(enum sensor_interface_dev dev, const uint8_t *buf, uint32_t num_bytes);

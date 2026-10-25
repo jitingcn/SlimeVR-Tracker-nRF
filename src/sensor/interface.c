@@ -22,8 +22,10 @@ enum sensor_interface_spec sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_COUNT]
 
 uint32_t sensor_interface_dev_spi_dummy_reads[SENSOR_INTERFACE_DEV_COUNT] = {0};
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 uint8_t ext_addr = 0x00;
 static const sensor_ext_ssi_t *ext_ssi = NULL;
+#endif
 
 // TODO: only one active spi transaction at a time
 // TODO: spi burst read multiple buffers
@@ -34,6 +36,7 @@ struct spi_buf_set tx = {.buffers = tx_bufs, .count = 1};
 struct spi_buf rx_bufs[2];
 struct spi_buf_set rx = {.buffers = rx_bufs, .count = 2};
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 // TODO: also keep reference to sensor device drivers (such as for ext mag)
 
 static int ssi_ext_read_segmented(uint8_t start_addr, uint8_t dummy_bytes, uint8_t *buf, uint32_t num_bytes)
@@ -86,6 +89,7 @@ static int ssi_ext_read_segmented(uint8_t start_addr, uint8_t dummy_bytes, uint8
 	}
 	return 0;
 }
+#endif
 
 void sensor_interface_register_sensor_imu_spi(struct spi_dt_spec *dev)
 {
@@ -104,6 +108,7 @@ bool sensor_interface_imu_is_i2c(void)
 	return sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU] == SENSOR_INTERFACE_SPEC_I2C;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_interface_register_sensor_mag_spi(struct spi_dt_spec *dev)
 {
 	sensor_interface_dev_spi[SENSOR_INTERFACE_DEV_MAG] = dev;
@@ -151,6 +156,7 @@ int sensor_interface_register_sensor_mag_ext(uint8_t addr, uint8_t min_burst, ui
 	}
 	return -1;
 }
+#endif
 
 // must be called to set correct frequency
 int sensor_interface_spi_configure(enum sensor_interface_dev dev, uint32_t frequency, uint32_t dummy_reads)
@@ -167,6 +173,7 @@ int sensor_interface_spi_configure(enum sensor_interface_dev dev, uint32_t frequ
 	return 0;
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_interface_ext_configure(const sensor_ext_ssi_t *ext)
 {
 	ext_ssi = ext;
@@ -185,6 +192,7 @@ int sensor_interface_ext_set_prefetch(bool enabled)
 		return -1;
 	return ext_ssi->ext_set_prefetch ? ext_ssi->ext_set_prefetch(enabled) : 0;
 }
+#endif
 
 enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev)
 {
@@ -221,11 +229,13 @@ int ssi_write(enum sensor_interface_dev dev, const uint8_t *buf, uint32_t num_by
 #endif
 	case SENSOR_INTERFACE_SPEC_I2C:
 		return i2c_write_dt(sensor_interface_dev_i2c[dev], buf, num_bytes);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	case SENSOR_INTERFACE_SPEC_EXT:
 		if (ext_ssi != NULL)
 			return ext_ssi->ext_write(ext_addr, buf, num_bytes);
 		else
 			return -1;
+#endif
 	default:
 		return -1;
 	}
@@ -300,6 +310,7 @@ int ssi_write_read(enum sensor_interface_dev dev, const void *write_buf, size_t 
 #endif
 	case SENSOR_INTERFACE_SPEC_I2C:
 		return i2c_write_read_dt(sensor_interface_dev_i2c[dev], write_buf, num_write, read_buf, num_read);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	case SENSOR_INTERFACE_SPEC_EXT:
 		if (ext_ssi == NULL)
 			return -1;
@@ -312,6 +323,7 @@ int ssi_write_read(enum sensor_interface_dev dev, const void *write_buf, size_t 
 			return ext_ssi->ext_write_read(ext_addr, write_buf, num_write, read_buf, num_read);
 		/* Longer than one I2CM transaction: segment by register-data length. */
 		return ssi_ext_read_segmented(((const uint8_t *)write_buf)[0], 0, read_buf, num_read);
+#endif
 	default:
 		return -1;
 	}
@@ -329,11 +341,13 @@ int ssi_burst_read_dummy(enum sensor_interface_dev dev, uint8_t start_addr, uint
 	if (dummy_bytes == 0)
 		return ssi_burst_read(dev, start_addr, buf, num_bytes);
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	/* On the external (I2CM) interface the interface layer owns segmentation:
 	 * it advances the sub-register per data chunk and strips the per-chunk
 	 * dummy prefix, so >burst register reads are merged transparently. */
 	if (sensor_interface_dev_spec[dev] == SENSOR_INTERFACE_SPEC_EXT)
 		return ssi_ext_read_segmented(start_addr, dummy_bytes, buf, num_bytes);
+#endif
 
 	uint8_t tmp[16];
 	uint32_t offset = 0;

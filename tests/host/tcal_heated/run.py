@@ -226,7 +226,7 @@ def build_harness(work, main_source=None, fast_math=False, feedforward=0, timeou
         f"-DCONFIG_SENSOR_TCAL_HEATED_DEFAULT_KFF={int(feedforward)}",
         f"-DCONFIG_SENSOR_TCAL_HEATED_DEFAULT_KI={int(integral_gain)}",
         f"-DCONFIG_SENSOR_TCAL_HEATED_TIMEOUT_MIN={int(timeout_min)}",
-        "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
         "-include", str(work / "globals.h"), "-I", str(work),
         "-I", str(ROOT / "tests/host/imu_calibration"), "-I", str(ROOT / "src"),
         *(["-ffast-math"] if fast_math else []),

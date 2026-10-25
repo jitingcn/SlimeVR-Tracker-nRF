@@ -459,6 +459,15 @@ config SENSOR_STARTUP_DISCARD_MS
         gyro startup. 0 disables the window. Keep it small (<=20 ms) so the
         first valid pose is not delayed.
 
+config SENSOR_USE_MAGNETOMETER
+    bool "Compile in magnetometer drivers and processing"
+    default y
+    help
+        Include direct and external magnetometer acquisition, magnetic fusion,
+        and manual and online magnetic calibration. Disabling this overrides
+        magnetometer driver selections without changing saved calibration.
+        The shared accelerometer calibration solver remains available.
+
 config SENSOR_MAG_ODR
     int "Magnetometer ODR (Hz)"
     default 50

@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-led-clock-") as directory:
                 "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
                 "-g", "-O1", "-fsanitize=undefined", f"-DKERNEL_HZ={kernel_hz}",
                 f"-DCONFIG_CONNECTION_TDMA={enabled}",
-                "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+                "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
                 f"-I{temporary}",
                 str(HERE / "test.c"), "-o", str(binary)], check=True)
             subprocess.run([str(binary)], check=True)

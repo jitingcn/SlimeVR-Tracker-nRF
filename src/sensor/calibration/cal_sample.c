@@ -44,7 +44,9 @@ struct cal_sample_vector {
 
 K_MSGQ_DEFINE(accel_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
 K_MSGQ_DEFINE(gyro_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 K_MSGQ_DEFINE(mag_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
+#endif
 
 static float latest_accel[3] = {0};
 /* Serialize admission, nonblocking queue publication and session purge. The
@@ -104,7 +106,11 @@ static void samples_set_channels(uint8_t channels)
 	);
 	k_msgq_purge(&accel_sample_queue);
 	k_msgq_purge(&gyro_sample_queue);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	k_msgq_purge(&mag_sample_queue);
+#else
+	channels &= (uint8_t)~CAL_SAMPLE_MAG;
+#endif
 	atomic_set(&sample_session, next | (channels & CAL_SAMPLE_CHANNEL_MASK));
 	k_spin_unlock(&sample_lock, key);
 }
@@ -181,6 +187,7 @@ int sensor_wait_gyro(float g[3], k_timeout_t timeout)
 	return wait_sample(&gyro_sample_queue, g, timeout, "Gyroscope");
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_sample_mag(const float m[3])
 {
 	publish_sample(&mag_sample_queue, m, CAL_SAMPLE_MAG);
@@ -190,6 +197,7 @@ int sensor_wait_mag(float m[3], k_timeout_t timeout)
 {
 	return wait_sample(&mag_sample_queue, m, timeout, "Magnetometer");
 }
+#endif
 
 static int wait_latest_accel(float a[3], k_timeout_t timeout)
 {

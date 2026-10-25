@@ -306,6 +306,7 @@ static const int i2c_dev_imu[] = {
 #endif // SLIME_IMU_GROUP_B
 };
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 const char *dev_mag_names[SENSOR_DEV_MAG_COUNT]
 	= {"HMC5883L",  "QMC5883L",        "QMC6309", "QMC6310",    "AK8963",    "AK09916",
 	   "AK09940",   "BMM150",          "BMM350",  "IST8306",    "IST8308",   "IST8320",
@@ -728,6 +729,7 @@ static const int i2c_dev_mag[] = {
 #endif // SLIME_MAG_G10
 };
 #endif // SENSOR_MAG_DRV_COUNT > 0
+#endif
 
 int sensor_scan_imu(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg)
 {
@@ -748,6 +750,7 @@ int sensor_scan_imu(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg)
 	);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_scan_mag(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg)
 {
 #if SENSOR_MAG_DRV_COUNT == 0
@@ -769,6 +772,7 @@ int sensor_scan_mag(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg)
 	);
 #endif
 }
+#endif
 
 int sensor_scan_imu_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 {
@@ -778,6 +782,7 @@ int sensor_scan_imu_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 	return sensor_scan_spi(bus, spi_dev_reg, i2c_dev_imu_addr_count, i2c_dev_imu_reg, i2c_dev_imu_id, i2c_dev_imu);
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 {
 #if SENSOR_MAG_DRV_COUNT == 0
@@ -815,3 +820,4 @@ int sensor_scan_mag_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr,
 	);
 #endif
 }
+#endif

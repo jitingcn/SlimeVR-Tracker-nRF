@@ -48,6 +48,7 @@ int imu_none_ext_setup(enum sensor_ext_mode mode);
 
 extern const sensor_imu_t sensor_imu_none;
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 int mag_none_init(float time, float *actual_time);
 void mag_none_shutdown(void);
 
@@ -60,5 +61,6 @@ float mag_none_temp_read(float bias[3]);
 void mag_none_mag_process(uint8_t *raw_m, float m[3]);
 
 extern const sensor_mag_t sensor_mag_none;
+#endif
 
 #endif

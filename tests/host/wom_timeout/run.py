@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-wom-timeout-") as directory:
             f"-DCONFIG_SLEEP_ON_ACTIVE_TIMEOUT={supported}",
             f"-DCONFIG_DYNAMIC_ACTIVE_TIMEOUT={dynamic}",
             f"-DCONFIG_ACTIVE_TIMEOUT_DELAY={default_ms}",
-            "-DCONFIG_CONNECTION_RAW_COLLECTION=1",
+            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
             "-I", str(temporary), "-I", str(ROOT / "src"),
             str(HERE / "test.c"), "-o", str(binary),
         ], check=True)

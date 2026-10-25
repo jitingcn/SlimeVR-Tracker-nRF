@@ -247,8 +247,10 @@ static bool configure_system_off(void)
 		LOG_WRN("Entering new power state while sensor error is raised");
 	if (get_status(SYS_STATUS_SYSTEM_ERROR))
 		LOG_WRN("Entering new power state while system error is raised");
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	/* Freeze online-mag commits before the final warm-NVS flush. */
 	sensor_calibration_online_mag_prepare_power_down();
+#endif
 	int sensor_err = main_imu_suspend();
 	if (!sensor_err) {
 		sensor_err = sensor_shutdown();
@@ -663,7 +665,9 @@ static bool sys_WOM(bool force, uint32_t generation)
 		return false;
 	}
 	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_calibration_online_mag_retained_save();
+#endif
 	sensor_record_wom_sleep();
 	sensor_retained_write();
 #if WOM_USE_DCDC // In case DCDC is more efficient in the ~10-100uA range
@@ -748,7 +752,9 @@ static bool sys_system_off(void) // TODO: add timeout
 		return false;
 	}
 	sys_flush_warm(); /* persist warm cal before session clear / power loss */
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_calibration_online_mag_cold_start();
+#endif
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
@@ -799,7 +805,9 @@ static bool sys_system_reboot(void) // TODO: add timeout
 		return false;
 	}
 	sys_flush_warm(); /* persist warm cal before reboot (covers OTA reboot path) */
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_calibration_online_mag_cold_start();
+#endif
 #if CONFIG_SENSOR_USE_TCAL
 	// Reset boot calibration state so it will recalibrate on next boot
 	sensor_boot_cal_reset();
