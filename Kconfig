@@ -385,7 +385,7 @@ config SENSOR_ACCEL_ODR
 
 config SENSOR_GYRO_ODR
     int "Gyrometer output data rate (Hz)"
-    default 200
+    default 400
     help
         Requested gyrometer output data rate. Actual rate will be raised to the nearest supported rate.
         A higher rate will increase the time to read and process sensor data.
@@ -543,7 +543,7 @@ config SENSOR_USE_SENS_CALIBRATION
 
 config SENSOR_SENS_REV
     int "Number of rotations (rev)"
-    default 2
+    default 5
     depends on SENSOR_USE_SENS_CALIBRATION
     help
        Number of rotations used in calculating sensitivity calibration.
@@ -759,8 +759,7 @@ endchoice
 
 config CONNECTION_TDMA
     bool "Enable TDMA transmit scheduling"
-    default n if !CLOCK_USE_LFXO
-    default y if CLOCK_USE_LFXO
+    default y
     help
         Enable Time Division Multiple Access scheduling for ESB radio.
         When enabled, each tracker transmits only within its assigned
