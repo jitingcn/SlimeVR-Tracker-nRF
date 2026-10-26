@@ -21,6 +21,12 @@ def function(source, name):
 
 esb = (SOURCE / "connection/esb.c").read_text()
 connection = (SOURCE / "connection/connection.c").read_text()
+snapshot = (SOURCE / "connection/sensor_data_snapshot.h").read_text()
+snapshot_types = (
+    block(snapshot, r"^enum sensor_stream \{", True) + "\n"
+    + block(snapshot, r"^typedef struct \{(?=\n\tfloat q\[4\];)") + " sensor_data_capture_t;\n"
+    + block(connection, r"^enum sub_packet_type \{", True)
+)
 header = (SRC / "connection/esb.h").read_text()
 constants = "\n".join(re.findall(r"^#define (?:ESB_|PING_INTERVAL_MS)[^\n]*", header, re.MULTILINE))
 wom_state = block(esb, r"^static struct \{(?=\n\tuint16_t minutes, token;)") + " wom_command;"
@@ -166,6 +172,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     temporary = Path(directory)
     (temporary / "connection").mkdir()
     (temporary / "connection/connection.h").write_text((SOURCE / "connection/connection.h").read_text())
+    (temporary / "snapshot_types.inc").write_text(snapshot_types)
     for name, parts in (("payload", payload), ("tx_failures", tx_failures), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery), ("channels", channels), ("lifecycle", function(connection, "connection_thread"))):
         (temporary / f"{name}.inc").write_text(parts)
     # Keep hardware leaves in the established fixture; exercise the new private

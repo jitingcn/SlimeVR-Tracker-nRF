@@ -17,12 +17,7 @@
 #define ESB_PONG_FLAG_DATA_COLLECT_METADATA 3
 #define SYS_STATUS_CONNECTION_ERROR 2
 #define COMPOSITE_LOOKAHEAD_MS 10
-#define SUB_PACKET_QUAT_ACCEL 1
-#define SUB_PACKET_QUAT_MAG 2
-#define SUB_PACKET_COMPACT_QUAT 3
-#define SUB_PACKET_STATUS 4
-#define SUB_PACKET_RUNTIME 5
-#define SUB_PACKET_INFO 6
+#include "snapshot_types.inc"
 static jmp_buf iteration_done;
 static unsigned iterations, test_stops, search_calls, ping_calls, ota_calls;
 static bool disconnected, searching, radio_available, hid_available, ota_active, test_enabled;
@@ -36,8 +31,8 @@ static struct { atomic_t due, attempts, queue_ok, queue_fail, retry_deferred; } 
 static int sensor_data_snapshot;
 static bool sensor_ids_set;
 static int64_t last_mag_time, last_info_time, last_status_time, last_runtime_time;
-static struct { unsigned tps; } test_rate_schedule;
-struct composite_builder { unsigned unused; };
+static struct { unsigned tps; bool mag_turn; } test_rate_schedule;
+struct composite_builder { uint8_t types[5]; unsigned n; };
 static bool atomic_cas(atomic_t *p, int old, int value) { if (*p != old) return false; *p = value; return true; }
 static uint32_t k_uptime_get_32(void) { return now_ms; }
 static uint64_t k_uptime_ticks(void) { return (uint64_t)now_ms * 1000; }
@@ -83,14 +78,33 @@ static bool connection_send_tracker_event(void) { return false; }
 bool connection_process_raw_data(void) { return false; }
 static bool sensor_data_snapshot_qa_pending(int *snapshot) { return false; }
 static bool sensor_data_snapshot_m_pending(int *snapshot) { return false; }
+static void sensor_data_snapshot_capture(int *snapshot, sensor_data_capture_t *capture)
+{
+    memset(capture, 0, sizeof(*capture));
+}
 static bool test_rate_due(uint64_t now) { return false; }
 static void test_rate_advance(uint64_t now) {}
-static void composite_builder_reset(struct composite_builder *builder) {}
-static void composite_try_add_due(struct composite_builder *builder, int type, bool due, int64_t *last, int64_t now) {}
-static bool connection_sensor_get_precise_quat(void) { return false; }
-static void composite_try_add(struct composite_builder *builder, int type) {}
-static bool send_composite_or_single(struct composite_builder *builder, int type) { return true; }
-static void composite_commit_timestamps(struct composite_builder *builder) {}
+static void composite_builder_reset(struct composite_builder *builder) { builder->n = 0; }
+static bool composite_try_add(struct composite_builder *builder, uint8_t type)
+{
+    assert(builder->n < 5);
+    builder->types[builder->n++] = type;
+    return true;
+}
+static bool composite_try_add_due(struct composite_builder *builder, uint8_t type, bool due, int64_t *last, int64_t now)
+{
+    return due && composite_try_add(builder, type);
+}
+static uint8_t composite_type_mask(const struct composite_builder *builder)
+{
+    uint8_t mask = 0;
+    for (unsigned i = 0; i < builder->n; ++i) mask |= 1u << builder->types[i];
+    return mask;
+}
+static uint8_t send_composite_or_single(struct composite_builder *builder, const sensor_data_capture_t *capture)
+{
+    return composite_type_mask(builder);
+}
 static unsigned connection_send_retry_ms(void) { return 1; }
 static void connection_idle_wait(int64_t now) {}
 #include "lifecycle.inc"

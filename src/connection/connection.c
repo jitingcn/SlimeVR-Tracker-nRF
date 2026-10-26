@@ -53,6 +53,7 @@
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
 
 static uint8_t tracker_id, batt, batt_v, sensor_temp, imu_id, mag_id, tracker_status;
@@ -61,23 +62,6 @@ static sensor_data_snapshot_t sensor_data_snapshot;
 static float sensor_last_q[4];
 static bool sensor_ids_set = false; /* true after connection_update_sensor_ids() first called */
 static K_SEM_DEFINE(connection_wake_sem, 0, 1);
-
-static void connection_sensor_snap_q_a(float q_out[4], float a_out[3])
-{
-	sensor_data_snapshot_read_qa(&sensor_data_snapshot, q_out, a_out);
-}
-
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-static void connection_sensor_snap_q_m(float q_out[4], float m_out[3])
-{
-	sensor_data_snapshot_read_qm(&sensor_data_snapshot, q_out, m_out);
-}
-#endif
-
-static bool connection_sensor_get_precise_quat(void)
-{
-	return sensor_data_snapshot_is_precise(&sensor_data_snapshot);
-}
 
 static uint8_t packet_sequence = 0;
 static atomic_t next_ping_deadline_ms = ATOMIC_INIT(0);
@@ -268,8 +252,9 @@ enum sub_packet_type {
 #define SUB_DATA_LEN_RUNTIME 8  /* type 5: remaining runtime estimate */
 
 /* Fill sub-packet payload (without type/id prefix) into buf, return bytes written */
-static int fill_sub_info(uint8_t *buf)
+static int fill_sub_info(uint8_t *buf, const sensor_data_capture_t *capture)
 {
+	(void)capture;
 	buf[0] = batt;
 	buf[1] = batt_v;
 	buf[2] = sensor_temp;
@@ -278,78 +263,70 @@ static int fill_sub_info(uint8_t *buf)
 	buf[5] = 0; /* resv */
 	buf[6] = imu_id;
 	buf[7] = mag_id;
-	uint16_t *fw = (uint16_t *)&buf[8];
-	fw[0] = ((BUILD_YEAR - 2020) & 127) << 9 | (BUILD_MONTH & 15) << 5 | (BUILD_DAY & 31);
+	sys_put_le16(((BUILD_YEAR - 2020) & 127) << 9 | (BUILD_MONTH & 15) << 5 | (BUILD_DAY & 31), &buf[8]);
 	buf[10] = FW_VERSION_MAJOR & 255;
 	buf[11] = FW_VERSION_MINOR & 255;
 	buf[12] = FW_VERSION_PATCH & 255;
 	return SUB_DATA_LEN_INFO;
 }
 
-static int fill_sub_quat_accel(uint8_t *buf)
+static int fill_sub_quat_accel(uint8_t *buf, const sensor_data_capture_t *capture)
 {
-	float q[4], a[3];
-	connection_sensor_snap_q_a(q, a);
-	uint16_t *b = (uint16_t *)buf;
-	b[0] = TO_FIXED_15(q[1]);
-	b[1] = TO_FIXED_15(q[2]);
-	b[2] = TO_FIXED_15(q[3]);
-	b[3] = TO_FIXED_15(q[0]);
-	b[4] = TO_FIXED_7(a[0]);
-	b[5] = TO_FIXED_7(a[1]);
-	b[6] = TO_FIXED_7(a[2]);
+	sys_put_le16(TO_FIXED_15(capture->q[1]), &buf[0]);
+	sys_put_le16(TO_FIXED_15(capture->q[2]), &buf[2]);
+	sys_put_le16(TO_FIXED_15(capture->q[3]), &buf[4]);
+	sys_put_le16(TO_FIXED_15(capture->q[0]), &buf[6]);
+	sys_put_le16(TO_FIXED_7(capture->a[0]), &buf[8]);
+	sys_put_le16(TO_FIXED_7(capture->a[1]), &buf[10]);
+	sys_put_le16(TO_FIXED_7(capture->a[2]), &buf[12]);
 	return SUB_DATA_LEN_QUAT;
 }
 
-static int fill_sub_compact_quat(uint8_t *buf)
+static int fill_sub_compact_quat(uint8_t *buf, const sensor_data_capture_t *capture)
 {
-	float q[4], a[3];
-	connection_sensor_snap_q_a(q, a);
 	buf[0] = batt;
 	buf[1] = batt_v;
 	buf[2] = sensor_temp;
 	float v[3] = {0};
-	q_fem(q, v);
+	q_fem(capture->q, v);
 	for (int i = 0; i < 3; i++) {
 		v[i] = (v[i] + 1) / 2;
 	}
 	uint16_t v_buf[3]
 		= {SATURATE_UINT10((1 << 10) * v[0]), SATURATE_UINT11((1 << 11) * v[1]), SATURATE_UINT11((1 << 11) * v[2])};
-	uint32_t *q_buf = (uint32_t *)&buf[3];
-	*q_buf = v_buf[0] | (v_buf[1] << 10) | (v_buf[2] << 21);
-	uint16_t *ab = (uint16_t *)&buf[7];
-	ab[0] = TO_FIXED_7(a[0]);
-	ab[1] = TO_FIXED_7(a[1]);
-	ab[2] = TO_FIXED_7(a[2]);
+	uint32_t q_buf = (uint32_t)v_buf[0] | ((uint32_t)v_buf[1] << 10) | ((uint32_t)v_buf[2] << 21);
+	sys_put_le32(q_buf, &buf[3]);
+	sys_put_le16(TO_FIXED_7(capture->a[0]), &buf[7]);
+	sys_put_le16(TO_FIXED_7(capture->a[1]), &buf[9]);
+	sys_put_le16(TO_FIXED_7(capture->a[2]), &buf[11]);
 	return SUB_DATA_LEN_COMPACT;
 }
 
-static int fill_sub_status(uint8_t *buf)
+static int fill_sub_status(uint8_t *buf, const sensor_data_capture_t *capture)
 {
+	(void)capture;
 	buf[0] = tracker_svr_status;
 	buf[1] = tracker_status;
 	return SUB_DATA_LEN_STATUS;
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-static int fill_sub_mag(uint8_t *buf)
+static int fill_sub_mag(uint8_t *buf, const sensor_data_capture_t *capture)
 {
-	float q[4], m[3];
-	connection_sensor_snap_q_m(q, m);
-	uint16_t *b = (uint16_t *)buf;
-	b[0] = TO_FIXED_15(q[1]);
-	b[1] = TO_FIXED_15(q[2]);
-	b[2] = TO_FIXED_15(q[3]);
-	b[3] = TO_FIXED_15(q[0]);
-	b[4] = TO_FIXED_10(m[0]);
-	b[5] = TO_FIXED_10(m[1]);
-	b[6] = TO_FIXED_10(m[2]);
+	sys_put_le16(TO_FIXED_15(capture->q[1]), &buf[0]);
+	sys_put_le16(TO_FIXED_15(capture->q[2]), &buf[2]);
+	sys_put_le16(TO_FIXED_15(capture->q[3]), &buf[4]);
+	sys_put_le16(TO_FIXED_15(capture->q[0]), &buf[6]);
+	sys_put_le16(TO_FIXED_10(capture->m[0]), &buf[8]);
+	sys_put_le16(TO_FIXED_10(capture->m[1]), &buf[10]);
+	sys_put_le16(TO_FIXED_10(capture->m[2]), &buf[12]);
 	return SUB_DATA_LEN_MAG;
 }
 #endif
 
-static int fill_sub_runtime(uint8_t *buf)
+static int fill_sub_runtime(uint8_t *buf, const sensor_data_capture_t *capture)
 {
+	(void)capture;
 	uint64_t runtime_us = k_ticks_to_us_floor64(sys_get_battery_remaining_time_estimate());
 	memcpy(buf, &runtime_us, sizeof(runtime_us));
 	return SUB_DATA_LEN_RUNTIME;
@@ -365,24 +342,24 @@ struct composite_builder {
 	struct tracker_event_tx event;
 };
 
-typedef int (*sub_fill_fn)(uint8_t *buf);
+typedef int (*sub_fill_fn)(uint8_t *buf, const sensor_data_capture_t *capture);
 
 struct sub_packet_desc {
 	uint8_t data_len;
 	bool pad_byte15; /* normal 16-byte packet: force data[15]=0 after fill */
+	uint8_t streams;
 	sub_fill_fn fill;
 };
 
-/* Indexed by sub-packet type. One source for len + fill used by normal + composite. */
 static const struct sub_packet_desc sub_packet_table[] = {
-	[SUB_PACKET_INFO] = {SUB_DATA_LEN_INFO, true, fill_sub_info},
-	[SUB_PACKET_QUAT_ACCEL] = {SUB_DATA_LEN_QUAT, false, fill_sub_quat_accel},
-	[SUB_PACKET_COMPACT_QUAT] = {SUB_DATA_LEN_COMPACT, true, fill_sub_compact_quat},
-	[SUB_PACKET_STATUS] = {SUB_DATA_LEN_STATUS, true, fill_sub_status},
+	[SUB_PACKET_INFO] = {SUB_DATA_LEN_INFO, true, 0, fill_sub_info},
+	[SUB_PACKET_QUAT_ACCEL] = {SUB_DATA_LEN_QUAT, false, SENSOR_STREAM_QA, fill_sub_quat_accel},
+	[SUB_PACKET_COMPACT_QUAT] = {SUB_DATA_LEN_COMPACT, true, SENSOR_STREAM_QA, fill_sub_compact_quat},
+	[SUB_PACKET_STATUS] = {SUB_DATA_LEN_STATUS, true, 0, fill_sub_status},
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	[SUB_PACKET_QUAT_MAG] = {SUB_DATA_LEN_MAG, false, fill_sub_mag},
+	[SUB_PACKET_QUAT_MAG] = {SUB_DATA_LEN_MAG, false, SENSOR_STREAM_M, fill_sub_mag},
 #endif
-	[SUB_PACKET_RUNTIME] = {SUB_DATA_LEN_RUNTIME, true, fill_sub_runtime},
+	[SUB_PACKET_RUNTIME] = {SUB_DATA_LEN_RUNTIME, true, 0, fill_sub_runtime},
 };
 
 static const struct sub_packet_desc *sub_packet_get(uint8_t type)
@@ -408,85 +385,41 @@ static bool connection_hid_output_ready(void)
 #endif
 }
 
-static void fill_normal_packet(uint8_t type, uint8_t data[16])
+static void fill_normal_packet(uint8_t type, uint8_t data[16], const sensor_data_capture_t *capture)
 {
 	memset(data, 0, 16);
 	const struct sub_packet_desc *d = sub_packet_get(type);
-	if (!d) {
-		type = SUB_PACKET_QUAT_ACCEL;
-		d = sub_packet_get(SUB_PACKET_QUAT_ACCEL);
-	}
 	data[0] = type;
 	data[1] = tracker_id;
-	d->fill(&data[2]);
+	d->fill(&data[2], capture);
 	if (d->pad_byte15) {
 		data[15] = 0;
 	}
 }
 
-static bool write_normal_packet(const uint8_t data[16])
-{
-	/* Radio unavailable: HID is the configured output path, so its
-	 * enqueue success is the send success. */
-	if (!esb_ready()) {
 #if CONFIG_CONNECTION_OVER_HID
-		if (!connection_hid_output_ready()) {
-			return false;
+static uint8_t write_hid_composite_as_normal_packets(const uint8_t *encoded, int business_count)
+{
+	uint8_t accepted = 0;
+	int pos = 3;
+	for (int i = 0; i < business_count; i++) {
+		uint8_t type = encoded[pos++];
+		const struct sub_packet_desc *d = sub_packet_get(type);
+		uint8_t data[16] = {0};
+		data[0] = type;
+		data[1] = encoded[1];
+		memcpy(&data[2], &encoded[pos], d->data_len);
+		if (d->pad_byte15) {
+			data[15] = 0;
 		}
-		return hid_write_packet_n(data);
-#else
-		return false;
-#endif
+		if (connection_hid_output_ready() && hid_write_packet_n(data)) {
+			accepted |= (uint8_t)(1u << type);
+		}
+		pos += d->data_len;
 	}
-
-	/* Radio available: only ESB queue success counts, so a failed
-	 * admission cannot consume the test-rate slot or mirror to HID;
-	 * HID stays a mirror of successful sends. */
-	uint8_t esb_pkt[ESB_SENSOR_DATA_LEN];
-
-	memcpy(esb_pkt, data, 16);
-	esb_pkt[16] = packet_sequence;
-	if (esb_write(esb_pkt, no_ack, ESB_SENSOR_DATA_LEN) != 0) {
-		return false;
-	}
-	packet_sequence++;
-#if CONFIG_CONNECTION_OVER_HID
-	if (connection_hid_output_ready()) {
-		hid_write_packet_n(data);
-	}
-#endif
-	return true;
-}
-
-#if CONFIG_CONNECTION_OVER_HID
-static bool write_hid_packet_type(uint8_t type)
-{
-	if (!connection_hid_output_ready()) {
-		return false;
-	}
-
-	uint8_t data[16];
-
-	fill_normal_packet(type, data);
-	return hid_write_packet_n(data);
-}
-
-static bool write_hid_composite_as_normal_packets(const struct composite_builder *builder)
-{
-	bool queued = true;
-	for (int i = 0; i < builder->n; i++) {
-		queued &= write_hid_packet_type(builder->types[i]);
-	}
-	return queued;
+	return accepted;
 }
 #endif
-
-static bool connection_write_packet_type(uint8_t type)
-{
-	uint8_t data[16];
-	fill_normal_packet(type, data);
-	return write_normal_packet(data);
-}
 
 void connection_update_sensor_ids(int imu, int mag)
 {
@@ -1355,6 +1288,9 @@ static struct {
 	uint64_t next_due_us;
 	uint32_t remainder;
 	uint16_t tps;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	bool mag_turn;
+#endif
 } test_rate_schedule;
 static uint64_t test_wake_delay_us;
 static bool test_wake_delay_valid;
@@ -1366,6 +1302,11 @@ static void test_rate_schedule_sync(uint64_t now_us)
 		memset(&test_rate_schedule, 0, sizeof(test_rate_schedule));
 		return;
 	}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	if (test_rate_schedule.tps == 0) {
+		test_rate_schedule.mag_turn = false;
+	}
+#endif
 	if (test_rate_schedule.tps != tps || test_rate_schedule.next_due_us == 0
 		|| test_rate_schedule.next_due_us + 1000000ULL < now_us) {
 		test_rate_schedule.tps = tps;
@@ -1410,55 +1351,6 @@ static uint64_t test_rate_delay_us(uint64_t now_us)
 /* Max sub-packet payload in a composite: ESB_MAX_PAYLOAD_LEN - 3 (header) - 1 (sequence) */
 #define COMPOSITE_MAX_SUB_DATA (ESB_MAX_PAYLOAD_LEN - 4)
 
-/*
- * Build and send a composite packet identified by ESB_COMPOSITE_TYPE
- * containing multiple sub-packets.
- * types[] / lens[] describe the sub-packets to include; n is the count.
- * Each sub-packet is: [type_byte][data...].
- * Format: [ESB_COMPOSITE_TYPE][tracker_id][sub_count][sub0_type][sub0_data...]
- *         [sub1_type][sub1_data...]...[sequence]
- */
-static bool send_composite(const struct composite_builder *builder)
-{
-	uint8_t buf[ESB_MAX_PAYLOAD_LEN];
-	int pos = 0;
-	/* An event is only a tail of real business data, never a replacement pose.
-	 * Reject an empty builder without completing its event token: the event
-	 * remains pending for a later pose (or a normal-mode standalone send). */
-	if (builder->n <= 0 || builder->n > ARRAY_SIZE(builder->types)) {
-		return false;
-	}
-	buf[pos++] = ESB_COMPOSITE_TYPE;
-	buf[pos++] = tracker_id;
-	buf[pos++] = (uint8_t)(builder->n + builder->has_event);
-	for (int i = 0; i < builder->n; i++) {
-		const struct sub_packet_desc *d = sub_packet_get(builder->types[i]);
-		if (!d || pos + 1 + d->data_len + 1 > sizeof(buf)) {
-			return false;
-		}
-		buf[pos++] = builder->types[i];
-		pos += d->fill(&buf[pos]);
-	}
-	if (builder->has_event) {
-		if (pos + 16 + 1 > sizeof(buf)) {
-			return false;
-		}
-		buf[pos++] = TRACKER_EVENT_ESB_TYPE;
-		memcpy(&buf[pos], &builder->event.packet[2], 15);
-		pos += 15;
-	}
-	buf[pos++] = packet_sequence;
-	int err = esb_write(buf, no_ack, pos);
-	if (builder->has_event) {
-		tracker_events_complete(builder->event.token, err == 0, k_uptime_get_32());
-	}
-	if (err != 0) {
-		return false;
-	}
-	packet_sequence++;
-	return true;
-}
-
 static void composite_builder_reset(struct composite_builder *builder)
 {
 	builder->n = 0;
@@ -1498,47 +1390,118 @@ composite_try_add_due(struct composite_builder *builder, uint8_t type, bool want
 	return true;
 }
 
+static uint8_t composite_type_mask(const struct composite_builder *builder)
+{
+	uint8_t types = 0;
+	for (int i = 0; i < builder->n; i++) {
+		types |= (uint8_t)(1u << builder->types[i]);
+	}
+	return types;
+}
+
 /* Apply deferred low-frequency last-sent timestamps once the packet that
  * carries them was actually queued; a failed send must leave them unchanged
  * so the data is retried. */
-static void composite_commit_timestamps(const struct composite_builder *builder)
+static void composite_commit_timestamps(const struct composite_builder *builder, uint8_t accepted)
 {
 	for (int i = 0; i < builder->n; i++) {
-		if (builder->last_times[i]) {
+		if ((accepted & (1u << builder->types[i])) && builder->last_times[i]) {
 			*builder->last_times[i] = builder->stamps[i];
 		}
 	}
 }
 
-static bool send_composite_or_single(struct composite_builder *builder, uint8_t fallback_type)
+static uint8_t send_composite_or_single(struct composite_builder *builder, const sensor_data_capture_t *capture)
 {
-	/* Private event data is never a normal sub-packet or a direct-HID mirror. */
-	if (esb_ready() && builder->n > 0 && builder->used + 16 <= COMPOSITE_MAX_SUB_DATA
+	if (builder->n <= 0 || builder->n > ARRAY_SIZE(builder->types)) {
+		return 0;
+	}
+	int business_len = 0;
+	for (int i = 0; i < builder->n; i++) {
+		const struct sub_packet_desc *d = sub_packet_get(builder->types[i]);
+		if (!d) {
+			return 0;
+		}
+		business_len += 1 + d->data_len;
+	}
+	if (business_len + (builder->has_event ? 16 : 0) > COMPOSITE_MAX_SUB_DATA) {
+		return 0;
+	}
+
+	bool radio_selected = esb_ready();
+	if (!radio_selected && !connection_hid_output_ready()) {
+		return 0;
+	}
+	if (radio_selected && !builder->has_event && business_len + 16 <= COMPOSITE_MAX_SUB_DATA
 		&& !esb_ota_is_active() && !get_status(SYS_STATUS_CONNECTION_ERROR)) {
 		builder->has_event = tracker_events_select(k_uptime_get_32(), tracker_id, &builder->event);
 	}
-	if (builder->n > 1 || builder->has_event) {
-		if (!esb_ready()) {
-#if CONFIG_CONNECTION_OVER_HID
-			/* Radio unavailable: HID is the configured output path;
-			 * its enqueue success is the send success. */
-			return write_hid_composite_as_normal_packets(builder);
-#else
-			return false;
-#endif
-		}
 
-		/* Radio available: only ESB queue success counts, so a failed
-		 * admission cannot advance the schedule or mirror to HID. */
-		if (!send_composite(builder)) {
-			return false;
+	uint8_t buf[ESB_MAX_PAYLOAD_LEN];
+	bool composite = builder->n > 1 || builder->has_event;
+	int pos;
+	if (composite) {
+		pos = 0;
+		buf[pos++] = ESB_COMPOSITE_TYPE;
+		buf[pos++] = tracker_id;
+		buf[pos++] = (uint8_t)(builder->n + builder->has_event);
+		for (int i = 0; i < builder->n; i++) {
+			const struct sub_packet_desc *d = sub_packet_get(builder->types[i]);
+			buf[pos++] = builder->types[i];
+			pos += d->fill(&buf[pos], capture);
 		}
-#if CONFIG_CONNECTION_OVER_HID
-		write_hid_composite_as_normal_packets(builder);
-#endif
-		return true;
+		if (builder->has_event) {
+			buf[pos++] = TRACKER_EVENT_ESB_TYPE;
+			memcpy(&buf[pos], &builder->event.packet[2], 15);
+			pos += 15;
+		}
+	} else {
+		fill_normal_packet(builder->types[0], buf, capture);
+		pos = 16;
 	}
-	return connection_write_packet_type(fallback_type);
+	buf[pos++] = packet_sequence;
+
+	uint8_t accepted = 0;
+	if (radio_selected) {
+		int err = esb_write(buf, no_ack, pos);
+		if (builder->has_event) {
+			tracker_events_complete(builder->event.token, err == 0, k_uptime_get_32());
+		}
+		if (err != 0) {
+			return 0;
+		}
+		packet_sequence++;
+		accepted = composite_type_mask(builder);
+#if CONFIG_CONNECTION_OVER_HID
+		if (connection_hid_output_ready()) {
+			if (composite) {
+				write_hid_composite_as_normal_packets(buf, builder->n);
+			} else {
+				hid_write_packet_n(buf);
+			}
+		}
+#endif
+	} else {
+#if CONFIG_CONNECTION_OVER_HID
+		if (composite) {
+			accepted = write_hid_composite_as_normal_packets(buf, builder->n);
+		} else if (hid_write_packet_n(buf)) {
+			accepted = (uint8_t)(1u << builder->types[0]);
+		}
+#endif
+	}
+
+	uint8_t accepted_streams = 0;
+	for (int i = 0; i < builder->n; i++) {
+		if (accepted & (1u << builder->types[i])) {
+			accepted_streams |= sub_packet_get(builder->types[i])->streams;
+		}
+	}
+	if (accepted_streams) {
+		sensor_data_snapshot_commit(&sensor_data_snapshot, capture, accepted_streams);
+	}
+	composite_commit_timestamps(builder, accepted);
+	return accepted;
 }
 
 static void connection_signal_wake(void)
@@ -1894,86 +1857,74 @@ void connection_thread(void)
 		bool info_soon = sensor_ids_set && (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
 		bool status_soon = (now - last_status_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
 		bool runtime_soon = (now - last_runtime_time > 1000 - COMPOSITE_LOOKAHEAD_MS);
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-		bool mag_soon = sensor_data_snapshot_m_pending(&sensor_data_snapshot)
-			&& (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
-#endif
-		bool status_wanted = status_due || status_soon;
-		bool runtime_wanted = runtime_due || runtime_soon;
-		bool info_wanted = info_due || info_soon;
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-		bool mag_wanted = mag_due || mag_soon;
-#endif
-
-		if (quat_ready) {
-			struct composite_builder builder;
-			uint8_t fallback_type = SUB_PACKET_QUAT_ACCEL;
-			composite_builder_reset(&builder);
-
-			/* Primary: quat sub-packet */
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-			if (mag_wanted) {
-				/* mag includes full quat, use type 4 instead of separate quat+mag */
-				composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
-				fallback_type = SUB_PACKET_QUAT_MAG;
-			} else
-#endif
-			if (!connection_sensor_get_precise_quat() && info_wanted) {
-				/* compact quat (type 2) contains batt/temp but NOT imu_id/mag_id.
-				 * Don't update last_info_time here so that a real type 0 info
-				 * sub-packet is still piggybacked to keep IMU model visible. */
-				composite_try_add(&builder, SUB_PACKET_COMPACT_QUAT);
-				fallback_type = SUB_PACKET_COMPACT_QUAT;
-			} else {
-				composite_try_add(&builder, SUB_PACKET_QUAT_ACCEL);
-			}
-
-			/* Piggyback low-freq sub-packets if they fit */
-			composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
-			composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
-			composite_try_add_due(&builder, SUB_PACKET_INFO, info_wanted, &last_info_time, now);
-
-			if (send_composite_or_single(&builder, fallback_type)) {
-				/* Only a successfully queued packet consumes the test-rate
-				 * slot; missed ESB admission is retried without advancing
-				 * the schedule. */
-				if (in_test_mode) {
-					test_rate_advance(k_ticks_to_us_near64(k_uptime_ticks()));
-				}
-				composite_commit_timestamps(&builder);
-			} else {
-				k_msleep(connection_send_retry_ms());
-			}
-			continue;
-		}
-
-		/* No quat ready: all low-frequency packets may carry an event tail. */
-		if (info_due || status_due || runtime_due
+		if (quat_ready || info_due || status_due || runtime_due
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 		    || mag_due
 #endif
 		) {
+			sensor_data_capture_t capture;
+			sensor_data_snapshot_capture(&sensor_data_snapshot, &capture);
+			quat_ready = in_test_mode ? test_send_due : (capture.pending & SENSOR_STREAM_QA) != 0;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+			mag_due = !in_test_mode && (capture.pending & SENSOR_STREAM_M)
+				&& (now - last_mag_time >= 100);
+			bool mag_soon = (capture.pending & SENSOR_STREAM_M)
+				&& (now - last_mag_time > 100 - COMPOSITE_LOOKAHEAD_MS);
+#endif
+			bool status_wanted = status_due || status_soon;
+			bool runtime_wanted = runtime_due || runtime_soon;
+			bool info_wanted = info_due || info_soon;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+			bool mag_wanted = mag_due || mag_soon;
+			bool pose_conflict = in_test_mode && (capture.pending & SENSOR_STREAM_QA) && mag_wanted;
+#endif
 			struct composite_builder builder;
 			composite_builder_reset(&builder);
-			uint8_t primary =
+
+			if (quat_ready) {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-				mag_due ? SUB_PACKET_QUAT_MAG :
+				bool mag_primary = in_test_mode && mag_wanted
+					&& (!(capture.pending & SENSOR_STREAM_QA) || test_rate_schedule.mag_turn);
+				if (mag_primary) {
+					composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
+				} else
 #endif
-				info_due ? SUB_PACKET_INFO
-				: status_due ? SUB_PACKET_STATUS : SUB_PACKET_RUNTIME;
+				if (!capture.precise && info_wanted) {
+					/* Compact pose omits the sensor IDs, so info remains independently due. */
+					composite_try_add(&builder, SUB_PACKET_COMPACT_QUAT);
+				} else {
+					composite_try_add(&builder, SUB_PACKET_QUAT_ACCEL);
+				}
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-			if (mag_due) {
-				composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
-			} else
+				if (!in_test_mode) {
+					composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, mag_wanted, &last_mag_time, now);
+				}
 #endif
-			if (info_due) {
-				composite_try_add_due(&builder, SUB_PACKET_INFO, true, &last_info_time, now);
-			}
-			composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
-			composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
-			if (send_composite_or_single(&builder, primary)) {
-				composite_commit_timestamps(&builder);
+				composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_INFO, info_wanted, &last_info_time, now);
 			} else {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+				if (mag_due) {
+					composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
+				} else
+#endif
+				if (info_due) {
+					composite_try_add_due(&builder, SUB_PACKET_INFO, true, &last_info_time, now);
+				}
+				composite_try_add_due(&builder, SUB_PACKET_STATUS, status_wanted, &last_status_time, now);
+				composite_try_add_due(&builder, SUB_PACKET_RUNTIME, runtime_wanted, &last_runtime_time, now);
+			}
+
+			uint8_t primary = builder.types[0];
+			uint8_t accepted = send_composite_or_single(&builder, &capture);
+			if (in_test_mode && (accepted & (1u << primary))) {
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+				test_rate_schedule.mag_turn = pose_conflict && primary != SUB_PACKET_QUAT_MAG;
+#endif
+				test_rate_advance(k_ticks_to_us_near64(k_uptime_ticks()));
+			}
+			if (accepted != composite_type_mask(&builder)) {
 				k_msleep(connection_send_retry_ms());
 			}
 			continue;
