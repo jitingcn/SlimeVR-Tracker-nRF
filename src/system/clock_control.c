@@ -36,6 +36,8 @@ LOG_MODULE_REGISTER(clock_switch, LOG_LEVEL_INF);
 #define LFCLK_STOP_TIMEOUT_US 10000
 #define LFCLK_START_TIMEOUT_US 1000000
 
+static K_MUTEX_DEFINE(clock_switch_lock);
+
 /* Helper to normalize XTAL variants for comparison.
  * XTAL_FULL_SWING and XTAL_LOW_SWING report as XTAL in the actual source. */
 static inline nrf_clock_lfclk_t normalize_source(nrf_clock_lfclk_t source)
@@ -62,6 +64,7 @@ static bool lfclk_running_source_get(nrf_clock_lfclk_t *source)
 /* CPU-loop delays remain usable while the LFCLK-backed system timer is stopped. */
 static int lfclk_start_source(nrf_clock_lfclk_t source)
 {
+	unsigned int key = irq_lock();
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTOP);
 	for (uint32_t waited = 0; ; waited += LFCLK_WAIT_STEP_US) {
 		nrf_clock_lfclk_t actual;
@@ -73,6 +76,7 @@ static int lfclk_start_source(nrf_clock_lfclk_t source)
 			break;
 		}
 		if (waited >= LFCLK_STOP_TIMEOUT_US) {
+			irq_unlock(key);
 			return -ETIMEDOUT;
 		}
 		nrfx_coredep_delay_us(LFCLK_WAIT_STEP_US);
@@ -80,6 +84,7 @@ static int lfclk_start_source(nrf_clock_lfclk_t source)
 	nrf_clock_event_clear(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED);
 	nrf_clock_lf_src_set(NRF_CLOCK, source);
 	nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_LFCLKSTART);
+	irq_unlock(key);
 	for (uint32_t waited = 0; waited < LFCLK_START_TIMEOUT_US; waited += LFCLK_WAIT_STEP_US) {
 		nrf_clock_lfclk_t actual;
 		if (nrf_clock_event_check(NRF_CLOCK, NRF_CLOCK_EVENT_LFCLKSTARTED)
@@ -112,33 +117,46 @@ void clock_switch(nrf_clock_lfclk_t source)
 	}
 #endif
 
-	/* Check if already running with the requested source */
+	k_mutex_lock(&clock_switch_lock, K_FOREVER);
 	nrf_clock_lfclk_t current_source;
 	bool running = lfclk_running_source_get(&current_source);
 	nrf_clock_lfclk_t normalized_requested = normalize_source(source);
 
 	if (running && current_source == normalized_requested) {
+		k_mutex_unlock(&clock_switch_lock);
 		LOG_INF("clock_switch: already running with source=%d", current_source);
 		return;
 	}
 
 	LOG_INF("clock_switch: %d -> %d", current_source, normalized_requested);
 
-	/* Keep the stop-to-start transition atomic while the system timer is stopped. */
+	/* The shared CLOCK ISR must not consume the event while this transaction polls it. */
 	unsigned int key = irq_lock();
+	bool lf_interrupt_enabled = nrf_clock_int_enable_check(NRF_CLOCK, NRF_CLOCK_INT_LF_STARTED_MASK);
+	nrf_clock_int_disable(NRF_CLOCK, NRF_CLOCK_INT_LF_STARTED_MASK);
+	irq_unlock(key);
+
 	int err = lfclk_start_source(source);
-	if (err && normalized_requested != NRF_CLOCK_LFCLK_RC) {
+	bool fallback = err && normalized_requested != NRF_CLOCK_LFCLK_RC;
+	if (fallback) {
 		err = lfclk_start_source(NRF_CLOCK_LFCLK_RC);
-		if (!err) {
-			irq_unlock(key);
-			LOG_ERR("LFCLK source %d failed; using RC fallback", source);
-			return;
-		}
+	}
+
+	key = irq_lock();
+	if (lf_interrupt_enabled) {
+		nrf_clock_int_enable(NRF_CLOCK, NRF_CLOCK_INT_LF_STARTED_MASK);
+	} else {
+		nrf_clock_int_disable(NRF_CLOCK, NRF_CLOCK_INT_LF_STARTED_MASK);
 	}
 	irq_unlock(key);
+	k_mutex_unlock(&clock_switch_lock);
 	if (err) {
 		LOG_ERR("LFCLK unavailable: %d", err);
 		sys_reboot(SYS_REBOOT_COLD);
+		return;
+	}
+	if (fallback) {
+		LOG_ERR("LFCLK source %d failed; using RC fallback", source);
 		return;
 	}
 	LOG_INF("clock_switch: switched to source=%d successfully", normalized_requested);
@@ -147,12 +165,7 @@ void clock_switch(nrf_clock_lfclk_t source)
 // Switch to RC clock before shut down to avoid any problems with the bootloader
 void clock_pre_shutdown(void)
 {
-	nrf_clock_lfclk_t current_source;
-	bool running = lfclk_running_source_get(&current_source);
-
-	if (running && current_source != NRF_CLOCK_LFCLK_RC) {
-		clock_switch(NRF_CLOCK_LFCLK_RC);
-	}
+	clock_switch(NRF_CLOCK_LFCLK_RC);
 }
 
 // Switch to external oscillator for LF clock for good TDMA precision

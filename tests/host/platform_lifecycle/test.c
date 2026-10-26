@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <errno.h>
+#include <pthread.h>
+#include <string.h>
 #define LOG_INF(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
@@ -15,86 +17,240 @@
 #define CONFIG_BOOTLOADER_MCUBOOT (!ADAFRUIT_FAULT_RECOVERY)
 #define WATCHDOG_RESET_THRESHOLD 3
 #define CONFIG_SENSOR_TCAL_HEATED 0
-#define LFCLK_WAIT_STEP_US 300
-#define LFCLK_STOP_TIMEOUT_US 10000
-#define LFCLK_START_TIMEOUT_US 1000000
+#include "clock_config.inc"
 #define SYS_REBOOT_COLD 0
+static _Thread_local unsigned int irq_depth, mutex_depth, caller;
 static int reboots;
-static void sys_reboot(int type) { reboots++; }
+static void sys_reboot(int type) { assert(!irq_depth && !mutex_depth); reboots++; }
 #if ADAFRUIT_FAULT_RECOVERY
 static void k_msleep(int ms) { assert(ms == 100); }
 #endif
-static unsigned int irq_lock(void) { return 0; }
-static void irq_unlock(unsigned int key) {}
-typedef enum { NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL } nrf_clock_lfclk_t;
+static pthread_mutex_t rendezvous = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
+static bool gate_enabled, owner_waiting, contender_waiting, owner_released;
+struct k_mutex { pthread_mutex_t native; };
+#define K_MUTEX_DEFINE(name) struct k_mutex name = { PTHREAD_MUTEX_INITIALIZER }
+#define K_FOREVER (-1)
+static inline int k_mutex_lock(struct k_mutex *mutex, int timeout)
+{
+    if (gate_enabled && caller == 2) {
+        assert(pthread_mutex_trylock(&mutex->native) == EBUSY);
+        assert(pthread_mutex_lock(&rendezvous) == 0);
+        contender_waiting = true;
+        assert(pthread_cond_broadcast(&changed) == 0);
+        assert(pthread_mutex_unlock(&rendezvous) == 0);
+    }
+    assert(pthread_mutex_lock(&mutex->native) == 0);
+    ++mutex_depth;
+    return 0;
+}
+static inline int k_mutex_unlock(struct k_mutex *mutex)
+{
+    assert(!irq_depth && mutex_depth == 1);
+    --mutex_depth;
+    assert(pthread_mutex_unlock(&mutex->native) == 0);
+    return 0;
+}
+
+typedef enum {
+    NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL,
+#if TEST_EXTERNAL
+    NRF_CLOCK_LFCLK_XTAL_FULL_SWING, NRF_CLOCK_LFCLK_XTAL_LOW_SWING,
+#endif
+} nrf_clock_lfclk_t;
+#if TEST_EXTERNAL
+#define NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES 1
+#endif
 #define NRF_CLOCK 0
 #define NRF_CLOCK_DOMAIN_LFCLK 0
 #define NRF_CLOCK_TASK_LFCLKSTOP 0
 #define NRF_CLOCK_TASK_LFCLKSTART 1
 #define NRF_CLOCK_EVENT_LFCLKSTARTED 0
-static nrf_clock_lfclk_t active_source, requested_source;
-static bool running, event, start_requested, watchdog_running, stop_stuck, fail_rc, fail_xtal;
-static unsigned int stop_remaining, delays, source_writes, starts, stops, watchdog_rc_writes;
-static unsigned int stop_request_remaining;
+#define NRF_CLOCK_INT_LF_STARTED_MASK 1u
+#define OTHER_CLOCK_MASK 2u
+enum start_result { READY, NO_START, WRONG_SOURCE, NO_EVENT };
+enum stop_failure { STOP_OK, REQUEST_STUCK, SOURCE_STUCK, FALLBACK_STOP_STUCK };
+static struct {
+    nrf_clock_lfclk_t active, requested;
+    bool running, event, request, watchdog, other_event, nvic_pending;
+    uint32_t interrupts;
+    enum start_result result[2];
+    enum stop_failure stop_failure;
+    unsigned int stop_request_left, stop_source_left, start_left;
+    unsigned int starts, stops, writes, delays, watchdog_writes, event_clears;
+    unsigned int radio_irqs, sensor_irqs, other_irqs, lf_callbacks, reserved_events;
+    bool last_lf_policy;
+    struct { unsigned int caller; int task; } trace[6];
+    unsigned int trace_count;
+} clock_model;
+
+static void shared_clock_irq(void)
+{
+    if (irq_depth || !clock_model.nvic_pending) return;
+    clock_model.nvic_pending = false;
+    if (clock_model.other_event && (clock_model.interrupts & OTHER_CLOCK_MASK)) {
+        clock_model.other_event = false;
+        clock_model.interrupts &= ~OTHER_CLOCK_MASK;
+        ++clock_model.other_irqs;
+    }
+    if (clock_model.event && !(clock_model.interrupts & NRF_CLOCK_INT_LF_STARTED_MASK)) {
+        ++clock_model.reserved_events;
+    }
+    if (clock_model.event && (clock_model.interrupts & NRF_CLOCK_INT_LF_STARTED_MASK)) {
+        clock_model.event = false;
+        clock_model.interrupts &= ~NRF_CLOCK_INT_LF_STARTED_MASK;
+        ++clock_model.lf_callbacks;
+    }
+}
+static unsigned int irq_lock(void)
+{
+    unsigned int key = irq_depth;
+    ++irq_depth;
+    return key;
+}
+static void irq_unlock(unsigned int key)
+{
+    assert(irq_depth == key + 1);
+    irq_depth = key;
+    shared_clock_irq();
+}
+static inline uint32_t nrf_clock_int_enable_check(int clock, uint32_t mask)
+{
+    return clock_model.interrupts & mask;
+}
+static inline void nrf_clock_int_enable(int clock, uint32_t mask)
+{
+    assert(irq_depth == 1 && mask == NRF_CLOCK_INT_LF_STARTED_MASK);
+    clock_model.interrupts |= mask;
+    clock_model.last_lf_policy = true;
+    if (clock_model.event) clock_model.nvic_pending = true;
+}
+static inline void nrf_clock_int_disable(int clock, uint32_t mask)
+{
+    assert(irq_depth == 1 && mask == NRF_CLOCK_INT_LF_STARTED_MASK);
+    clock_model.interrupts &= ~mask;
+    clock_model.last_lf_policy = false;
+}
 static inline bool nrf_clock_start_task_check(int clock, int domain)
 {
-    return start_requested;
+    return clock_model.request;
 }
 static bool nrf_clock_is_running(int clock, int domain, nrf_clock_lfclk_t *source)
 {
-    *source = active_source;
-    return running;
+    *source = clock_model.active;
+    return clock_model.running;
+}
+static void trace_clock(int task)
+{
+    assert(irq_depth == 1);
+    assert(clock_model.trace_count < 6);
+    clock_model.trace[clock_model.trace_count].caller = caller;
+    clock_model.trace[clock_model.trace_count++].task = task;
 }
 static void nrf_clock_task_trigger(int clock, int task)
 {
+    trace_clock(task);
     if (task == NRF_CLOCK_TASK_LFCLKSTOP) {
-        stops++;
-        stop_request_remaining = 1;
-        stop_remaining = 3;
+        ++clock_model.stops;
+        clock_model.stop_request_left = 1;
+        clock_model.stop_source_left = 3;
+        clock_model.start_left = 0;
     } else {
-        starts++;
-        assert(!start_requested && (!running || active_source == NRF_CLOCK_LFCLK_RC));
-        start_requested = true;
-        bool failed = requested_source == NRF_CLOCK_LFCLK_RC ? fail_rc : fail_xtal;
-        running = !failed || watchdog_running;
-        active_source = failed ? NRF_CLOCK_LFCLK_RC : requested_source;
-        event = !failed;
-        stop_remaining = stop_request_remaining = 0;
+        assert(!clock_model.request);
+        assert(!clock_model.running || clock_model.active == NRF_CLOCK_LFCLK_RC);
+        assert(!clock_model.event);
+        ++clock_model.starts;
+        clock_model.request = true;
+        clock_model.start_left = 3;
+        clock_model.stop_request_left = clock_model.stop_source_left = 0;
     }
 }
 static void nrf_clock_lf_src_set(int clock, nrf_clock_lfclk_t source)
 {
-    assert(!start_requested);
-    assert(!running || active_source == NRF_CLOCK_LFCLK_RC);
-    if (running && watchdog_running) {
-        watchdog_rc_writes++;
-    }
-    requested_source = source;
-    source_writes++;
+    trace_clock(2);
+    assert(!clock_model.request);
+    assert(!clock_model.running || clock_model.active == NRF_CLOCK_LFCLK_RC);
+    if (clock_model.running && clock_model.watchdog) ++clock_model.watchdog_writes;
+    clock_model.requested = source;
+    ++clock_model.writes;
 }
-static void nrf_clock_event_clear(int clock, int which) { event = false; }
-static bool nrf_clock_event_check(int clock, int which) { return event; }
+static void nrf_clock_event_clear(int clock, int which)
+{
+    assert(irq_depth == 1 && !clock_model.request);
+    assert(!clock_model.running || clock_model.active == NRF_CLOCK_LFCLK_RC);
+    clock_model.event = false;
+    ++clock_model.event_clears;
+}
+static bool nrf_clock_event_check(int clock, int which) { return clock_model.event; }
+static void wait_for_contender(void)
+{
+    if (!gate_enabled || caller != 1 || clock_model.starts != 1 || owner_waiting) return;
+    assert(pthread_mutex_lock(&rendezvous) == 0);
+    owner_waiting = true;
+    assert(pthread_cond_broadcast(&changed) == 0);
+    while (!owner_released) assert(pthread_cond_wait(&changed, &rendezvous) == 0);
+    assert(pthread_mutex_unlock(&rendezvous) == 0);
+}
 static void nrfx_coredep_delay_us(uint32_t us)
 {
     assert(us == LFCLK_WAIT_STEP_US);
-    assert(++delays < 10000);
-    if (stop_stuck) return;
-    if (stop_request_remaining && --stop_request_remaining == 0) start_requested = false;
-    if (stop_remaining && --stop_remaining == 0) {
-        running = watchdog_running;
-        if (watchdog_running) active_source = NRF_CLOCK_LFCLK_RC;
+    assert(++clock_model.delays < 10000);
+    if (clock_model.start_left) {
+        assert(irq_depth == 0);
+        assert(!(clock_model.interrupts & NRF_CLOCK_INT_LF_STARTED_MASK));
+        ++clock_model.radio_irqs;
+        ++clock_model.sensor_irqs;
+        wait_for_contender();
+        if (--clock_model.start_left == 0) {
+            enum start_result result = clock_model.result[clock_model.starts - 1];
+            nrf_clock_lfclk_t actual = clock_model.requested;
+#if TEST_EXTERNAL
+            if (actual == NRF_CLOCK_LFCLK_XTAL_FULL_SWING ||
+                actual == NRF_CLOCK_LFCLK_XTAL_LOW_SWING) actual = NRF_CLOCK_LFCLK_XTAL;
+#endif
+            if (result != NO_START) {
+                clock_model.running = true;
+                clock_model.active = result == WRONG_SOURCE
+                    ? (actual == NRF_CLOCK_LFCLK_RC ? NRF_CLOCK_LFCLK_XTAL : NRF_CLOCK_LFCLK_RC)
+                    : actual;
+                clock_model.event = result != NO_EVENT;
+            }
+            clock_model.other_event = true;
+            if ((clock_model.other_event && (clock_model.interrupts & OTHER_CLOCK_MASK)) ||
+                (clock_model.event && (clock_model.interrupts & NRF_CLOCK_INT_LF_STARTED_MASK))) {
+                clock_model.nvic_pending = true;
+            }
+        }
+    } else if (clock_model.stop_request_left || clock_model.stop_source_left) {
+        assert(irq_depth == 1);
+        bool request_stuck = clock_model.stop_failure == REQUEST_STUCK ||
+            (clock_model.stop_failure == FALLBACK_STOP_STUCK && clock_model.stops == 2);
+        if (!request_stuck && clock_model.stop_request_left &&
+            --clock_model.stop_request_left == 0) clock_model.request = false;
+        if (clock_model.stop_failure != SOURCE_STUCK && clock_model.stop_source_left &&
+            --clock_model.stop_source_left == 0) {
+            clock_model.running = clock_model.watchdog;
+            if (clock_model.watchdog) clock_model.active = NRF_CLOCK_LFCLK_RC;
+        }
+    } else {
+        assert(irq_depth == 0);
+        ++clock_model.radio_irqs;
+        ++clock_model.sensor_irqs;
     }
+    shared_clock_irq();
 }
-
-static void reset_clock(bool watchdog, nrf_clock_lfclk_t source)
+static void reset_clock(bool watchdog, nrf_clock_lfclk_t source, bool lf_enabled)
 {
-    running = start_requested = true;
-    watchdog_running = watchdog;
-    active_source = requested_source = source;
-    event = stop_stuck = fail_rc = fail_xtal = false;
-    stop_remaining = stop_request_remaining = delays = source_writes = starts = stops = 0;
-    watchdog_rc_writes = 0;
+    assert(!irq_depth && !mutex_depth);
+    memset(&clock_model, 0, sizeof(clock_model));
+    clock_model.running = clock_model.request = true;
+    clock_model.watchdog = watchdog;
+    clock_model.active = clock_model.requested = source;
+    clock_model.interrupts = OTHER_CLOCK_MASK | (lf_enabled ? NRF_CLOCK_INT_LF_STARTED_MASK : 0);
+    clock_model.last_lf_policy = lf_enabled;
     reboots = 0;
+    gate_enabled = owner_waiting = contender_waiting = owner_released = false;
+    caller = 0;
 }
 
 typedef int wdt_channel_id_t;
@@ -170,6 +326,161 @@ static void sensor_calibration_set_consumer_ready(bool ready) {}
 static void sensor_mag_timing_reset(void) {}
 static int sensor_request_scan(bool a, bool b) { return scan_result; }
 #include "production.inc"
+
+static void check_clock_release(bool saved_lf, unsigned int callbacks)
+{
+    assert(!irq_depth && !mutex_depth);
+    assert(clock_model.last_lf_policy == saved_lf);
+    assert(clock_model.lf_callbacks == callbacks);
+}
+
+static void test_clock_failures(void)
+{
+    static const struct {
+        bool watchdog;
+        nrf_clock_lfclk_t initial, target, final;
+        enum stop_failure stop_failure;
+        enum start_result first, second;
+        unsigned int starts, stops, reboots, watchdog_writes;
+        bool stale_event, final_event;
+    } cases[] = {
+        {false, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, READY, READY, 1, 1, 0, 0, false, true},
+        {true, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_XTAL,
+         STOP_OK, READY, READY, 1, 1, 0, 1, false, true},
+        {true, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, READY, READY, 1, 1, 0, 1, false, true},
+        {false, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL,
+         SOURCE_STUCK, READY, READY, 0, 1, 1, 0, false, false},
+        {true, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         REQUEST_STUCK, READY, READY, 0, 2, 1, 0, false, false},
+        {true, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         FALLBACK_STOP_STUCK, NO_START, READY, 1, 2, 1, 1, false, false},
+        {false, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, NO_START, READY, 2, 2, 0, 0, false, true},
+        {true, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, NO_START, READY, 2, 2, 0, 2, false, true},
+        {false, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, NO_START, NO_START, 2, 2, 1, 0, false, false},
+        {true, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, NO_START, NO_START, 2, 2, 1, 2, false, false},
+        {false, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, WRONG_SOURCE, READY, 2, 2, 0, 0, false, true},
+        {false, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_RC,
+         STOP_OK, NO_EVENT, READY, 2, 2, 0, 0, true, true},
+        {false, NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_XTAL,
+         STOP_OK, NO_EVENT, WRONG_SOURCE, 2, 2, 1, 0, false, true},
+    };
+    for (unsigned int saved = 0; saved < 2; ++saved) {
+        for (unsigned int i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            reset_clock(cases[i].watchdog, cases[i].initial, saved);
+            clock_model.stop_failure = cases[i].stop_failure;
+            clock_model.result[0] = cases[i].first;
+            clock_model.result[1] = cases[i].second;
+            if (cases[i].stale_event) {
+                clock_model.event = clock_model.other_event = clock_model.nvic_pending = true;
+            }
+            clock_switch(cases[i].target);
+            assert(clock_model.active == cases[i].final);
+            assert(clock_model.starts == cases[i].starts && clock_model.writes == cases[i].starts);
+            assert(clock_model.stops == cases[i].stops && reboots == (int)cases[i].reboots);
+            assert(clock_model.event_clears == cases[i].starts);
+            assert(clock_model.watchdog_writes == cases[i].watchdog_writes);
+            check_clock_release(saved, saved && cases[i].final_event);
+            assert(clock_model.event == (cases[i].final_event && !saved));
+            assert(!!(clock_model.interrupts & NRF_CLOCK_INT_LF_STARTED_MASK) ==
+                   (saved && !cases[i].final_event));
+            if (cases[i].starts) {
+                assert(clock_model.radio_irqs >= 3 && clock_model.sensor_irqs >= 3);
+                assert(clock_model.other_irqs == 1 && !(clock_model.interrupts & OTHER_CLOCK_MASK));
+            }
+            if (!cases[i].reboots) assert(clock_model.running && clock_model.request);
+            if (cases[i].stop_failure == REQUEST_STUCK) assert(clock_model.request);
+            if (i == 0) {
+                assert(clock_model.reserved_events == 1);
+            }
+        }
+    }
+}
+
+struct clock_call { unsigned int caller; nrf_clock_lfclk_t target; bool shutdown; };
+static void *call_clock(void *data)
+{
+    const struct clock_call *call = data;
+    caller = call->caller;
+    if (call->shutdown) clock_pre_shutdown();
+    else clock_switch(call->target);
+    return NULL;
+}
+static void test_clock_contention(void)
+{
+    for (unsigned int mode = 0; mode < 3; ++mode) {
+        reset_clock(true, NRF_CLOCK_LFCLK_RC, false);
+        gate_enabled = true;
+        const struct clock_call calls[] = {
+            {1, NRF_CLOCK_LFCLK_XTAL, false},
+            {2, mode == 0 ? NRF_CLOCK_LFCLK_XTAL : NRF_CLOCK_LFCLK_RC, mode == 2},
+        };
+        pthread_t owner, contender;
+        assert(pthread_create(&owner, NULL, call_clock, (void *)&calls[0]) == 0);
+        assert(pthread_mutex_lock(&rendezvous) == 0);
+        while (!owner_waiting) assert(pthread_cond_wait(&changed, &rendezvous) == 0);
+        assert(clock_model.running && clock_model.active == NRF_CLOCK_LFCLK_RC);
+        assert(pthread_create(&contender, NULL, call_clock, (void *)&calls[1]) == 0);
+        while (!contender_waiting) assert(pthread_cond_wait(&changed, &rendezvous) == 0);
+        assert(clock_model.stops == 1 && clock_model.writes == 1 && clock_model.starts == 1);
+        owner_released = true;
+        assert(pthread_cond_broadcast(&changed) == 0);
+        assert(pthread_mutex_unlock(&rendezvous) == 0);
+        assert(pthread_join(owner, NULL) == 0 && pthread_join(contender, NULL) == 0);
+        unsigned int transactions = mode == 0 ? 1 : 2;
+        assert(!reboots && clock_model.running && clock_model.request);
+        assert(clock_model.active == (mode == 0 ? NRF_CLOCK_LFCLK_XTAL : NRF_CLOCK_LFCLK_RC));
+        assert(clock_model.starts == transactions && clock_model.stops == transactions);
+        assert(clock_model.writes == transactions && clock_model.trace_count == 3 * transactions);
+        for (unsigned int i = 0; i < clock_model.trace_count; ++i) {
+            assert(clock_model.trace[i].caller == (i < 3 ? 1u : 2u));
+            assert(clock_model.trace[i].task == (i % 3 == 0 ? 0 : i % 3 == 1 ? 2 : 1));
+        }
+        check_clock_release(false, 0);
+    }
+}
+
+static void test_clock_noop_and_shutdown(void)
+{
+    for (unsigned int saved = 0; saved < 2; ++saved) {
+        for (unsigned int source = NRF_CLOCK_LFCLK_RC; source <= NRF_CLOCK_LFCLK_XTAL; ++source) {
+            reset_clock(false, source, saved);
+            clock_model.event = clock_model.other_event = clock_model.nvic_pending = true;
+            if (source == NRF_CLOCK_LFCLK_RC) clock_pre_shutdown();
+            else clock_switch(source);
+            assert(clock_model.event && clock_model.other_event && clock_model.nvic_pending);
+            assert(clock_model.starts == 0 && clock_model.stops == 0 && clock_model.event_clears == 0);
+            assert(clock_model.other_irqs == 0 && !reboots);
+            check_clock_release(saved, 0);
+        }
+        reset_clock(false, NRF_CLOCK_LFCLK_XTAL, saved);
+        clock_model.running = clock_model.request = false;
+        clock_pre_shutdown();
+        assert(clock_model.running && clock_model.request && clock_model.active == NRF_CLOCK_LFCLK_RC);
+        assert(clock_model.starts == 1 && clock_model.stops == 1 && !reboots);
+        check_clock_release(saved, saved);
+#if TEST_EXTERNAL
+        for (unsigned int source = NRF_CLOCK_LFCLK_XTAL_FULL_SWING;
+             source <= NRF_CLOCK_LFCLK_XTAL_LOW_SWING; ++source) {
+            reset_clock(false, NRF_CLOCK_LFCLK_RC, saved);
+            clock_switch(source);
+            assert(clock_model.running && clock_model.active == NRF_CLOCK_LFCLK_XTAL);
+            assert(clock_model.requested == source && clock_model.starts == 1 && !reboots);
+            check_clock_release(saved, saved);
+            reset_clock(false, NRF_CLOCK_LFCLK_XTAL, saved);
+            clock_switch(source);
+            assert(clock_model.starts == 0 && clock_model.stops == 0);
+            check_clock_release(saved, 0);
+        }
+#endif
+    }
+}
 
 int main(void)
 {
@@ -262,55 +573,9 @@ int main(void)
     assert(watchdog_init() == 0);
     assert(watchdog_get_reset_count() == 0);
     assert(retained->watchdog_state.total_wdt_resets == 3);
-    /* Normal STOP clears the software request before the oscillator settles. */
-    reset_clock(false, NRF_CLOCK_LFCLK_XTAL);
-    clock_switch(NRF_CLOCK_LFCLK_RC);
-    assert(running && active_source == NRF_CLOCK_LFCLK_RC && source_writes == 1);
-    assert(delays == 3 && starts == 1 && !reboots);
-
-    reset_clock(false, NRF_CLOCK_LFCLK_RC);
-    clock_switch(NRF_CLOCK_LFCLK_XTAL);
-    assert(running && active_source == NRF_CLOCK_LFCLK_XTAL && start_requested);
-    assert(source_writes == 1 && starts == 1 && !reboots);
-
-    /* WDT keeps LFRC physically running after STOP has cleared LFCLKRUN. */
-    reset_clock(true, NRF_CLOCK_LFCLK_RC);
-    clock_switch(NRF_CLOCK_LFCLK_XTAL);
-    assert(running && active_source == NRF_CLOCK_LFCLK_XTAL && start_requested);
-    assert(source_writes == 1 && watchdog_rc_writes == 1 && starts == 1 && !reboots);
-    assert(delays == 1);
-
-    /* Shutdown XTAL -> RC must wait for the old XTAL to settle to forced RC. */
-    reset_clock(true, NRF_CLOCK_LFCLK_XTAL);
-    clock_switch(NRF_CLOCK_LFCLK_RC);
-    assert(running && active_source == NRF_CLOCK_LFCLK_RC && start_requested);
-    assert(delays == 3 && watchdog_rc_writes == 1 && starts == 1 && !reboots);
-
-    /* RC in LFCLKSTAT alone cannot authorize a write while STOP is stuck. */
-    reset_clock(true, NRF_CLOCK_LFCLK_RC);
-    stop_stuck = true;
-    clock_switch(NRF_CLOCK_LFCLK_XTAL);
-    assert(reboots == 1 && source_writes == 0 && starts == 0 && stops == 2);
-    assert(start_requested && running && active_source == NRF_CLOCK_LFCLK_RC);
-    assert(delays == 2 * ((LFCLK_STOP_TIMEOUT_US + LFCLK_WAIT_STEP_US - 1) / LFCLK_WAIT_STEP_US));
-
-    /* Oscillator failure still starts RC, with or without a WDT clock request. */
-    for (int watchdog = 0; watchdog < 2; watchdog++) {
-        reset_clock(watchdog, NRF_CLOCK_LFCLK_RC);
-        fail_xtal = true;
-        clock_switch(NRF_CLOCK_LFCLK_XTAL);
-        assert(running && active_source == NRF_CLOCK_LFCLK_RC && start_requested);
-        assert(starts == 2 && source_writes == 2 && stops == 2 && !reboots);
-        assert(delays >= LFCLK_START_TIMEOUT_US / LFCLK_WAIT_STEP_US);
-        if (watchdog) assert(watchdog_rc_writes == 2);
-
-        /* Physical WDT RC does not replace a successful START acknowledgement. */
-        reset_clock(watchdog, NRF_CLOCK_LFCLK_RC);
-        fail_xtal = fail_rc = true;
-        clock_switch(NRF_CLOCK_LFCLK_XTAL);
-        assert(reboots == 1 && starts == 2 && source_writes == 2);
-        assert(running == (bool)watchdog);
-    }
+    test_clock_failures();
+    test_clock_contention();
+    test_clock_noop_and_shutdown();
     reboots = 0;
 
     /* Registration cases start before init, independently of boot-policy cases. */

@@ -19,16 +19,21 @@
 */
 #pragma once
 
+/* Synchronous switches require thread context with interrupts enabled.
+ * Shutdown waits for an in-flight switch before selecting RC for the bootloader. */
 void clock_pre_shutdown(void);
 
 void clock_init_external(void);
 
 /**
- * @brief Asynchronously switch to external LF clock (LFXO)
+ * @brief Asynchronously switch to the configured LF clock source
  *
  * This function spawns a new thread to perform the clock switch,
  * which can take hundreds of milliseconds for LFXO to stabilize.
  * Use this when you cannot afford to block the calling thread.
+ * Readiness polling leaves unrelated interrupts enabled. LFCLKSTARTED alone
+ * is masked so the SDK ISR cannot consume the event before the polling thread.
+ * STOP and source programming remain IRQ-protected.
  *
  * Note: The spawned thread exits after the switch completes.
  * Check logs for "clock_switch: switched to source=X successfully"
