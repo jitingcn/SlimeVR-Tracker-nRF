@@ -58,6 +58,11 @@ typedef struct sensor_ext_ssi {
 	/* Optional policy hook. Disabling must quiesce pending background reads
 	 * before returning success. NULL means a synchronous-only backend. */
 	int (*ext_set_prefetch)(bool enabled);
+	/* Optional whole-register read for continuous, non-destructive sensors.
+	 * -EAGAIN: acquisition pending, caller must retry without publishing data.
+	 * -ENOTSUP: no I/O performed; use the synchronous segmented path instead.
+	 * Success publishes a complete buffer; errors leave it unchanged. */
+	int (*ext_read_nonblocking)(uint8_t addr, uint8_t reg, uint8_t *buf, uint32_t num_bytes);
 } sensor_ext_ssi_t;
 
 void sensor_interface_register_sensor_imu_spi(struct spi_dt_spec *dev);
@@ -85,6 +90,8 @@ int ssi_read(enum sensor_interface_dev dev, uint8_t *buf, uint32_t num_bytes);
 int ssi_write_read(enum sensor_interface_dev dev, const void *write_buf, size_t num_write, void *read_buf, size_t num_read);
 
 int ssi_burst_read(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t *buf, uint32_t num_bytes);
+/* Opportunistically asynchronous on EXT; synchronous on other interfaces. */
+int ssi_burst_read_nonblocking(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t *buf, uint32_t num_bytes);
 int ssi_burst_read_dummy(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t dummy_bytes, uint8_t *buf, uint32_t num_bytes);
 int ssi_burst_write(enum sensor_interface_dev dev, uint8_t start_addr, const uint8_t *buf, uint32_t num_bytes);
 int ssi_reg_read_byte(enum sensor_interface_dev dev, uint8_t reg_addr, uint8_t *value);

@@ -185,6 +185,8 @@ void mmc5603_mag_oneshot(void)
 
 bool mmc5603_mag_read(float m[3])
 {
+	// Explicit oneshots (including SET/RESET calibration) remain synchronous.
+	bool synchronous = oneshot_pending || last_state == 0xffff || (last_state & 0xff) == 0;
 	if (oneshot_pending) {
 		if (oneshot_failed) {
 			oneshot_pending = false;
@@ -211,12 +213,15 @@ bool mmc5603_mag_read(float m[3])
 	}
 
 	uint8_t rawData[9]; // x/y/z mag register data stored here
-	int err = ssi_burst_read(
+	int err = (synchronous ? ssi_burst_read : ssi_burst_read_nonblocking)(
 		SENSOR_INTERFACE_DEV_MAG,
 		MMC5603NJ_XOUT_0,
 		&rawData[0],
 		9
 	); // Read the 9 raw data registers into data array
+	if (err == -EAGAIN) {
+		return false;
+	}
 	if (err) {
 		LOG_ERR("Communication error");
 		return false;

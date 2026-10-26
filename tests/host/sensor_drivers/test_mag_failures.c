@@ -52,6 +52,8 @@ struct fake_bus {
 
 static struct fake_bus bus;
 static enum sensor_interface_spec fake_spec = SENSOR_INTERFACE_SPEC_I2C;
+static int nonblocking_result;
+static unsigned nonblocking_calls;
 
 #define CHECK(condition) do { \
 	if (!(condition)) { \
@@ -65,6 +67,8 @@ static void fake_bus_reset(void)
 	memset(&bus, 0, sizeof(bus));
 	bus.now_ms = 1;
 	fake_spec = SENSOR_INTERFACE_SPEC_I2C;
+	nonblocking_result = 0;
+	nonblocking_calls = 0;
 }
 
 static void fake_bus_clear_transactions(void)
@@ -158,6 +162,12 @@ int ssi_burst_read(
 	for (uint32_t i = 0; i < num_bytes; i++)
 		buf[i] = bus.registers[(uint8_t)(start_addr + i)];
 	return 0;
+}
+
+int ssi_burst_read_nonblocking(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uint32_t len)
+{
+	nonblocking_calls++;
+	return nonblocking_result ? nonblocking_result : ssi_burst_read(dev, reg, buf, len);
 }
 
 int ssi_burst_read_dummy(
@@ -903,9 +913,41 @@ static int run_isolated(const struct test_case *test)
 	return 1;
 }
 
+static int test_mmc5603_nonblocking_20bit(void)
+{
+	fake_bus_reset();
+	float actual, m[3] = {11, 22, 33};
+	CHECK(mmc5603_update_odr(0.01f, &actual) == 0);
+	fake_bus_clear_transactions();
+	nonblocking_result = -EAGAIN;
+	CHECK(!mmc5603_mag_read(m));
+	CHECK(nonblocking_calls == 1 && bus.op_count == 0);
+	CHECK(m[0] == 11 && m[1] == 22 && m[2] == 33);
+	nonblocking_result = -EIO;
+	CHECK(!mmc5603_mag_read(m));
+	CHECK(m[0] == 11 && m[1] == 22 && m[2] == 33);
+	// Include nonzero low nibbles on every axis; all nine bytes are needed.
+	const uint8_t raw[] = {0x80, 0x00, 0x7f, 0xff, 0x80, 0x01, 0xf0, 0x10, 0xa0};
+	memcpy(bus.registers, raw, sizeof(raw));
+	nonblocking_result = 0;
+	CHECK(mmc5603_mag_read(m));
+	CHECK(bus.ops[0].type == FAKE_BURST_READ && bus.ops[0].length == 9);
+	CHECK(m[0] == 15.0f / 16384 && m[1] == -15.0f / 16384 && m[2] == 26.0f / 16384);
+	// Explicit oneshots must not return EAGAIN during synchronous calibration.
+	CHECK(mmc5603_update_odr(INFINITY, &actual) == 0);
+	mmc5603_mag_oneshot();
+	bus.registers[MMC5603NJ_STATUS] = MSTAT_MEAS_M_DONE;
+	unsigned calls = nonblocking_calls;
+	nonblocking_result = -EAGAIN;
+	CHECK(mmc5603_mag_read(m));
+	CHECK(nonblocking_calls == calls);
+	return 0;
+}
+
 int main(void)
 {
 	static const struct test_case tests[] = {
+		{"MMC5603 pending read and 20-bit decode", test_mmc5603_nonblocking_20bit},
 		{"BMM350 init and compensation", test_bmm350_init_and_compensation},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},

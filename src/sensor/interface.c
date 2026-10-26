@@ -336,6 +336,17 @@ int ssi_burst_read(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t *b
 	return ssi_write_read(dev, &start_addr, 1, buf, num_bytes);
 }
 
+int ssi_burst_read_nonblocking(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t *buf, uint32_t num_bytes)
+{
+	if (sensor_interface_dev_spec[dev] == SENSOR_INTERFACE_SPEC_EXT && ext_ssi && ext_ssi->ext_read_nonblocking) {
+		int err = ext_ssi->ext_read_nonblocking(ext_addr, start_addr, buf, num_bytes);
+		if (err != -ENOTSUP) {
+			return err;
+		}
+	}
+	return ssi_burst_read(dev, start_addr, buf, num_bytes);
+}
+
 int ssi_burst_read_dummy(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t dummy_bytes, uint8_t *buf, uint32_t num_bytes)
 {
 	if (dummy_bytes == 0)
