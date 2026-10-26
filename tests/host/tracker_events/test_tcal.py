@@ -66,10 +66,14 @@ typedef atomic_long atomic_t;
 #define atomic_get(value) atomic_load(value)
 #define CONFIG_SENSOR_USE_TCAL 1
 #define CONFIG_SENSOR_TCAL_HEATED 0
+#define CONFIG_CMSIS_DSP 0
+#define CONFIG_SENSOR_POLY_TEMP_MIN 10
+#define CONFIG_SENSOR_POLY_TEMP_MAX 45
 #include "sensor/calibration/calibration.h"
 #include "sensor/calibration/bias_collect.h"
 #include "sensor/calibration/tcal_mls_lut.h"
 #include "connection/tracker_event_protocol.h"
+#define LOG_MODULE_REGISTER(...)
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
@@ -78,7 +82,7 @@ typedef atomic_long atomic_t;
 static struct {
     struct { bool enabled, completed, doffset_valid; unsigned attempt_count; float doffset[3]; } bootCalState;
     struct { bool valid; unsigned count; } tempCalState;
-    struct { float temp; } tempCalPoints[TCAL_BUFFER_SIZE];
+    struct { float temp, bias[3]; } tempCalPoints[TCAL_BUFFER_SIZE];
     bool tcal_enabled;
     uint8_t fusion_id;
 } retained_data;
@@ -90,8 +94,18 @@ static int collect_error, lookup_error, request_slot;
 static bool curve_sloped;
 static float model_shift;
 static unsigned lock_depth;
-void sensor_tcal_lock(void) { lock_depth++; }
-void sensor_tcal_unlock(void) { assert(lock_depth); lock_depth--; }
+#define K_FOREVER (-1)
+#define K_MUTEX_DEFINE(name) static unsigned name
+static int k_mutex_lock(unsigned *mutex, int timeout) {
+    (void)timeout;
+    (*mutex)++; lock_depth++;
+    return 0;
+}
+static int k_mutex_unlock(unsigned *mutex) {
+    assert(*mutex && lock_depth);
+    (*mutex)--; lock_depth--;
+    return 0;
+}
 static bool v_finite(const float *v, unsigned n) {
     for (unsigned i = 0; i < n; ++i) if (!isfinite(v[i])) return false;
     return true;
@@ -101,8 +115,6 @@ static void sensor_calibration_gyro_bias(float *g) {
     g[0] = 1.0f; g[1] = -2.0f; g[2] = 0.5f;
 }
 void sensor_tcal_feed_continuous_sample(const float g[3], float temp) { (void)g; (void)temp; }
-void sensor_tcal_model_changed(void) {}
-void sensor_tcal_build_lut_priority(float temp) { (void)temp; }
 #define TCAL_ENABLED_ID 1
 /* Persistent compensation write failure cache (file-scope in tcal_runtime.c,
  * so the extraction needs it declared here). */
@@ -195,7 +207,7 @@ static int last_request;
 static enum cal_request_origin last_origin;
 static int64_t k_uptime_get(void) { return clock_ms; }
 static int64_t system_uptime_since_boot_ms(void) { return clock_ms; }
-static void k_msleep(int ms) { clock_ms += ms; }
+static void k_msleep(int ms) { assert(lock_depth == 0); clock_ms += ms; }
 static float sensor_get_current_imu_temperature(void) { return temperature; }
 bool wait_for_motion(bool motion, int count) { (void)motion; (void)count; return stationary; }
 void sensor_request_fusion_bias_reset(void) {}
@@ -209,13 +221,6 @@ int sensor_calibration_request(int id, enum cal_request_origin origin) {
     request_slot = id;
     return 0;
 }
-int sensor_tcal_mls_lookup(float temp, float bias[3]) {
-    (void)temp;
-    bias[0] = 0.1f; bias[1] = 0.2f; bias[2] = 0.3f;
-    if (curve_sloped) for (int i = 0; i < 3; ++i) bias[i] += (temp - 25.0f) * (i + 1) + model_shift;
-    return lookup_error;
-}
-int sensor_tcal_lut_lookup(float temp, float bias[3]) { (void)temp; (void)bias; return -1; }
 static bool disable_during_collect;
 static bool invalidate_during_collect;
 static int sensor_boot_bias_collect(float *bias, float *temp) {
@@ -251,11 +256,33 @@ void cal_event_end(uint16_t op, uint8_t outcome, uint8_t phase, uint8_t reason) 
 }
 void tracker_events_notify(void) {}
 '''
+curve_source = (
+    '#define sensor_tcal_curve_lookup tcal_production_curve_lookup\n'
+    f'#include "{(ROOT / "src/sensor/calibration/tcal_mls_lut.c").as_posix()}"\n'
+    '#undef sensor_tcal_curve_lookup\n'
+    # Failure injection wraps the actual canonical implementation; no substitute
+    # MLS/interpolation model can hide a firmware D/application disagreement.
+    'int sensor_tcal_curve_lookup(float temp, float bias[3]) {\n'
+    '    if (lookup_error) return lookup_error;\n'
+    '    return tcal_production_curve_lookup(temp, bias);\n'
+    '}\n'
+)
 main = r'''
+static void update_curve_points(void) {
+    for (unsigned i = 0; i < retained->tempCalState.count; ++i)
+        for (int axis = 0; axis < 3; ++axis) {
+            retained->tempCalPoints[i].bias[axis] = .1f * (axis + 1);
+            if (curve_sloped)
+                retained->tempCalPoints[i].bias[axis] +=
+                    (retained->tempCalPoints[i].temp - 25.0f) * (axis + 1) + model_shift;
+        }
+}
 static void quality_points(void) {
     retained->tempCalState.count = 5;
     retained->tempCalState.valid = true;
     for (unsigned i = 0; i < 5; ++i) retained->tempCalPoints[i].temp = 23.0f + i;
+    update_curve_points();
+    sensor_tcal_model_changed();
 }
 static void expect_terminal(uint8_t outcome, uint8_t phase, uint8_t reason) {
     assert(terminal_count == 1);
@@ -297,7 +324,6 @@ static void compensation(const char *scenario) {
         }
         expect_vector(residual, original);
     } else if (!strcmp(scenario, "natural_temperature")) {
-        curve_sloped = true;
         temperature += 1;
         assert(!sensor_calibration_gyro_reference_pending());
         assert(!sample(after, delta));
@@ -308,6 +334,7 @@ static void compensation(const char *scenario) {
         sensor_tcal_set_enabled(false);
         assert(!sample(before, delta));
         curve_sloped = true; model_shift = 5;
+        update_curve_points();
         retained->fusion_id = 1;
         sensor_tcal_refresh_model();
         assert(!sensor_calibration_gyro_reference_pending());
@@ -392,6 +419,7 @@ static void compensation(const char *scenario) {
         } else if (!strcmp(scenario, "model_invalidates_d") || !strcmp(scenario, "model_replaces_applied_d")) {
             if (!strcmp(scenario, "model_replaces_applied_d")) assert(sample(before, delta));
             curve_sloped = true; model_shift = 2;
+            update_curve_points();
             sensor_tcal_refresh_model();
             assert(!retained->bootCalState.doffset_valid);
             assert(!sample(after, delta));
@@ -410,6 +438,126 @@ static void compensation(const char *scenario) {
         }
     }
 }
+static void nonlinear_points(float physical_bias[3]) {
+    static const float temps[TCAL_BUFFER_SIZE] = {
+        11.15f, 13.82f, 15.11f, 17.66f, 19.03f, 21.47f, 23.09f, 24.78f,
+        26.11f, 27.93f, 29.46f, 31.82f, 34.17f, 37.41f, 40.68f, 43.87f
+    };
+    static const double base[3] = {.37, -.21, .53};
+    static const double linear[3] = {.019, -.013, .008};
+    static const double quadratic[3] = {.0024, -.0017, .0011};
+    static const double cubic[3] = {.000055, .000080, -.000040};
+    retained->tempCalState.count = TCAL_BUFFER_SIZE;
+    retained->tempCalState.valid = true;
+    for (int i = 0; i <= TCAL_BUFFER_SIZE; ++i) {
+        double u = (double)(i == TCAL_BUFFER_SIZE ? temperature : temps[i]) - 27.0;
+        if (i < TCAL_BUFFER_SIZE) retained->tempCalPoints[i].temp = temps[i];
+        for (int axis = 0; axis < 3; ++axis) {
+            float bias = (float)(base[axis] + u * linear[axis]
+                + u * u * quadratic[axis] + u * u * u * cubic[axis]);
+            if (i < TCAL_BUFFER_SIZE) retained->tempCalPoints[i].bias[axis] = bias;
+            else physical_bias[axis] = bias;
+        }
+    }
+    sensor_tcal_refresh_model();
+}
+static void finish_lut(void) {
+    for (int i = 0; i < 100; ++i)
+        if (sensor_tcal_build_lut_continue()) {
+            assert(sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_COMPLETE);
+            return;
+        }
+    assert(!"LUT did not finish");
+}
+static void curve_closure(const char *stage) {
+    temperature = 27.24f;
+    float measured[3], anchor[3], previous[3], delta[3], expected[3], expected_delta[3];
+    const float physical_d[3] = {.137f, -.093f, .061f};
+    const float tiny_d[3] = {.0009f, -.00099f, .00101f};
+    const float zero[3] = {0};
+    bool threshold = !strcmp(stage, "threshold");
+    nonlinear_points(measured);
+    assert(sensor_tcal_curve_lookup(temperature, anchor) == 0);
+    assert(!sample(previous, delta));
+    for (int axis = 0; axis < 3; ++axis)
+        measured[axis] = threshold ? anchor[axis] + tiny_d[axis]
+                                  : measured[axis] + physical_d[axis];
+    sensor_tcal_build_lut_priority(temperature);
+    assert(sensor_tcal_lut_get_computed_count() == 0);
+    if (!strcmp(stage, "closure_partial")) {
+        for (int i = 0; i < 4 && !sensor_tcal_lut_is_valid(); ++i)
+            assert(!sensor_tcal_build_lut_continue());
+        assert(sensor_tcal_lut_is_valid());
+        assert(sensor_tcal_lut_get_computed_count() < MLS_LUT_SIZE);
+    } else if (!strcmp(stage, "closure_complete")) {
+        finish_lut();
+    } else {
+        assert(threshold || !strcmp(stage, "closure_none"));
+    }
+    uint32_t model = sensor_tcal_model_generation();
+    uint32_t reference = sensor_tcal_reference_generation();
+    struct led_token receipt = led_begin(LED_OWNER_TCAL, led_request_id());
+    assert(sensor_tcal_calculate_doffset(measured, temperature, current_operation,
+        receipt, current_generation) == 0);
+    assert(retained->bootCalState.doffset_valid);
+    assert(sensor_tcal_model_generation() == model);
+    assert(sensor_tcal_reference_generation() == reference + 1);
+    assert(sensor_calibration_gyro_reference_pending());
+    assert(led_results[LED_SUCCESS] == 0);
+    expect_terminal(CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
+    float canonical[3];
+    assert(sensor_tcal_curve_lookup(temperature, canonical) == 0);
+    assert(!memcmp(canonical, anchor, sizeof(canonical)));
+    for (int axis = 0; axis < 3; ++axis) {
+        float unthresholded = measured[axis] - anchor[axis];
+        float stored = fabsf(unthresholded) < .001f ? 0 : unthresholded;
+        assert(retained->bootCalState.doffset[axis] == stored);
+        expected[axis] = measured[axis] - (anchor[axis] + stored);
+        expected_delta[axis] = anchor[axis] - (anchor[axis] + stored);
+        assert(fabsf(expected[axis]) < (threshold ? .001f : .000001f));
+    }
+    if (threshold) {
+        assert(retained->bootCalState.doffset[0] == 0);
+        assert(retained->bootCalState.doffset[1] == 0);
+        assert(retained->bootCalState.doffset[2] != 0);
+    }
+    for (int pass = 0; pass < 100; ++pass) {
+        float g[3];
+        memcpy(g, measured, sizeof(g));
+        assert(sensor_calibration_process_gyro(g, .01f, delta) == (pass == 0));
+        assert(!memcmp(g, expected, sizeof(g)));
+        expect_vector(delta, pass == 0 ? expected_delta : zero);
+        assert(!sensor_calibration_gyro_reference_pending());
+        assert(sensor_tcal_model_generation() == model);
+        assert(sensor_tcal_reference_generation() == reference + 1);
+        assert(led_results[LED_SUCCESS] == 1 && led_results[LED_CANCELLED] == 0);
+        assert(last_led_token.session == receipt.session);
+        assert(lock_depth == 0);
+        if (sensor_tcal_build_lut_continue()) {
+            if (pass > 0) break;
+        }
+        assert(pass < 99);
+    }
+    assert(sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_COMPLETE);
+    /* Completed LUT, explicit cache discard, then full rebuild are all cache
+     * lifecycle events, not a new measurement/reference or a second receipt. */
+    sensor_tcal_cache_invalidate();
+    for (int pass = 0; pass < 2; ++pass) {
+        float g[3];
+        memcpy(g, measured, sizeof(g));
+        assert(!sensor_calibration_process_gyro(g, .01f, delta));
+        assert(!memcmp(g, expected, sizeof(g)));
+        expect_vector(delta, zero);
+        if (pass == 0) {
+            sensor_tcal_build_lut_priority(temperature);
+            finish_lut();
+        }
+    }
+    assert(sensor_tcal_model_generation() == model);
+    assert(sensor_tcal_reference_generation() == reference + 1);
+    assert(led_results[LED_SUCCESS] == 1 && led_results[LED_CANCELLED] == 0);
+    assert(lock_depth == 0);
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     const char *scenario = argv[1];
@@ -420,7 +568,13 @@ int main(int argc, char **argv) {
     }
     retained->bootCalState.enabled = true;
     retained->tcal_enabled = true;
+    curve_sloped = !strcmp(scenario, "comp_natural_temperature");
     quality_points();
+    if (!strncmp(scenario, "curve_", 6)) {
+        curve_closure(scenario + 6);
+        printf("tcal canonical curve: %s passed\n", scenario);
+        return 0;
+    }
     if (!strncmp(scenario, "comp_", 5)) {
         compensation(scenario + 5);
         printf("tcal compensation: %s passed\n", scenario);
@@ -643,7 +797,7 @@ int main(int argc, char **argv) {
     return 0;
 }
 '''
-parts = [preamble, constants, state, reference_state]
+parts = [preamble, curve_source, constants, state, reference_state]
 parts.extend(function(name) for name in (
     "tcal_feedback_finish_locked", "sensor_tcal_feedback_cancel",
     "sensor_tcal_feedback_applied", "tcal_result",
@@ -681,17 +835,24 @@ scenarios = (
     "user_boot_stale_generation", "user_runtime_stale_generation",
     "user_apply_fallback", "user_pending_reset", "user_pending_model",
     "user_pending_replaced", "user_pending_auto", "silent_applied",
+    "curve_closure_none", "curve_closure_partial", "curve_closure_complete", "curve_threshold",
 )
 with tempfile.TemporaryDirectory(prefix="tcal-events-") as directory:
     tmp = Path(directory)
+    for name in ("globals.h", "util.h", "zephyr/kernel.h", "sensor/sensor.h"):
+        header = tmp / name
+        header.parent.mkdir(parents=True, exist_ok=True)
+        header.write_text("#pragma once\n")
     unit = tmp / "tcal.c"
     unit.write_text("\n\n".join(parts) + main)
     binary = tmp / "tcal"
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+        "-fno-pie", "-no-pie",
         "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
-        "-fno-pie", "-no-pie", "-I", str(ROOT / "src"), str(unit), "-lm", "-o", str(binary),
+        "-I", str(tmp), "-I", str(ROOT / "src"),
+        str(unit), "-lm", "-o", str(binary),
     ], check=True)
     for scenario in scenarios:
         subprocess.run([str(binary), scenario], check=True)

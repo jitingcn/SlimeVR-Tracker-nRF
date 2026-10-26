@@ -1314,15 +1314,10 @@ static int sensor_tcal_calculate_doffset_locked(const float measured_bias[3], fl
 		return 0; // Not an error, just skipped
 	}
 
-	// Calculate curve value at current temperature using MLS
+	// Use exactly the same grid curve as gyro compensation, even before the
+	// incremental LUT worker has populated the entries needed at this temperature.
 	float curve_bias[3];
-	bool offset_calculated = false;
-	const char *method_name = "MLS";
-
-	if (sensor_tcal_mls_lookup(temp, curve_bias) == 0) {
-		offset_calculated = true;
-		LOG_INF("D_offset: Using MLS method");
-	}
+	bool offset_calculated = sensor_tcal_curve_lookup(temp, curve_bias) == 0;
 
 	// If method failed, this should not happen since we checked quality
 	// but handle it gracefully
@@ -1335,8 +1330,7 @@ static int sensor_tcal_calculate_doffset_locked(const float measured_bias[3], fl
 	}
 
 	LOG_INF(
-		"D_offset: Baseline (%s) [%.5f, %.5f, %.5f] at temp %.2fC",
-		method_name,
+		"D_offset: Baseline (canonical curve) [%.5f, %.5f, %.5f] at temp %.2fC",
 		(double)curve_bias[0],
 		(double)curve_bias[1],
 		(double)curve_bias[2],

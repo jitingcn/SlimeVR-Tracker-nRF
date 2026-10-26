@@ -306,13 +306,9 @@ bool sensor_calibration_process_gyro(float g[3], float dt, float reference_delta
 	if (curve_ready && !v_finite(&temp, 1)) {
 		temp = sensor_get_current_imu_temperature();
 	}
-	/* Cached enable∧points≥min — LUT/MLS; else ZRO below. */
+	/* A canonical curve is independent of incremental LUT availability. */
 	if (curve_ready) {
-		if (sensor_tcal_lut_lookup(temp, calculated_offset) == 0) {
-			offset_calculated = true;
-		} else if (sensor_tcal_mls_lookup(temp, calculated_offset) == 0) {
-			offset_calculated = true;
-		}
+		offset_calculated = sensor_tcal_curve_lookup(temp, calculated_offset) == 0;
 	}
 
 	if (!offset_calculated) {

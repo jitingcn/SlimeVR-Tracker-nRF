@@ -56,7 +56,14 @@ void sensor_tcal_model_changed(void);
 
 int sensor_tcal_mls_lookup(float temp, float bias_out[3]);
 int sensor_tcal_lut_lookup(float temp, float bias_out[3]);
-/* Schedule only; fitting runs in the calibration worker's continuation. */
+/*
+ * Canonical compensation/D reference: fixed-grid interpolation regardless of
+ * LUT build progress. Fits and caches at most two missing exact grid values;
+ * subsequent lookups reuse them. Finite temperatures outside the grid clamp
+ * to its endpoint values, as in cached-only LUT lookup.
+ */
+int sensor_tcal_curve_lookup(float temp, float bias_out[3]);
+/* Schedule only; background filling runs in the calibration worker. */
 void sensor_tcal_build_lut_priority(float current_temp);
 /* Handles PRIORITY and BACKGROUND states; call without an outer model lock. */
 bool sensor_tcal_build_lut_continue(void);
