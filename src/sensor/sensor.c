@@ -32,6 +32,7 @@
 #include "connection/tracker_events.h"
 #include "calibration/calibration.h"
 #include "calibration/imu_calibration.h"
+#include "calibration/cal_sample.h"
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 #include "calibration/mag_common.h"
 #include "calibration/online_mag.h"
@@ -2505,6 +2506,15 @@ static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float f
 }
 #endif
 
+void sensor_gyro_report_discontinuity(void)
+{
+	/* Zero dt is an explicit unknown-interval record, never a replacement
+	 * rate or an extension of the next sample's represented interval. The
+	 * queue's existing session lock/overflow policy owns its publication. */
+	static const float unknown_rate[3] = {0};
+	sensor_sample_gyro(unknown_rate, 0.0f);
+}
+
 static void feed_gyro_sample(
 	float *raw_g,
 	int *g_count
@@ -2905,7 +2915,7 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 		float raw_a[3] = {0};
 		float raw_g[3] = {0};
 		if (sensor_imu->fifo_process(i, rawData, raw_a, raw_g)) {
-			continue; // skip on error
+			continue; // No sample: includes benign metadata/empty/unsupported records.
 		}
 
 #if CONFIG_CONNECTION_RAW_COLLECTION

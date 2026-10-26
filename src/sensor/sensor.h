@@ -31,6 +31,10 @@ const char *sensor_get_sensor_fusion_name(void);
 bool sensor_is_initialized(void);
 /* True only after a valid current fusion frame, not merely driver discovery. */
 bool sensor_output_ready(void);
+/* Driver acquisition owner: report an explicitly lost/unknown gyro interval
+ * (overrun or destructive FIFO flush), not empty/other-channel/invalid markers.
+ * Active raw calibration consumers must reject the interrupted stream. */
+void sensor_gyro_report_discontinuity(void);
 
 int sensor_get_sensor_temperature(float *);
 

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "sensor/interface.h"
+#include "sensor/sensor.h"
 
 struct host_write {
 	uint8_t reg;
@@ -19,6 +20,10 @@ static int fail_read_reg = -1;
 static size_t interval_bytes, interval_reads;
 static uint8_t fifo_count_reg;
 static bool fifo_count_is_bytes;
+static unsigned gyro_discontinuities;
+
+void sensor_gyro_report_discontinuity(void) { gyro_discontinuities++; }
+unsigned host_bus_gyro_discontinuities(void) { return gyro_discontinuities; }
 
 void host_bus_fail_read(int reg) { fail_read_reg = reg; }
 size_t host_bus_interval_bytes(void) { return interval_bytes; }
@@ -34,6 +39,7 @@ void host_bus_reset(void)
 	fail_read_reg = -1;
 	interval_bytes = 0;
 	interval_reads = 0;
+	gyro_discontinuities = 0;
 	memset(registers, 0, sizeof(registers));
 }
 

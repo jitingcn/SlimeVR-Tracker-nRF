@@ -30,6 +30,7 @@ uint8_t host_bus_write_value(size_t index);
 void host_bus_fifo(uint8_t reg, bool bytes);
 size_t host_bus_interval_bytes(void);
 size_t host_bus_interval_reads(void);
+unsigned host_bus_gyro_discontinuities(void);
 
 static unsigned writes_value(uint8_t reg, uint8_t value)
 {
@@ -183,6 +184,25 @@ static void test_lsm_wom(const struct lsm_wom_case *d)
 	}
 }
 
+static void test_dso_fifo_discontinuity(void)
+{
+	const uint8_t flags[] = {0, 1U << 5, 1U << 3, 1U << 6};
+	for (size_t i = 0; i < sizeof(flags); i++) {
+		host_bus_reset();
+		host_bus_fifo(LSM6DSO_FIFO_STATUS1, true);
+		host_bus_set_register(LSM6DSO_FIFO_STATUS1, 1);
+		host_bus_set_register(LSM6DSO_FIFO_STATUS1 + 1, flags[i]);
+		uint8_t record[7];
+		assert(lsm6dso_fifo_read(record, sizeof(record)) == 1);
+		assert(host_bus_gyro_discontinuities() == (i >= 2 ? 1U : 0U));
+	}
+	host_bus_reset();
+	host_bus_fail_read(LSM6DSO_FIFO_STATUS1);
+	uint8_t record[7];
+	assert(lsm6dso_fifo_read(record, sizeof(record)) == 0);
+	assert(host_bus_gyro_discontinuities() == 0);
+}
+
 int main(int argc, char **argv)
 {
 	const struct icm_case drivers[] = {
@@ -208,6 +228,7 @@ int main(int argc, char **argv)
 	}
 
 	if (argc == 1 || !strcmp(argv[1], "lsm")) {
+		test_dso_fifo_discontinuity();
 		float a = -42, g = -43;
 		host_bus_reset();
 		host_bus_fail_read(LSM6DSO_INTERNAL_FREQ_FINE);

@@ -32,6 +32,8 @@ static struct {
 		unsigned skip;
 	} fault;
 } hw;
+static unsigned gyro_discontinuities;
+void sensor_gyro_report_discontinuity(void) { gyro_discontinuities++; }
 
 static void advance(uint64_t us)
 {
@@ -179,6 +181,7 @@ static void reset_model(bool prefetch, bool clear_status)
 	assert(lsm_ext_setup(SENSOR_EXT_MODE_I2CM_PROXY) == 0);
 	assert(hw.ext->ext_set_prefetch(prefetch) == 0);
 	initialize();
+	gyro_discontinuities = 0;
 	for (unsigned i = 0; i < 7; i++)
 		hw.external[0x08 + i] = 0x50 + i;
 }
@@ -393,6 +396,31 @@ static void test_shutdown_after_stop_failure(void)
 	}
 }
 
+static void test_fifo_destructive_loss_notification(void)
+{
+	reset_model(false, false);
+	uint8_t record[7];
+	hw.main[LSM6DSV_FIFO_STATUS1] = 1;
+	hw.main[LSM6DSV_FIFO_STATUS2] = LSM6DSV_FIFO_OVR_LATCHED;
+	assert(lsm_fifo_read(record, sizeof(record)) == 0);
+	assert(gyro_discontinuities == 1);
+	/* A latched overrun is still loss if the current FIFO count is zero. */
+	hw.main[LSM6DSV_FIFO_STATUS1] = 0;
+	assert(lsm_fifo_read(record, sizeof(record)) == 0);
+	assert(gyro_discontinuities == 2);
+	hw.main[LSM6DSV_FIFO_STATUS1] = 1;
+	hw.main[LSM6DSV_FIFO_STATUS2] = 0;
+	fail_on(READ, false, LSM6DSV_FIFO_DATA_OUT_TAG, -1, 0);
+	assert(lsm_fifo_read(record, sizeof(record)) == 0);
+	assert(gyro_discontinuities == 3);
+	fail_on(READ, false, LSM6DSV_FIFO_STATUS1, -1, 0);
+	assert(lsm_fifo_read(record, sizeof(record)) == 0);
+	assert(gyro_discontinuities == 3); /* Failed status alone has consumed nothing. */
+	hw.main[LSM6DSV_FIFO_STATUS2] = LSM6DSV_FIFO_FULL_IA;
+	assert(lsm_fifo_read(record, sizeof(record)) == 1);
+	assert(gyro_discontinuities == 3);
+}
+
 int main(void)
 {
 	test_nack(false);
@@ -409,6 +437,7 @@ int main(void)
 	test_prefetch_policy_lifecycle();
 	test_ambiguous_write_is_not_replayed();
 	test_shutdown_after_stop_failure();
+	test_fifo_destructive_loss_notification();
 	puts("LSM6DSV full-driver proxy regressions passed");
 	return 0;
 }

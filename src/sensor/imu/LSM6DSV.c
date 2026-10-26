@@ -54,6 +54,9 @@ static uint8_t lsm_unknown_tag_count = 0;
 static int lsm_fifo_resync(const char *reason)
 {
 	LOG_WRN("Resyncing FIFO: %s", reason);
+	/* BYPASS discards an unknown number of queued gyro intervals. Report the
+	 * break even if recovery I/O fails; no later vector can fill this gap. */
+	sensor_gyro_report_discontinuity();
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_CTRL4, LSM6DSV_FIFO_MODE_BYPASS);
 	// Preserve both settling delays; their required margin has not been verified.
 	k_usleep(350);
@@ -397,17 +400,17 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 	// DIFF_FIFO[8:0]: bit 0 of STATUS2 and all eight bits of STATUS1.
 	uint16_t packet_count = (uint16_t)((raw_status[1] & LSM6DSV_FIFO_DIFF_8) << 8 | raw_status[0]);
 
-	// Early return if FIFO is empty
-	if (packet_count == 0) {
-		return 0;
-	}
-
 	// Check for FIFO overflow (latched status, cleared on read)
 	if (raw_status[1] & LSM6DSV_FIFO_OVR_LATCHED) {
 		LOG_WRN("FIFO overflow detected - data may be lost");
 		lsm_fifo_resync("overflow detected");
 		return 0;
 	}
+	// Early return if FIFO is empty
+	if (packet_count == 0) {
+		return 0;
+	}
+
 
 	// Limit read to available buffer space; drain what fits instead of
 	// resyncing and dropping the whole batch (a corrupted DIFF_FIFO or a

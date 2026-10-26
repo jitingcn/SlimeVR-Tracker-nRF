@@ -279,6 +279,9 @@ uint16_t lsm6dso_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 			LOG_ERR("Failed to read FIFO status");
 			return total_packets;
 		}
+		if (raw_count[1] & (LSM6DSO_FIFO_OVR_LATCHED | LSM6DSO_FIFO_OVR)) {
+			sensor_gyro_report_discontinuity();
+		}
 		if (raw_count[1] & LSM6DSO_FIFO_OVR_LATCHED) {
 			LOG_WRN("FIFO overrun latched");
 		}
