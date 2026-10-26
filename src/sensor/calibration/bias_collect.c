@@ -23,6 +23,7 @@
 #include "globals.h"
 #include "sensor/sensor.h"
 #include "system/watchdog.h"
+#include "util.h"
 
 #include <math.h>
 #include <string.h>
@@ -76,6 +77,9 @@ int sensor_offsetBias_internal(
 )
 {
 	float rawData[3];
+	struct sensor_gyro_sample gyro_sample;
+	uint32_t last_gyro_sequence = 0;
+	bool have_gyro_sequence = false;
 	float min_a[3], max_a[3];
 	float min_g[3], max_g[3];
 	/* Gyro motion uses the range of short-window MEANS, not raw samples.
@@ -211,13 +215,19 @@ int sensor_offsetBias_internal(
 		accel_check_counter++;
 
 		// Accumulate Gyroscope
-		if (sensor_wait_gyro(rawData, K_MSEC(100))) {
+		if (sensor_wait_gyro(&gyro_sample, K_MSEC(100))) {
 			return -2; // Timeout
 		}
+		if (!v_finite(gyro_sample.v, 3) || !v_finite(&gyro_sample.dt, 1) || gyro_sample.dt <= 0.0f ||
+		    (have_gyro_sequence && gyro_sample.sequence != last_gyro_sequence + 1U)) {
+			return -2; // Lost/invalid raw interval: do not fit a partial stream.
+		}
+		last_gyro_sequence = gyro_sample.sequence;
+		have_gyro_sequence = true;
 
 		// Check Gyro Motion (windowed-mean range method)
 		for (int j = 0; j < 3; j++) {
-			gyro_win_sum[j] += (double)rawData[j];
+			gyro_win_sum[j] += (double)gyro_sample.v[j];
 		}
 		gyro_win_count++;
 		if (gyro_win_count >= gyro_motion_window) {
@@ -251,9 +261,9 @@ int sensor_offsetBias_internal(
 		}
 
 		// Accumulate gyro data using online algorithm
-		gyro_sum[0] += (double)rawData[0];
-		gyro_sum[1] += (double)rawData[1];
-		gyro_sum[2] += (double)rawData[2];
+		gyro_sum[0] += (double)gyro_sample.v[0];
+		gyro_sum[1] += (double)gyro_sample.v[1];
+		gyro_sum[2] += (double)gyro_sample.v[2];
 
 #if CONFIG_SENSOR_USE_TCAL
 		// Sample and accumulate temperature

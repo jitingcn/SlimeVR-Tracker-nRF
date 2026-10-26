@@ -96,7 +96,7 @@ static bool v_finite(const float *v, unsigned n) {
     for (unsigned i = 0; i < n; ++i) if (!isfinite(v[i])) return false;
     return true;
 }
-static void sensor_sample_gyro(float *g) { (void)g; }
+static void sensor_sample_gyro(float *g, float dt) { (void)g; (void)dt; }
 static void sensor_calibration_gyro_bias(float *g) {
     g[0] = 1.0f; g[1] = -2.0f; g[2] = 0.5f;
 }
@@ -267,7 +267,7 @@ static void expect_vector(const float actual[3], const float expected[3]) {
 static bool sample(float g[3], float delta[3]) {
     g[0] = 10; g[1] = 20; g[2] = 30;
     delta[0] = delta[1] = delta[2] = 999;
-    bool reset = sensor_calibration_process_gyro(g, delta);
+    bool reset = sensor_calibration_process_gyro(g, .01f, delta);
     assert(!sensor_calibration_gyro_reference_pending());
     assert(lock_depth == 0);
     return reset;

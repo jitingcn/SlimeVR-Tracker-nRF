@@ -2523,7 +2523,7 @@ static void feed_gyro_sample(
 
 	/* --- Firmware compensation (layer 1): TCal / static ZRO / D_offset --- */
 	float reference_delta[3];
-	bool measured_reset = sensor_calibration_process_gyro(raw_g, reference_delta);
+	bool measured_reset = sensor_calibration_process_gyro(raw_g, gyro_actual_time, reference_delta);
 	float g[] = {raw_g[0], raw_g[1], raw_g[2]};
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION

@@ -53,9 +53,10 @@ static inline int sensor_operation_result(enum led_owner owner, int result, bool
 
 /* Sensor feeds data to calibration */
 void sensor_calibration_process_accel(float a[3]);
-/* Sensor owner: delta is old minus new firmware offset (unscaled dps).
+/* Sensor owner: dt is the raw vector's represented physical interval, not
+ * dequeue/delivery time. Delta is old minus new firmware offset (unscaled dps).
  * Return true for a new measured calibration, which resets residual bias. */
-bool sensor_calibration_process_gyro(float g[3], float reference_delta[3]);
+bool sensor_calibration_process_gyro(float g[3], float dt, float reference_delta[3]);
 void sensor_calibration_reset_gyro_reference(void);
 bool sensor_calibration_gyro_reference_pending(void);
 #if CONFIG_SENSOR_USE_MAGNETOMETER

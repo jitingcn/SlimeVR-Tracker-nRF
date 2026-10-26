@@ -32,7 +32,7 @@ K_SEM_DEFINE(consumer_done, 0, 1);
 static bool pause_producer;
 static uint8_t producer_channel;
 static int consumer_result;
-static float consumer_value[3];
+static struct sensor_gyro_sample consumer_sample;
 
 static k_spinlock_key_t observed_spin_lock(struct k_spinlock *lock)
 {
@@ -62,7 +62,7 @@ static void publish(uint8_t channel, float value)
 	if (channel == CAL_SAMPLE_ACCEL) {
 		sensor_sample_accel(v);
 	} else if (channel == CAL_SAMPLE_GYRO) {
-		sensor_sample_gyro(v);
+		sensor_sample_gyro(v, 0.0025f);
 	} else {
 		sensor_sample_mag(v);
 	}
@@ -73,7 +73,13 @@ static int consume(uint8_t channel, float value[3], k_timeout_t timeout)
 	if (channel == CAL_SAMPLE_ACCEL) {
 		return sensor_wait_accel(value, timeout);
 	} else if (channel == CAL_SAMPLE_GYRO) {
-		return sensor_wait_gyro(value, timeout);
+		struct sensor_gyro_sample sample;
+		int err = sensor_wait_gyro(&sample, timeout);
+		if (!err) {
+			memcpy(value, sample.v, sizeof(sample.v));
+			zassert_equal(sample.dt, 0.0025f);
+		}
+		return err;
 	}
 	return sensor_wait_mag(value, timeout);
 }
@@ -109,7 +115,8 @@ ZTEST(cal_sample, test_idle_has_no_queue_traffic_but_live_accel)
 	zassert_equal(value[1], 100);
 	zassert_equal(value[2], 101);
 	zassert_not_equal(sensor_wait_accel(value, K_NO_WAIT), 0);
-	zassert_not_equal(sensor_wait_gyro(value, K_NO_WAIT), 0);
+	struct sensor_gyro_sample gyro;
+	zassert_not_equal(sensor_wait_gyro(&gyro, K_NO_WAIT), 0);
 	zassert_not_equal(sensor_wait_mag(value, K_NO_WAIT), 0);
 }
 
@@ -181,7 +188,7 @@ static void consumer_entry(void *a, void *b, void *c)
 {
 	ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
 	k_sem_give(&consumer_ready);
-	consumer_result = sensor_wait_gyro(consumer_value, K_MSEC(500));
+	consumer_result = sensor_wait_gyro(&consumer_sample, K_MSEC(500));
 	/* Acquiring the production snapshot lock also detects an illegal handoff
 	 * before the producer releases its outer sample lock. */
 	float accel[3];
@@ -209,9 +216,44 @@ ZTEST(cal_sample, test_blocked_higher_priority_consumer_handoff)
 	zassert_equal(joined, 0);
 	zassert_equal(producer_joined, 0);
 	zassert_equal(consumer_result, 0);
-	zassert_equal(consumer_value[0], 42);
-	zassert_equal(consumer_value[1], 43);
-	zassert_equal(consumer_value[2], 44);
+	zassert_equal(consumer_sample.v[0], 42);
+	zassert_equal(consumer_sample.v[1], 43);
+	zassert_equal(consumer_sample.v[2], 44);
+	zassert_equal(consumer_sample.dt, 0.0025f);
+	zassert_equal(consumer_sample.sequence, 1);
+}
+
+ZTEST(cal_sample, test_gyro_intervals_sequences_and_overflow_gaps)
+{
+	sensor_calibration_samples_begin(CAL_SAMPLE_GYRO);
+	float vector[3] = {1, 2, 3};
+	sensor_sample_gyro(vector, 0.00125f);
+	struct sensor_gyro_sample sample;
+	zassert_equal(sensor_wait_gyro(&sample, K_NO_WAIT), 0);
+	zassert_equal(sample.sequence, 1);
+	zassert_equal(sample.dt, 0.00125f);
+	for (int i = 0; i < 70; i++) {
+		vector[0] = i;
+		sensor_sample_gyro(vector, 0.0025f);
+	}
+	zassert_equal(sensor_wait_gyro(&sample, K_NO_WAIT), 0);
+	zassert_equal(sample.sequence, 8, "Overflow must expose all six missing intervals");
+	zassert_equal(sample.v[0], 6);
+	zassert_equal(sample.dt, 0.0025f, "Do not stretch the retained interval across loss");
+	for (uint32_t sequence = 9; sequence <= 71; sequence++) {
+		zassert_equal(sensor_wait_gyro(&sample, K_NO_WAIT), 0);
+		zassert_equal(sample.sequence, sequence);
+		zassert_equal(sample.v[0], sequence - 2);
+		zassert_equal(sample.dt, 0.0025f);
+	}
+	/* A same-channel restart purges metadata with its vector and resets sequence. */
+	sensor_sample_gyro(vector, 0.5f);
+	sensor_calibration_samples_begin(CAL_SAMPLE_GYRO);
+	zassert_not_equal(sensor_wait_gyro(&sample, K_NO_WAIT), 0);
+	sensor_sample_gyro(vector, 0.003f);
+	zassert_equal(sensor_wait_gyro(&sample, K_NO_WAIT), 0);
+	zassert_equal(sample.sequence, 1);
+	zassert_equal(sample.dt, 0.003f);
 }
 
 ZTEST_SUITE(cal_sample, NULL, NULL, before_test, NULL, NULL);

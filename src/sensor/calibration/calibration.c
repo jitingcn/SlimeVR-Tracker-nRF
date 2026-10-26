@@ -277,9 +277,9 @@ void sensor_calibration_process_accel(float a[3])
 #endif
 }
 
-bool sensor_calibration_process_gyro(float g[3], float reference_delta[3])
+bool sensor_calibration_process_gyro(float g[3], float dt, float reference_delta[3])
 {
-	sensor_sample_gyro(g);
+	sensor_sample_gyro(g, dt);
 	memset(reference_delta, 0, sizeof(float) * 3);
 #if CONFIG_SENSOR_USE_TCAL
 	float calculated_offset[3];

@@ -46,7 +46,8 @@ static void sensor_diagnostics_on_cal_gyro(float *g) {memcpy(cal_samples[cal_cou
 static float calibration_delta[3];
 static bool physical_reset;
 static unsigned reset_count;
-static bool sensor_calibration_process_gyro(float *g, float *delta) {
+static bool sensor_calibration_process_gyro(float *g, float dt, float *delta) {
+    assert(dt == gyro_actual_time); /* Raw FIFO interval, before any merge. */
     const float offsets[3] = {0.125f, -0.0625f, 0.03125f};
     for (int i=0;i<3;i++) g[i] -= offsets[i];
     memcpy(delta, calibration_delta, sizeof(calibration_delta));

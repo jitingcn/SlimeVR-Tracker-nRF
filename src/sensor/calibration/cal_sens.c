@@ -192,6 +192,31 @@ extern uint16_t sens_cal_revolutions;
 #define SENS_CAL_WARN_OFF_AXIS_RATIO 0.10f
 #define SENS_CAL_MAX_OFF_AXIS_RATIO 0.25f
 
+struct sensitivity_stream {
+	uint32_t sequence;
+	bool started;
+};
+
+static int sensitivity_wait_sample(struct sensor_gyro_sample *sample,
+	struct sensitivity_stream *stream, k_timeout_t timeout)
+{
+	int err = sensor_wait_gyro(sample, timeout);
+	if (err) {
+		return err;
+	}
+	if (!v_finite(sample->v, 3) || !v_finite(&sample->dt, 1) || sample->dt <= 0.0f) {
+		return -EINVAL;
+	}
+	/* Backlog before the bias window is not part of this measurement. Once
+	 * collection starts, every represented interval must remain contiguous. */
+	if (stream->started && sample->sequence != stream->sequence + 1U) {
+		return -EOVERFLOW;
+	}
+	stream->sequence = sample->sequence;
+	stream->started = true;
+	return 0;
+}
+
 void sensor_calibrate_sens(void)
 {
 	const uint16_t operation_id = sensor_calibration_current_operation();
@@ -221,7 +246,8 @@ void sensor_calibrate_sens(void)
 		(double)expected_deg
 	);
 
-	float g[3];
+	struct sensor_gyro_sample sample;
+	struct sensitivity_stream stream = {0};
 
 	// 1. Wait for the tracker to be held still before measuring bias.
 	sensor_calibration_stage(feedback, LED_WAIT_STILL);
@@ -233,35 +259,28 @@ void sensor_calibrate_sens(void)
 		return;
 	}
 
-	// 2. Measure the in-situ gyro bias. sensor_wait_gyro returns
-	//    raw samples (before bias and sensitivity are applied), so we average a
-	//    short window here rather than relying on the stored gyro bias.
+	// 2. Measure raw in-situ bias over represented sensor time, not dequeue
+	//    time. Weight by interval so a changing sample period remains correct.
 	sensitivity_step(operation_id, feedback, CAL_PHASE_COLLECT, 0);
 	double bias_sum[3] = {0.0, 0.0, 0.0};
-	int bias_count = 0;
-	int64_t bias_start = k_uptime_get();
-	while (k_uptime_get() - bias_start < SENS_CAL_BIAS_SAMPLE_MS) {
-		if (sensor_wait_gyro(g, K_MSEC(1000))) {
-			LOG_WRN("Sensitivity calibration: gyro timeout during bias, aborting");
-			printk("Gyro sensitivity auto-calibration failed: gyro timeout while measuring bias.\n");
-			sensitivity_failed(operation_id, feedback, CAL_PHASE_COLLECT, CAL_REASON_SAMPLE_TIMEOUT);
+	double bias_time = 0.0; // Bounded by the one-second collection window.
+	while (bias_time < SENS_CAL_BIAS_SAMPLE_MS * 1e-3) {
+		if (sensitivity_wait_sample(&sample, &stream, K_MSEC(1000))) {
+			LOG_WRN("Sensitivity calibration: missing or invalid gyro interval during bias");
+			printk("Gyro sensitivity auto-calibration failed: missing or invalid bias interval.\n");
+			sensitivity_failed(operation_id, feedback, CAL_PHASE_COLLECT, CAL_REASON_INSUFFICIENT_SAMPLES);
 			return;
 		}
+		double sample_dt = (double)sample.dt;
 		for (int i = 0; i < 3; i++) {
-			bias_sum[i] += (double)g[i];
+			bias_sum[i] += (double)sample.v[i] * sample_dt;
 		}
-		bias_count++;
+		bias_time += sample_dt;
 		watchdog_feed(WDT_CHANNEL_CALIBRATION);
-	}
-	if (bias_count == 0) {
-		LOG_WRN("Sensitivity calibration: no bias samples, aborting");
-		printk("Gyro sensitivity auto-calibration failed: no bias samples.\n");
-		sensitivity_failed(operation_id, feedback, CAL_PHASE_COLLECT, CAL_REASON_INSUFFICIENT_SAMPLES);
-		return;
 	}
 	float gyro_bias[3];
 	for (int i = 0; i < 3; i++) {
-		gyro_bias[i] = (float)(bias_sum[i] / bias_count);
+		gyro_bias[i] = (float)(bias_sum[i] / bias_time);
 	}
 	LOG_INF(
 		"Sensitivity calibration: bias %.4f %.4f %.4f dps",
@@ -291,10 +310,15 @@ void sensor_calibrate_sens(void)
 			sensitivity_failed(operation_id, feedback, CAL_PHASE_WAIT_ROTATION, CAL_REASON_START_TIMEOUT);
 			return;
 		}
-		if (sensor_wait_gyro(g, K_MSEC(1000))) {
-			continue; // Tolerate occasional waits while watching for the start
+		int err = sensitivity_wait_sample(&sample, &stream, K_MSEC(1000));
+		if (err) {
+			if (err == -EOVERFLOW || err == -EINVAL) {
+				sensitivity_failed(operation_id, feedback, CAL_PHASE_WAIT_ROTATION, CAL_REASON_INSUFFICIENT_SAMPLES);
+				return;
+			}
+			continue; // Wall-clock timeout still bounds a missing stream.
 		}
-		rate = g[axis] - gyro_bias[axis];
+		rate = sample.v[axis] - gyro_bias[axis];
 		if (k_uptime_get() - last_wdt >= 1000) {
 			watchdog_feed(WDT_CHANNEL_CALIBRATION);
 			last_wdt = k_uptime_get();
@@ -304,37 +328,26 @@ void sensor_calibrate_sens(void)
 		}
 	}
 
-	// 4. Integrate the gyro rate over the spin.
-	//    Use elapsed consumer time for integration, as before. The raw sample
-	//    FIFO preserves vectors but does not carry acquisition timestamps.
+	// 4. Integrate each represented interval, including the trigger above
+	//    exactly once. Wall clock is only the operational watchdog/timeout.
 	LOG_INF("Sensitivity calibration: recording");
 	sensitivity_step(operation_id, feedback, CAL_PHASE_RECORD_ROTATION, axis);
 	double measured = 0.0;
 	double axis_motion = 0.0;
 	double off_axis_motion = 0.0;
 	int64_t spin_start = k_uptime_get();
-	int64_t last_ticks = k_uptime_ticks();
-	int64_t below_since = -1; // When the rate first dropped below the stop threshold
+	double below_time = 0.0; // Only the current stop-dwell window.
 	bool finished = false;
 	last_wdt = spin_start;
 	while (k_uptime_get() - spin_start < SENS_CAL_SPIN_TIMEOUT_MS) {
-		if (sensor_wait_gyro(g, K_MSEC(1000))) {
-			LOG_WRN("Sensitivity calibration: gyro timeout during spin, aborting");
-			printk("Gyro sensitivity auto-calibration failed: gyro timeout during spin.\n");
-			sensitivity_failed(operation_id, feedback, CAL_PHASE_RECORD_ROTATION, CAL_REASON_SAMPLE_TIMEOUT);
-			return;
-		}
-		int64_t now_ticks = k_uptime_ticks();
-		double dt = (double)k_ticks_to_us_near64(now_ticks - last_ticks) * 1e-6;
-		last_ticks = now_ticks;
-
-		rate = g[axis] - gyro_bias[axis];
+		rate = sample.v[axis] - gyro_bias[axis];
+		double dt = sample.dt;
 		measured += (double)rate * dt;
 		axis_motion += fabs((double)rate) * dt;
 		double off_axis_rate_sq = 0.0;
 		for (int i = 0; i < 3; i++) {
 			if (i != axis) {
-				double off_rate = (double)(g[i] - gyro_bias[i]);
+				double off_rate = (double)(sample.v[i] - gyro_bias[i]);
 				off_axis_rate_sq += off_rate * off_rate;
 			}
 		}
@@ -349,14 +362,19 @@ void sensor_calibrate_sens(void)
 		// after at least a minimum fraction of the expected angle has been covered.
 		// This keeps a brief pause mid-spin from ending the measurement early.
 		if (fabsf(rate) < SENS_CAL_STOP_RATE_DPS && fabs(measured) >= (double)(expected_deg * SENS_CAL_MIN_FRACTION)) {
-			if (below_since < 0) {
-				below_since = k_uptime_get();
-			} else if (k_uptime_get() - below_since >= SENS_CAL_STOP_DWELL_MS) {
+			below_time += dt;
+			if (below_time >= SENS_CAL_STOP_DWELL_MS * 1e-3) {
 				finished = true;
 				break;
 			}
 		} else {
-			below_since = -1;
+			below_time = 0.0;
+		}
+		if (sensitivity_wait_sample(&sample, &stream, K_MSEC(1000))) {
+			LOG_WRN("Sensitivity calibration: missing or invalid gyro interval, aborting");
+			printk("Gyro sensitivity auto-calibration failed: missing or invalid gyro interval.\n");
+			sensitivity_failed(operation_id, feedback, CAL_PHASE_RECORD_ROTATION, CAL_REASON_INSUFFICIENT_SAMPLES);
+			return;
 		}
 	}
 

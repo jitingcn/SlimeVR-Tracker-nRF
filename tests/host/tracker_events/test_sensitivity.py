@@ -26,6 +26,7 @@ prelude = prelude.replace(
     "(void)lock; assert(owner_depth == 1); owner_depth--;",
     "assert(*lock > 0); (*lock)--; if (lock == &calibration_request_lock) owner_depth--;",
 )
+prelude = prelude.replace("static void sensor_calibration_samples_end", "void sensor_calibration_samples_end")
 prelude += "\nvoid sensor_tcal_feedback_cancel(void) {}\n"
 if "sensitivity_maintenance" not in calibration:
     prelude = prelude.replace(", sensitivity_maintenance", "")
@@ -34,6 +35,7 @@ FIXTURE = r'''
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include "sensor/calibration/cal_sample.h"
 #define LOG_WRN(...) ((void)0)
 #define printk(...) ((void)printf(__VA_ARGS__))
 #undef LOG_INF
@@ -55,6 +57,12 @@ static bool complete_during_write;
 static bool invalidate_on_validate;
 static int64_t now_ms;
 static const float degrees[3] = {10.5f, -2.1f, 15.0f};
+static uint32_t gyro_sequence;
+static bool replay_mode;
+static unsigned replay_index, replay_count, delivery_batch = 1;
+static struct sensor_gyro_sample replay[128];
+static uint32_t sample_timestamp_us[128];
+static uint32_t delivered_hash;
 int sensor_calibration_set_sensitivity(const float values[3]);
 int sensor_calibration_reset_sensitivity(void);
 static void retained_update(void) { retained_updates++; }
@@ -98,10 +106,8 @@ static int sys_write(unsigned id, void *destination, const void *value, size_t l
     }
     writes++; memcpy(destination,value,len); return 0;
 }
-static bool wait_for_motion(bool moving, int count) { (void)moving; (void)count; return true; }
+bool wait_for_motion(bool moving, int count) { (void)moving; (void)count; return true; }
 static int64_t k_uptime_get(void) { return now_ms; }
-static int64_t k_uptime_ticks(void) { return now_ms; }
-static int64_t k_ticks_to_us_near64(int64_t ticks) { return ticks*1000; }
 static void watchdog_feed(int channel) { (void)channel; }
 /* Warm storage leaves: the worker brackets its final write in a transaction. */
 static unsigned warm_begin, warm_end;
@@ -110,14 +116,25 @@ void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size) {
     (void)id; (void)data; (void)size;
 }
 void sys_warm_transaction_end(bool schedule) { (void)schedule; warm_end++; }
-static bool v_finite(const float *values,int count) {
-    for(int i=0;i<count;i++) if(!isfinite(values[i])) return false;
-    return true;
-}
-static int sensor_wait_gyro(float g[3],int timeout) {
-    (void)timeout; now_ms+=100; g[0]=g[1]=g[2]=0;
+int sensor_wait_gyro(struct sensor_gyro_sample *sample,k_timeout_t timeout) {
+    (void)timeout;
+    if (replay_mode) {
+        assert(replay_index < replay_count);
+        *sample = replay[replay_index];
+        /* Delivery may be uniform, paired, or an entire FIFO at one instant;
+         * the physical timestamp/interval/sequence/vector stream is identical. */
+        unsigned group_end=((replay_index/delivery_batch)+1)*delivery_batch;
+        if (group_end > replay_count) group_end=replay_count;
+        now_ms=sample_timestamp_us[group_end-1]/1000;
+        const unsigned char *bytes=(const unsigned char *)sample;
+        for (size_t i=0; i<sizeof(*sample); i++) delivered_hash=(delivered_hash^bytes[i])*16777619U;
+        replay_index++;
+        return 0;
+    }
+    now_ms+=100;
+    *sample=(struct sensor_gyro_sample){.dt=0.1f,.sequence=++gyro_sequence};
     if (phase==CAL_PHASE_WAIT_ROTATION ||
-        (phase==CAL_PHASE_RECORD_ROTATION && spin_samples++<10)) g[sens_cal_axis]=360;
+        (phase==CAL_PHASE_RECORD_ROTATION && spin_samples++<9)) sample->v[sens_cal_axis]=360;
     return 0;
 }
 '''
@@ -130,7 +147,7 @@ static void check_scales(bool reset) {
     }
 }
 static void run_worker(int mode,bool finish_in_write) {
-    now_ms=0; phase=0; spin_samples=0; replacement=mode;
+    now_ms=0; phase=0; spin_samples=0; replacement=mode; gyro_sequence=0;
     complete_during_write=finish_in_write;
     memset(led_results,0,sizeof(led_results));
     warm_begin=warm_end=0;
@@ -171,7 +188,7 @@ static void rejected_replacement(void) {
     assert(writes==previous_writes && !memcmp(previous,data.gyroSensScale,sizeof(previous)));
 }
 static void stale_epoch_does_not_overwrite_scales(void) {
-    now_ms=0; phase=0; spin_samples=0; replacement=0;
+    now_ms=0; phase=0; spin_samples=0; replacement=0; gyro_sequence=0;
     complete_during_write=false;
     assert(sensor_calibration_set_sensitivity(degrees)==0);
     float before[3]; memcpy(before,data.gyroSensScale,sizeof(before));
@@ -190,11 +207,83 @@ static void stale_epoch_does_not_overwrite_scales(void) {
     assert(led_results[LED_SUCCESS]==0 && warm_begin==warm_end);
     assert(sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER)==0);
 }
+static void append_physical_sample(float rate) {
+    unsigned i=replay_count++;
+    assert(i<sizeof(replay)/sizeof(*replay));
+    uint32_t previous=i ? sample_timestamp_us[i-1] : 0;
+    sample_timestamp_us[i]=previous+125000;
+    replay[i]=(struct sensor_gyro_sample){
+        .v={rate+2.0f,-3.0f,0.5f},
+        .dt=(float)(sample_timestamp_us[i]-previous)*1e-6f,
+        .sequence=i+1,
+    };
+}
+static void physical_stream(bool pause) {
+    replay_count=0;
+    for (int i=0;i<8;i++) append_physical_sample(0); /* One-second bias window. */
+    for (int i=0;i<8;i++) append_physical_sample(360); /* Includes trigger's 45 degrees. */
+    if (pause) {
+        for (int i=0;i<4;i++) append_physical_sample(0); /* Half-dwell cannot finish. */
+        append_physical_sample(64); /* Resume motion: reset stop dwell. */
+    }
+    for (int i=0;i<8;i++) append_physical_sample(0); /* Exactly one second to stop. */
+}
+static float run_physical_stream(unsigned batch, bool accepted_fit) {
+    replay_mode=true; replay_index=0; delivery_batch=batch;
+    now_ms=0; phase=0; replacement=0; spin_samples=0; delivered_hash=2166136261U;
+    unsigned prior_writes=writes, prior_success=successes, prior_failure=failures;
+    float before[3]; memcpy(before,data.gyroSensScale,sizeof(before));
+    assert(sensor_request_calibration_sens(0,1)==0);
+    sensor_calibrate_sens();
+    if (accepted_fit) {
+        assert(replay_index==replay_count); /* Entire stop dwell, no consumer-clock shortcut. */
+        assert(writes==prior_writes+1 && successes==prior_success+1 && failures==prior_failure);
+    } else {
+        assert(writes==prior_writes && successes==prior_success && failures==prior_failure+1);
+        assert(!memcmp(before,data.gyroSensScale,sizeof(before)));
+    }
+    assert(sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER)==0);
+    replay_mode=false;
+    return data.gyroSensScale[0];
+}
+static void batching_trigger_and_stop_dwell_invariants(void) {
+    for (unsigned pause=0;pause<2;pause++) {
+        physical_stream(pause);
+        float first=run_physical_stream(1,true);
+        uint32_t hash=delivered_hash;
+        assert(fabsf(first-(pause ? 360.0f/368.0f : 1.0f))<1e-6f);
+        const unsigned batches[]={2,3,8,64};
+        for (unsigned i=0;i<sizeof(batches)/sizeof(*batches);i++) {
+            float batched=run_physical_stream(batches[i],true);
+            assert(!memcmp(&first,&batched,sizeof(first)));
+            assert(hash==delivered_hash); /* Same physical samples and timestamps. */
+        }
+    }
+}
+static void missing_intervals_reject_the_measurement(void) {
+    const unsigned gaps[]={3,8,10,19}; /* Bias, trigger, rotation and stop dwell. */
+    for (unsigned g=0;g<sizeof(gaps)/sizeof(*gaps);g++) {
+        physical_stream(false);
+        for (unsigned i=gaps[g];i<replay_count;i++) replay[i].sequence++;
+        run_physical_stream(64,false);
+    }
+    const float invalid_dt[]={0.0f,-0.125f,NAN,INFINITY};
+    for (unsigned i=0;i<sizeof(invalid_dt)/sizeof(*invalid_dt);i++) {
+        physical_stream(false); replay[10].dt=invalid_dt[i];
+        run_physical_stream(2,false);
+    }
+    /* Unsigned sequence wrap is contiguous, not a fabricated loss. */
+    physical_stream(false);
+    for (unsigned i=0;i<replay_count;i++) replay[i].sequence += UINT32_MAX-12U;
+    assert(fabsf(run_physical_stream(64,true)-1.0f)<1e-6f);
+}
 int main(void) {
     run_worker(0,false); /* Control reaches a valid production worker commit. */
     run_worker(1,false); run_worker(2,false);
     run_worker(1,true); run_worker(2,true);
     stale_epoch_does_not_overwrite_scales();
+    batching_trigger_and_stop_dwell_invariants();
+    missing_intervals_reject_the_measurement();
     sensor_tcal_heated_lock();
     assert(sensor_calibration_heated_reserve_locked()==0);
     sensor_tcal_heated_unlock();
@@ -237,23 +326,30 @@ def main():
     ) if re.search(rf"^int {name}\(|^void {name}\(", calibration, re.M))
     bodies = "\n".join(requests.function(name, calibration) for name in owners + extra)
     constants = "\n".join(re.findall(r"^#define SENS_CAL_.*$", sensitivity, re.M))
+    stream_struct = requests.extract_block(sensitivity, r"^struct sensitivity_stream\s*\{") + ";\n"
+    finite = requests.function("v_finite", (ROOT / "src/util.c").read_text())
     sens_bodies = "\n".join(requests.function(name, sensitivity) for name in (
         "sensitivity_replace_locked", "sensitivity_step", "sensitivity_failed",
         "sensor_calibration_set_sensitivity", "sensor_calibration_reset_sensitivity",
-        "sensor_calibrate_sens",
+        "sensitivity_wait_sample", "sensor_calibrate_sens",
     ))
-    source = prelude + bodies + FIXTURE + constants + "\n" + sens_bodies + TEST
+    source = prelude + bodies + FIXTURE + constants + "\n" + stream_struct + finite + sens_bodies + TEST
     with tempfile.TemporaryDirectory(prefix="sensitivity-maintenance-") as directory:
         path = Path(directory)
         (path / "test.c").write_text(source)
-        subprocess.run(shlex.split(os.environ.get("CC") or "cc") + [
-            "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-            "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=1", "-DCONFIG_SENSOR_TCAL_HEATED=1",
-            "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
-            "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test"),
-        ], check=True)
-        subprocess.run([str(path / "test")], check=True)
-    print("sensitivity replacement/reset with heated admission: PASS")
+        kernel = path / "zephyr/kernel.h"
+        kernel.parent.mkdir()
+        kernel.write_text("typedef int k_timeout_t;\n")
+        for flags in ([], ["-ffast-math"]):
+            subprocess.run(shlex.split(os.environ.get("CC") or "cc") + [
+                "-std=gnu11", "-Wall", "-Wextra", "-Werror", *flags,
+                "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
+                "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=1", "-DCONFIG_SENSOR_TCAL_HEATED=1",
+                "-DCONFIG_SENSOR_USE_TCAL=0", "-I", str(path),
+                "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test"),
+            ], check=True)
+            subprocess.run([str(path / "test")], check=True)
+    print("sensitivity sample-time fits, admission/load and replacement/reset: PASS")
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ struct cal_sample_vector {
 };
 
 K_MSGQ_DEFINE(accel_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
-K_MSGQ_DEFINE(gyro_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
+K_MSGQ_DEFINE(gyro_sample_queue, sizeof(struct sensor_gyro_sample), CAL_SAMPLE_QUEUE_CAPACITY, 4);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 K_MSGQ_DEFINE(mag_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
 #endif
@@ -54,24 +54,26 @@ static float latest_accel[3] = {0};
  * preempted before the lock across an end/begin boundary. */
 static struct k_spinlock sample_lock;
 static atomic_t sample_session;
+static uint32_t gyro_sample_sequence;
 #define CAL_SAMPLE_CHANNEL_MASK (CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO | CAL_SAMPLE_MAG)
 static bool accel_snapshot_valid;
 #if CONFIG_SENSOR_TCAL_HEATED
 static int64_t accel_snapshot_time;
 #endif
 
-static void publish_sample_locked(struct k_msgq *queue, const float v[3])
+static void publish_sample_locked(struct k_msgq *queue, const void *sample)
 {
-	float discarded[3];
+	struct sensor_gyro_sample discarded;
 
-	if (k_msgq_put(queue, v, K_NO_WAIT) == -ENOMSG) {
+	if (k_msgq_put(queue, sample, K_NO_WAIT) == -ENOMSG) {
 		/* Explicit overflow policy: discard the oldest queued vector and keep
 		 * the newest one. This is loss, never a duplicate or fabricated sample. */
-		(void)k_msgq_get(queue, discarded, K_NO_WAIT);
-		(void)k_msgq_put(queue, v, K_NO_WAIT);
+		(void)k_msgq_get(queue, &discarded, K_NO_WAIT);
+		(void)k_msgq_put(queue, sample, K_NO_WAIT);
 	}
 }
 
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 static void publish_sample(struct k_msgq *queue, const float v[3], uint8_t channel)
 {
 	atomic_val_t session = atomic_get(&sample_session);
@@ -84,8 +86,9 @@ static void publish_sample(struct k_msgq *queue, const float v[3], uint8_t chann
 	}
 	k_spin_unlock(&sample_lock, key);
 }
+#endif
 
-static int wait_sample(struct k_msgq *queue, float v[3], k_timeout_t timeout, const char *name)
+static int wait_sample(struct k_msgq *queue, void *v, k_timeout_t timeout, const char *name)
 {
 	if (k_msgq_get(queue, v, timeout) != 0) {
 		LOG_ERR("%s wait timed out", name);
@@ -111,6 +114,7 @@ static void samples_set_channels(uint8_t channels)
 #else
 	channels &= (uint8_t)~CAL_SAMPLE_MAG;
 #endif
+	gyro_sample_sequence = 0;
 	atomic_set(&sample_session, next | (channels & CAL_SAMPLE_CHANNEL_MASK));
 	k_spin_unlock(&sample_lock, key);
 }
@@ -177,14 +181,27 @@ bool sensor_peek_accel_fresh(float a[3], int64_t max_age_ms)
 }
 #endif
 
-void sensor_sample_gyro(const float g[3])
+void sensor_sample_gyro(const float g[3], float dt)
 {
-	publish_sample(&gyro_sample_queue, g, CAL_SAMPLE_GYRO);
+	atomic_val_t session = atomic_get(&sample_session);
+	if (!(session & CAL_SAMPLE_GYRO)) {
+		return;
+	}
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
+	if (session == atomic_get(&sample_session)) {
+		struct sensor_gyro_sample sample = {
+			.v = {g[0], g[1], g[2]},
+			.dt = dt,
+			.sequence = ++gyro_sample_sequence,
+		};
+		publish_sample_locked(&gyro_sample_queue, &sample);
+	}
+	k_spin_unlock(&sample_lock, key);
 }
 
-int sensor_wait_gyro(float g[3], k_timeout_t timeout)
+int sensor_wait_gyro(struct sensor_gyro_sample *sample, k_timeout_t timeout)
 {
-	return wait_sample(&gyro_sample_queue, g, timeout, "Gyroscope");
+	return wait_sample(&gyro_sample_queue, sample, timeout, "Gyroscope");
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
