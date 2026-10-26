@@ -96,15 +96,15 @@ int sensor_calibration_set_sensitivity(const float degrees[3])
 
 	float scales[3];
 	for (int i = 0; i < 3; i++) {
-		if (!isfinite(degrees[i])) {
+		if (!v_finite(&degrees[i], 1)) {
 			return sensor_operation_result(LED_OWNER_SENS, -EINVAL, false);
 		}
 		float denominator = 1.0f - (degrees[i] / (360.0f * CONFIG_SENSOR_SENS_REV));
-		if (!isfinite(denominator) || fabsf(denominator) < 1e-6f) {
+		if (!v_finite(&denominator, 1) || fabsf(denominator) < 1e-6f) {
 			return sensor_operation_result(LED_OWNER_SENS, -EINVAL, false);
 		}
 		scales[i] = 1.0f / denominator;
-		if (!isfinite(scales[i])) {
+		if (!sensor_calibration_sensitivity_valid(scales[i])) {
 			return sensor_operation_result(LED_OWNER_SENS, -EINVAL, false);
 		}
 	}
@@ -187,8 +187,6 @@ extern uint16_t sens_cal_revolutions;
 #define SENS_CAL_START_TIMEOUT_MS 30000 // Give up waiting for the spin to start
 #define SENS_CAL_SPIN_TIMEOUT_MS 60000  // Give up waiting for the spin to finish
 #define SENS_CAL_MIN_FRACTION 0.85f     // Require near-complete expected angle before stopping
-#define SENS_CAL_MIN_SCALE 0.9f         // Reject implausible results (likely wrong turn count)
-#define SENS_CAL_MAX_SCALE 1.1f
 #define SENS_CAL_WARN_OFF_AXIS_RATIO 0.10f
 #define SENS_CAL_MAX_OFF_AXIS_RATIO 0.25f
 
@@ -408,9 +406,9 @@ void sensor_calibrate_sens(void)
 	);
 	LOG_INF("Sensitivity calibration: computed scale %.5f", (double)scale);
 
-	if (!v_finite(&scale, 1)) {
-		LOG_WRN("Sensitivity calibration: computed non-finite scale, not applied");
-		printk("Gyro sensitivity auto-calibration rejected: invalid scale. Nothing saved.\n");
+	if (!sensor_calibration_sensitivity_valid(scale)) {
+		LOG_WRN("Sensitivity calibration: computed invalid scale, not applied");
+		printk("Gyro sensitivity auto-calibration rejected: scale outside 0.9..1.1. Nothing saved.\n");
 		sensitivity_failed(operation_id, feedback, CAL_PHASE_VALIDATE, CAL_REASON_INVALID_MODEL);
 		return;
 	}
@@ -427,31 +425,6 @@ void sensor_calibrate_sens(void)
 			(double)SENS_CAL_MAX_OFF_AXIS_RATIO
 		);
 		sensitivity_failed(operation_id, feedback, CAL_PHASE_VALIDATE, CAL_REASON_QUALITY);
-		return;
-	}
-
-	// Reject implausible results. The firmware cannot distinguish a wrong revolution
-	// count from a genuinely large sensitivity error, so a scale far from 1.0 most
-	// likely means the wrong number of turns was performed.
-	if (scale < SENS_CAL_MIN_SCALE || scale > SENS_CAL_MAX_SCALE) {
-		LOG_WRN(
-			"Sensitivity calibration: scale %.5f out of range [%.2f, %.2f], not applied",
-			(double)scale,
-			(double)SENS_CAL_MIN_SCALE,
-			(double)SENS_CAL_MAX_SCALE
-		);
-		printk(
-			"Gyro sensitivity auto-calibration rejected: measured %.2f deg for %.2f deg, scale %.5f outside "
-			"%.2f..%.2f. Equivalent sens diff over %u rev: %.3f deg. Nothing saved.\n",
-			(double)measured_deg,
-			(double)expected_deg,
-			(double)scale,
-			(double)SENS_CAL_MIN_SCALE,
-			(double)SENS_CAL_MAX_SCALE,
-			(unsigned int)CONFIG_SENSOR_SENS_REV,
-			(double)equivalent_diff_deg
-		);
-		sensitivity_failed(operation_id, feedback, CAL_PHASE_VALIDATE, CAL_REASON_INVALID_MODEL);
 		return;
 	}
 

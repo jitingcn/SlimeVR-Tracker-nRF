@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Exercise raw wire bytes, retained restore and the shared accelerometer solver."""
 import importlib.util
 import os
 from pathlib import Path
@@ -61,6 +62,7 @@ def restore_source():
     header = (SRC / "system/system.h").read_text()
     constants = "\n".join(re.findall(r"^#define (?:[A-Z0-9_]+_ID|MAG_ONLINE_CALIBRATION_[A-Z]+)\s+[^\n]+", header, re.MULTILINE))
     parts = [constants, function(system, "sys_retained_init"),
+             function(calibration, "sensor_calibration_sensitivity_valid"),
              function(calibration, "sensor_calibration_read")]
     parts.extend(function(sensor, name) for name in (
         "sensor_scan_read", "sensor_scan_write", "sensor_scan_clear",

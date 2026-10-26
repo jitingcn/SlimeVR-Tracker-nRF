@@ -46,6 +46,9 @@ static void sys_read(uint16_t id, void *data, size_t size);
 static void sensor_calibration_imu_load(void)
 {
     imu_loads++;
+    assert(retained->gyroSensScale[0] == 1.0f);
+    assert(retained->gyroSensScale[1] == 1.02f);
+    assert(retained->gyroSensScale[2] == 1.0f);
 }
 void magneto_online_replace_BAinv_and_reset(const float matrix[4][3], uint16_t operation, struct led_token feedback)
 {
@@ -124,7 +127,9 @@ static void restore_case(bool warm, bool invalid)
     storage.onlineMagState.reserved[0] = 0x31;
     storage.onlineMagState.reserved[1] = 0x42;
     storage.onlineMagState.reserved[2] = 0x53;
-    storage.gyroSensScale[0] = storage.gyroSensScale[1] = storage.gyroSensScale[2] = 1.0f;
+    storage.gyroSensScale[0] = 0;
+    storage.gyroSensScale[1] = 1.02f;
+    storage.gyroSensScale[2] = 2;
     storage.imu_addr = 0x68;
     storage.imu_reg = 0x75;
     storage.sensor_data[7] = 0xab;
@@ -154,7 +159,7 @@ static void restore_case(bool warm, bool invalid)
     magnetic_equal(&expected);
 #endif
     sensor_calibration_read();
-    assert(imu_loads == 1);
+    assert(imu_loads == 1 && retained->gyroSensScale[0] == 1 && retained->gyroSensScale[1] == 1.02f && retained->gyroSensScale[2] == 1);
     assert(sensor_data[7] == 0xab);
     sensor_scan_read();
     assert(sensor_imu_dev.addr == (warm ? 0x68 : 0));

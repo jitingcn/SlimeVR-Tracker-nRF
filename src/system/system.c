@@ -519,13 +519,8 @@ static int sys_retained_init(void)
 		sys_read(BATT_STATS_CURVE_ID, &retained->battery_pptt_curve, sizeof(retained->battery_pptt_curve));
 		sys_migrate_battery_curve();
 		sys_read(MAIN_GYRO_SENS_ID, &retained->gyroSensScale, sizeof(retained->gyroSensScale));
-		// If gyroSensScale was never set in NVS (all zeros), restore default values
-		if (retained->gyroSensScale[0] == 0.0f && retained->gyroSensScale[1] == 0.0f
-			&& retained->gyroSensScale[2] == 0.0f) {
-			retained->gyroSensScale[0] = 1.0f;
-			retained->gyroSensScale[1] = 1.0f;
-			retained->gyroSensScale[2] = 1.0f;
-		}
+		/* sensor_calibration_read() validates each loaded/retained gain through
+		 * the same admission contract as manual and automatic calibration. */
 #if CONFIG_SENSOR_USE_TCAL
 		sys_read(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, sizeof(retained->gyroTemp));
 		sys_read(MAIN_GYRO_TCAL_POINTS_ID, &retained->tempCalPoints, sizeof(retained->tempCalPoints));

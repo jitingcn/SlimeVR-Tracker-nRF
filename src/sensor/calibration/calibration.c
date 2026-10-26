@@ -405,12 +405,15 @@ uint8_t *sensor_calibration_get_sensor_data()
 	return sensor_data;
 }
 
+bool sensor_calibration_sensitivity_valid(float scale)
+{
+	return v_finite(&scale, 1) && scale >= 0.9f && scale <= 1.1f;
+}
+
 void sensor_calibration_read(void)
 {
-	/* Heal NaN/±inf persisted by older builds: validation used v_epsilon(),
-	 * whose CMSIS path treated NaN as in-range, so invalid calibrations could
-	 * be stored with a valid CRC. Clean retained first so the copies below
-	 * and the online-mag install stay finite. */
+	/* Heal invalid coefficients persisted by older builds before any copies
+	 * or fusion use. Sensitivity axes are independent: preserve valid gains. */
 	bool healed = false;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (!v_finite(retained->magBias, 3)) {
@@ -426,14 +429,14 @@ void sensor_calibration_read(void)
 		healed = true;
 	}
 #endif
-	if (!v_finite(retained->gyroSensScale, 3)) {
-		retained->gyroSensScale[0] = 1.0f;
-		retained->gyroSensScale[1] = 1.0f;
-		retained->gyroSensScale[2] = 1.0f;
-		healed = true;
+	for (int axis = 0; axis < 3; axis++) {
+		if (!sensor_calibration_sensitivity_valid(retained->gyroSensScale[axis])) {
+			retained->gyroSensScale[axis] = 1.0f;
+			healed = true;
+		}
 	}
 	if (healed) {
-		LOG_WRN("Calibration: cleared non-finite values persisted by an older build");
+		LOG_WRN("Calibration: cleared invalid values persisted by an older build");
 		retained_update();
 	}
 	memcpy(sensor_data, retained->sensor_data, sizeof(sensor_data));

@@ -35,6 +35,7 @@ FIXTURE = r'''
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <float.h>
 #include "sensor/calibration/cal_sample.h"
 #define LOG_WRN(...) ((void)0)
 #define printk(...) ((void)printf(__VA_ARGS__))
@@ -47,7 +48,10 @@ static int sensitivity_lock;
 static uint32_t sensitivity_generation;
 static uint16_t sensitivity_operation;
 static struct led_token sensitivity_feedback;
-static struct { float gyroSensScale[3]; } data;
+static struct {
+    float gyroSensScale[3], magBias[3], magBAinv[4][3];
+    uint8_t sensor_data[1], mag_online_calibration_mode;
+} data;
 static typeof(data) *retained = &data;
 static unsigned writes, retained_updates, successes, cancellations, failures;
 static uint8_t phase, cancel_reason;
@@ -63,6 +67,25 @@ static unsigned replay_index, replay_count, delivery_batch = 1;
 static struct sensor_gyro_sample replay[128];
 static uint32_t sample_timestamp_us[128];
 static uint32_t delivered_hash;
+static unsigned imu_loads;
+static uint8_t sensor_data[1];
+static float magBias[3];
+#define MAG_ONLINE_CALIBRATION_DISABLED 2
+#define MAG_ONLINE_CALIBRATION_DEFAULT 0
+static void sensor_calibration_imu_load(void) {
+    for (int i=0; i<3; i++) assert(sensor_calibration_sensitivity_valid(retained->gyroSensScale[i]));
+    imu_loads++;
+}
+static void magneto_online_replace_BAinv_and_reset(float matrix[4][3], int owner, struct led_token token) {
+    (void)matrix; (void)owner; (void)token;
+}
+static void magneto_online_runtime_configure(bool enabled) { (void)enabled; }
+bool sensor_calibration_get_online_mag_enabled(void) { return false; }
+static void magneto_online_snapshot_BAinv(float matrix[4][3]) { memset(matrix,0,12*sizeof(float)); }
+static bool mag_bainv_structurally_ok(float matrix[4][3],float tolerance) { (void)matrix; (void)tolerance; return false; }
+static void magneto_online_runtime_load_retained(void) {}
+static int cal_online_mag_update_count(void) { return 0; }
+static unsigned cal_online_mag_norm_count(void) { return 0; }
 int sensor_calibration_set_sensitivity(const float values[3]);
 int sensor_calibration_reset_sensitivity(void);
 static void retained_update(void) { retained_updates++; }
@@ -153,6 +176,7 @@ static void run_worker(int mode,bool finish_in_write) {
     warm_begin=warm_end=0;
     unsigned previous_writes=writes, previous_success=successes;
     unsigned previous_cancel=cancellations, previous_updates=retained_updates;
+    uint32_t previous_generation=sensitivity_generation;
     assert(sensor_request_calibration_sens(0,1)==0);
     uint16_t operation=sensor_calibration_current_operation();
     sensor_calibrate_sens();
@@ -166,6 +190,8 @@ static void run_worker(int mode,bool finish_in_write) {
         assert(successes==previous_success+1 && retained_updates==previous_updates+1);
         assert(fabsf(retained->gyroSensScale[0]-1.0f)<1e-6f);
     }
+    assert(sensitivity_generation==previous_generation+
+        (mode ? 1U : 0U));
     assert(requested_calibration==(finish_in_write ? 0 : CAL_REQUEST_GYRO_SENS));
     /* The guarded final write runs inside a warm transaction. */
     assert(warm_begin >= 1 && warm_end >= 1);
@@ -183,9 +209,11 @@ static void run_worker(int mode,bool finish_in_write) {
 static void rejected_replacement(void) {
     float previous[3]; memcpy(previous,data.gyroSensScale,sizeof(previous));
     unsigned previous_writes=writes;
+    uint32_t previous_generation=sensitivity_generation;
     assert(sensor_calibration_set_sensitivity(degrees)==-EBUSY);
     assert(sensor_calibration_reset_sensitivity()==-EBUSY);
     assert(writes==previous_writes && !memcmp(previous,data.gyroSensScale,sizeof(previous)));
+    assert(sensitivity_generation==previous_generation);
 }
 static void stale_epoch_does_not_overwrite_scales(void) {
     now_ms=0; phase=0; spin_samples=0; replacement=0; gyro_sequence=0;
@@ -194,6 +222,7 @@ static void stale_epoch_does_not_overwrite_scales(void) {
     float before[3]; memcpy(before,data.gyroSensScale,sizeof(before));
     unsigned previous_writes=writes, previous_updates=retained_updates;
     unsigned previous_success=successes, previous_cancel=cancellations;
+    uint32_t previous_generation=sensitivity_generation;
     memset(led_results,0,sizeof(led_results));
     warm_begin=warm_end=0;
     assert(sensor_request_calibration_sens(0,1)==0);
@@ -205,7 +234,54 @@ static void stale_epoch_does_not_overwrite_scales(void) {
     assert(successes==previous_success && cancellations==previous_cancel+1);
     assert(cancelled_operation==operation && cancel_reason==CAL_REASON_RESET);
     assert(led_results[LED_SUCCESS]==0 && warm_begin==warm_end);
+    assert(sensitivity_generation==previous_generation);
     assert(sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER)==0);
+}
+static void manual_rejects_invalid_without_mutation(void) {
+    const float bad[] = {
+        3600.0f, 1799.819946f, -1e30f, 1800.0f, NAN, INFINITY, -INFINITY,
+        -360.0f, 360.0f,
+    };
+    float before[3]; memcpy(before,data.gyroSensScale,sizeof(before));
+    unsigned prior_writes=writes, prior_begin=warm_begin, prior_end=warm_end;
+    uint32_t prior_generation=sensitivity_generation;
+    assert(sensor_calibration_set_sensitivity(NULL)==-EINVAL);
+    for (unsigned axis=0;axis<3;axis++) {
+        for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) {
+            float values[3]={0};
+            values[axis]=bad[i];
+            assert(sensor_calibration_set_sensitivity(values)==-EINVAL);
+            assert(!memcmp(before,data.gyroSensScale,sizeof(before)));
+            assert(writes==prior_writes && warm_begin==prior_begin && warm_end==prior_end);
+            assert(sensitivity_generation==prior_generation);
+        }
+    }
+    assert(sensor_calibration_sensitivity_valid(0.9f));
+    assert(sensor_calibration_sensitivity_valid(1.1f));
+    assert(!sensor_calibration_sensitivity_valid(nextafterf(0.9f,0.0f)));
+    assert(!sensor_calibration_sensitivity_valid(nextafterf(1.1f,2.0f)));
+}
+static void loaded_invalid_axes_are_healed_before_use(void) {
+    const float bad[]={0.0f,-1.0f,0.89f,1.11f,9998.34f,1.8e-27f,FLT_MAX,NAN,INFINITY,-INFINITY};
+    unsigned prior_writes=writes;
+    for (unsigned axis=0;axis<3;axis++) {
+        for (unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++) {
+            float expected[3]={0.9f,1.03f,1.1f};
+            memcpy(data.gyroSensScale,expected,sizeof(expected));
+            data.gyroSensScale[axis]=bad[i];
+            expected[axis]=1.0f;
+            unsigned prior_updates=retained_updates, prior_loads=imu_loads;
+            sensor_calibration_read();
+            assert(!memcmp(expected,data.gyroSensScale,sizeof(expected)));
+            assert(retained_updates==prior_updates+1 && imu_loads==prior_loads+1);
+            assert(writes==prior_writes); /* Healing is retained-load policy, not an NVS rewrite. */
+            sensor_calibration_read();
+            assert(retained_updates==prior_updates+1 && imu_loads==prior_loads+2);
+        }
+    }
+    memset(data.gyroSensScale,0,sizeof(data.gyroSensScale));
+    sensor_calibration_read();
+    for (int i=0;i<3;i++) assert(data.gyroSensScale[i]==1.0f);
 }
 static void append_physical_sample(float rate) {
     unsigned i=replay_count++;
@@ -232,6 +308,7 @@ static float run_physical_stream(unsigned batch, bool accepted_fit) {
     replay_mode=true; replay_index=0; delivery_batch=batch;
     now_ms=0; phase=0; replacement=0; spin_samples=0; delivered_hash=2166136261U;
     unsigned prior_writes=writes, prior_success=successes, prior_failure=failures;
+    uint32_t prior_generation=sensitivity_generation;
     float before[3]; memcpy(before,data.gyroSensScale,sizeof(before));
     assert(sensor_request_calibration_sens(0,1)==0);
     sensor_calibrate_sens();
@@ -242,6 +319,8 @@ static float run_physical_stream(unsigned batch, bool accepted_fit) {
         assert(writes==prior_writes && successes==prior_success && failures==prior_failure+1);
         assert(!memcmp(before,data.gyroSensScale,sizeof(before)));
     }
+    assert(sensitivity_generation==prior_generation+
+        0U);
     assert(sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER)==0);
     replay_mode=false;
     return data.gyroSensScale[0];
@@ -282,6 +361,8 @@ int main(void) {
     run_worker(1,false); run_worker(2,false);
     run_worker(1,true); run_worker(2,true);
     stale_epoch_does_not_overwrite_scales();
+    manual_rejects_invalid_without_mutation();
+    loaded_invalid_axes_are_healed_before_use();
     batching_trigger_and_stop_dwell_invariants();
     missing_intervals_reject_the_measurement();
     sensor_tcal_heated_lock();
@@ -328,12 +409,15 @@ def main():
     constants = "\n".join(re.findall(r"^#define SENS_CAL_.*$", sensitivity, re.M))
     stream_struct = requests.extract_block(sensitivity, r"^struct sensitivity_stream\s*\{") + ";\n"
     finite = requests.function("v_finite", (ROOT / "src/util.c").read_text())
+    load_bodies = "\n".join(requests.function(name, calibration) for name in (
+        "sensor_calibration_sensitivity_valid", "sensor_calibration_read",
+    ))
     sens_bodies = "\n".join(requests.function(name, sensitivity) for name in (
         "sensitivity_replace_locked", "sensitivity_step", "sensitivity_failed",
         "sensor_calibration_set_sensitivity", "sensor_calibration_reset_sensitivity",
         "sensitivity_wait_sample", "sensor_calibrate_sens",
     ))
-    source = prelude + bodies + FIXTURE + constants + "\n" + stream_struct + finite + sens_bodies + TEST
+    source = prelude + bodies + FIXTURE + constants + "\n" + stream_struct + finite + load_bodies + sens_bodies + TEST
     with tempfile.TemporaryDirectory(prefix="sensitivity-maintenance-") as directory:
         path = Path(directory)
         (path / "test.c").write_text(source)

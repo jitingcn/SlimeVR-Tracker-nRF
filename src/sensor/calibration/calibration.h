@@ -101,6 +101,8 @@ void sensor_calibration_online_mag_cancel_pending(void);
 
 int sensor_calibration_set_sensitivity(const float degrees[3]);
 int sensor_calibration_reset_sensitivity(void);
+/* Shared manual/automatic/load admission: finite gain in inclusive [0.9, 1.1]. */
+bool sensor_calibration_sensitivity_valid(float scale);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_calibration_validate_mag(float m_inv[][3], bool write);
 #endif
