@@ -43,7 +43,6 @@ void sensor_scan_read(void);
 void sensor_scan_write(void);
 void sensor_scan_clear(void);
 
-void sensor_retained_read(void);
 void sensor_retained_write(void);
 void sensor_record_wom_sleep(void);
 

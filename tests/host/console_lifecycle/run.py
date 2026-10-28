@@ -20,17 +20,18 @@ source = (subprocess.check_output(["rtk", "proxy", "git", "show", f"{baseline}:s
 
 
 def function(name, text=source):
-    return extract_block(text, rf"^(?:static )?(?:(?:void|bool|int|size_t) |const struct console_cmd \*){re.escape(name)}\([^;{{]*\)\s*\{{")
+    return extract_block(text, rf"^(?:static )?(?:(?:void|bool|int|size_t|uint64_t) |const struct console_cmd \*){re.escape(name)}\([^;{{]*\)\s*\{{")
 
 
 parts = ["static void console_thread(void);", "static bool console_feedback_enabled;",
          source[source.index("#define CONSOLE_RESET_CONFIRM_MS"):source.index("\n#if USB_EXISTS || UART_CONSOLE_EXISTS", source.index("#define CONSOLE_RESET_CONFIRM_MS"))],
          source[source.index("static const struct device *const console_uart_dev"):source.index("\n#endif\n\n#if !USB_EXISTS")]]
 parts += [function(name, (SRC / "parse_args.c").read_text()) for name in
-          ("parse_args", "parse_long_bounded", "parse_float_triplet")]
+          ("parse_args", "parse_u64", "parse_long_bounded", "parse_float_triplet")]
 parts += [function(name) for name in ("console_reject", "console_require_args",
           "console_reset_cancel", "console_reset_confirm", "cmd_sens_set",
-          "console_cmd_sens", "console_cmd_reset", "console_cmd_channel", "print_connection")]
+          "console_cmd_sens", "console_cmd_reset", "console_cmd_channel",
+          "console_cmd_radio", "console_cmd_set", "print_connection")]
 parts.append(function("console_cmd_unavailable"))
 parts.append("#if CONFIG_SENSOR_USE_MAGNETOMETER\n" +
              function("print_mag_calibration_status") + "\n" +
@@ -44,7 +45,7 @@ table = source[table_start:source.index("\n};", table_start) + 3]
 for handler in sorted(set(re.findall(r'\{"[^"]+", (console_cmd_\w+)(?:, \w+)?\}', table))):
     if handler not in ("console_cmd_calibrate", "console_cmd_calibrate_acc_alias",
                        "console_cmd_sens", "console_cmd_reset", "console_cmd_channel",
-                       "console_cmd_mag", "console_cmd_unavailable"):
+                       "console_cmd_radio", "console_cmd_set", "console_cmd_mag", "console_cmd_unavailable"):
         parts.append(f"#define {handler} handle_command")
 parts.append(table)
 parts += [function(name) for name in ("console_find_command", "console_command_mutates")]
@@ -92,5 +93,15 @@ with tempfile.TemporaryDirectory(prefix="tracker-console-lifecycle-") as directo
         "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
         "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(SRC),
         str(HERE / "test_rtt_reset.c"), "-o", str(binary),
+    ], check=True)
+    subprocess.run([str(binary)], check=True)
+    (temporary / "production_tcal.inc").write_text(
+        function("parse_args", (SRC / "parse_args.c").read_text()) + "\n" + function("console_cmd_tcal")
+    )
+    binary = temporary / "console-tcal"
+    subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+        "-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1",
+        "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
+        "-I", str(temporary), str(HERE / "test_tcal.c"), "-lm", "-o", str(binary),
     ], check=True)
     subprocess.run([str(binary)], check=True)

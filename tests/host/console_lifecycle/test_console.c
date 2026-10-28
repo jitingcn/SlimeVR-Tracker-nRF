@@ -26,11 +26,34 @@ static void test_printk(const char *format, ...)
     vsnprintf(printed + used, sizeof(printed) - used, format, args);
     va_end(args);
 }
+static int test_snprintk(char *buffer, size_t size, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(buffer, size, format, args);
+    va_end(args);
+    return written;
+}
+#define snprintk test_snprintk
 static int64_t now_ms;
 static int64_t k_uptime_get(void) { return now_ms; }
 static unsigned clear_calls, sensitivity_writes, channel_writes;
 static float saved_sensitivity[3];
 static int saved_channel;
+static unsigned radio_writes, pairing_writes;
+static bool radio_enabled;
+static uint64_t pairing_address;
+static int esb_user_set_enabled(bool enabled)
+{
+    radio_writes++;
+    radio_enabled = enabled;
+    return 0;
+}
+static void esb_set_pair(uint64_t address)
+{
+    pairing_writes++;
+    pairing_address = address;
+}
 static int sys_clear(void) { clear_calls++; return 0; }
 static int sensor_calibration_set_sensitivity(const float values[3])
 {
@@ -476,6 +499,17 @@ int main(void)
         smoke_console_command(magnetic_commands[i], prior_rejects);
     }
     assert(rejects == magnetic_rejects + (CONFIG_SENSOR_USE_MAGNETOMETER ? 0U : 7U));
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+    const char *bad_mag[] = {"mag auto\n", "mag auto maybe\n", "mag online on extra\n",
+                             "mag debug\n", "mag debug maybe\n"};
+    for (size_t i = 0; i < ARRAY_SIZE(bad_mag); i++) {
+        unsigned prior_rejects = rejects;
+        receive(bad_mag[i]); run_worker();
+        assert(rejects == prior_rejects + 1 && online_writes == 2 && !online_debug);
+    }
+    receive("mag debug on\n"); run_worker(); assert(online_debug);
+    receive("mag debug off\n"); run_worker(); assert(!online_debug);
+#endif
 
     /* Production reset handler/worker, real DTR-close and hard-reset entrypoints. */
     receive("reset all\n"); run_worker();
@@ -584,6 +618,15 @@ int main(void)
     assert(channel_writes == 0);
     receive("channel 0\nchannel 100\n"); run_worker();
     assert(channel_writes == 2 && saved_channel == 100);
+    unsigned bad_command_rejects = rejects;
+    receive("radio\nradio off extra\nradio maybe\n"); run_worker();
+    receive("channel\nreset\nset\n"); run_worker();
+    assert(rejects == bad_command_rejects + 6 && radio_writes == 0 && pairing_writes == 0);
+    receive("radio off\n"); run_worker(); assert(radio_writes == 1 && !radio_enabled);
+    receive("radio on\n"); run_worker(); assert(radio_writes == 2 && radio_enabled);
+    receive("set 0011223344556677\n"); run_worker();
+    assert(pairing_writes == 1 && pairing_address == UINT64_C(0x0011223344556677));
+    receive("set bad\n"); run_worker(); assert(pairing_writes == 1);
     float unchanged[3] = {4, 5, 6};
     assert(!parse_float_triplet("1,2,", unchanged));
     assert(unchanged[0] == 4 && unchanged[1] == 5 && unchanged[2] == 6);

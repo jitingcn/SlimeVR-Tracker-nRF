@@ -1483,7 +1483,7 @@ void sensor_scan_clear(void) // TODO: move some of this to sys?
 	retained_update();
 }
 
-void sensor_retained_read(void) // TODO: move some of this to sys? or move to calibration?
+static void sensor_log_retained_state(void)
 {
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 	LOG_INF("Accelerometer matrix:");
@@ -2319,7 +2319,7 @@ int sensor_init(void)
 #endif
 
 	// Setup fusion
-	sensor_retained_read(); // TODO: useless
+	sensor_log_retained_state();
 #if CONFIG_SENSOR_USE_VQF
 	if (fusion_id == FUSION_VQF) {
 		vqf_update_sensor_ids(sensor_imu_id);

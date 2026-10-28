@@ -1901,11 +1901,7 @@ static void console_cmd_tcal(size_t argc, char **argv)
 	} else {
 		char *subcmd = arg;
 
-		if (subcmd == NULL) {
-			// Handling case where arg might contain only spaces
-			printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
-			console_reject();
-		} else if (strcmp(subcmd, "on") == 0) {
+		if (strcmp(subcmd, "on") == 0) {
 			sensor_tcal_set_enabled(true);
 			if (sensor_tcal_get_enabled()) {
 				printk("T-Cal compensation enabled\n");
@@ -1927,10 +1923,7 @@ static void console_cmd_tcal(size_t argc, char **argv)
 			cmd_reset_tcal();
 		} else if (strcmp(subcmd, "auto") == 0) {
 			char *auto_arg = arg2;
-			if (auto_arg == NULL) {
-				printk("Error: Missing argument. Use: tcal auto <on|off>\n");
-				console_reject();
-			} else if (strcmp(auto_arg, "on") == 0) {
+			if (strcmp(auto_arg, "on") == 0) {
 				sensor_tcal_set_auto_calibration(true);
 				if (sensor_tcal_get_auto_calibration()) {
 					printk("T-Cal auto-calibration enabled. Device will auto-calibrate when resting.\n");
@@ -1981,32 +1974,26 @@ static void console_cmd_tcal(size_t argc, char **argv)
 			printk("End of dump. Total points printed: %u\n", points_printed);
 		} else if (strcmp(subcmd, "remove") == 0) {
 			char *idx_str = arg2;
+			char *endptr = NULL;
+			errno = 0;
+			long index = strtol(idx_str, &endptr, 10);
 
-			if (idx_str == NULL) {
-				printk("Error: Missing index. Use: tcal remove <index>\n");
+			// Check if conversion was successful
+			if (endptr == NULL || endptr == idx_str || errno == ERANGE || index < INT_MIN || index > INT_MAX) {
+				printk("Error: Invalid index '%s'. Please provide a number.\n", idx_str);
 				console_reject();
 			} else {
-				char *endptr = NULL;
-				errno = 0;
-				long index = strtol(idx_str, &endptr, 10);
+				// Skip trailing whitespace
+				while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+					endptr++;
+				}
 
-				// Check if conversion was successful
-				if (endptr == NULL || endptr == idx_str || errno == ERANGE || index < INT_MIN || index > INT_MAX) {
-					printk("Error: Invalid index '%s'. Please provide a number.\n", idx_str);
+				// Check for trailing non-whitespace characters
+				if (*endptr != '\0') {
+					printk("Error: Invalid characters after index '%s'.\n", idx_str);
 					console_reject();
 				} else {
-					// Skip trailing whitespace
-					while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
-						endptr++;
-					}
-
-					// Check for trailing non-whitespace characters
-					if (*endptr != '\0') {
-						printk("Error: Invalid characters after index '%s'.\n", idx_str);
-						console_reject();
-					} else {
-						sensor_tcal_remove_point((int)index);
-					}
+					sensor_tcal_remove_point((int)index);
 				}
 			}
 		} else if (strcmp(subcmd, "test") == 0) {
@@ -2103,7 +2090,6 @@ static void console_cmd_mag(size_t argc, char **argv)
 {
 	char *arg = argc > 1 ? argv[1] : NULL;
 	char *arg2 = argc > 2 ? argv[2] : NULL;
-	char *arg3 = argc > 3 ? argv[3] : NULL;
 	if (arg != NULL) {
 		size_t expected = (strcmp(arg, "auto") == 0 || strcmp(arg, "online") == 0 ||
 			strcmp(arg, "debug") == 0) ? 3 : 2;
@@ -2129,9 +2115,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 		print_mag_calibration_status();
 	} else {
 		char *subcmd = arg;
-		if (subcmd == NULL) {
-			printk("Usage: mag [on|off|clear|cal|auto <on|off>|debug <on|off>]\n");
-		} else if (strcmp(subcmd, "on") == 0) {
+		if (strcmp(subcmd, "on") == 0) {
 			printk("Enabling magnetometer\n");
 			sensor_set_mag_enabled(true);
 		} else if (strcmp(subcmd, "off") == 0) {
@@ -2139,12 +2123,8 @@ static void console_cmd_mag(size_t argc, char **argv)
 			sensor_set_mag_enabled(false);
 		} else if (strcmp(subcmd, "auto") == 0 || strcmp(subcmd, "online") == 0) {
 			char *state = arg2;
-			char *extra = arg3;
 
-			if (state == NULL || extra != NULL) {
-				printk("Usage: mag %s <on|off>\n", subcmd);
-				console_reject();
-			} else if (strcmp(state, "on") == 0) {
+			if (strcmp(state, "on") == 0) {
 				sensor_calibration_set_online_mag_enabled(true);
 				printk("Online magnetometer calibration enabled\n");
 			} else if (strcmp(state, "off") == 0) {
@@ -2155,7 +2135,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 				console_reject();
 			}
 		} else if (strcmp(subcmd, "debug") == 0) {
-			if (argc != 3 || (strcmp(arg2, "on") != 0 && strcmp(arg2, "off") != 0)) {
+			if (strcmp(arg2, "on") != 0 && strcmp(arg2, "off") != 0) {
 				printk("Usage: mag debug <on|off>\n");
 				console_reject();
 			} else {
@@ -2189,13 +2169,12 @@ static void console_cmd_mag(size_t argc, char **argv)
 
 static void console_cmd_set(size_t argc, char **argv)
 {
-	char *arg = argc > 1 ? argv[1] : NULL;
-
 	if (argc != 2) {
 		printk("Invalid number of arguments\n");
 		console_reject();
 		return;
 	}
+	char *arg = argv[1];
 	uint64_t addr = parse_u64(arg, 16);
 	char buf[17];
 	snprintk(buf, 17, "%016llx", addr);
@@ -2292,28 +2271,20 @@ static void console_cmd_wom(size_t argc, char **argv)
 
 static void console_cmd_channel(size_t argc, char **argv)
 {
-	char *arg = argc > 1 ? argv[1] : NULL;
 	if (!console_require_args(argc, 2, 2)) {
 		return;
 	}
-
-	if (!arg) {
-		printk("Usage: channel <0-100>\n");
-		printk("Example: channel 25 - Set RF channel to 25\n");
+	long channel;
+	if (!parse_long_bounded(argv[1], 0, 100, &channel)) {
+		printk("Invalid channel. Must be a number between 0 and 100.\n");
 		console_reject();
 	} else {
-		long channel;
-		if (!parse_long_bounded(arg, 0, 100, &channel)) {
-			printk("Invalid channel. Must be a number between 0 and 100.\n");
-			console_reject();
+		int err = channel_control_set((int)channel);
+		if (err) {
+			printk("Error: Channel update failed: %d (RAM/radio may already be updated).\n", err);
 		} else {
-			int err = channel_control_set((int)channel);
-			if (err) {
-				printk("Error: Channel update failed: %d (RAM/radio may already be updated).\n", err);
-			} else {
-				printk("RF channel saved to NVS: %d\n", (int)channel);
-				printk("ESB reinitialized with channel %d\n", (int)channel);
-			}
+			printk("RF channel saved to NVS: %d\n", (int)channel);
+			printk("ESB reinitialized with channel %d\n", (int)channel);
 		}
 	}
 }
@@ -2338,14 +2309,7 @@ static void console_cmd_radio(size_t argc, char **argv)
 	if (!console_require_args(argc, 2, 2)) {
 		return;
 	}
-	char *arg = argc > 1 ? argv[1] : NULL;
-
-	if (!arg) {
-		printk("Usage: radio <on|off>\n");
-		printk("Example: radio off - stop ESB radio for IMU noise A/B test\n");
-		console_reject();
-		return;
-	}
+	char *arg = argv[1];
 
 	if (strcmp(arg, "off") == 0) {
 		int err = esb_user_set_enabled(false);
@@ -2503,18 +2467,18 @@ static void console_cmd_reset(size_t argc, char **argv)
 	if (!console_require_args(argc, 2, 2)) {
 		return;
 	}
-	char *arg = argc > 1 ? argv[1] : NULL;
+	char *arg = argv[1];
 
-	if (arg && strcmp(arg, "zro") == 0) {
+	if (strcmp(arg, "zro") == 0) {
 		cmd_reset_zro();
 	}
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-	else if (arg && strcmp(arg, "acc") == 0) {
+	else if (strcmp(arg, "acc") == 0) {
 		cmd_reset_acc();
 	}
 #endif
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	else if (arg && strcmp(arg, "mag") == 0) {
+	else if (strcmp(arg, "mag") == 0) {
 		int err = sensor_calibration_clear_mag(NULL, true, true);
 		if (err) {
 			printk("Error: Magnetometer calibration reset rejected (%d)\n", err);
@@ -2522,20 +2486,20 @@ static void console_cmd_reset(size_t argc, char **argv)
 	}
 #endif
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	else if (arg && strcmp(arg, "sens") == 0) {
+	else if (strcmp(arg, "sens") == 0) {
 		cmd_sens_reset();
 	}
 #endif
 #if CONFIG_SENSOR_USE_TCAL
-	else if (arg && strcmp(arg, "tcal") == 0) {
+	else if (strcmp(arg, "tcal") == 0) {
 		cmd_reset_tcal();
 	}
 #endif
-	else if (arg && strcmp(arg, "bat") == 0) {
+	else if (strcmp(arg, "bat") == 0) {
 		cmd_reset_bat();
-	} else if (arg && strcmp(arg, "fusion") == 0) {
+	} else if (strcmp(arg, "fusion") == 0) {
 		cmd_fusion_reset();
-	} else if (arg && strcmp(arg, "all") == 0) {
+	} else if (strcmp(arg, "all") == 0) {
 		if (console_reset_confirm()) {
 			sys_clear();
 		}
