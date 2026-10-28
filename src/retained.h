@@ -12,6 +12,9 @@
 #include <stdint.h>
 
 #if CONFIG_SENSOR_USE_TCAL
+_Static_assert(CONFIG_SENSOR_POLY_TEMP_MAX > CONFIG_SENSOR_POLY_TEMP_MIN,
+	       "Temperature calibration maximum must exceed minimum");
+
 // A single point in temperature calibration data
 struct TempCalPoint {
 	float temp;    // The temperature for this point

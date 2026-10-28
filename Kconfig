@@ -381,6 +381,7 @@ config SENSOR_RETAINED_SCAN_POWER_UP_DELAY_MS
 config SENSOR_ACCEL_ODR
     int "Accelerometer output data rate (Hz)"
     default 100
+    range 1 2147483647
     help
         Requested accelerometer output data rate. Actual rate will be raised to the nearest supported rate.
         A higher rate will increase the time to read and process sensor data.
@@ -388,6 +389,7 @@ config SENSOR_ACCEL_ODR
 config SENSOR_GYRO_ODR
     int "Gyrometer output data rate (Hz)"
     default 400
+    range 1 2147483647
     help
         Requested gyrometer output data rate. Actual rate will be raised to the nearest supported rate.
         A higher rate will increase the time to read and process sensor data.
@@ -473,6 +475,7 @@ config SENSOR_USE_MAGNETOMETER
 config SENSOR_MAG_ODR
     int "Magnetometer ODR (Hz)"
     default 50
+    range 1 2147483647
     help
         Requested magnetometer output data rate in Hz.
         Fixed at magnetometer init for the session (nearest supported continuous rate).
@@ -649,6 +652,7 @@ config SENSOR_POLY_TEMP_MAX
 config SENSOR_POLY_STEPS_PER_DEGREE
     int "Calibration steps per degree C"
     default 2
+    range 1 2147483647
     help
         Enter the number of calibration points to take per degree Celsius.
         For 0.5 C steps, enter 2.
@@ -679,6 +683,7 @@ config RADIO_TX_POWER
 config RADIO_RF_CHANNEL
     int "Radio RF channel"
     default 2
+    range 0 100
     help
         Radio RF channel (0-100).
         Must match the receiver channel.
