@@ -364,41 +364,111 @@ enum {
 	DSO_SHUB_MAX_READ = 7,
 	DSO_SHUB_SLAVE0_NACK = 0x08,
 };
+static int lsm6dso_restore_main(int err)
+{
+	int restore_err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00);
+	return err ? err : restore_err;
+}
+
+static int lsm6dso_stop_master(void)
+{
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08);
+	k_usleep(350);
+	return err;
+}
+
+static int lsm6dso_stop_and_restore(int err, bool in_hub)
+{
+	if (!in_hub) {
+		int select_err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40);
+		if (select_err) {
+			return lsm6dso_restore_main(err ? err : select_err);
+		}
+	}
+	int stop_err = lsm6dso_stop_master();
+	return lsm6dso_restore_main(err ? err : stop_err);
+}
+
+static int lsm6dso_wait_status(uint8_t reg, uint8_t mask, int timeout_ms, uint8_t *status)
+{
+	int64_t timeout = k_uptime_get() + timeout_ms;
+	*status = 0;
+	while (k_uptime_get() < timeout) {
+		int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, reg, status);
+		if (err) {
+			return err;
+		}
+		if (*status & mask) {
+			return 0;
+		}
+	}
+	return -1;
+}
+
 int lsm6dso_ext_setup(enum sensor_ext_mode mode)
 {
-	if (mode == SENSOR_EXT_MODE_OFF || mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH) {
-		int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40);
-		err |= ssi_reg_write_byte(
-			SENSOR_INTERFACE_DEV_IMU,
-			LSM6DSO_MASTER_CONFIG,
-			mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH ? 0x10 : 0x08
-		);
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00);
-		if (err) {
-			LOG_ERR("Communication error");
-		}
-		return err;
-	}
-
-	if (mode != SENSOR_EXT_MODE_I2CM_PROXY) {
+	if (mode != SENSOR_EXT_MODE_OFF && mode != SENSOR_EXT_MODE_I2C_PASSTHROUGH
+	    && mode != SENSOR_EXT_MODE_I2CM_PROXY) {
 		return -1;
 	}
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00);
-	k_usleep(350);
-	// One-shot sensor-hub transactions need an accel data-ready trigger.
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL1, DSO_ODR_208Hz | DSO_FS_XL_8G);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL6, DSO_OP_MODE_XL_HP);
-	k_msleep(5);
+	if (!err) {
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG,
+			mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH ? 0x10 : 0x08);
+	}
+	err = lsm6dso_restore_main(err);
 	if (err) {
 		LOG_ERR("Communication error");
 		return err;
 	}
+	if (mode != SENSOR_EXT_MODE_I2CM_PROXY) {
+		return 0;
+	}
 
+	k_usleep(350);
+	// One-shot sensor-hub transactions need an accel data-ready trigger.
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL1, DSO_ODR_208Hz | DSO_FS_XL_8G);
+	if (!err) {
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_CTRL6, DSO_OP_MODE_XL_HP);
+	}
+	if (err) {
+		LOG_ERR("Communication error");
+		return err;
+	}
+	k_msleep(5);
 	sensor_interface_ext_configure(&sensor_ext_lsm6dso);
 	return 0;
+}
+
+static int lsm6dso_start_transaction(uint8_t addr, uint8_t sub, uint8_t length, const uint8_t *data)
+{
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40);
+	if (err) {
+		return lsm6dso_restore_main(err);
+	}
+	uint8_t slv0[3] = {(addr << 1) | (data == NULL), sub, length};
+	err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SLV0_ADD, slv0, 3);
+	if (!err && data != NULL) {
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_DATAWRITE_SLV0, *data);
+	}
+	if (err) {
+		return lsm6dso_restore_main(err);
+	}
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x4C);
+	if (err) {
+		return lsm6dso_stop_and_restore(err, true);
+	}
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00);
+	if (err) {
+		return lsm6dso_stop_and_restore(err, false);
+	}
+	uint8_t tmp, status;
+	err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_OUTX_H_A, &tmp);
+	if (!err) {
+		err = lsm6dso_wait_status(LSM6DSO_STATUS_REG, 0x01, LSM6DSO_SHUB_XLDA_TIMEOUT_MS, &status);
+	}
+	return err ? lsm6dso_stop_and_restore(err, false) : 0;
 }
 
 int lsm6dso_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
@@ -407,48 +477,23 @@ int lsm6dso_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes
 		LOG_ERR("Unsupported write");
 		return -1;
 	}
-	// Configure transaction and begin one-shot write.
-	int err
-		= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
-	uint8_t slv0[3] = {(addr << 1) | 0x00, buf[0], 0x00 | 0x00}; // write, SHUB_ODR = 104Hz, reading no bytes
-	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SLV0_ADD, slv0, 3);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_DATAWRITE_SLV0, buf[1]);
-	err |= ssi_reg_write_byte(
-		SENSOR_INTERFACE_DEV_IMU,
-		LSM6DSO_MASTER_CONFIG,
-		0x4C
-	); // WRITE_ONCE, SHUB_PU_EN, enable I2C master
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
-	uint8_t tmp;
-	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_OUTX_H_A, &tmp); // clear current XLDA
-	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + LSM6DSO_SHUB_XLDA_TIMEOUT_MS;
-	while (!(status & 0x01) && k_uptime_get() < timeout) { // wait for new XLDA
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_REG, &status);
+	int err = lsm6dso_start_transaction(addr, buf[0], 0, &buf[1]);
+	if (err) {
+		return err;
 	}
-	err |= ssi_reg_write_byte(
-		SENSOR_INTERFACE_DEV_IMU,
-		LSM6DSO_FUNC_CFG_ACCESS,
-		0x40
-	); // switch to sensor hub registers
-	status = 0;
-	timeout = k_uptime_get() + LSM6DSO_SHUB_OP_TIMEOUT_MS;
-	while (!(status & 0x80) && k_uptime_get() < timeout) { // WR_ONCE_DONE
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER, &status);
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40);
+	if (err) {
+		return lsm6dso_stop_and_restore(err, false);
 	}
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
-	k_usleep(350);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
-	if (status & DSO_SHUB_SLAVE0_NACK) // SLAVE0_NACK
-	{
-		LOG_DBG("Ext I2C write NACK from address 0x%02X", addr);
-		return -1;
-	}
-	if (!(status & 0x80)) {
+	uint8_t status;
+	err = lsm6dso_wait_status(LSM6DSO_STATUS_MASTER, 0x80, LSM6DSO_SHUB_OP_TIMEOUT_MS, &status);
+	if (err == -1) {
 		LOG_ERR("Write timeout");
-		return -1;
+	} else if (!err && (status & DSO_SHUB_SLAVE0_NACK)) {
+		LOG_DBG("Ext I2C write NACK from address 0x%02X", addr);
+		err = -1;
 	}
-	return err;
+	return lsm6dso_stop_and_restore(err, true);
 }
 
 int lsm6dso_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
@@ -458,54 +503,46 @@ int lsm6dso_ext_write_read(const uint8_t addr, const void *write_buf, size_t num
 		return -1;
 	}
 	uint8_t sub_addr = ((const uint8_t *)write_buf)[0];
-
-	// Configure transaction and begin one-shot read.
-	int err
-		= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
-	uint8_t slv0[3] = {(addr << 1) | 0x01, sub_addr, 0x00 | num_read}; // read, SHUB_ODR = 104Hz, reading num_read bytes
-	err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SLV0_ADD, slv0, 3);
-	err |= ssi_reg_write_byte(
-		SENSOR_INTERFACE_DEV_IMU,
-		LSM6DSO_MASTER_CONFIG,
-		0x4C
-	); // WRITE_ONCE, SHUB_PU_EN, enable I2C master
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
-	uint8_t tmp;
-	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_OUTX_H_A, &tmp); // clear current XLDA
-	uint8_t status = 0;
-	int64_t timeout = k_uptime_get() + LSM6DSO_SHUB_XLDA_TIMEOUT_MS;
-	while (!(status & 0x01) && k_uptime_get() < timeout) { // wait for new XLDA
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_REG, &status);
+	int err = lsm6dso_start_transaction(addr, sub_addr, num_read, NULL);
+	if (err) {
+		goto fail;
 	}
-	status = 0;
-	timeout = k_uptime_get() + LSM6DSO_SHUB_OP_TIMEOUT_MS;
-	while (!(status & 0x01) && k_uptime_get() < timeout) { // SENS_HUB_ENDOP
-		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER_MAINPAGE, &status);
-	}
-	err |= ssi_reg_write_byte(
-		SENSOR_INTERFACE_DEV_IMU,
-		LSM6DSO_FUNC_CFG_ACCESS,
-		0x40
-	); // switch to sensor hub registers
-	uint8_t master_status = 0;
-	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER, &master_status);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_MASTER_CONFIG, 0x08); // SHUB_PU_EN, disable I2C master
-	k_usleep(350);
-	if (err || (master_status & DSO_SHUB_SLAVE0_NACK) || !(status & 0x01))
-	{
-		if (err) {
-			LOG_ERR("Communication error");
-		} else if (master_status & DSO_SHUB_SLAVE0_NACK) {
-			LOG_DBG("Ext I2C NACK from address 0x%02X", addr);
-		} else {
+	uint8_t status;
+	err = lsm6dso_wait_status(LSM6DSO_STATUS_MASTER_MAINPAGE, 0x01, LSM6DSO_SHUB_OP_TIMEOUT_MS, &status);
+	if (err) {
+		if (err == -1) {
 			LOG_DBG("Ext I2C read timeout for address 0x%02X", addr);
 		}
-		err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00);
-		memset(read_buf, 0, num_read);
-		return err ? err : -1;
+		err = lsm6dso_stop_and_restore(err, false);
+		goto fail;
 	}
-	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SENSOR_HUB_1, read_buf, num_read);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_FUNC_CFG_ACCESS, 0x40);
+	if (err) {
+		err = lsm6dso_stop_and_restore(err, false);
+		goto fail;
+	}
+	err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_STATUS_MASTER, &status);
+	if (!err && (status & DSO_SHUB_SLAVE0_NACK)) {
+		LOG_DBG("Ext I2C NACK from address 0x%02X", addr);
+		err = -1;
+	}
+	if (err) {
+		err = lsm6dso_stop_and_restore(err, true);
+		goto fail;
+	}
+	err = lsm6dso_stop_master();
+	if (!err) {
+		err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSO_SENSOR_HUB_1, read_buf, num_read);
+	}
+	err = lsm6dso_restore_main(err);
+	if (!err) {
+		return 0;
+	}
+fail:
+	if (err != -1) {
+		LOG_ERR("Communication error");
+	}
+	memset(read_buf, 0, num_read);
 	return err;
 }
 #endif

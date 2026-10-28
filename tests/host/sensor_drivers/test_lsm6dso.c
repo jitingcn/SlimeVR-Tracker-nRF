@@ -13,14 +13,23 @@ struct transaction {
 	bool reading;
 	uint8_t addr, sub, config, data;
 };
+struct bus_call {
+	uint8_t reg;
+	bool bank, reading;
+};
+
+/* Banked SPI model; a failed transfer may already have reached the device. */
 
 static struct {
 	uint8_t main[256], hub[256], external[256], status;
-	bool bank, master, stalled, fail_status_once, settling;
+	bool bank, master, stalled, fail_status_once, settling, no_xlda;
 	uint64_t now;
 	unsigned bus_calls, starts, stops, settle_waits, cleanup_errors;
 	unsigned main_status_reads, banked_status_reads, payload_reads;
 	unsigned unexpected_i2c, protocol_errors, nack_start;
+	unsigned fail_call, fail_second_call;
+	bool fail_applied;
+	struct bus_call calls[256];
 	struct transaction transactions[32];
 } hw;
 static struct spi_dt_spec imu_spi;
@@ -134,7 +143,7 @@ static int read_registers(uint8_t reg, uint8_t *buf, size_t length)
 	} else if (!hw.bank && reg == 0x1e) {
 		if (length != 1)
 			return protocol_error();
-		*buf = 0x01;
+		*buf = hw.no_xlda ? 0 : 0x01;
 	} else {
 		if (hw.bank && reg == 0x02)
 			hw.payload_reads++;
@@ -152,6 +161,12 @@ int spi_transceive_dt(const struct spi_dt_spec *spec,
 		tx->buffers[0].buf == NULL || tx->buffers[0].len == 0)
 		return protocol_error();
 	uint8_t command = ((const uint8_t *)tx->buffers[0].buf)[0];
+	bool reading = rx != NULL;
+	if (hw.bus_calls <= ARRAY_SIZE(hw.calls))
+		hw.calls[hw.bus_calls - 1] = (struct bus_call){command & 0x7f, hw.bank, reading};
+	bool fail = hw.bus_calls == hw.fail_call || hw.bus_calls == hw.fail_second_call;
+	if (fail && (reading || !hw.fail_applied))
+		return -EIO;
 	if (rx != NULL) {
 		if (tx->count != 1 || tx->buffers[0].len != 1 || !(command & 0x80) ||
 			rx->count != 2 || rx->buffers[0].len != 1 || rx->buffers[1].buf == NULL)
@@ -172,7 +187,8 @@ int spi_transceive_dt(const struct spi_dt_spec *spec,
 	}
 	if (length < 2)
 		return protocol_error();
-	return write_registers(bytes[0], bytes + 1, length - 1);
+	int err = write_registers(bytes[0], bytes + 1, length - 1);
+	return fail ? -EIO : err;
 }
 
 int i2c_write_dt(const struct i2c_dt_spec *spec, const uint8_t *buf, size_t length)
@@ -294,7 +310,7 @@ static bool test_read_failure(unsigned fault)
 	CHECK(direct_read(out, sizeof(out)) == (fault == 1 ? -EIO : -1));
 	const uint8_t empty[7] = {0};
 	CHECK(memcmp(out, empty, sizeof(out)) == 0 && hw.payload_reads == 0);
-	CHECK(hw.main_status_reads != 0 && hw.banked_status_reads == 1);
+	CHECK(hw.main_status_reads != 0 && hw.banked_status_reads == (fault == 2 ? 0U : 1U));
 	CHECK(!hw.fail_status_once && hw.starts == 1);
 	return clean_transaction();
 }
@@ -391,6 +407,101 @@ static bool test_qmc_failed_sample(unsigned status_io_error)
 	return clean_transaction();
 }
 
+static bool test_setup_page_failures(unsigned mode)
+{
+	const uint8_t sentinel[] = {0x91, 0x82, 0x73, 0x64};
+	for (unsigned failure = 1; failure <= 3; failure++) {
+		for (unsigned applied = 0; applied < 2; applied++) {
+			CHECK(reset_model());
+			memcpy(hw.main + LSM6DSO_CTRL5, sentinel, sizeof(sentinel));
+			hw.main[LSM6DSO_CTRL1] = 0xa7;
+			sensor_interface_ext_configure(NULL);
+			hw.fail_call = hw.bus_calls + failure;
+			hw.fail_applied = applied;
+			CHECK(lsm6dso_ext_setup((enum sensor_ext_mode)mode) == -EIO);
+			CHECK(memcmp(hw.main + LSM6DSO_CTRL5, sentinel, sizeof(sentinel)) == 0);
+			CHECK(hw.main[LSM6DSO_CTRL1] == 0xa7);
+			CHECK(sensor_interface_ext_get() == NULL);
+		}
+	}
+	return true;
+}
+
+static bool test_transaction_page_failures(unsigned writing)
+{
+	const uint8_t sentinel[] = {0x91, 0x82, 0x73, 0x64};
+	const uint8_t command[] = {0x50, 0x73};
+	uint8_t out[7];
+	CHECK(reset_model());
+	unsigned first = hw.bus_calls;
+	CHECK((writing ? ssi_write(SENSOR_INTERFACE_DEV_MAG, command, sizeof(command))
+		       : direct_read(out, sizeof(out))) == 0);
+	unsigned count = hw.bus_calls - first;
+	CHECK(count > 5 && first + count <= ARRAY_SIZE(hw.calls));
+	struct bus_call calls[32];
+	CHECK(count <= ARRAY_SIZE(calls));
+	memcpy(calls, hw.calls + first, count * sizeof(calls[0]));
+
+	for (unsigned failure = 1; failure <= count; failure++) {
+		for (unsigned applied = 0; applied < 2; applied++) {
+			CHECK(reset_model());
+			memcpy(hw.main + LSM6DSO_CTRL5, sentinel, sizeof(sentinel));
+			memset(out, 0xa5, sizeof(out));
+			hw.fail_call = hw.bus_calls + failure;
+			hw.fail_applied = applied;
+			int err = writing ? ssi_write(SENSOR_INTERFACE_DEV_MAG, command, sizeof(command))
+					  : direct_read(out, sizeof(out));
+			CHECK(err == -EIO);
+			CHECK(memcmp(hw.main + LSM6DSO_CTRL5, sentinel, sizeof(sentinel)) == 0);
+			if (!writing) {
+				const uint8_t empty[7] = {0};
+				CHECK(memcmp(out, empty, sizeof(out)) == 0);
+			}
+			struct bus_call failed = calls[failure - 1];
+			if (failed.reading && (failed.reg == LSM6DSO_STATUS_REG ||
+					       failed.reg == LSM6DSO_STATUS_MASTER_MAINPAGE ||
+					       (failed.bank && failed.reg == LSM6DSO_STATUS_MASTER))) {
+				for (unsigned j = hw.fail_call; j < hw.bus_calls && j < ARRAY_SIZE(hw.calls); j++)
+					CHECK(!hw.calls[j].reading || hw.calls[j].reg != failed.reg ||
+					      hw.calls[j].bank != failed.bank);
+			}
+		}
+	}
+
+	for (unsigned i = 0; i < count; i++) {
+		if (calls[i].reading && !calls[i].bank && calls[i].reg == LSM6DSO_STATUS_REG) {
+			for (unsigned applied = 0; applied < 2; applied++) {
+				CHECK(reset_model());
+				memcpy(hw.main + LSM6DSO_CTRL5, sentinel, sizeof(sentinel));
+				hw.fail_call = hw.bus_calls + i + 1;
+				hw.fail_second_call = hw.fail_call + 1;
+				hw.fail_applied = applied;
+				CHECK((writing ? ssi_write(SENSOR_INTERFACE_DEV_MAG, command, sizeof(command))
+					       : direct_read(out, sizeof(out))) == -EIO);
+				CHECK(memcmp(hw.main + LSM6DSO_CTRL5, sentinel, sizeof(sentinel)) == 0);
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool test_xlda_timeout(unsigned writing)
+{
+	const uint8_t command[] = {0x50, 0x73};
+	uint8_t out[7];
+	CHECK(reset_model());
+	hw.no_xlda = true;
+	uint64_t start = hw.now;
+	int err = writing ? ssi_write(SENSOR_INTERFACE_DEV_MAG, command, sizeof(command))
+			  : direct_read(out, sizeof(out));
+	CHECK(err == -1);
+	CHECK(hw.now - start >= 80000 && hw.now - start < 90000);
+	CHECK(hw.main_status_reads == 0 && hw.banked_status_reads == 0);
+	CHECK(hw.starts == 1);
+	return clean_transaction();
+}
+
 int main(void)
 {
 	const struct {
@@ -398,6 +509,13 @@ int main(void)
 		bool (*run)(unsigned);
 		unsigned argument;
 	} cases[] = {
+		{"setup off page failures", test_setup_page_failures, SENSOR_EXT_MODE_OFF},
+		{"setup passthrough page failures", test_setup_page_failures, SENSOR_EXT_MODE_I2C_PASSTHROUGH},
+		{"setup proxy page failures", test_setup_page_failures, SENSOR_EXT_MODE_I2CM_PROXY},
+		{"read page and status failures", test_transaction_page_failures, 0},
+		{"write page and status failures", test_transaction_page_failures, 1},
+		{"read XLDA timeout cleanup", test_xlda_timeout, 0},
+		{"write XLDA timeout cleanup", test_xlda_timeout, 1},
 		{"healthy write", test_healthy_write, 0},
 		{"healthy read 1", test_healthy_read, 1},
 		{"healthy read 7", test_healthy_read, 7},
