@@ -16,6 +16,7 @@ void k_free(void *ptr)
 {
 	free(ptr);
 }
+/* Production defines this in cal_mag.c, which this fixture does not link. */
 union mag_cal_workspace mag_cal_workspace;
 static float samples[256][3];
 static unsigned polls, cancel_at;
