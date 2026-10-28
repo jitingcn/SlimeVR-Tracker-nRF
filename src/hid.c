@@ -51,8 +51,8 @@ struct tracker_report {
 #define RING_PACKET_CAPACITY (3 * PACKETS_PER_USB_REPORT)
 
 /*
- * SPSC packet ring: connection thread produces, HID thread consumes.
- * No irq_lock — only these two threads touch the indices.
+ * The connection thread produces and the HID thread consumes this packet
+ * ring. The state lock also excludes producers while a session is retired.
  */
 static uint8_t reports[RING_PACKET_CAPACITY * PACKET_SIZE_BYTES] __aligned(sizeof(void *));
 static atomic_t hid_prod; /* next write index (monotonic) */
@@ -60,52 +60,19 @@ static atomic_t hid_cons; /* next consume index (monotonic) */
 static uint8_t submit_stage[USB_REPORT_SIZE_BYTES] __aligned(sizeof(void *));
 
 static const struct device *hdev;
-static ATOMIC_DEFINE(hid_ep_in_busy, 1);
+/* Protects configuration, interface readiness, report ownership and ring
+ * publication. USB callbacks never wait for the submitting thread. */
+static struct k_spinlock hid_state_lock;
+static bool hid_configured;
 static bool hid_ready;
-static const uint8_t *submitted_report;
-
-#define HID_EP_BUSY_FLAG 0
+static bool hid_report_inflight;
+static K_MUTEX_DEFINE(hid_submit_lock);
+static K_SEM_DEFINE(hid_wake, 0, 1);
 
 LOG_MODULE_REGISTER(hid_event, LOG_LEVEL_INF);
 
-static void hid_thread(void);
-static struct k_thread hid_thread_id;
-static K_THREAD_STACK_DEFINE(hid_thread_id_stack, 256);
-static bool hid_thread_running;
-static bool hid_thread_joinable;
-static bool hid_start_pending;
-static void hid_lifecycle_work_handler(struct k_work *work);
-static K_WORK_DEFINE(hid_lifecycle_work, hid_lifecycle_work_handler);
-
-static void hid_thread_start_now(void)
-{
-	k_thread_create(
-		&hid_thread_id,
-		hid_thread_id_stack,
-		K_THREAD_STACK_SIZEOF(hid_thread_id_stack),
-		(k_thread_entry_t)hid_thread,
-		NULL,
-		NULL,
-		NULL,
-		HID_THREAD_PRIORITY,
-		0,
-		K_NO_WAIT
-	);
-	hid_thread_running = true;
-}
-
-static void hid_lifecycle_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	if (hid_thread_joinable) {
-		(void)k_thread_join(&hid_thread_id, K_FOREVER);
-		hid_thread_joinable = false;
-	}
-	if (hid_start_pending && !hid_thread_running) {
-		hid_start_pending = false;
-		hid_thread_start_now();
-	}
-}
+static void hid_thread(void *p1, void *p2, void *p3);
+K_THREAD_DEFINE(hid_thread_id, 256, hid_thread, NULL, NULL, NULL, HID_THREAD_PRIORITY, 0, 0);
 
 static const uint8_t hid_report_desc[] = {
 	HID_USAGE_PAGE(HID_USAGE_GEN_DESKTOP),
@@ -118,35 +85,29 @@ static const uint8_t hid_report_desc[] = {
 	HID_END_COLLECTION,
 };
 
-void hid_thread_create(void)
+void hid_set_configured(bool configured)
 {
-	if (hid_thread_running) {
-		return;
+	k_spinlock_key_t key = k_spin_lock(&hid_state_lock);
+
+	if (hid_configured != configured) {
+		hid_configured = configured;
+		if (!configured) {
+			/* The producer is excluded by this lock, so no old-session
+			 * packet can be published after the ring is discarded. */
+			atomic_set(&hid_cons, atomic_get(&hid_prod));
+		}
 	}
-	if (hid_thread_joinable) {
-		/* Join+start on workqueue — USB status_cb must not block. */
-		hid_start_pending = true;
-		k_work_submit(&hid_lifecycle_work);
-		return;
-	}
-	hid_thread_start_now();
+	k_spin_unlock(&hid_state_lock, key);
+	k_sem_give(&hid_wake);
 }
 
-void hid_thread_abort(void)
+void hid_wait_for_idle(void)
 {
-	if (!hid_thread_running) {
-		return;
-	}
-	/* Stop touching USB before abort — unplug path needs this. */
-	hid_ready = false;
-	submitted_report = NULL;
-	atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
-	hid_start_pending = false;
-	k_thread_abort(&hid_thread_id);
-	hid_thread_running = false;
-	hid_thread_joinable = true;
-	/* Join on system workqueue — USB status_cb must not block forever. */
-	k_work_submit(&hid_lifecycle_work);
+	/* Called by the USB control thread only after submissions are stopped.
+	 * Do not wait for the report completion: its callback may require the
+	 * USB stack to finish teardown first. */
+	k_mutex_lock(&hid_submit_lock, K_FOREVER);
+	k_mutex_unlock(&hid_submit_lock);
 }
 
 static void packet_device_addr(uint8_t *report) // associate id and tracker address
@@ -167,7 +128,13 @@ int64_t last_registration_sent = 0;
 
 static void send_report(void)
 {
-	if (!hid_ready) {
+	int64_t now = k_uptime_get();
+	k_mutex_lock(&hid_submit_lock, K_FOREVER);
+	k_spinlock_key_t key = k_spin_lock(&hid_state_lock);
+
+	if (!hid_configured || !hid_ready || hid_report_inflight) {
+		k_spin_unlock(&hid_state_lock, key);
+		k_mutex_unlock(&hid_submit_lock);
 		return;
 	}
 
@@ -175,12 +142,9 @@ static void send_report(void)
 	uint32_t prod = (uint32_t)atomic_get(&hid_prod);
 	uint32_t pending = prod - cons;
 
-	if (pending == 0
-		&& k_uptime_get() - REGISTRATION_INTERVAL < last_registration_sent) {
-		return;
-	}
-
-	if (atomic_test_and_set_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG)) {
+	if (pending == 0 && now - REGISTRATION_INTERVAL < last_registration_sent) {
+		k_spin_unlock(&hid_state_lock, key);
+		k_mutex_unlock(&hid_submit_lock);
 		return;
 	}
 
@@ -202,29 +166,43 @@ static void send_report(void)
 		}
 	}
 	atomic_set(&hid_cons, (atomic_val_t)prod);
+	hid_report_inflight = true;
+	k_spin_unlock(&hid_state_lock, key);
 
-	submitted_report = submit_stage;
-	int ret = hid_device_submit_report(hdev, USB_REPORT_SIZE_BYTES, submitted_report);
-
+	int ret = hid_device_submit_report(hdev, USB_REPORT_SIZE_BYTES, submit_stage);
 	if (ret != 0) {
-		submitted_report = NULL;
-		atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
+		/* A failed submission does not transfer buffer ownership. */
+		key = k_spin_lock(&hid_state_lock);
+		hid_report_inflight = false;
+		k_spin_unlock(&hid_state_lock, key);
 		if (ret != -EACCES) {
 			LOG_ERR("Failed to submit report: %d", ret);
 		}
-		return;
+	} else {
+		last_registration_sent = k_uptime_get();
 	}
-
-	last_registration_sent = k_uptime_get();
+	k_mutex_unlock(&hid_submit_lock);
 }
 
 int64_t last_dropped_report_log = 0;
 
 #define DROPPED_REPORT_LOG_INTERVAL 5000
 
-void hid_thread(void)
+static void hid_thread(void *p1, void *p2, void *p3)
 {
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
 	while (1) {
+		k_spinlock_key_t key = k_spin_lock(&hid_state_lock);
+		bool configured = hid_configured;
+		k_spin_unlock(&hid_state_lock, key);
+		if (!configured) {
+			(void)k_sem_take(&hid_wake, K_FOREVER);
+			continue;
+		}
+
 		send_report();
 
 		if (k_uptime_get() - DROPPED_REPORT_LOG_INTERVAL > last_dropped_report_log) {
@@ -236,18 +214,7 @@ void hid_thread(void)
 			last_dropped_report_log = k_uptime_get();
 		}
 
-		k_msleep(1);
-	}
-}
-
-static void int_in_ready_cb(const struct device *dev)
-{
-	if (dev != hdev) {
-		return;
-	}
-
-	if (!atomic_test_and_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG) && hid_ready) {
-		LOG_WRN("IN endpoint callback without preceding buffer write");
+		(void)k_sem_take(&hid_wake, K_MSEC(1));
 	}
 }
 
@@ -257,11 +224,20 @@ static void input_report_done_cb(const struct device *dev, const uint8_t *const 
 		return;
 	}
 
-	if (report != submitted_report && hid_ready) {
+	k_spinlock_key_t key = k_spin_lock(&hid_state_lock);
+	bool unexpected = report != submit_stage || !hid_report_inflight;
+	bool ready = hid_ready;
+	if (!unexpected) {
+		hid_report_inflight = false;
+	}
+	k_spin_unlock(&hid_state_lock, key);
+
+	if (unexpected && ready) {
 		LOG_WRN("IN endpoint callback for unexpected report buffer");
 	}
-	submitted_report = NULL;
-	int_in_ready_cb(dev);
+	if (!unexpected) {
+		k_sem_give(&hid_wake);
+	}
 }
 
 static void iface_ready_cb(const struct device *dev, const bool ready)
@@ -270,11 +246,12 @@ static void iface_ready_cb(const struct device *dev, const bool ready)
 		return;
 	}
 
+	k_spinlock_key_t key = k_spin_lock(&hid_state_lock);
 	hid_ready = ready;
-	if (!ready) {
-		submitted_report = NULL;
-		atomic_clear_bit(hid_ep_in_busy, HID_EP_BUSY_FLAG);
-	}
+	/* A disabled interface does not return ownership of a submitted buffer.
+	 * Reuse it only after input_report_done, even across a new configuration. */
+	k_spin_unlock(&hid_state_lock, key);
+	k_sem_give(&hid_wake);
 }
 
 static int
@@ -329,10 +306,12 @@ SYS_INIT(composite_pre_init, APPLICATION, CONFIG_KERNEL_INIT_PRIORITY_DEVICE);
 
 bool hid_write_packet_n(const uint8_t *data)
 {
+	k_spinlock_key_t key = k_spin_lock(&hid_state_lock);
 	uint32_t prod = (uint32_t)atomic_get(&hid_prod);
 	uint32_t cons = (uint32_t)atomic_get(&hid_cons);
 
-	if ((prod - cons) >= RING_PACKET_CAPACITY) {
+	if (!hid_configured || (prod - cons) >= RING_PACKET_CAPACITY) {
+		k_spin_unlock(&hid_state_lock, key);
 		return false;
 	}
 
@@ -344,6 +323,8 @@ bool hid_write_packet_n(const uint8_t *data)
 	}
 	report[1] = 0;
 	atomic_set(&hid_prod, (atomic_val_t)(prod + 1));
+	k_spin_unlock(&hid_state_lock, key);
+	k_sem_give(&hid_wake);
 	return true;
 }
 

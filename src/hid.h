@@ -26,10 +26,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-void hid_thread_create(void);
-void hid_thread_abort(void);
+/* Configuration changes are nonblocking; stop before waiting for submission. */
+void hid_set_configured(bool configured);
+void hid_wait_for_idle(void);
 
-/* True when the packet was queued; false when the report ring is full. */
+/* True when queued; false when unconfigured or the report ring is full. */
 bool hid_write_packet_n(const uint8_t *data);
 
 #endif

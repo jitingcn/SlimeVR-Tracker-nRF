@@ -130,16 +130,18 @@ config USB_INIT_THREAD_STACK_SIZE
     default 512
     help
         Stack size of the USB init thread. It registers the descriptors and
-        enables the USB device, and the USBD callbacks for the first bus
-        events (bus reset, configuration, VBUS) run in this context, so the
-        whole USB device stack init and enumeration path has to fit here.
+        initializes the USB stack. Without HID it also enables the device;
+        with HID the USB control thread owns the enable/disable lifecycle.
 
 config USB_CTRL_THREAD_STACK_SIZE
     int "USB control thread stack size"
+    default 1024 if CONNECTION_OVER_HID
     default 512
     help
         Stack size of the USB control thread, which services CDC line state
-        changes and the DFU touch window.
+        changes and the DFU touch window. With HID enabled it also performs
+        USB controller enable/disable after the submitting thread is idle.
+        The HID default matches the previous system-workqueue reservation.
 
 endmenu
 

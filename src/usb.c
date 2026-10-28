@@ -28,6 +28,19 @@ static uint32_t usb_config_epoch;
 static K_MUTEX_DEFINE(usb_serial_transition_lock);
 static K_SEM_DEFINE(usb_ctrl_event, 0, 1);
 
+#if CONFIG_CONNECTION_OVER_HID
+/* The control thread alone enables/disables the controller. Status callbacks
+ * publish VBUS changes under the same lock as configuration changes. */
+static bool usb_hid_initialized;
+static bool usb_hid_vbus_seen;
+static bool usb_hid_vbus_wanted;
+static bool usb_hid_disable_pending;
+static bool usb_hid_disable_failed;
+static bool usb_hid_enabled;
+static bool usb_hid_enabling;
+static bool usb_hid_enable_failed;
+#endif
+
 LOG_MODULE_REGISTER(usb, LOG_LEVEL_INF);
 
 static void usb_init_thread(void);
@@ -233,14 +246,21 @@ static void usb_serial_stop_locked(bool invalidate)
 #endif
 }
 
-static void usb_configure(bool new_configured)
+static void usb_configure_locked(bool new_configured)
 {
 #if USB_CONSOLE_IS_CDC
 	const struct device *const cons = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 #endif
 	bool was_configured;
 
-	k_mutex_lock(&usb_serial_transition_lock, K_FOREVER);
+#if CONFIG_CONNECTION_OVER_HID
+	/* A queued old CONFIGURATION message cannot restart HID while an unplug
+	 * is waiting for the control thread to disable the controller. */
+	if (new_configured && (!usb_hid_vbus_wanted || usb_hid_disable_pending ||
+			       (!usb_hid_enabled && !usb_hid_enabling))) {
+		new_configured = false;
+	}
+#endif
 	was_configured = configured;
 	if (was_configured != new_configured) {
 		usb_config_epoch++;
@@ -253,10 +273,14 @@ static void usb_configure(bool new_configured)
 			pm_device_action_run(cons, PM_DEVICE_ACTION_RESUME);
 #endif
 #if CONFIG_CONNECTION_OVER_HID
-			hid_thread_create();
+			hid_set_configured(true);
 #endif
 		}
 	} else {
+#if CONFIG_CONNECTION_OVER_HID
+		/* Stop admission even for a duplicate reset/unconfigure message. */
+		hid_set_configured(false);
+#endif
 		if (was_configured) {
 			set_status(SYS_STATUS_USB_CONNECTED, false);
 		}
@@ -264,16 +288,18 @@ static void usb_configure(bool new_configured)
 		 * the configuration state. */
 		usb_serial_stop_locked(true);
 		if (was_configured) {
-#if CONFIG_CONNECTION_OVER_HID
-			hid_thread_abort();
-#endif
 #if USB_CONSOLE_IS_CDC
 			pm_device_action_run(cons, PM_DEVICE_ACTION_SUSPEND);
 #endif
 		}
 	}
-	k_mutex_unlock(&usb_serial_transition_lock);
+}
 
+static void usb_configure(bool new_configured)
+{
+	k_mutex_lock(&usb_serial_transition_lock, K_FOREVER);
+	usb_configure_locked(new_configured);
+	k_mutex_unlock(&usb_serial_transition_lock);
 	k_sem_give(&usb_ctrl_event);
 }
 
@@ -299,10 +325,101 @@ static int usb_enable_device(struct usbd_context *ctx)
 	return ret;
 }
 
+#if CONFIG_CONNECTION_OVER_HID
+static void usb_hid_vbus_changed(bool present)
+{
+	k_mutex_lock(&usb_serial_transition_lock, K_FOREVER);
+	usb_hid_vbus_seen = true;
+	usb_hid_vbus_wanted = present;
+	if (present) {
+		usb_hid_enable_failed = false;
+	} else {
+		/* Publish the stop before the control thread sees pending teardown.
+		 * A later READY must not cancel this required disable. */
+		hid_set_configured(false);
+		usb_hid_disable_pending = true;
+	}
+	k_mutex_unlock(&usb_serial_transition_lock);
+	k_sem_give(&usb_ctrl_event);
+}
+
+static void usb_hid_service_device(void)
+{
+	while (1) {
+		bool disable;
+		int ret;
+
+		k_mutex_lock(&usb_serial_transition_lock, K_FOREVER);
+		if (!usb_hid_initialized) {
+			k_mutex_unlock(&usb_serial_transition_lock);
+			return;
+		}
+		disable = usb_hid_disable_pending;
+		if (!disable && (!usb_hid_vbus_wanted || usb_hid_enabled || usb_hid_enable_failed)) {
+			k_mutex_unlock(&usb_serial_transition_lock);
+			return;
+		}
+		if (!disable) {
+			usb_hid_enabling = true;
+		}
+		k_mutex_unlock(&usb_serial_transition_lock);
+
+		if (disable) {
+			/* Only the USB API call must leave; completion may depend on
+			 * the stack and is deliberately not awaited here. */
+			hid_wait_for_idle();
+			ret = usbd_disable(&slimevr_usbd);
+			if (ret == -EALREADY && !usb_hid_disable_failed) {
+				ret = 0;
+			}
+		} else {
+			ret = usb_enable_device(&slimevr_usbd);
+		}
+
+		k_mutex_lock(&usb_serial_transition_lock, K_FOREVER);
+		if (disable) {
+			if (ret == 0) {
+				usb_hid_enabled = false;
+				usb_hid_disable_pending = false;
+				usb_hid_disable_failed = false;
+			} else {
+				/* usbd_disable can mark the stack disabled even when
+				 * udc_disable failed; later -EALREADY is not proof
+				 * that the controller was actually stopped. */
+				usb_hid_disable_failed = true;
+			}
+		} else {
+			usb_hid_enabling = false;
+			if (ret == 0) {
+				usb_hid_enabled = true;
+			} else {
+				usb_hid_enable_failed = true;
+				/* Configuration may have been reported while enable
+				 * was in progress. Retire it without posting another
+				 * control event and spinning on a failed enable. */
+				usb_configure_locked(false);
+			}
+		}
+		k_mutex_unlock(&usb_serial_transition_lock);
+
+		if (ret != 0) {
+			LOG_ERR("Failed to %s USB device: %d", disable ? "disable" : "enable", ret);
+			/* A failed disable keeps admission stopped and never falls
+			 * through to enable; a subsequent event can retry it. */
+			return;
+		}
+	}
+}
+#endif
+
 static void status_cb(struct usbd_context *const ctx, const struct usbd_msg *const msg)
 {
 	const struct device *const dev_console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+#if CONFIG_CONNECTION_OVER_HID
+	ARG_UNUSED(ctx);
+#else
 	int ret;
+#endif
 
 	switch (msg->type) {
 	case USBD_MSG_RESET:
@@ -312,16 +429,25 @@ static void status_cb(struct usbd_context *const ctx, const struct usbd_msg *con
 		usb_configure(msg->status != 0);
 		break;
 	case USBD_MSG_VBUS_READY:
+#if CONFIG_CONNECTION_OVER_HID
+		usb_hid_vbus_changed(true);
+#else
 		ret = usb_enable_device(ctx);
 		if (ret != 0) {
 			LOG_ERR("Failed to enable USB device: %d", ret);
 		}
+#endif
 		break;
 	case USBD_MSG_VBUS_REMOVED:
+#if CONFIG_CONNECTION_OVER_HID
+		usb_hid_vbus_changed(false);
+		usb_configure(false);
+#else
 		usb_configure(false);
 		if (usbd_disable(ctx) != 0) {
 			LOG_ERR("Failed to disable USB device");
 		}
+#endif
 		break;
 	case USBD_MSG_CDC_ACM_CONTROL_LINE_STATE:
 	case USBD_MSG_CDC_ACM_LINE_CODING:
@@ -348,12 +474,24 @@ static void usb_init_thread(void)
 		return;
 	}
 
+#if CONFIG_CONNECTION_OVER_HID
+	bool vbus_present = !usbd_can_detect_vbus(&slimevr_usbd) || vbus_read();
+	k_mutex_lock(&usb_serial_transition_lock, K_FOREVER);
+	/* Do not overwrite a newer event observed while initialization ran. */
+	if (!usb_hid_vbus_seen) {
+		usb_hid_vbus_wanted = vbus_present;
+	}
+	usb_hid_initialized = true;
+	k_mutex_unlock(&usb_serial_transition_lock);
+	k_sem_give(&usb_ctrl_event);
+#else
 	if (!usbd_can_detect_vbus(&slimevr_usbd) || vbus_read()) {
 		ret = usb_enable_device(&slimevr_usbd);
 		if (ret != 0) {
 			LOG_ERR("Failed to enable USB device: %d", ret);
 		}
 	}
+#endif
 }
 
 struct usb_ctrl_service_state {
@@ -492,6 +630,9 @@ static void usb_ctrl_thread(void *p1, void *p2, void *p3)
 			timeout = K_TIMEOUT_ABS_MS(deadline_ms);
 		}
 		(void)k_sem_take(&usb_ctrl_event, timeout);
+#if CONFIG_CONNECTION_OVER_HID
+		usb_hid_service_device();
+#endif
 		usb_ctrl_service_step(dev_console, backend, &state);
 	}
 }
