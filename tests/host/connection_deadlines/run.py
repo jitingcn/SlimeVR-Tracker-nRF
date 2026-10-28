@@ -15,10 +15,13 @@ HERE = Path(__file__).resolve().parent
 root = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
 connection = (root / "src/connection/connection.c").read_text()
 tdma = (root / "src/connection/tdma.c").read_text()
+capture = (root / "src/connection/radio_capture.c").read_text()
+esb = (root / "src/connection/esb.c").read_text()
+esb_header = (root / "src/connection/esb.h").read_text()
 
 
 def function(source, name):
-    return extract_block(source, rf"^(?:static )?(?:enum tdma_ping_admission|void|bool|int64_t|uint32_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
+    return extract_block(source, rf"^(?:static )?(?:enum tdma_ping_admission|void|bool|int64_t|uint32_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
 
 prefix = r'''
 #include <assert.h>
@@ -28,30 +31,50 @@ prefix = r'''
 #include <stdio.h>
 #include <string.h>
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
+#define CLAMP(x,lo,hi) MIN(MAX(x,lo),hi)
+#define LOG_WRN(...) ((void)0)
 #define PING_INTERVAL_MS 1000
-#define TDMA_COARSE_WAKE_LEAD_TICKS 4
+#define TIME_SYNC_TIMEOUT_MS 15000
+#define TDMA_MAX_TRACKERS 16
 #define K_NO_WAIT 0
 #define K_USEC(x) ((uint64_t)(x))
 #define K_MSEC(x) ((uint64_t)(x) * 1000)
 typedef int64_t atomic_t;
 static int64_t atomic_get(const atomic_t *p) { return *p; }
 enum tdma_ping_admission { TDMA_PING_UNAVAILABLE, TDMA_PING_DEFERRED, TDMA_PING_ADMITTED };
-static atomic_t tdma_cfg_pack, tdma_runtime_enabled;
+static atomic_t tdma_cfg_pack, tdma_runtime_enabled, tdma_epoch_at;
 static uint64_t virtual_us;
-static uint32_t kernel_hz, sleep_calls;
+static uint32_t kernel_hz, sleep_calls, busy_calls, clock_offset;
 static uint64_t first_sleep_us;
 static int64_t sync_age;
-static bool invalidate_on_sleep;
-static uint64_t esb_get_server_time_ticks_64(void) { return virtual_us * 32768 / 1000000; }
-static int64_t esb_get_sync_age_ms(void) { return sync_age; }
+static bool invalidate_on_sleep, change_layout_on_sleep, disable_on_sleep, freeze_clock;
+static unsigned irq_lock(void) { return 0; }
+static void irq_unlock(unsigned key) { (void)key; }
+static bool server_time_synced;
+static int64_t g_last_sync_timestamp;
+static uint32_t g_server_ticks_offset, g_last_sync_local_ticks;
+static int32_t g_clock_skew_ppb;
+static uint32_t receiver_tick(void) { return (uint32_t)(virtual_us * 32768 / 1000000) + clock_offset; }
+static uint64_t k_uptime_ticks(void) {
+    server_time_synced = sync_age >= 0;
+    g_last_sync_timestamp = (int64_t)(virtual_us / 1000) - sync_age;
+    g_server_ticks_offset = clock_offset;
+    return virtual_us;
+}
+static uint64_t k_ticks_to_ms_floor64(uint64_t ticks) { return ticks / 1000; }
+static uint64_t net_ticks_from_kernel64(uint64_t ticks) { return ticks * 32768 / 1000000; }
+static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks; }
 static void k_sleep(uint64_t us) {
     if (sleep_calls++ == 0) first_sleep_us = us;
     /* Ceil timeout conversion plus one kernel tick models phase uncertainty. */
     uint64_t kticks = (us * kernel_hz + 999999) / 1000000 + 1;
-    virtual_us += (kticks * 1000000 + kernel_hz - 1) / kernel_hz;
+    if (!freeze_clock) virtual_us += (kticks * 1000000 + kernel_hz - 1) / kernel_hz;
     if (invalidate_on_sleep) sync_age = -1;
+    if (change_layout_on_sleep) ++tdma_epoch_at;
+    if (disable_on_sleep) tdma_runtime_enabled = 0;
 }
-static void k_busy_wait(uint32_t us) { virtual_us += us; }
+static void k_busy_wait(uint32_t us) { ++busy_calls; if (!freeze_clock) virtual_us += us; }
 static int connection_wake_sem, sensor_data_snapshot;
 static bool sensor_ids_set, m_pending, test_enabled, radio_ready, event_pending;
 static int64_t last_mag_time, last_info_time, last_status_time, last_runtime_time;
@@ -65,20 +88,41 @@ static bool get_status(int status) { (void)status; return false; }
 static uint32_t tracker_events_deadline(uint32_t now) { return event_pending ? now : UINT32_MAX; }
 static bool test_mode_get(void) { return test_enabled; }
 static bool sensor_data_snapshot_m_pending(const int *unused) { (void)unused; return m_pending; }
-static uint64_t k_uptime_ticks(void) { return virtual_us; }
+/* The modeled kernel uses microsecond ticks; the network conversion is real. */
 static uint64_t k_ticks_to_us_near64(uint64_t ticks) { return ticks; }
 static uint64_t test_rate_delay_us(uint64_t now) { (void)now; return test_delay_us; }
 static int k_sem_take(int *sem, uint64_t us) { (void)sem; observed_wait_us = us; return 0; }
 '''
-parts = [prefix,
+parts = [prefix, extract_block(esb_header, r"^struct esb_network_clock \{", True),
+         function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms"),
          tdma[tdma.index("#define TDMA_PACK("):tdma.index("\nvoid tdma_init(")],
-         tdma[tdma.index("#define TDMA_LEN17_RESERVE_TICKS"):tdma.index("\nstatic uint32_t tdma_ping_period_frames")]]
-parts += [function(tdma, name) for name in (
-    "tdma_ping_period_frames", "tdma_ping_phase_frame", "tdma_sleep_network_ticks",
-    "tdma_wait_until_network_tick", "tdma_config_snapshot", "tdma_ping_target",
-    "tdma_ping_wake_delay_ms", "tdma_wait_for_ping_window",
-    "tdma_slot_ping_frame", "tdma_data_frame_guarded", "tdma_wait_for_data_admission",
-    "tdma_admission_stalled")]
+         tdma[tdma.index("#define TDMA_LEN17_RESERVE_TICKS"):tdma.index("\nvoid tdma_note_radio_busy")],
+         function(tdma, "tdma_admission_stalled")]
+parts += [capture[capture.index("#define CAPTURE_METRICS"):capture.index("BUILD_ASSERT")],
+          capture[capture.index("struct capture_metric {"):capture.index("static struct capture_record capture_queue")]]
+parts += [r'''
+#define ESB_SENSOR_DATA_LEN 17
+#define __DMB() ((void)0)
+#define K_FOREVER 0
+static struct capture_record capture_queue[CAPTURE_QUEUE_SIZE];
+static uint8_t capture_head, capture_tail;
+static struct ping_capture_record ping_queue[CAPTURE_QUEUE_SIZE];
+static uint8_t ping_head, ping_tail;
+static struct capture_metric metrics[CAPTURE_METRICS];
+static struct ping_capture_metric ping_metric;
+static int capture_metrics_lock;
+static uint64_t capture_platform_now(void) { return virtual_us; }
+static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; }
+static void k_mutex_unlock(int *lock) { (void)lock; }
+static bool tdma_config_get(uint8_t *slot, uint8_t *width, uint16_t *frame) {
+    struct tdma_config c;
+    if (!tdma_config_snapshot(&c)) return false;
+    *slot = c.slot_index; *width = c.slot_ticks; *frame = c.frame_ticks;
+    return true;
+}
+''']
+parts += [function(capture, name) for name in
+          ("metric_index", "duration_bucket", "phase_bucket", "radio_capture_process")]
 parts += [function(connection, name) for name in ("connection_next_deadline_ms", "connection_idle_wait")]
 start = connection.index("#if CONFIG_SENSOR_USE_MAGNETOMETER\n\t\tbool mag_due =")
 end = connection.index("\n\n", start)
@@ -141,11 +185,12 @@ static uint64_t set_ping_before(uint32_t excess) {
     tdma_cfg_pack = TDMA_PACK(0, 16, 128);
     tdma_last_ping_frame = tdma_last_admitted_frame = UINT64_MAX;
     tdma_last_ping_pack = tdma_last_admitted_pack = 0;
-    sync_age = 0; sleep_calls = 0; first_sleep_us = 0; invalidate_on_sleep = false;
+    sync_age = 0; sleep_calls = 0; first_sleep_us = 0; clock_offset = 0;
+    invalidate_on_sleep = change_layout_on_sleep = disable_on_sleep = freeze_clock = false;
     uint64_t target = 32768 + TDMA_SLOT_TARGET_OFFSET;
     uint64_t now = target - 128 - excess;
     virtual_us = (now * 1000000 + 32767) / 32768;
-    assert(esb_get_server_time_ticks_64() == now);
+    assert(receiver_tick() == now);
     return target;
 }
 static void ping(void) {
@@ -159,7 +204,7 @@ static void ping(void) {
             assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
             assert(sleep_calls == 1);
             assert(first_sleep_us == ((uint64_t)excess * 1000000 + 32767) / 32768);
-            uint64_t remaining = target - esb_get_server_time_ticks_64();
+            uint64_t remaining = target - receiver_tick();
             /* Full preparation frame minus at most three modeled kernel/network ticks. */
             assert(remaining <= 128 && remaining >= 125);
             assert(tdma_last_ping_frame == UINT64_MAX);
@@ -192,6 +237,18 @@ static void ping(void) {
         /* Exactly one frame early enters existing precise wait, not early DEFERRED. */
         set_ping_before(0);
         assert(tdma_wait_for_ping_window() == TDMA_PING_ADMITTED);
+        set_ping_before(0);
+        change_layout_on_sleep = true;
+        assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
+        assert(tdma_last_ping_frame == UINT64_MAX);
+        set_ping_before(0);
+        disable_on_sleep = true;
+        assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
+        assert(tdma_last_ping_frame == UINT64_MAX);
+        set_ping_before(0);
+        invalidate_on_sleep = true;
+        assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
+        assert(tdma_last_ping_frame == UINT64_MAX);
     }
     puts("PASS PING early yield, slot admission, duplicate and sync/config boundaries at both kernel rates");
 }
@@ -213,13 +270,13 @@ static void data_ping_boundary(void) {
                         tdma_cfg_pack = TDMA_PACK(slot, width, frame_ticks);
                         tdma_last_ping_frame = tdma_last_admitted_frame = UINT64_MAX;
                         tdma_last_ping_pack = tdma_last_admitted_pack = 0;
-                        sync_age = 0; invalidate_on_sleep = false;
+                        sync_age = 0; invalidate_on_sleep = false; clock_offset = 0;
                         virtual_us = (tick * 1000000 + 32767) / 32768;
                         uint64_t before = virtual_us;
                         assert(!tdma_wait_for_data_admission(8));
                         assert(virtual_us == before); /* Yield, do not sleep through PING. */
                         assert(tdma_wait_for_ping_window() == TDMA_PING_ADMITTED);
-                        assert(esb_get_server_time_ticks_64() <= target + TDMA_PING_LATE_TOLERANCE_TICKS);
+                        assert(receiver_tick() <= target + TDMA_PING_LATE_TOLERANCE_TICKS);
                     }
                     /* Outside the protected frame, data remains admissible. */
                     virtual_us = ((target + 2 * frame_ticks) * 1000000 + 32767) / 32768;
@@ -266,12 +323,159 @@ static void admission_stall(void) {
     assert(tdma_admission_stalled());
     puts("PASS admission stall predicate matches refusals that consume no radio time");
 }
+static void set_receiver_tick(uint32_t tick) {
+    clock_offset = 0;
+    virtual_us = ((uint64_t)tick * 1000000U + 32767U) / 32768U;
+    assert(receiver_tick() == tick);
+}
+static void configure(uint8_t slots, uint8_t width, uint8_t slot) {
+    tdma_runtime_enabled = 1;
+    tdma_epoch_at = 1;
+    tdma_cfg_pack = TDMA_PACK(slot, width, (uint16_t)slots * width);
+    tdma_last_ping_frame = tdma_last_admitted_frame = UINT64_MAX;
+    tdma_last_ping_pack = tdma_last_admitted_pack = 0;
+    sync_age = 0;
+    invalidate_on_sleep = change_layout_on_sleep = disable_on_sleep = freeze_clock = false;
+    sleep_calls = busy_calls = 0;
+}
+static void receiver_clock_rollover(void) {
+    kernel_hz = 32768;
+    configure(3, 48, 0);
+    set_receiver_tick(1122);
+    clock_offset = 0x80000000U;
+    assert(receiver_tick() == 2147484770U);
+    bool admitted = tdma_wait_for_data_admission(8);
+    assert(!admitted || receiver_tick() != 2147484770U);
+    configure(3, 48, 2);
+    set_receiver_tick(2147484770U);
+    assert(tdma_wait_for_data_admission(8));
+    assert(receiver_tick() == 2147484770U);
+
+    unsigned crossing_pings = 0, eligible_data = 0;
+    for (unsigned slots = 1; slots <= 16; ++slots) {
+        for (unsigned width = 16; width <= 255; ++width) {
+            for (unsigned slot = 0; slot < slots; ++slot) {
+                configure(slots, width, slot);
+                struct tdma_config config;
+                assert(tdma_config_snapshot(&config));
+                uint32_t last = UINT32_MAX / config.frame_ticks;
+                set_receiver_tick(last * config.frame_ticks);
+                uint32_t delay = 0;
+                assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
+                assert(tdma_ping_wake_delay_ms(&delay) && delay > 0);
+                assert(sleep_calls == 0);
+                set_receiver_tick(0);
+                assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
+                assert(tdma_ping_wake_delay_ms(&delay) && delay > 0);
+                assert(sleep_calls == 0);
+
+                uint32_t previous = last - 1U;
+                uint32_t period = tdma_ping_period_frames(config.frame_ticks);
+                uint64_t start = (uint64_t)previous * config.frame_ticks
+                    + slot * width + TDMA_SLOT_TARGET_OFFSET;
+                bool scheduled = previous % period == tdma_ping_phase_frame(slot, slots, period);
+                bool fits = start + TDMA_PING_LATE_TOLERANCE_TICKS
+                    + width * TDMA_PING_WINDOW_SLOTS <= 0x100000000ULL;
+                assert(tdma_ping_frame_eligible(previous, slot, &config) == (scheduled && fits));
+                if (scheduled && !fits) {
+                    ++crossing_pings;
+                    uint32_t next_frame, target;
+                    bool in_window;
+                    assert(tdma_ping_target((uint32_t)start - 1U, &config,
+                        &next_frame, &target, &in_window));
+                    assert(!in_window && next_frame != previous);
+                    bool own_ping;
+                    if (!tdma_data_frame_guarded(previous, &config, &own_ping)) {
+                        set_receiver_tick((uint32_t)start);
+                        assert(tdma_wait_for_data_admission(8));
+                        assert(receiver_tick() == (uint32_t)start);
+                        ++eligible_data;
+                    }
+                }
+                bool own_ping;
+                bool guarded = tdma_data_frame_guarded(previous, &config, &own_ping);
+                uint8_t previous_slot = slot ? slot - 1U : slots - 1U;
+                uint32_t previous_guard_frame = slot ? previous : previous - 1U;
+                assert(own_ping == tdma_ping_frame_eligible(previous, slot, &config));
+                assert(guarded == (own_ping
+                    || tdma_ping_frame_eligible(previous_guard_frame, previous_slot, &config)));
+            }
+        }
+    }
+    assert(crossing_pings > 0 && eligible_data > 0);
+    configure(8, 16, 0);
+    set_receiver_tick(10000);
+    struct tdma_config config;
+    struct esb_network_clock clock;
+    assert(tdma_config_snapshot(&config) && tdma_clock_snapshot(&config, &clock));
+    freeze_clock = true;
+    assert(!tdma_wait_until_network_tick(&config, clock, clock.receiver_ticks + 3));
+    assert(busy_calls == TDMA_FINE_SPINS);
+    busy_calls = sleep_calls = 0;
+    assert(!tdma_wait_until_network_tick(&config, clock, clock.receiver_ticks + 100));
+    assert(sleep_calls == TDMA_COARSE_SLEEPS && busy_calls == 0);
+    freeze_clock = false;
+    puts("PASS receiver32 epochs, rollover exclusions, all layouts, guards and wait bounds");
+}
+static void capture_phases(void) {
+    configure(3, 48, 2);
+    ping_queue[0] = (struct ping_capture_record){
+        .start_server_ticks = 2147484770U, .duration_us = 305,
+        .frame_ticks = 144, .slot_index = 2, .slot_ticks = 48,
+        .attempts = 1, .success = true, .have_start = true, .schedule_valid = true
+    };
+    ping_head = 1;
+    radio_capture_process();
+    assert(ping_metric.phase_samples == 1);
+    assert(ping_metric.start_phase[34] == 1 && ping_metric.end_phase[44] == 1);
+    ping_queue[1] = ping_queue[0];
+    ping_queue[1].start_server_ticks = UINT32_MAX - 2U;
+    ping_head = 2;
+    radio_capture_process();
+    assert(ping_metric.success[0] == 2 && ping_metric.phase_samples == 1);
+    ping_queue[2] = ping_queue[0];
+    ping_queue[2].start_server_ticks = 0;
+    ping_queue[2].slot_index = 0;
+    ping_head = 3;
+    radio_capture_process();
+    assert(ping_metric.phase_samples == 2 && ping_metric.start_phase[32] == 1);
+    assert(ping_metric.start_missing == 0);
+
+    set_receiver_tick(2147484790U);
+    capture_queue[0] = (struct capture_record){
+        .ready_us = virtual_us - 305, .end_us = virtual_us - 62, .payload_length = 17
+    };
+    capture_head = 1;
+    radio_capture_process();
+    assert(metrics[0].phase_samples == 1);
+    assert(metrics[0].ready_phase[44] == 1 && metrics[0].end_phase[51] == 1);
+
+    configure(3, 48, 2);
+    set_receiver_tick(100U * 144U + 149U);
+    capture_queue[1] = (struct capture_record){
+        .ready_us = virtual_us - 305, .end_us = virtual_us - 30, .payload_length = 17
+    };
+    capture_head = 2;
+    radio_capture_process();
+    assert(metrics[0].phase_samples == 2 && metrics[0].crossed_slot_end == 1);
+    set_receiver_tick(1000);
+    clock_offset = 0U - 996U;
+    capture_queue[2] = (struct capture_record){
+        .ready_us = virtual_us - 305, .end_us = virtual_us - 30, .payload_length = 17
+    };
+    capture_head = 3;
+    radio_capture_process();
+    assert(metrics[0].samples == 3 && metrics[0].phase_samples == 2);
+    puts("PASS capture receiver32 phases, frame crossing and wrap classification");
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     if (strcmp(argv[1], "deadlines") == 0) deadlines();
     else if (strcmp(argv[1], "ping") == 0) ping();
     else if (strcmp(argv[1], "data-ping") == 0) data_ping_boundary();
     else if (strcmp(argv[1], "stall") == 0) admission_stall();
+    else if (strcmp(argv[1], "rollover") == 0) receiver_clock_rollover();
+    else if (strcmp(argv[1], "capture") == 0) capture_phases();
     else return 2;
     return 0;
 }
@@ -288,5 +492,5 @@ with tempfile.TemporaryDirectory(prefix="slimenrf-deadline-smoke-") as directory
         "-fno-pie", "-no-pie",
         "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
         str(source), "-o", str(binary)], check=True)
-    for selected in (["deadlines", "ping", "data-ping", "stall"] if case == "all" else [case]):
+    for selected in (["deadlines", "ping", "data-ping", "stall", "rollover", "capture"] if case == "all" else [case]):
         subprocess.run([str(binary), selected], check=True)

@@ -81,6 +81,7 @@ static struct {
 static struct {
 	uint8_t counter;
 	uint32_t ping_ticks, ping_ticks_kernel;
+	bool valid;
 } ping_history[PING_HISTORY_SIZE];
 static unsigned ping_history_idx, consecutive_enomem_errors;
 static unsigned esb_write_dropped, esb_write_dup_queued, esb_write_queued;
@@ -165,9 +166,17 @@ static bool connection_get_data_collection_batch(void)
 static void esb_write_rate_tick(void)
 {
 }
-static uint64_t esb_get_server_time_ticks_64(void)
+struct esb_network_clock {
+	uint32_t receiver_ticks;
+	uint64_t local_kernel_ticks;
+	int64_t sync_age_ms;
+};
+static bool esb_get_network_clock(struct esb_network_clock *clock)
 {
-	return 123;
+	clock->receiver_ticks = 123;
+	clock->local_kernel_ticks = 0;
+	clock->sync_age_ms = sync_age;
+	return server_time_synced;
 }
 static uint8_t crc8_ccitt(uint8_t seed, const uint8_t *data, size_t size)
 {

@@ -7,27 +7,36 @@
 #define CONFIG_SOC_SERIES_NRF54L 1
 #endif
 #define SYS_STATUS_CONNECTION_ERROR 0x20
+#define LOG_WRN(...) ((void)0)
 #define ESB_ST_PAIRED 1
 static uint64_t now_ticks;
-static bool locked, change_on_unlock;
+static bool locked, change_on_unlock, refresh_on_unlock;
+static unsigned irq_depth;
 static bool server_time_synced, channel_wait_normal, channel_redirect_pending;
 static int esb_conn_state, status_bits;
 static int64_t g_last_sync_timestamp;
 static uint32_t g_server_ticks_offset, g_last_sync_local_ticks;
 static int32_t g_clock_skew_ppb;
-static uint32_t tdma_runtime_enabled, tdma_cfg_pack;
+static uint32_t tdma_runtime_enabled, tdma_cfg_pack, tdma_epoch_at;
 static uint32_t atomic_get(const uint32_t *value) { return *value; }
-static unsigned irq_lock(void) { assert(!locked); locked = true; return 0; }
+static unsigned irq_lock(void) { unsigned prior = irq_depth++; locked = true; return prior; }
 static void irq_unlock(unsigned key)
 {
 	(void)key;
-	assert(locked);
-	locked = false;
-	if (change_on_unlock) {
+	assert(irq_depth > 0 && key + 1 == irq_depth);
+	irq_depth = key;
+	locked = irq_depth != 0;
+	if (!locked && change_on_unlock) {
 		server_time_synced = false;
 		g_server_ticks_offset = 99;
 		g_last_sync_local_ticks = 0;
 		g_clock_skew_ppb = 0;
+	}
+	if (!locked && refresh_on_unlock) {
+		refresh_on_unlock = false;
+		server_time_synced = true;
+		g_last_sync_timestamp = (int64_t)(now_ticks * 1000ULL / KERNEL_HZ);
+		g_server_ticks_offset = 7;
 	}
 }
 static uint64_t k_uptime_ticks(void) { assert(locked); return now_ticks; }
@@ -68,6 +77,34 @@ static void unavailable(void)
 }
 int main(void)
 {
+	reset();
+	struct esb_network_clock clock;
+	reset(); now_ticks = 0; g_last_sync_timestamp = 0; g_server_ticks_offset = 0;
+	assert(esb_get_network_clock(&clock));
+	assert(clock.receiver_ticks == 0 && clock.local_kernel_ticks == 0 && clock.sync_age_ms == 0);
+	assert(esb_get_sync_age_ms() == 0);
+	reset(); g_server_ticks_offset = 0x7fffffffU;
+	assert(esb_get_network_clock(&clock) && clock.receiver_ticks == 3276800U + 0x7fffffffU);
+	g_server_ticks_offset = 0x80000000U;
+	assert(esb_get_network_clock(&clock) && clock.receiver_ticks == 3276800U + 0x80000000U);
+	g_server_ticks_offset = 0xffffffffU;
+	assert(esb_get_network_clock(&clock) && clock.receiver_ticks == 3276799U);
+	assert(net_tick_difference(0x80000000U, 0) == -2147483648LL);
+	assert(net_tick_difference(0x7fffffffU, 0) == 2147483647LL);
+	assert(net_tick_difference(0, 0xffffffffU) == 1);
+	reset(); g_last_sync_timestamp = 100000 - TIME_SYNC_TIMEOUT_MS;
+	assert(esb_get_network_clock(&clock) && clock.sync_age_ms == TIME_SYNC_TIMEOUT_MS);
+	--g_last_sync_timestamp;
+	assert(!esb_get_network_clock(&clock) && esb_get_sync_age_ms() == -1);
+	reset(); g_last_sync_timestamp = 100000 - TIME_SYNC_TIMEOUT_MS - 1;
+	refresh_on_unlock = true;
+	assert(!esb_get_network_clock(&clock));
+	assert(server_time_synced && g_last_sync_timestamp == 100000);
+	assert(esb_get_network_clock(&clock) && clock.receiver_ticks == 3276807U);
+	reset(); g_last_sync_local_ticks -= 65536; g_clock_skew_ppb = 1000000;
+	change_on_unlock = true;
+	assert(esb_get_network_clock(&clock) && clock.receiver_ticks == 3276800U + 1065U);
+	change_on_unlock = false;
 	reset();
 #if CONFIG_CONNECTION_TDMA
 	uint32_t local, network;

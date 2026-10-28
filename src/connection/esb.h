@@ -214,14 +214,14 @@ uint8_t esb_get_ping_ack_flag(void);
 // Additional delay applied to the base ping interval after repeated failures.
 uint32_t esb_get_ping_backoff_ms(void);
 
-// Get estimated current server time in ticks (0 if not synced) - high precision
-uint64_t esb_get_server_time_ticks_64(void);
-
-// Get estimated current server time in microseconds (0 if not synced)
-uint64_t esb_get_server_time_us_64(void);
-
-// Get estimated current server time in milliseconds (0 if not synced)
-uint32_t esb_get_server_time(void);
+/* Receiver time is a wrapping 32768 Hz wire timestamp, including zero.
+ * Availability and the local sample used for bounded waits are explicit. */
+struct esb_network_clock {
+	uint32_t receiver_ticks;
+	uint64_t local_kernel_ticks;
+	int64_t sync_age_ms;
+};
+bool esb_get_network_clock(struct esb_network_clock *clock);
 
 // Get time since last successful PONG sync in milliseconds (-1 if never synced)
 int64_t esb_get_sync_age_ms(void);

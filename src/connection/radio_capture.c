@@ -48,15 +48,14 @@ struct capture_metric {
 };
 
 struct ping_capture_record {
-	uint64_t start_us;
-	uint64_t end_us;
-	uint64_t start_server_ticks;
+	uint32_t start_server_ticks;
 	uint32_t duration_us;
 	uint16_t frame_ticks;
 	uint8_t slot_index;
 	uint8_t slot_ticks;
 	uint8_t attempts;
 	bool success;
+	bool have_start;
 	bool schedule_valid;
 };
 
@@ -96,7 +95,7 @@ static volatile uint8_t ping_head;
 static volatile uint8_t ping_tail;
 static atomic_t ping_queue_drops;
 static uint64_t ping_transaction_start_us;
-static uint64_t ping_transaction_server_ticks;
+static uint32_t ping_transaction_server_ticks;
 static uint16_t ping_transaction_frame_ticks;
 static uint8_t ping_transaction_slot_index;
 static uint8_t ping_transaction_slot_ticks;
@@ -396,8 +395,10 @@ void radio_capture_record(
 	}
 	if (!no_ack && packet_type == ESB_PING_TYPE && transaction_start) {
 		ping_transaction_start_us = capture_platform_now();
-		ping_transaction_server_ticks = esb_get_server_time_ticks_64();
-		ping_transaction_schedule_valid = ping_transaction_server_ticks != 0
+		struct esb_network_clock clock;
+		bool clock_valid = esb_get_network_clock(&clock);
+		ping_transaction_server_ticks = clock_valid ? clock.receiver_ticks : 0;
+		ping_transaction_schedule_valid = clock_valid
 			&& tdma_config_get(
 				&ping_transaction_slot_index,
 				&ping_transaction_slot_ticks,
@@ -424,8 +425,6 @@ void radio_capture_record(
 		}
 		bool have_start = atomic_cas(&ping_transaction_pending, 1, 0);
 		ping_queue[head] = (struct ping_capture_record){
-			.start_us = have_start ? ping_transaction_start_us : 0,
-			.end_us = completion_us,
 			.start_server_ticks = have_start ? ping_transaction_server_ticks : 0,
 			.duration_us = have_start ? (uint32_t)(completion_us - ping_transaction_start_us) : 0,
 			.frame_ticks = ping_transaction_frame_ticks,
@@ -433,6 +432,7 @@ void radio_capture_record(
 			.slot_ticks = ping_transaction_slot_ticks,
 			.attempts = CLAMP(attempts, 1, 3),
 			.success = success,
+			.have_start = have_start,
 			.schedule_valid = have_start && ping_transaction_schedule_valid,
 		};
 		__DMB();
@@ -478,25 +478,32 @@ void radio_capture_process(void)
 				ping_metric.failure_timed++;
 			}
 		}
-		if (record.start_us == 0) {
+		if (!record.have_start) {
 			ping_metric.start_missing++;
 			continue;
 		}
 		if (!record.schedule_valid || record.frame_ticks == 0 || record.slot_ticks == 0) {
 			continue;
 		}
-		uint64_t start_ticks = record.start_server_ticks;
-		uint64_t duration_ticks
-			= ((uint64_t)record.duration_us * 32768U + 999999U) / 1000000U;
-		uint64_t end_ticks = start_ticks + duration_ticks;
+		uint32_t start_ticks = record.start_server_ticks;
+		uint32_t duration_ticks
+			= (uint32_t)(((uint64_t)record.duration_us * 32768U + 999999U) / 1000000U);
+		uint32_t end_ticks = start_ticks + duration_ticks;
+		if (end_ticks < start_ticks) {
+			continue;
+		}
 		int32_t slot_start = (int32_t)record.slot_index * record.slot_ticks;
 		int32_t start_phase = (int32_t)(start_ticks % record.frame_ticks) - slot_start;
-		int32_t end_phase = start_phase + (int32_t)duration_ticks;
+		int32_t end_phase = (int32_t)(end_ticks % record.frame_ticks) - slot_start
+			+ (int32_t)((end_ticks / record.frame_ticks - start_ticks / record.frame_ticks)
+				* record.frame_ticks);
 		while (start_phase > (int32_t)(record.frame_ticks / 2)) {
 			start_phase -= record.frame_ticks;
+			end_phase -= record.frame_ticks;
 		}
 		while (start_phase < -(int32_t)(record.frame_ticks / 2)) {
 			start_phase += record.frame_ticks;
+			end_phase += record.frame_ticks;
 		}
 		ping_metric.phase_samples++;
 		ping_metric.start_phase[phase_bucket(start_phase)]++;
@@ -534,25 +541,31 @@ void radio_capture_process(void)
 		uint16_t frame_ticks;
 		int32_t ready_phase = 0;
 		int32_t end_phase = 0;
-		uint64_t server_ticks_now = esb_get_server_time_ticks_64();
-		bool phase_valid = server_ticks_now != 0
+		struct esb_network_clock clock;
+		bool phase_valid = esb_get_network_clock(&clock)
 			&& tdma_config_get(&slot_index, &slot_ticks, &frame_ticks);
 		bool crossed = false;
 		if (phase_valid) {
-			uint64_t ready_ticks
-				= server_ticks_now - (elapsed_ready * 32768U + 999999U) / 1000000U;
-			uint64_t end_ticks
-				= server_ticks_now - (elapsed_end * 32768U + 999999U) / 1000000U;
-			uint32_t slot_start = (uint32_t)slot_index * slot_ticks;
-			ready_phase = (int32_t)(ready_ticks % frame_ticks) - (int32_t)slot_start;
-			end_phase = (int32_t)(end_ticks % frame_ticks) - (int32_t)slot_start;
-			if (ready_phase > (int32_t)(frame_ticks / 2)) {
-				ready_phase -= frame_ticks;
+			uint32_t ready_ticks = clock.receiver_ticks
+				- (uint32_t)((elapsed_ready * 32768U + 999999U) / 1000000U);
+			uint32_t end_ticks = clock.receiver_ticks
+				- (uint32_t)((elapsed_end * 32768U + 999999U) / 1000000U);
+			if (end_ticks < ready_ticks) {
+				phase_valid = false;
+			} else {
+				uint32_t slot_start = (uint32_t)slot_index * slot_ticks;
+				ready_phase = (int32_t)(ready_ticks % frame_ticks) - (int32_t)slot_start;
+				end_phase = (int32_t)(end_ticks % frame_ticks) - (int32_t)slot_start
+					+ (int32_t)((end_ticks / frame_ticks - ready_ticks / frame_ticks) * frame_ticks);
+				if (ready_phase > (int32_t)(frame_ticks / 2)) {
+					ready_phase -= frame_ticks;
+					end_phase -= frame_ticks;
+				} else if (ready_phase < -(int32_t)(frame_ticks / 2)) {
+					ready_phase += frame_ticks;
+					end_phase += frame_ticks;
+				}
+				crossed = ready_phase >= 0 && end_phase >= slot_ticks;
 			}
-			if (end_phase > (int32_t)(frame_ticks / 2)) {
-				end_phase -= frame_ticks;
-			}
-			crossed = ready_phase >= 0 && end_phase >= slot_ticks;
 		}
 
 		k_mutex_lock(&capture_metrics_lock, K_FOREVER);

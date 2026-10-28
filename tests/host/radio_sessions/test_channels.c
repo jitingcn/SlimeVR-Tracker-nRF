@@ -81,7 +81,7 @@ static uint8_t tracker_id = 3, ping_counter, epoch;
 static uint32_t ping_ctr_sent;
 static int64_t ping_send_time;
 #define PING_HISTORY_SIZE 8
-static struct { uint8_t counter; uint32_t ping_ticks, ping_ticks_kernel; } ping_history[PING_HISTORY_SIZE];
+static struct { uint8_t counter; uint32_t ping_ticks, ping_ticks_kernel; bool valid; } ping_history[PING_HISTORY_SIZE];
 static unsigned ping_history_idx;
 static uint64_t k_uptime_ticks(void) { return (uint64_t)now; }
 static uint64_t net_ticks_from_kernel64(uint64_t ticks) { return ticks; }
@@ -1040,6 +1040,12 @@ static void scan_sequences(void) {
 }
 
 int main(void) {
+    reset(84); now = 0; ping_history_idx = 0;
+    memset(ping_history, 0, sizeof(ping_history));
+    record_ping_admission(0);
+    assert(ping_history[0].valid && ping_history[0].ping_ticks == 0
+        && ping_history[0].ping_ticks_kernel == 0);
+    assert(host_ping_history(0) && !host_ping_history(1));
     if (getenv("RADIO_EVEN_ONLY")) {
         scan_sequences();
         advertised_channels();

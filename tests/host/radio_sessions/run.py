@@ -173,6 +173,11 @@ channels += "esb_get_ping_request_data(&tx_payload.data[8]);\n"
 channels += block(esb, r"^\tif \(is_ping && queue_status == 0 && data_length == ESB_PING_LEN\) \{")
 channels += "\n" + block(esb, r"^\tif \(tx_payload.data\[0\] == ESB_PING_TYPE && queue_status == 0\) \{")
 channels += "\n}\n"
+start = esb.index("\t\t\t\t\tuint32_t ping_ticks_for_this_ctr = 0;")
+end = esb.index("uint32_t rtt_us = 0;", start)
+channels += ("\nstatic bool host_ping_history(uint8_t rx_ctr) {\n" + esb[start:end]
+             + "\n(void)ping_ticks_for_this_ctr; (void)ping_ticks_kernel_for_this_ctr;"
+             + "\nreturn ping_history_valid;\n}\n")
 channels += "\nstatic void maintenance_timeout(void) { int64_t now_idle = k_uptime_get();\n"
 channels += block(esb, r"^\t\tif \(ping_pending && \(now_idle - ping_send_time\) > \(get_ping_interval_ms\(\) - 100\)\) \{")
 channels += "\n}\n"

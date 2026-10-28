@@ -78,11 +78,9 @@ void tdma_init(uint8_t tracker_id);
 /**
  * Block until this tracker can safely launch one normal NoACK packet.
  *
- * Admission allows at most one normal NoACK packet per TDMA frame and reserves
- * a payload-size-specific call-to-END budget. A late packet, guarded frame, or
- * second packet in one frame waits for the next usable own slot. Waiting occurs
- * before esb_write_payload(), so the ESB FIFO cannot auto-drain while sleeping.
- * Returns immediately when TDMA or synchronized server time is unavailable.
+ * Admission allows at most one normal NoACK packet per receiver-low32 TDMA
+ * frame. The final frame and frame zero are deferred at rollover. Waits are
+ * bounded and return false when the clock, layout, or opportunity changes.
  */
 bool tdma_wait_for_slot(uint8_t payload_length);
 

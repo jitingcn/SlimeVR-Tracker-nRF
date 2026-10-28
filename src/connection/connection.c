@@ -104,15 +104,15 @@ static uint32_t ping_next_periodic_deadline(uint32_t previous_deadline, uint32_t
 
 static uint32_t ping_server_phase_delay_ms(uint32_t interval_ms)
 {
-	uint64_t server_ticks = esb_get_server_time_ticks_64();
-	if (server_ticks == 0 || interval_ms == 0) {
+	struct esb_network_clock clock;
+	if (interval_ms == 0 || !esb_get_network_clock(&clock)) {
 		return 0;
 	}
 
 	uint32_t interval_ticks = (uint32_t)(((uint64_t)interval_ms * 32768U + 500U) / 1000U);
 	uint32_t phase_ticks
 		= (uint32_t)(((uint64_t)ping_phase_ms(interval_ms) * 32768U + 500U) / 1000U);
-	uint32_t server_phase_ticks = (uint32_t)(server_ticks % interval_ticks);
+	uint32_t server_phase_ticks = clock.receiver_ticks % interval_ticks;
 	uint32_t delay_ticks = phase_ticks >= server_phase_ticks ? phase_ticks - server_phase_ticks
 											  : interval_ticks - server_phase_ticks + phase_ticks;
 	uint32_t delay_ms = (uint32_t)(((uint64_t)delay_ticks * 1000U + 32767U) / 32768U);

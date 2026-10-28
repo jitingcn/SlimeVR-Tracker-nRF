@@ -208,6 +208,7 @@ struct ping_history_entry {
 	uint32_t ping_ticks;
 	// ticks at ping send time, KERNEL tick domain (RTT vs t4 stamp)
 	uint32_t ping_ticks_kernel;
+	bool valid;
 };
 static struct ping_history_entry ping_history[PING_HISTORY_SIZE] = {0};
 static uint8_t ping_history_idx = 0;
@@ -880,6 +881,13 @@ static inline uint64_t net_ticks_from_kernel64(uint64_t kernel_ticks)
 #endif
 }
 
+static int64_t net_tick_difference(uint32_t a, uint32_t b)
+{
+	uint32_t difference = a - b;
+	return difference < 0x80000000U ? (int64_t)difference
+		: (int64_t)difference - 0x100000000LL;
+}
+
 /* Reassemble a wrapping 32-bit kernel-tick stamp onto the 64-bit monotonic
  * timeline: the nearest 64-bit value whose low 32 bits equal short_ticks.
  * Valid for stamps within +/-2^31 kernel ticks of the current time. */
@@ -896,11 +904,6 @@ static inline uint64_t kernel_ticks_extend32(uint32_t short_ticks)
 	return candidate;
 }
 
-/* 32768 Hz network ticks -> microseconds (floor), platform-independent. */
-static inline uint64_t net_ticks_to_us_64(uint64_t net_ticks)
-{
-	return (net_ticks * 1000000ULL) / 32768ULL;
-}
 
 /* 32768 Hz network ticks -> milliseconds (floor), platform-independent. */
 static inline uint32_t net_ticks_to_ms_32(uint32_t net_ticks)
@@ -917,7 +920,7 @@ static int64_t g_last_sync_timestamp = 0;
 
 // Clock skew compensation (tracker vs receiver crystal frequency difference)
 static int32_t g_clock_skew_ppb = 0;         // Estimated clock skew in parts per billion
-static int32_t g_skew_ref_offset = 0;        // Offset at skew reference point
+static uint32_t g_skew_ref_offset = 0;       // Offset bits at skew reference point
 static uint32_t g_skew_ref_local_ticks = 0;  // Local ticks at skew reference point (updated infrequently)
 #define SKEW_REF_REFRESH_TICKS (60 * 32768)  // Refresh skew reference every ~60s
 
@@ -1597,9 +1600,13 @@ void event_handler(struct esb_evt const *event)
 
 					// Find send ticks for this PONG's counter in history
 					uint32_t ping_ticks_for_this_ctr = 0;
+					uint32_t ping_ticks_kernel_for_this_ctr = 0;
+					bool ping_history_valid = false;
 					for (int i = 0; i < PING_HISTORY_SIZE; i++) {
-						if (ping_history[i].counter == rx_ctr && ping_history[i].ping_ticks != 0) {
+						if (ping_history[i].valid && ping_history[i].counter == rx_ctr) {
 							ping_ticks_for_this_ctr = ping_history[i].ping_ticks;
+							ping_ticks_kernel_for_this_ctr = ping_history[i].ping_ticks_kernel;
+							ping_history_valid = true;
 							break;
 						}
 					}
@@ -1639,10 +1646,11 @@ void event_handler(struct esb_evt const *event)
 								pong_sens_auto_revolutions
 							);
 						}
-					} else if (ping_ticks_for_this_ctr != 0) {
+					} else if (ping_history_valid) {
+						uint32_t rx_difference = ping_rx_ticks - g_last_rx_raw_ticks;
 						receiver_clock_restarted = g_time_initialized
-							&& (int32_t)(ping_rx_ticks - g_last_rx_raw_ticks)
-								< -(int32_t)RECEIVER_RESTART_BACKWARD_TICKS;
+							&& rx_difference > 0x80000000U
+							&& 0U - rx_difference > RECEIVER_RESTART_BACKWARD_TICKS;
 						if (receiver_clock_restarted) {
 							receiver_restart_detections++;
 							LOG_WRN(
@@ -1688,13 +1696,6 @@ void event_handler(struct esb_evt const *event)
 							(uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(t4_ticks));
 
 						// Calculate full RTT: from PING send (T1) to PONG receive (T4)
-						uint32_t ping_ticks_kernel_for_this_ctr = 0;
-						for (int i = 0; i < PING_HISTORY_SIZE; i++) {
-							if (ping_history[i].counter == rx_ctr && ping_history[i].ping_ticks_kernel != 0) {
-								ping_ticks_kernel_for_this_ctr = ping_history[i].ping_ticks_kernel;
-								break;
-							}
-						}
 						uint32_t rtt_ticks = t4_ticks - ping_ticks_kernel_for_this_ctr;
 						rtt_us = k_ticks_to_us_floor32(rtt_ticks);
 
@@ -1743,8 +1744,7 @@ void event_handler(struct esb_evt const *event)
 							// all trackers and cancels out in TDMA slot alignment.
 							// Decoupling from min_rtt avoids noise injection when
 							// min_rtt ages/updates.
-							int32_t server_offset_ticks
-								= (int32_t)(ping_rx_ticks - t4_net_ticks);
+							uint32_t server_offset_ticks = ping_rx_ticks - t4_net_ticks;
 
 							/* Save prior sync stamp before overwrite — EMA predict
 							 * needs elapsed since last accepted PONG, not zero. */
@@ -1760,17 +1760,17 @@ void event_handler(struct esb_evt const *event)
 								g_sync_update_count = 0;
 								g_time_initialized = true;
 								server_time_synced = true;
-								LOG_DBG("Server offset initialized: %d ticks", server_offset_ticks);
+								LOG_DBG("Server offset initialized: %u ticks", server_offset_ticks);
 							} else {
 								uint32_t delta_from_ref = ping_ticks_for_this_ctr - g_skew_ref_local_ticks;
-								int32_t predicted_drift = (int32_t)((int64_t)g_clock_skew_ppb
-									* (int64_t)delta_from_ref / 1000000000LL);
-								int32_t predicted_offset = g_skew_ref_offset + predicted_drift;
-								int32_t innovation = server_offset_ticks - predicted_offset;
-								if (abs(innovation) > 32000) {
+								int64_t predicted_drift = (int64_t)g_clock_skew_ppb
+									* delta_from_ref / 1000000000LL;
+								uint32_t predicted_offset = g_skew_ref_offset + (uint32_t)predicted_drift;
+								int64_t innovation = net_tick_difference(server_offset_ticks, predicted_offset);
+								if (innovation > 32000 || innovation < -32000) {
 									LOG_WRN(
-										"Large offset jump detected (%d ticks), resetting (old=%d new=%d)",
-										innovation,
+										"Large offset jump detected (%lld ticks), resetting (old=%u new=%u)",
+										(long long)innovation,
 										g_server_ticks_offset,
 										server_offset_ticks
 									);
@@ -1780,28 +1780,29 @@ void event_handler(struct esb_evt const *event)
 									g_clock_skew_ppb = 0;
 								} else {
 									if (delta_from_ref >= 32768) {
-										int64_t total_drift = (int64_t)(server_offset_ticks - g_skew_ref_offset);
-										int32_t raw_skew_ppb = (int32_t)(total_drift * 1000000000LL
-											/ (int64_t)delta_from_ref);
-										g_clock_skew_ppb += (raw_skew_ppb - g_clock_skew_ppb) / 4;
+										int64_t total_drift = net_tick_difference(server_offset_ticks, g_skew_ref_offset);
+										int64_t raw_skew_ppb = total_drift * 1000000000LL / delta_from_ref;
+										int64_t filtered_skew = (int64_t)g_clock_skew_ppb
+											+ (raw_skew_ppb - g_clock_skew_ppb) / 4;
+										g_clock_skew_ppb = (int32_t)CLAMP(filtered_skew, INT32_MIN, INT32_MAX);
 									}
 									g_sync_update_count++;
 									uint32_t delta_since_sync = ping_ticks_for_this_ctr - prev_sync_local_ticks;
-									int32_t predicted_current = (int32_t)g_server_ticks_offset
-										+ (int32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
-									int32_t offset_innovation = server_offset_ticks - predicted_current;
+									uint32_t predicted_current = g_server_ticks_offset
+										+ (uint32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
+									int64_t offset_innovation = net_tick_difference(server_offset_ticks, predicted_current);
 									if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
-										g_server_ticks_offset = predicted_current + (offset_innovation * 3 + 2) / 4;
+										g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation * 3 + 2) / 4);
 									} else {
-										g_server_ticks_offset = predicted_current + (offset_innovation + 2) / 4;
+										g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation + 2) / 4);
 									}
 									if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
 										g_skew_ref_offset = server_offset_ticks;
 										g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
 									}
 									LOG_DBG(
-										"Offset update: innovation=%d offset=%d skew=%d ppb (rtt=%u min=%u)",
-										innovation, g_server_ticks_offset, g_clock_skew_ppb,
+										"Offset update: innovation=%lld offset=%u skew=%d ppb (rtt=%u min=%u)",
+										(long long)innovation, g_server_ticks_offset, g_clock_skew_ppb,
 										rtt_ticks, g_min_rtt_ticks
 									);
 								}
@@ -1813,7 +1814,7 @@ void event_handler(struct esb_evt const *event)
 							uint32_t local_now = (uint32_t)net_ticks_from_kernel64(k_uptime_ticks());
 							uint32_t elapsed_since_meas = local_now - ping_ticks_for_this_ctr;
 							int32_t skew_corr = (int32_t)((int64_t)g_clock_skew_ppb * elapsed_since_meas / 1000000000LL);
-							uint32_t est_ticks = (uint32_t)((int32_t)g_server_ticks_offset + (int32_t)local_now + skew_corr);
+							uint32_t est_ticks = g_server_ticks_offset + local_now + (uint32_t)skew_corr;
 							uint32_t server_time_ms = net_ticks_to_ms_32(est_ticks);
 							uint32_t server_ms = server_time_ms % 1000;
 							uint32_t server_s = (server_time_ms / 1000) % 60;
@@ -2512,18 +2513,17 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 			/* Never echo an unexecuted control while asking for channel proof. */
 			data[7] = ESB_PING_FLAG_CHANNEL_CONFIRM;
 		}
-		if (!server_time_synced) {
-			LOG_DBG("Sending PING while time not synced - attempting to re-sync");
-		}
 		// Set sequence number
 		data[2] = ping_counter;
-		if (server_time_synced) {
-			// TODO: Set local store server time if synced
-			uint32_t server_time_ticks = (uint32_t)esb_get_server_time_ticks_64();
+		struct esb_network_clock clock;
+		if (esb_get_network_clock(&clock)) {
+			uint32_t server_time_ticks = clock.receiver_ticks;
 			data[3] = (server_time_ticks >> 24) & 0xFF;
 			data[4] = (server_time_ticks >> 16) & 0xFF;
 			data[5] = (server_time_ticks >> 8) & 0xFF;
 			data[6] = server_time_ticks & 0xFF;
+		} else {
+			LOG_DBG("Sending PING while time not synced - attempting to re-sync");
 		}
 		esb_wom_prepare_ping(data);
 		// Calculate crc8 checksum over first 12 bytes
@@ -2543,8 +2543,8 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 	 * connection thread. Normal NoACK claims it here. Both must queue only while
 	 * ESB is idle: MANUAL_START auto-drains queued payloads once a TX chain runs.
 	 */
-	if (is_ping && tdma_is_enabled() && esb_get_sync_age_ms() >= 0
-	    && esb_get_sync_age_ms() <= PING_INTERVAL_MS * 10) {
+	int64_t sync_age = is_ping && tdma_is_enabled() ? esb_get_sync_age_ms() : -1;
+	if (sync_age >= 0 && sync_age <= PING_INTERVAL_MS * 10) {
 		if (!esb_is_idle()) {
 			tdma_note_radio_busy();
 			return -EBUSY;
@@ -2618,13 +2618,13 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 		queue_status = dup_ret;
 	}
 #endif
-	/* Zero ping_ticks until TX stamp — avoid RX binding new counter to old ticks. */
+	/* A queued counter is not usable until both transmit stamps are stored. */
 	if (is_ping && queue_status == 0 && data_length == ESB_PING_LEN) {
 		unsigned key = irq_lock();
 		ping_failed = false;
 		ping_counter++;
 		ping_history[ping_history_idx].counter = tx_payload.data[2];
-		ping_history[ping_history_idx].ping_ticks = 0;
+		ping_history[ping_history_idx].valid = false;
 		ping_ctr_sent = tx_payload.data[2];
 		ping_channel_confirm_sent = (tx_payload.data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
 		wom_command.sent_flag = tx_payload.data[7];
@@ -2740,6 +2740,7 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 		unsigned key = irq_lock();
 		ping_history[ping_history_idx].ping_ticks = (uint32_t)net_ticks_from_kernel64(t1_kernel64);
 		ping_history[ping_history_idx].ping_ticks_kernel = (uint32_t)t1_kernel64;
+		ping_history[ping_history_idx].valid = true;
 		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
 		irq_unlock(key);
 		ping_send_time = k_uptime_get();
@@ -3131,53 +3132,47 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks)
 	return true;
 }
 
-uint64_t esb_get_server_time_ticks_64(void)
+bool esb_get_network_clock(struct esb_network_clock *clock)
 {
-	if (!server_time_synced) {
-		return 0;
+	unsigned key = irq_lock();
+	uint64_t kernel_ticks = k_uptime_ticks();
+	bool synced = server_time_synced;
+	int64_t last_sync_ms = g_last_sync_timestamp;
+	uint32_t offset = g_server_ticks_offset;
+	uint32_t reference_ticks = g_last_sync_local_ticks;
+	int32_t skew_ppb = g_clock_skew_ppb;
+	irq_unlock(key);
+
+	int64_t age_ms = (int64_t)k_ticks_to_ms_floor64(kernel_ticks) - last_sync_ms;
+	if (!synced || age_ms < 0) {
+		return false;
 	}
-
-	int64_t now = k_uptime_get();
-	if (now - g_last_sync_timestamp > TIME_SYNC_TIMEOUT_MS) {
-		LOG_WRN("Time sync timeout: %lld ms since last sync, clearing sync state", now - g_last_sync_timestamp);
-		server_time_synced = false;
-		return 0;
+	if (age_ms > TIME_SYNC_TIMEOUT_MS) {
+		bool expired = false;
+		key = irq_lock();
+		if (server_time_synced && g_last_sync_timestamp == last_sync_ms) {
+			server_time_synced = false;
+			expired = true;
+		}
+		irq_unlock(key);
+		if (expired) {
+			LOG_WRN("Time sync timeout: %lld ms since last sync, clearing sync state", (long long)age_ms);
+		}
+		return false;
 	}
-
-	uint64_t local_now = net_ticks_from_kernel64(k_uptime_ticks());
-	// Apply clock skew compensation only for time elapsed since last PONG
-	// (g_server_ticks_offset already incorporates all drift up to last measurement)
-	uint32_t elapsed = (uint32_t)local_now - g_last_sync_local_ticks;
-	int32_t skew_correction = (int32_t)((int64_t)g_clock_skew_ppb * elapsed / 1000000000LL);
-	/* 64-bit monotonic estimate; low 32 bits are the 32-bit wire-stamp
-	 * domain (PING data[3-6]) and stay wrap-safe. */
-	return local_now + (uint64_t)(int64_t)(int32_t)g_server_ticks_offset
-		+ (uint64_t)(int64_t)skew_correction;
-}
-
-uint64_t esb_get_server_time_us_64(void)
-{
-	uint64_t ticks = esb_get_server_time_ticks_64();
-
-	return net_ticks_to_us_64(ticks);
-}
-
-uint32_t esb_get_server_time(void)
-{
-	uint64_t ticks = esb_get_server_time_ticks_64();
-	if (ticks == 0) {
-		return 0;
-	}
-	uint64_t time_us = esb_get_server_time_us_64();
-	return (uint32_t)(time_us / 1000ULL);
+	uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks);
+	uint32_t elapsed = local - reference_ticks;
+	int64_t correction = (int64_t)skew_ppb * elapsed / 1000000000LL;
+	clock->receiver_ticks = local + offset + (uint32_t)correction;
+	clock->local_kernel_ticks = kernel_ticks;
+	clock->sync_age_ms = age_ms;
+	return true;
 }
 
 int64_t esb_get_sync_age_ms(void)
 {
-	if (!server_time_synced || g_last_sync_timestamp == 0) {
-		return -1;
-	}
-	return k_uptime_get() - g_last_sync_timestamp;
+	struct esb_network_clock clock;
+	return esb_get_network_clock(&clock) ? clock.sync_age_ms : -1;
 }
 
 static void esb_thread(void)
