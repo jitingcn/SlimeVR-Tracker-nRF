@@ -59,9 +59,6 @@
 #include "tcal_heated.h"
 #endif
 
-static uint8_t imu_id;
-static uint8_t sensor_data[128]; // any use sensor data
-
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 static float magBias[3] = {0};
 float magBAinv[4][3];
@@ -386,21 +383,6 @@ void sensor_calibration_process_mag(float m[3])
 }
 #endif
 
-void sensor_calibration_update_sensor_ids(int imu)
-{
-	imu_id = imu;
-}
-
-uint8_t sensor_calibration_get_imu_id(void)
-{
-	return imu_id;
-}
-
-uint8_t *sensor_calibration_get_sensor_data()
-{
-	return sensor_data;
-}
-
 bool sensor_calibration_sensitivity_valid(float scale)
 {
 	return v_finite(&scale, 1) && scale >= 0.9f && scale <= 1.1f;
@@ -435,7 +417,6 @@ void sensor_calibration_read(void)
 		LOG_WRN("Calibration: cleared invalid values persisted by an older build");
 		retained_update();
 	}
-	memcpy(sensor_data, retained->sensor_data, sizeof(sensor_data));
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	memcpy(magBias, retained->magBias, sizeof(magBias));
 #endif

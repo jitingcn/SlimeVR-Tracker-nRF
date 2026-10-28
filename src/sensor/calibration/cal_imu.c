@@ -30,11 +30,7 @@
 #include <errno.h>
 #include <string.h>
 
-#include "sensor/sensors_enum.h"
 #include "sensor/magneto/magneto1_4.h"
-#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
-#include "sensor/imu/BMI270.h"
-#endif
 
 #include "bias_collect.h"
 #include "cal_imu.h"
@@ -101,48 +97,6 @@ void sensor_calibrate_imu(void)
 	// Variables to store average temperature and temperature range from calibration
 	float avg_temp = NAN;
 	float temp_range = NAN;
-#endif
-
-#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
-	if (sensor_calibration_get_imu_id() == IMU_BMI270) // bmi270 specific
-	{
-		imu_step(operation_id, feedback, CAL_PHASE_SENSOR_RETRIM);
-		uint8_t *sensor_data = sensor_calibration_get_sensor_data();
-		LOG_INF("Suspending sensor thread");
-		int suspend_err = main_imu_suspend();
-		if (suspend_err) {
-			LOG_ERR("Cannot safely suspend for IMU retrim: %d", suspend_err);
-			imu_failed(operation_id, feedback, CAL_PHASE_SENSOR_RETRIM, CAL_REASON_SENSOR_UNAVAILABLE);
-			return;
-		}
-		LOG_INF("Running BMI270 component retrimming");
-		int err = bmi_crt(sensor_data); // will automatically reinitialize // TODO: this blocks sensor!
-		LOG_INF("Resuming sensor thread");
-		main_imu_resume();
-		if (err) {
-			LOG_WRN("IMU specific calibration was not completed properly");
-			imu_failed(operation_id, feedback, CAL_PHASE_SENSOR_RETRIM, CAL_REASON_SENSOR_UNAVAILABLE);
-			return; // Calibration failed
-		}
-		LOG_INF("Finished IMU specific calibration");
-		sys_warm_transaction_begin();
-		if (!sensor_calibration_generation_valid(generation)) {
-			sys_warm_transaction_end(false);
-			imu_cancelled(operation_id, feedback);
-			return;
-		}
-		int storage_err = sys_write(MAIN_SENSOR_DATA_ID, &retained->sensor_data, sensor_data, sizeof(retained->sensor_data));
-		if (storage_err < 0) {
-			prior_error = storage_err;
-			cal_event_step(operation_id, CAL_PHASE_STORAGE, CAL_REASON_STORAGE_ERROR);
-			if (operation_id) {
-				tracker_events_notify();
-			}
-		}
-		sys_warm_transaction_end(false);
-		sensor_request_fusion_reset(false); // apply reset on the sensor's next frame
-		k_msleep(500);              // Delay before beginning acquisition
-	}
 #endif
 
 	LOG_INF("Reading data");

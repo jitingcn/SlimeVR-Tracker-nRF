@@ -97,7 +97,7 @@ void sensor_calibration_invalidate_requests(void) {}
 /* Accepted reset admission clears one request kind atomically. */
 void sensor_calibration_invalidate_kind(int kind) { (void)kind; }
 
-/* Warm storage leaves: BMI storage wrapping and guarded writes call these. */
+/* Warm storage leaves used by guarded calibration writes. */
 void sys_warm_transaction_begin(void) {}
 void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size)
 {

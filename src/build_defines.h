@@ -62,7 +62,7 @@ static uint8_t get_server_constant_tracker_status(int status) __attribute__((unu
 #define SVR_IMU_BMI160 8
 #define SVR_IMU_ICM20948 9
 #define SVR_IMU_ICM42688 10
-#define SVR_IMU_BMI270 11
+#define SVR_IMU_BMI270 11 // Historical server ID; BMI270 is no longer supported.
 #define SVR_IMU_LSM6DS3TRC 12
 #define SVR_IMU_LSM6DSV 13
 #define SVR_IMU_LSM6DSO 14

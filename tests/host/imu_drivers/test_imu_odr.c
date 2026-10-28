@@ -3,7 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "sensor/imu/BMI270.h"
 #include "sensor/imu/ICM42686.h"
 #include "sensor/imu/ICM42688.h"
 #include "sensor/imu/ICM45686.h"
@@ -156,48 +155,9 @@ static void test_clock_scale(void)
 		fail("ICM45686", "internal-clock scale was not reset");
 }
 
-static void test_bmi(void)
-{
-	const char *name = "BMI270";
-	float at, gt;
-	struct { float requested_hz, expected_hz; uint8_t accel, gyro; } cases[] = {
-		{12.5f, 12.5f, ODR_12p5, ODR_25},
-		{10.0f, 12.5f, ODR_12p5, ODR_25},
-		{25.0f, 25.0f, ODR_25, ODR_25},
-		{100.0f, 100.0f, ODR_100, ODR_100},
-		{200.0f, 200.0f, ODR_200, ODR_200},
-		{800.0f, 800.0f, ODR_800, ODR_800},
-		{0.1f, 0.78125f, ODR_0p78, ODR_25},
-	};
-	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
-		bmi_update_odr(0.0f, 0.0f, &at, &gt);
-		host_bus_reset();
-		bmi_update_odr(1.0f / cases[i].requested_hz, 1.0f / cases[i].requested_hz, &at, &gt);
-		if ((last_value(BMI270_ACC_CONF) & 0x0f) != cases[i].accel ||
-			(last_value(BMI270_GYR_CONF) & 0x0f) != cases[i].gyro)
-			fail(name, "wrong ODR register code");
-		expect_close(name, at, 1.0f / cases[i].expected_hz);
-		expect_close(name, gt, 1.0f / (cases[i].requested_hz < 25.0f ? 25.0f : cases[i].expected_hz));
-	}
-
-	bmi_update_odr(0.0f, 0.0f, &at, &gt);
-	bmi_update_odr(0.08f, 0.08f, &at, &gt);
-	host_bus_reset();
-	bmi_update_odr(0.08f, 0.08f, &at, &gt);
-	if (host_bus_write_count() != 0)
-		fail(name, "cache hit emitted a transaction");
-	expect_close(name, at, 0.08f);
-	expect_close(name, gt, 0.04f);
-
-	host_bus_reset();
-	bmi_update_odr(0.0f, INFINITY, &at, &gt);
-	if (last_value(BMI270_PWR_CTRL) != 0x08 || at != 0.0f || gt != 0.0f)
-		fail(name, "off semantics incorrect");
-}
 
 int main(void)
 {
-	test_bmi();
 	const struct driver_case cases[] = {
 		{"ICM42686", icm42686_update_odr, ICM42686_ACCEL_CONFIG0, ICM42686_GYRO_CONFIG0,
 		 ICM42686_PWR_MGMT0, 0x0f, 0x0f, ICM42686_AODR_12_5Hz, ICM42686_AODR_25Hz,

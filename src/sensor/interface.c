@@ -169,7 +169,7 @@ int sensor_interface_spi_configure(enum sensor_interface_dev dev, uint32_t frequ
 		frequency = MIN(frequency, DT_PROP(DT_NODELABEL(imu_spi), spi_max_frequency));
 #endif
 	sensor_interface_dev_spi[dev]->config.frequency = frequency;
-	sensor_interface_dev_spi_dummy_reads[dev] = dummy_reads; // shoutout to BMI270
+	sensor_interface_dev_spi_dummy_reads[dev] = dummy_reads;
 	return 0;
 }
 

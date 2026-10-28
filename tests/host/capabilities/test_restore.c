@@ -23,7 +23,6 @@ static bool warm_boot, ram_retention_valid;
 static unsigned nvs_reads, retained_updates, imu_loads, model_restores, model_configures, online_loads;
 static bool configured_online;
 static float live_matrix[4][3], magBias[3];
-static uint8_t sensor_data[128];
 static struct { uint16_t addr; } sensor_imu_dev, sensor_mag_dev;
 static uint8_t sensor_imu_dev_reg, sensor_mag_dev_reg;
 static bool mag_enabled = true, mag_available = true, mag_calibrated = true;
@@ -132,7 +131,8 @@ static void restore_case(bool warm, bool invalid)
     storage.gyroSensScale[2] = 2;
     storage.imu_addr = 0x68;
     storage.imu_reg = 0x75;
-    storage.sensor_data[7] = 0xab;
+    for (size_t i = 0; i < sizeof(storage.sensor_data); i++)
+        storage.sensor_data[i] = (uint8_t)(0xa3U + 37U * i);
     if (invalid) {
         uint32_t nan = 0x7fc12345;
         memcpy(&storage.magBAinv[2][1], &nan, sizeof(nan));
@@ -155,15 +155,17 @@ static void restore_case(bool warm, bool invalid)
     sensor_mag_dev_reg = 0xff;
     assert(sys_retained_init() == 0);
     assert(nvs_reads == (warm ? 0U : 11U));
+    assert(memcmp(retained->sensor_data, expected.sensor_data, sizeof(expected.sensor_data)) == 0);
 #if !CONFIG_SENSOR_USE_MAGNETOMETER
     magnetic_equal(&expected);
 #endif
     sensor_calibration_read();
     assert(imu_loads == 1 && retained->gyroSensScale[0] == 1 && retained->gyroSensScale[1] == 1.02f && retained->gyroSensScale[2] == 1);
-    assert(sensor_data[7] == 0xab);
+    assert(memcmp(retained->sensor_data, expected.sensor_data, sizeof(expected.sensor_data)) == 0);
     sensor_scan_read();
     assert(sensor_imu_dev.addr == (warm ? 0x68 : 0));
     sensor_scan_write();
+    assert(memcmp(retained->sensor_data, expected.sensor_data, sizeof(expected.sensor_data)) == 0);
     sensor_refresh_sensor_ids();
     assert(published_imu == 7);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -194,6 +196,7 @@ static void restore_case(bool warm, bool invalid)
 
 int main(void)
 {
+    assert(MAIN_SENSOR_DATA_ID == 30 && sizeof(storage.sensor_data) == 128);
     restore_case(true, false);
     restore_case(true, true);
     restore_case(false, false);

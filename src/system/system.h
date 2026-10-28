@@ -21,7 +21,7 @@
 #define BATT_STATS_INTERVAL_0 9 // ID 9 to 28 (20 intervals)
 #define BATT_STATS_CURVE_ID 29
 
-#define MAIN_SENSOR_DATA_ID 30
+#define MAIN_SENSOR_DATA_ID 30 // Reserved legacy BMI270 data in NVS; do not reuse.
 #define RF_CHANNEL_ID 31
 #define MAG_ENABLED_ID 37
 #define TCAL_ENABLED_ID 38

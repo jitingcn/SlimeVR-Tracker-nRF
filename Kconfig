@@ -391,7 +391,7 @@ config SENSOR_GYRO_ODR
     help
         Requested gyrometer output data rate. Actual rate will be raised to the nearest supported rate.
         A higher rate will increase the time to read and process sensor data.
-        A lower rate is recommended for IMUs with poor gyrometer rate noise density. (Ex. BMI270, LSM6DS3TR-C)
+        A lower rate is recommended for IMUs with poor gyrometer rate noise density. (Ex. LSM6DS3TR-C)
 
 config SENSOR_GYRO_OVERSAMPLING
     int "Gyroscope Δq-merge factor (INT_merge)"

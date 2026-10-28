@@ -6,14 +6,13 @@ LDFLAGS += -Wl,--gc-sections
 LDLIBS += -lm
 
 IMU_SOURCES := \
-	../../../src/sensor/imu/BMI270.c \
 	../../../src/sensor/imu/ICM42686.c \
 	../../../src/sensor/imu/ICM42688.c \
 	../../../src/sensor/imu/ICM45686.c \
 	../../../src/sensor/imu/LSM6DSM.c \
 	../../../src/sensor/imu/LSM6DSO.c
 
-IMU_HEADERS := $(IMU_SOURCES:.c=.h) ../../../src/sensor/imu/BMI270_firmware.h \
+IMU_HEADERS := $(IMU_SOURCES:.c=.h) \
 	../../../src/sensor/imu/icm426xx_hires.h ../../../src/sensor/imu/icm426xx_io.h
 COMMON_HEADERS := ../../../src/sensor/sensor.h ../../../src/sensor/sensor_none.h \
 	../../../src/sensor/interface.h ../../../src/sensor/diagnostics.h

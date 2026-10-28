@@ -6,7 +6,6 @@
 #include <string.h>
 #include <hal/nrf_gpio.h>
 
-#include "sensor/imu/BMI270.h"
 #include "sensor/imu/ICM42686.h"
 #include "sensor/imu/ICM42688.h"
 #include "sensor/imu/LSM6DSM.h"
@@ -29,7 +28,6 @@ uint8_t host_bus_write_reg(size_t index);
 uint8_t host_bus_write_value(size_t index);
 void host_bus_fifo(uint8_t reg, bool bytes);
 size_t host_bus_interval_bytes(void);
-size_t host_bus_interval_reads(void);
 unsigned host_bus_gyro_discontinuities(void);
 
 static unsigned writes_value(uint8_t reg, uint8_t value)
@@ -100,23 +98,6 @@ static void test_icm(const struct icm_case *d)
 	assert(guarded[0] == 0xCC && guarded[41] == 0xCC && guarded[42] == 0xCC);
 }
 
-static void test_bmi_boundary(unsigned reported, unsigned capacity)
-{
-	uint8_t guarded[64];
-	assert(capacity + 2 <= sizeof(guarded));
-	memset(guarded, 0xCC, sizeof(guarded));
-	host_bus_reset();
-	host_bus_fifo(BMI270_FIFO_LENGTH_0, true);
-	host_bus_set_register(BMI270_FIFO_LENGTH_0, reported);
-	host_bus_set_register(BMI270_FIFO_LENGTH_0 + 1, reported >> 8);
-	unsigned packets = reported / 12;
-	if (packets > capacity / 12) packets = capacity / 12;
-	assert(bmi_fifo_read(guarded + 1, capacity) == packets);
-	assert(host_bus_interval_bytes() == packets * 12);
-	assert(host_bus_interval_reads() == (packets != 0));
-	assert(guarded[0] == 0xCC);
-	for (unsigned i = packets * 12 + 1; i < sizeof(guarded); i++) assert(guarded[i] == 0xCC);
-}
 
 struct lsm_wom_case {
 	const char *name;
@@ -215,16 +196,6 @@ int main(int argc, char **argv)
 	};
 	if (argc == 1 || !strcmp(argv[1], "icm")) {
 		for (unsigned i = 0; i < sizeof(drivers) / sizeof(drivers[0]); i++) test_icm(&drivers[i]);
-	}
-	if (argc == 1 || !strcmp(argv[1], "bmi")) {
-		for (unsigned count = 1; count < 12; count++) test_bmi_boundary(count, 12);
-		test_bmi_boundary(0, 12);
-		test_bmi_boundary(12, 12);
-		test_bmi_boundary(13, 12);
-		test_bmi_boundary(25, 24);
-		test_bmi_boundary(25, 25);
-		test_bmi_boundary(24, 11);
-		test_bmi_boundary(24, 0);
 	}
 
 	if (argc == 1 || !strcmp(argv[1], "lsm")) {

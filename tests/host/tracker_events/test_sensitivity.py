@@ -50,7 +50,7 @@ static uint16_t sensitivity_operation;
 static struct led_token sensitivity_feedback;
 static struct {
     float gyroSensScale[3], magBias[3], magBAinv[4][3];
-    uint8_t sensor_data[1], mag_online_calibration_mode;
+    uint8_t mag_online_calibration_mode;
 } data;
 static typeof(data) *retained = &data;
 static unsigned writes, retained_updates, successes, cancellations, failures;
@@ -68,7 +68,6 @@ static struct sensor_gyro_sample replay[128];
 static uint32_t sample_timestamp_us[128];
 static uint32_t delivered_hash;
 static unsigned imu_loads;
-static uint8_t sensor_data[1];
 static float magBias[3];
 #define MAG_ONLINE_CALIBRATION_DISABLED 2
 #define MAG_ONLINE_CALIBRATION_DEFAULT 0

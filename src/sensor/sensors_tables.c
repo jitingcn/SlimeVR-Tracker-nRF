@@ -34,8 +34,8 @@ LOG_MODULE_DECLARE(sensor_scan, LOG_LEVEL_INF);
 #define SLIME_DRV1(cfg) IS_ENABLED(cfg)
 
 #define SENSOR_IMU_DRV_COUNT                                                                                           \
-	(SLIME_DRV1(CONFIG_SENSOR_DRV_BMI270) + SLIME_DRV1(CONFIG_SENSOR_DRV_ICM42688)                                     \
-	 + SLIME_DRV1(CONFIG_SENSOR_DRV_ICM42686) + SLIME_DRV1(CONFIG_SENSOR_DRV_ICM45686)                                 \
+	(SLIME_DRV1(CONFIG_SENSOR_DRV_ICM42688) + SLIME_DRV1(CONFIG_SENSOR_DRV_ICM42686)                                   \
+	 + SLIME_DRV1(CONFIG_SENSOR_DRV_ICM45686)                                                                         \
 	 + SLIME_DRV1(CONFIG_SENSOR_DRV_LSM6DSM) + SLIME_DRV1(CONFIG_SENSOR_DRV_LSM6DSO)                                   \
 	 + SLIME_DRV1(CONFIG_SENSOR_DRV_LSM6DSV))
 
@@ -56,8 +56,8 @@ LOG_MODULE_DECLARE(sensor_scan, LOG_LEVEL_INF);
 // A packed address group is emitted only if at least one of its WHO_AM_I rows
 // survives gating. *_addr_count must equal the number of emitted groups.
 #define SLIME_IMU_GROUP_A                                                                                              \
-	(IS_ENABLED(CONFIG_SENSOR_DRV_BMI270) || IS_ENABLED(CONFIG_SENSOR_DRV_ICM45686)                                    \
-	 || IS_ENABLED(CONFIG_SENSOR_DRV_ICM42686) || IS_ENABLED(CONFIG_SENSOR_DRV_ICM42688) || SLIME_IMU_KEEP_UNIMPL)
+	(IS_ENABLED(CONFIG_SENSOR_DRV_ICM45686) || IS_ENABLED(CONFIG_SENSOR_DRV_ICM42686)                                   \
+	 || IS_ENABLED(CONFIG_SENSOR_DRV_ICM42688) || SLIME_IMU_KEEP_UNIMPL)
 #define SLIME_IMU_GROUP_B                                                                                              \
 	(IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSM) || IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSO)                                    \
 	 || IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSV) || SLIME_IMU_KEEP_UNIMPL)
@@ -104,11 +104,7 @@ const char *dev_imu_names[SENSOR_DEV_IMU_COUNT]
 	   "LSM6DSV16B/ISM330BX"};
 const sensor_imu_t *sensor_imus[SENSOR_DEV_IMU_COUNT] = {
 	&sensor_imu_none, // will not implement, too low quality
-#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
-	&sensor_imu_bmi270,
-#else
-	&sensor_imu_none,
-#endif
+	&sensor_imu_none, // BMI270: reserved historical ID, no driver
 	&sensor_imu_none,
 	&sensor_imu_none, // cardinal sin
 	&sensor_imu_none, // cardinal sin
@@ -203,13 +199,10 @@ static const uint8_t i2c_dev_imu_reg[] = {
 static const uint8_t i2c_dev_imu_id[] = {
 #if SLIME_IMU_GROUP_A
 	// reg 0x00
-	(SLIME_IMU_KEEP_UNIMPL * 3 + IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)),
+	(SLIME_IMU_KEEP_UNIMPL * 3),
 #if SLIME_IMU_KEEP_UNIMPL
 	0xEA,
 	0xD1, // ICM20948, BMI160
-#endif
-#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
-	0x24, // BMI270
 #endif
 #if SLIME_IMU_KEEP_UNIMPL
 	0x43, // BMI323
@@ -264,9 +257,6 @@ static const int i2c_dev_imu[] = {
 // reg 0x00
 #if SLIME_IMU_KEEP_UNIMPL
 	IMU_ICM20948, IMU_BMI160,
-#endif
-#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
-	IMU_BMI270,
 #endif
 #if SLIME_IMU_KEEP_UNIMPL
 	IMU_BMI323,

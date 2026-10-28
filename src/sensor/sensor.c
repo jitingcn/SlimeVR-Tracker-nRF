@@ -2290,15 +2290,6 @@ int sensor_init(void)
 #endif
 	}
 
-	sensor_calibration_update_sensor_ids(sensor_imu_id);
-#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
-	if (sensor_imu == &sensor_imu_bmi270) // bmi270 specific
-	{
-		LOG_INF("Applying gyroscope gain");
-		bmi_gain_apply(sensor_calibration_get_sensor_data());
-	}
-#endif
-
 #if IMU_INT_EXISTS
 	// Setup interrupt
 	float fifo_threshold = sensor_update_time_ms / 1000.0f / sensor_actual_time; // target loop rate

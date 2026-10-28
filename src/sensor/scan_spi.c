@@ -65,7 +65,7 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 				// TODO: BMM150 workaround?
 				int err = spi_transceive_dt(bus, &tx, &rx);
 				LOG_DBG("err: %d", err);
-				id = buf[1] ? buf[1] : buf[2]; // ID may be in first byte, or skip one byte (such as BMI270)
+				id = buf[1] ? buf[1] : buf[2]; // ID may follow a dummy byte
 				LOG_DBG("Read value: 0x%02X, 0x%02X, 0x%02X (0x%02X)", buf[0], buf[1], buf[2], id);
 				// Advance packed-table cursors even when a register transaction fails.
 				for (int l = 0; !err && l < id_cnt; l++)

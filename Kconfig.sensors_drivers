@@ -15,11 +15,6 @@ config SENSOR_MAG_DRIVERS_MINIMAL
 
 menu "IMU drivers"
 
-config SENSOR_DRV_BMI270
-	bool "BMI270"
-	default y if !SENSOR_IMU_DRIVERS_MINIMAL
-	default n
-
 config SENSOR_DRV_ICM42688
 	bool "ICM42688"
 	default y if !SENSOR_IMU_DRIVERS_MINIMAL

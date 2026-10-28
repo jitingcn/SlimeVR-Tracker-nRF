@@ -167,9 +167,6 @@ list(FILTER app_sources EXCLUDE REGEX ".*/sensor/mag/.*\\.c$")
 target_sources(app PRIVATE ${app_sources})
 
 # IMU drivers
-if(CONFIG_SENSOR_DRV_BMI270)
-  target_sources(app PRIVATE src/sensor/imu/BMI270.c)
-endif()
 if(CONFIG_SENSOR_DRV_ICM42688)
   target_sources(app PRIVATE src/sensor/imu/ICM42688.c)
 endif()
@@ -234,7 +231,7 @@ endif()
 endif()
 
 set(_slimenrf_imu_drv_count 0)
-foreach(_d BMI270 ICM42688 ICM42686 ICM45686 LSM6DSM LSM6DSO LSM6DSV)
+foreach(_d ICM42688 ICM42686 ICM45686 LSM6DSM LSM6DSO LSM6DSV)
   if(CONFIG_SENSOR_DRV_${_d})
     math(EXPR _slimenrf_imu_drv_count "${_slimenrf_imu_drv_count}+1")
   endif()

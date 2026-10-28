@@ -59,7 +59,7 @@ struct retained_data {
 	uint8_t reboot_counter;
 	uint8_t paired_addr[8];
 
-	uint8_t sensor_data[128];
+	uint8_t sensor_data[128]; // Reserved legacy BMI270 gain data; preserve retained layout.
 
 	float accelBias[3];
 	float gyroBias[3];

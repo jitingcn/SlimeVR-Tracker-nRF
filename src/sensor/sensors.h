@@ -29,9 +29,6 @@
 
 #include "sensor_none.h"
 
-#if IS_ENABLED(CONFIG_SENSOR_DRV_BMI270)
-#include "imu/BMI270.h"
-#endif
 #if IS_ENABLED(CONFIG_SENSOR_DRV_ICM42688)
 #include "imu/ICM42688.h"
 #endif

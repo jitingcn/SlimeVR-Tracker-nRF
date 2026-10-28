@@ -116,7 +116,7 @@ void sensor_calibration_invalidate_kind(int kind)
 	(void)kind;
 }
 
-/* Warm storage leaves: BMI storage wrapping and guarded writes call these. */
+/* Warm storage leaves used by guarded calibration writes. */
 void sys_warm_transaction_begin(void)
 {
 }
@@ -356,7 +356,7 @@ static void test_unavailable_consumer_and_recovery(void)
 	assert(sensor_calibration_reset_imu() == 0);
 }
 
-static void test_bmi_resume_cannot_reopen_terminal_gate(void)
+static void test_nonowner_resume_cannot_reopen_terminal_gate(void)
 {
 	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	sensor_calibration_prepare_power_down();
@@ -364,7 +364,7 @@ static void test_bmi_resume_cannot_reopen_terminal_gate(void)
 	assert(retained->fusion_id == 0);
 	atomic_set(&main_suspended, true);
 	sensor_suspend_owner = &power_thread_id;
-	main_imu_resume(); // late BMI cleanup cannot release the power owner's stop
+	main_imu_resume(); // another caller cannot release the power owner's stop
 	assert(resumes == 0 && atomic_get(&main_suspended));
 	assert(sensor_calibration_reset_imu() == -ESHUTDOWN);
 	assert(sensor_calibration_reset_accel() == -ESHUTDOWN);
@@ -399,7 +399,7 @@ int main(void)
 	isolated(test_clear_waits_for_persisting_transaction);
 	isolated(test_failed_clear_reports_error_and_releases_barrier);
 	isolated(test_unavailable_consumer_and_recovery);
-	isolated(test_bmi_resume_cannot_reopen_terminal_gate);
+	isolated(test_nonowner_resume_cannot_reopen_terminal_gate);
 	puts("Actual reset-all/resume and calibration lifecycle regressions passed");
 	return 0;
 }

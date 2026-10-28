@@ -17,7 +17,7 @@ static uint8_t registers[256];
 static size_t transaction_count;
 static size_t fail_transaction;
 static int fail_read_reg = -1;
-static size_t interval_bytes, interval_reads;
+static size_t interval_bytes;
 static uint8_t fifo_count_reg;
 static bool fifo_count_is_bytes;
 static unsigned gyro_discontinuities;
@@ -27,7 +27,6 @@ unsigned host_bus_gyro_discontinuities(void) { return gyro_discontinuities; }
 
 void host_bus_fail_read(int reg) { fail_read_reg = reg; }
 size_t host_bus_interval_bytes(void) { return interval_bytes; }
-size_t host_bus_interval_reads(void) { return interval_reads; }
 void host_bus_fifo(uint8_t reg, bool bytes) { fifo_count_reg = reg; fifo_count_is_bytes = bytes; }
 uint8_t host_bus_register(uint8_t reg) { return registers[reg]; }
 
@@ -38,7 +37,6 @@ void host_bus_reset(void)
 	fail_transaction = 0;
 	fail_read_reg = -1;
 	interval_bytes = 0;
-	interval_reads = 0;
 	gyro_discontinuities = 0;
 	memset(registers, 0, sizeof(registers));
 }
@@ -119,7 +117,6 @@ int ssi_reg_read_interval(enum sensor_interface_dev dev, uint8_t reg, uint8_t *b
 int ssi_burst_read_interval(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uint32_t len, uint32_t interval)
 {
 	(void)dev; (void)reg;
-	interval_reads++;
 	interval_bytes += len;
 	/* Deliberately write every requested byte: canaries expose oversized transfers. */
 	memset(buf, 0xA5, len);

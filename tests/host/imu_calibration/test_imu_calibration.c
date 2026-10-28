@@ -191,7 +191,7 @@ void sensor_calibration_invalidate_kind(int kind)
 	led_kind_invalidations++;
 }
 
-/* Warm storage leaves: BMI storage wrapping and guarded writes call these. */
+/* Warm storage leaves used by guarded calibration writes. */
 void sys_warm_transaction_begin(void)
 {
 }
