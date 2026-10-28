@@ -367,8 +367,12 @@ static bool mag_available;
 static bool mag_enabled;    // initialized from retained->mag_enabled in sensor_scan()
 static bool mag_calibrated; // true if magnetometer calibration data is valid
 static atomic_t mag_persistence_error;
-// set when mag toggle reboot is pending, prevents sensor_retained_write from saving fusion state
+/* Closed until the changed magnetic domain has restarted and rebased. */
 static bool skip_fusion_save;
+static bool mag_fusion_restarted;
+static atomic_t mag_fusion_finish_pending;
+static unsigned int mag_setting_writes;
+static K_MUTEX_DEFINE(mag_fusion_lock);
 #endif
 
 struct fusion_periods {
@@ -455,6 +459,31 @@ static void sensor_service_mag_ref(void)
 		}
 		sensor_fusion->rebase_mag(norm, dip);
 		last_mag_fusion_ticks = 0;
+	}
+}
+
+/* The sensor owner or the suspended lifecycle owner holds fusion exclusively. */
+static void sensor_finish_mag_fusion_restart(bool restarted)
+{
+	k_mutex_lock(&mag_fusion_lock, K_FOREVER);
+	if (skip_fusion_save && restarted) {
+		mag_fusion_restarted = true;
+	}
+	if (skip_fusion_save && mag_fusion_restarted && !mag_setting_writes &&
+	    mag_enabled == retained->mag_enabled) {
+		sensor_fusion_reset_mag_ref();
+		sensor_service_mag_ref();
+		skip_fusion_save = false;
+		mag_fusion_restarted = false;
+		atomic_clear(&mag_fusion_finish_pending);
+	}
+	k_mutex_unlock(&mag_fusion_lock);
+}
+
+static void sensor_service_pending_mag_fusion(void)
+{
+	if (atomic_cas(&mag_fusion_finish_pending, 1, 0)) {
+		sensor_finish_mag_fusion_restart(false);
 	}
 }
 
@@ -1529,10 +1558,13 @@ void sensor_retained_write(void) // TODO: move to sys?
 #if CONFIG_SENSOR_USE_TCAL
 	sensor_tcal_lock();
 #endif
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	k_mutex_lock(&mag_fusion_lock, K_FOREVER);
+#endif
 	if (atomic_get(&fusion_requests) || sensor_calibration_fusion_stale() ||
 	    sensor_calibration_gyro_reference_pending()
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	    || skip_fusion_save
+	    || skip_fusion_save || mag_setting_writes
 #endif
 	) {
 		/* Never save fusion against a baseline not yet consumed by the sensor. */
@@ -1545,6 +1577,9 @@ void sensor_retained_write(void) // TODO: move to sys?
 	sensor_tcal_unlock();
 #endif
 	retained_update();
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	k_mutex_unlock(&mag_fusion_lock);
+#endif
 }
 
 void sensor_record_wom_sleep(void)
@@ -1697,9 +1732,23 @@ static void sensor_mag_runtime_disable(void)
 	mag_calibrated = false;
 }
 
+static void sensor_invalidate_mag_fusion(bool setting_write)
+{
+	k_mutex_lock(&mag_fusion_lock, K_FOREVER);
+	if (setting_write) {
+		mag_setting_writes++;
+	}
+	skip_fusion_save = true;
+	mag_fusion_restarted = false;
+	atomic_clear(&mag_fusion_finish_pending);
+	retained->fusion_id = 0;
+	retained_update();
+	k_mutex_unlock(&mag_fusion_lock);
+}
+
 int sensor_set_mag_enabled(bool enabled)
 {
-	if (mag_enabled == enabled) {
+	if ((sensor_sensor_init && main_ok ? mag_enabled : retained->mag_enabled) == enabled) {
 		LOG_INF("Magnetometer already %s", enabled ? "enabled" : "disabled");
 		int storage_err = atomic_get(&mag_persistence_error);
 		if (enabled && (!mag_available || !main_ok || !sensor_sensor_init || main_suspended)) {
@@ -1716,10 +1765,17 @@ int sensor_set_mag_enabled(bool enabled)
 
 	if (!sensor_sensor_init || !main_ok) {
 		LOG_INF("%s magnetometer, rebooting (sensor not ready)...", enabled ? "Enabling" : "Disabling");
+		sensor_invalidate_mag_fusion(true);
 		bool val = enabled;
 		int storage_err = sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
+		k_mutex_lock(&mag_fusion_lock, K_FOREVER);
+		mag_setting_writes--;
+		if (!mag_setting_writes && skip_fusion_save && mag_fusion_restarted &&
+		    mag_enabled == retained->mag_enabled) {
+			atomic_set(&mag_fusion_finish_pending, 1);
+		}
+		k_mutex_unlock(&mag_fusion_lock);
 		atomic_set(&mag_persistence_error, storage_err);
-		skip_fusion_save = true;
 		int reboot_err = sys_request_system_reboot();
 		int result = storage_err < 0 ? storage_err : reboot_err;
 		/* Durable intent is not proof that the missing live consumer applied it. */
@@ -1728,17 +1784,6 @@ int sensor_set_mag_enabled(bool enabled)
 		return result;
 	}
 
-	if (enabled && !mag_available) {
-		LOG_WRN("No magnetometer hardware; persisting enabled for next boot");
-		bool val = true;
-		int storage_err = sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));
-		atomic_set(&mag_persistence_error, storage_err);
-		mag_enabled = true;
-		sensor_refresh_sensor_ids();
-		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(),
-			storage_err < 0 ? LED_APPLIED_NOT_SAVED : LED_PARTIAL);
-		return storage_err;
-	}
 
 	LOG_INF("%s magnetometer (runtime)...", enabled ? "Enabling" : "Disabling");
 	int suspend_err = main_imu_suspend();
@@ -1746,20 +1791,26 @@ int sensor_set_mag_enabled(bool enabled)
 		LOG_ERR("Magnetometer change could not quiesce the sensor: %d", suspend_err);
 		return sensor_operation_result(LED_OWNER_MAG, suspend_err, false);
 	}
-	int err = sys_interface_resume();
-	if (err) {
-		main_imu_resume();
-		return sensor_operation_result(LED_OWNER_MAG, err, false);
+	int err = 0;
+	int pm_err = 0;
+	if (mag_available) {
+		err = sys_interface_resume();
+		if (err) {
+			main_imu_resume();
+			return sensor_operation_result(LED_OWNER_MAG, err, false);
+		}
 	}
-	if (enabled) {
-		err = sensor_mag_runtime_enable();
-	} else {
-		sensor_mag_runtime_disable();
-	}
-
-	int pm_err = sys_interface_suspend();
-	if (pm_err < 0) {
-		LOG_ERR("Magnetometer interface suspension failed: %d", pm_err);
+	sensor_invalidate_mag_fusion(false);
+	if (mag_available) {
+		if (enabled) {
+			err = sensor_mag_runtime_enable();
+		} else {
+			sensor_mag_runtime_disable();
+		}
+		pm_err = sys_interface_suspend();
+		if (pm_err < 0) {
+			LOG_ERR("Magnetometer interface suspension failed: %d", pm_err);
+		}
 	}
 
 	if (err < 0) {
@@ -1773,7 +1824,6 @@ int sensor_set_mag_enabled(bool enabled)
 	atomic_set(&mag_persistence_error, storage_err);
 	mag_enabled = enabled;
 
-	skip_fusion_save = true;
 	int restart_err = main_imu_restart();
 	if (restart_err) {
 		LOG_ERR("Fusion restart failed; sensor left suspended: %d", restart_err);
@@ -1781,7 +1831,6 @@ int sensor_set_mag_enabled(bool enabled)
 		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(), LED_PARTIAL);
 		return restart_err;
 	}
-	sensor_mag_ref_reset();
 	sensor_refresh_sensor_ids();
 
 #if CONFIG_CONNECTION_RAW_COLLECTION
@@ -1794,6 +1843,11 @@ int sensor_set_mag_enabled(bool enabled)
 	if (pm_err < 0) {
 		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(), LED_PARTIAL);
 		return pm_err;
+	}
+	if (enabled && !mag_available) {
+		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(),
+			storage_err < 0 ? LED_APPLIED_NOT_SAVED : LED_PARTIAL);
+		return storage_err;
 	}
 	LOG_INF("Magnetometer %s", enabled ? "enabled" : "disabled");
 	return sensor_operation_result(LED_OWNER_MAG, storage_err, true);
@@ -1876,6 +1930,7 @@ static void sensor_discard_partial_samples(void)
 static void sensor_apply_calibration_frame(void)
 {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
+	sensor_service_pending_mag_fusion();
 	magneto_online_apply_pending();
 #endif
 	enum sensor_calibration_effect effect = sensor_calibration_apply_pending();
@@ -2344,6 +2399,7 @@ int sensor_init(void)
 	sensor_calibration_reset_gyro_reference();
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_mag_timing_reset();
+	sensor_finish_mag_fusion_restart(true);
 #endif
 
 
@@ -3880,6 +3936,7 @@ int main_imu_restart(void)
 		if (had_mag_ref && saved_ref_norm > 0) {
 			sensor_fusion_set_mag_ref(saved_ref_norm, saved_ref_dip);
 		}
+		sensor_finish_mag_fusion_restart(true);
 #endif
 	}
 #if CONFIG_SENSOR_TCAL_HEATED

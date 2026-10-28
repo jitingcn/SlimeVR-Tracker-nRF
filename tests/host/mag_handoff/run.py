@@ -411,6 +411,7 @@ mag_acquire_end = sensor.index('#if CONFIG_CONNECTION_RAW_COLLECTION', mag_acqui
 transition_test = preamble + r'''
 #include <errno.h>
 #define CONFIG_SENSOR_TCAL_HEATED 1
+#define CONFIG_SENSOR_USE_TCAL 0
 #define CONFIG_SENSOR_MAG_ODR 50
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
@@ -425,14 +426,25 @@ typedef int atomic_t;
 static int atomic_get(atomic_t *v) { return *v; }
 static void atomic_set(atomic_t *v, int n) { *v=n; }
 static void atomic_clear(atomic_t *v) { *v=0; }
+static bool atomic_cas(atomic_t *v, int old, int next) {
+    if (*v!=old) return false; *v=next; return true;
+}
 static bool mag_available=true, mag_enabled, sensor_sensor_init=true, main_ok=true;
-static bool skip_fusion_save, hardware_on, heated_resting;
-static atomic_t main_suspended, output_ready, mag_persistence_error;
+static bool hardware_on, heated_resting, sensor_fusion_init=true, skip_fusion_save, mag_fusion_restarted;
+static unsigned mag_setting_writes;
+static atomic_t main_suspended, output_ready, mag_persistence_error, fusion_requests, mag_fusion_finish_pending;
+static int mag_fusion_lock;
+#define K_FOREVER 0
+static int k_mutex_lock(int *lock,int timeout) { (void)lock; (void)timeout; return 0; }
+static void k_mutex_unlock(int *lock) { (void)lock; }
 static int magneto_progress, pm_error, restart_error, enable_error;
-static int mag_reads, ref_resets, restart_calls, partial_events;
+static int mag_reads, ref_resets, restart_calls, partial_events, saves, retained_updates;
+static bool calibration_stale, gyro_reference_pending;
+static bool interleave_initialization;
+static void sensor_finish_mag_fusion_restart(bool restarted);
 static float gyro_actual_time=.0025f, accel_actual_time=.005f, mag_actual_time=.02f;
 static unsigned gyro_oversample_n=CONFIG_SENSOR_GYRO_OVERSAMPLING;
-static int64_t next_mag_read_ticks, mag_read_period_ticks=1;
+static int64_t next_mag_read_ticks, mag_read_period_ticks=1, last_mag_fusion_ticks;
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 static int gyro_oversample_count;
 static float gyro_dq_acc[4], gyro_merge_bias_dps[3];
@@ -441,8 +453,12 @@ static float gyro_dq_acc[4], gyro_merge_bias_dps[3];
 static int accel_oversample_count;
 static float accel_oversample_sum[3];
 #endif
-static struct {bool mag_enabled;} retained_data;
+static struct {bool mag_enabled; int fusion_id; unsigned char fusion_data[8];} retained_data;
 static typeof(retained_data) *retained=&retained_data;
+static int fusion_id=4;
+static void retained_update(void) { retained_updates++; }
+static bool sensor_calibration_fusion_stale(void) { return calibration_stale; }
+static bool sensor_calibration_gyro_reference_pending(void) { return gyro_reference_pending; }
 static int main_imu_suspend(void) { main_suspended=1; return 0; }
 static void main_imu_resume(void) { main_suspended=0; }
 static void sensor_release_failed_restart(void) {}
@@ -451,7 +467,13 @@ static int sys_interface_suspend(void) { return pm_error; }
 static int sensor_mag_runtime_enable(void) { if (enable_error) return enable_error; hardware_on=true; return 0; }
 static void sensor_mag_runtime_disable(void) { hardware_on=false; }
 static int sys_write(int id, void *dest, const void *src, size_t n) {
-    assert(id==MAG_ENABLED_ID); memcpy(dest,src,n); return 0;
+    assert(id==MAG_ENABLED_ID && skip_fusion_save && retained->fusion_id==0);
+    if (interleave_initialization) {
+        int before=ref_resets;
+        sensor_finish_mag_fusion_restart(true);
+        assert(skip_fusion_save && ref_resets==before);
+    }
+    memcpy(dest,src,n); return 0;
 }
 static int sys_request_system_reboot(void) { return 0; }
 static int led_request_id(void) { return 0; }
@@ -463,7 +485,6 @@ static int sensor_operation_result(int owner,int err,bool applied) {
     (void)owner; (void)applied; return err;
 }
 static void sensor_refresh_sensor_ids(void) {}
-static void sensor_mag_ref_reset(void) { ref_resets++; }
 static void sensor_mag_timing_reset(void) { next_mag_read_ticks=0; }
 static void sensor_calibration_reset_gyro_reference(void) {}
 static void sys_cancel_WOM(void) {}
@@ -475,10 +496,23 @@ static void sensor_send_raw_metadata(void) {}
 static int sensor_temperature_invalidate(void) { return restart_error; }
 static void sensor_temperature_resume(void) {}
 static bool sensor_fusion_get_mag_ref(float *norm,float *dip) { *norm=0; *dip=0; return false; }
-static void sensor_fusion_set_mag_ref(float norm,float dip) { (void)norm; (void)dip; }
+typedef int k_spinlock_key_t;
+static struct {int unused;} mag_ref_request_lock;
+static bool mag_ref_request_pending;
+static float mag_ref_request_norm, mag_ref_request_dip;
+static k_spinlock_key_t k_spin_lock(void *lock) { (void)lock; return 0; }
+static void k_spin_unlock(void *lock, k_spinlock_key_t key) { (void)lock; (void)key; }
+static bool magneto_online_take_mag_ref(float *norm,float *dip) { (void)norm; (void)dip; return false; }
 static float last_fusion_mag;
 static void fusion_init(float g,float a,float m) { (void)g; (void)a; last_fusion_mag=m; restart_calls++; }
-static struct {void (*init)(float,float,float);} backend={fusion_init};
+static void rebase_mag(float norm,float dip) { assert(norm==0 && dip==0); ref_resets++; }
+static void save_fusion(void *data) {
+    assert(!skip_fusion_save && !mag_ref_request_pending);
+    ((unsigned char *)data)[0]=(unsigned char)(40+ ++saves);
+}
+static struct {void (*init)(float,float,float); void (*rebase_mag)(float,float); void (*save)(void *);} backend={
+    fusion_init, rebase_mag, save_fusion
+};
 static typeof(backend) *sensor_fusion=&backend;
 static bool read_mag(float *out) { assert(hardware_on); mag_reads++; out[0]=7; return true; }
 static struct {bool (*mag_read)(float *);} mag_driver={read_mag};
@@ -487,6 +521,10 @@ static int64_t k_uptime_ticks(void) { return 10; }
 typedef struct {float raw_m[3]; bool new_mag_data;} sensor_loop_frame_t;
 ''' + extract_block(sensor, r'^struct fusion_periods\s*\{', semicolon=True) + '\n' + \
     extract_block(sensor, r'^static struct fusion_periods sensor_fusion_periods\([^;{}]*\)\s*\{') + '\n' + \
+    '\n'.join(function(sensor, name) for name in (
+        'sensor_fusion_set_mag_ref', 'sensor_fusion_reset_mag_ref', 'sensor_service_mag_ref',
+        'sensor_finish_mag_fusion_restart', 'sensor_service_pending_mag_fusion',
+        'sensor_retained_write', 'sensor_invalidate_mag_fusion')) + '\n' + \
     function(sensor, 'sensor_discard_partial_samples') + '\n' + \
     function(sensor, 'main_imu_restart') + '\n' + \
     function(sensor, 'sensor_set_mag_enabled') + '\n' + \
@@ -510,10 +548,17 @@ static void assert_discarded(void) {
 }
 int main(void) {
     sensor_loop_frame_t frame={0};
+    retained->fusion_id=fusion_id; retained->fusion_data[0]=17;
     pm_error=-EIO; pending_samples();
     assert(sensor_set_mag_enabled(true)==-EIO);
     assert(mag_enabled && hardware_on && retained->mag_enabled && !main_suspended);
     assert(last_fusion_mag==.02f && restart_calls==1 && ref_resets==1 && partial_events==1);
+    assert(!skip_fusion_save && retained->fusion_id==0);
+    sensor_retained_write(); assert(retained->fusion_id==fusion_id && retained->fusion_data[0]==41);
+    calibration_stale=true; sensor_retained_write(); assert(retained->fusion_id==0 && saves==1);
+    calibration_stale=false; gyro_reference_pending=true;
+    sensor_retained_write(); assert(retained->fusion_id==0 && saves==1);
+    gyro_reference_pending=false;
     assert_discarded(); acquire(&frame);
     assert(frame.new_mag_data && frame.raw_m[0]==7 && mag_reads==1);
     pending_samples();
@@ -525,8 +570,33 @@ int main(void) {
     pm_error=0; restart_error=-EBUSY; pending_samples();
     assert(sensor_set_mag_enabled(true)==-EBUSY);
     assert(mag_enabled && hardware_on && main_suspended && restart_calls==2);
+    assert(skip_fusion_save && retained->fusion_id==0);
+    sensor_retained_write(); assert(retained->fusion_id==0 && saves==1);
     restart_error=0; assert(main_imu_restart()==0); assert_discarded();
-    puts("PM failure preserves actual mode; restart discards partial gyro and accel samples");
+    assert(!skip_fusion_save && ref_resets==3);
+    sensor_retained_write(); assert(retained->fusion_id==fusion_id && saves==2);
+    main_suspended=0; mag_enabled=false; hardware_on=false; main_ok=false; retained->mag_enabled=false;
+    interleave_initialization=true;
+    assert(sensor_set_mag_enabled(true)==0);
+    interleave_initialization=false;
+    assert(skip_fusion_save && retained->fusion_id==0);
+    sensor_retained_write(); assert(retained->fusion_id==0 && saves==2);
+    main_ok=true; mag_enabled=true; assert(main_imu_restart()==0);
+    assert(!skip_fusion_save); sensor_retained_write(); assert(saves==3 && retained->fusion_id==fusion_id);
+    main_ok=false; mag_enabled=false; retained->mag_enabled=true;
+    interleave_initialization=true;
+    assert(sensor_set_mag_enabled(false)==0 && !retained->mag_enabled && skip_fusion_save);
+    interleave_initialization=false;
+    assert(retained->fusion_id==0 && mag_fusion_finish_pending==1);
+    sensor_retained_write(); assert(retained->fusion_id==0 && saves==3);
+    main_ok=true; sensor_service_pending_mag_fusion();
+    assert(!skip_fusion_save && !mag_fusion_finish_pending);
+    sensor_retained_write(); assert(retained->fusion_id==fusion_id && saves==4);
+    mag_enabled=false; mag_available=false; hardware_on=false;
+    assert(sensor_set_mag_enabled(true)==0);
+    assert(mag_enabled && !hardware_on && !skip_fusion_save && last_fusion_mag==0);
+    sensor_retained_write(); assert(saves==5 && retained->fusion_id==fusion_id);
+    puts("PM mode and retained fusion gates survive failure, recovery and absent hardware");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
