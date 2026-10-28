@@ -249,6 +249,11 @@ bool bmm1_mag_read(float m[3])
 		LOG_ERR("Communication error");
 		return false;
 	}
+	if ((rawData[1] == 0x80 && (rawData[0] & 0xF8) == 0) ||
+	    (rawData[3] == 0x80 && (rawData[2] & 0xF8) == 0) ||
+	    (rawData[5] == 0x80 && (rawData[4] & 0xFE) == 0)) {
+		return false;
+	}
 	bmm1_mag_process(rawData, m);
 	return true;
 }

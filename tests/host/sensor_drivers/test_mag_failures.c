@@ -538,6 +538,70 @@ static int test_bmm150_direct_status_gate(void)
 	return 0;
 }
 
+static void bmm150_frame(const int16_t axes[3])
+{
+	for (unsigned axis = 0; axis < 3; axis++) {
+		uint16_t packed = (uint16_t)((int32_t)axes[axis] * (axis == 2 ? 2 : 8));
+		bus.registers[BMM150_DATAX_LSB + axis * 2] = (uint8_t)packed;
+		bus.registers[BMM150_DATAX_LSB + axis * 2 + 1] = (uint8_t)(packed >> 8);
+	}
+	bus.registers[BMM150_RHALL_LSB] = BMM150_DATA_READY_MASK;
+	bus.registers[BMM150_RHALL_LSB + 1] = 0x80;
+}
+
+static bool bmm150_read_mode(unsigned mode, float out[3])
+{
+	fake_spec = mode == 1 ? SENSOR_INTERFACE_SPEC_EXT : SENSOR_INTERFACE_SPEC_I2C;
+	if (mode == 2) {
+		bmm1_mag_oneshot();
+		bus.registers[BMM150_OP_CTRL] &= (uint8_t)~0x06;
+	}
+	return bmm1_mag_read(out);
+}
+
+static int test_bmm150_overflow_is_not_published(void)
+{
+	const int16_t ordinary[3] = {100, -200, 300};
+	const int16_t overflow[3] = {-4096, -4096, -16384};
+	const int16_t neighbors[3][2] = {{-4095, 4095}, {-4095, 4095}, {-16383, 16383}};
+	const float expected_neighbors[3][2] = {
+		{-12.796875f, 12.796875f}, {-12.796875f, 12.796875f}, {-27.305f, 27.305f},
+	};
+	const float expected_ordinary[3] = {0.3125f, -0.625f, 0.5f};
+	float actual;
+	fake_bus_reset();
+	/* Fixed trim and RHALL values make the compensated vector deterministic. */
+	bus.registers[BMM150_DIG_Z2_LSB + 1] = 0x20;
+	bus.registers[BMM150_DIG_Z2_LSB + 3] = 0x40;
+	bus.registers[BMM150_DIG_Z2_LSB + 5] = 0x20;
+	CHECK(bmm1_init(0.04f, &actual) == 0);
+
+	for (unsigned mode = 0; mode < 3; mode++) {
+		for (unsigned axis = 0; axis < 3; axis++) {
+			int16_t axes[3];
+			memcpy(axes, ordinary, sizeof(axes));
+			axes[axis] = overflow[axis];
+			bmm150_frame(axes);
+			bus.registers[BMM150_DATAX_LSB + axis * 2] |= axis == 2 ? 0x01 : 0x07;
+			float out[3] = {11.0f, 22.0f, 33.0f};
+			CHECK(!bmm150_read_mode(mode, out));
+			CHECK(out[0] == 11.0f && out[1] == 22.0f && out[2] == 33.0f);
+
+			for (unsigned side = 0; side < 2; side++) {
+				axes[axis] = neighbors[axis][side];
+				bmm150_frame(axes);
+				CHECK(bmm150_read_mode(mode, out));
+				for (unsigned component = 0; component < 3; component++) {
+					float expected = component == axis ? expected_neighbors[axis][side]
+									 : expected_ordinary[component];
+					CHECK(fabsf(out[component] - expected) < 0.00001f);
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 static bool contains_write(uint8_t reg, uint8_t value);
 static int test_bmm350_init_and_compensation(void)
 {
@@ -915,6 +979,7 @@ int main(void)
 		{"LIS3 combined status/data", test_lis3_combines_status_and_data},
 		{"Combined status/data drivers", test_status_plus_data_drivers_publish_only_ready},
 		{"BMM150 direct status", test_bmm150_direct_status_gate},
+		{"BMM150 axis overflow", test_bmm150_overflow_is_not_published},
 		{"MMC oneshot timeouts", test_mmc_timeouts_stop_before_data},
 		{"MMC temperature read failures", test_mmc_temperature_failures_do_not_publish_bias},
 		{"QMC oneshot timeouts", test_qmc_timeouts_stop_before_data},
