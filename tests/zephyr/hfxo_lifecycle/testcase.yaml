@@ -1,0 +1,40 @@
+tests:
+  tracker.hfxo_lifecycle.nrf52:
+    tags:
+      - kernel
+      - radio
+    platform_allow:
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64
+  tracker.hfxo_lifecycle.nrf54:
+    tags:
+      - kernel
+      - radio
+    extra_args:
+      - HFXO_NRF54=ON
+    platform_allow:
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64
+  tracker.hfxo_lifecycle.lf_synth:
+    tags:
+      - kernel
+      - radio
+    extra_args:
+      - HFXO_SYNTH=ON
+    platform_allow:
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64
+  tracker.hfxo_lifecycle.nrf54_lf_synth:
+    tags:
+      - kernel
+      - radio
+    extra_args:
+      - HFXO_NRF54=ON
+      - HFXO_SYNTH=ON
+    platform_allow:
+      - native_sim/native/64
+    integration_platforms:
+      - native_sim/native/64

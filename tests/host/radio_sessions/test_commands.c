@@ -32,6 +32,7 @@ static void tracker_events_notify(void) { event_notifications++; }
 #endif
 #define CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C 44
 #define CONFIG_CONNECTION_OVER_HID 0
+#define IS_ENABLED(option) 0
 #define USER_SHUTDOWN_ENABLED 0
 #define ESB_ST_PAIRING 0
 #define ESB_ST_RECOVERING 2
@@ -125,6 +126,7 @@ static void k_msleep(int ms)
     if (feeds >= stop_after) longjmp(thread_stop, 1);
 }
 static void clocks_request_start(int delay) {}
+static inline void clocks_request_start_internal(uint32_t delay, bool init_lf) {}
 static void clock_init_external_async(void) {}
 static void esb_pair(void) { assert(false); }
 static void esb_initialize(bool init) {}

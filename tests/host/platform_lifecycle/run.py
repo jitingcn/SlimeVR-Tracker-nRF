@@ -34,7 +34,7 @@ for name in ("should_enter_dfu", "enter_dfu_mode"):
 for name in ("watchdog_get_reset_count", "watchdog_clear_reset_count", "watchdog_mark_boot_success"):
     parts.append(function(watchdog, name))
 for path, names in (
-    ("system/clock_control.c", ("normalize_source", "lfclk_running_source_get", "lfclk_start_source", "clock_switch", "clock_pre_shutdown")),
+    ("system/clock_control.c", ("normalize_source", "lfclk_running_source_get", "lfclk_start_source", "clock_switch", "clock_pre_shutdown", "clock_init_external")),
     ("system/watchdog.c", ("watchdog_init", "watchdog_register_thread", "watchdog_feed", "watchdog_pause", "watchdog_resume")),
     ("system/power.c", ("sys_interface_action", "sys_interface_suspend", "sys_interface_resume")),
     ("sensor/sensor.c", ("sensor_transfer_suspension_to_power", "sensor_shutdown", "sensor_setup_WOM")),
@@ -45,6 +45,10 @@ for path, names in (
         clock_constants = re.findall(r"^#define LFCLK_(?:WAIT_STEP_US|STOP_TIMEOUT_US|START_TIMEOUT_US) .*$",
                                      source, re.MULTILINE)
         parts += re.findall(r"^static K_MUTEX_DEFINE\([^;]+\);$", source, re.MULTILINE)
+        clock_latch = re.findall(r"^static bool clock_external_init_disallowed(?:\s*=\s*(?:true|false))?;",
+                                 source, re.MULTILINE)
+        parts += clock_latch
+        clock_constants.append(f"#define HOST_LF_INIT_FENCE {int(bool(clock_latch))}")
     for name in names:
         # Helpers introduced by the fix are absent in baseline source.
         if name in ("lfclk_start_source", "sys_interface_action") and not re.search(rf"\b{name}\(", source):

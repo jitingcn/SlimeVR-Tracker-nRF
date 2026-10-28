@@ -33,12 +33,24 @@ wom_state = block(esb, r"^static struct \{(?=\n\tuint16_t minutes, token;)") + "
 payload = constants + "\n" + "\n".join(re.findall(r"^static struct esb_payload tx_payload = .*;", esb, re.MULTILINE))
 payload += "\n" + wom_state + "\n" + function(esb, "esb_wom_reset")
 payload += "\n" + function(esb, "esb_wom_prepare_ping")
+# Keep the whole production clock section so stop/start share its actual state
+# and helper declarations; the fixture stubs only the kernel and onoff leaves.
+clock_start = esb.index("bool clock_status = false;")
+clock_control = re.search(r"^#if defined\(CONFIG_CLOCK_CONTROL_NRF\)$", esb[clock_start:], re.MULTILINE)
+if not clock_control:
+    raise ValueError("Clock control section not found")
+control_start = clock_start + clock_control.start()
+depth = 0
+for directive in re.finditer(r"^[ \t]*#\s*(if|ifdef|ifndef|endif)\b[^\n]*", esb[control_start:], re.MULTILINE):
+    depth += -1 if directive.group(1) == "endif" else 1
+    if depth == 0:
+        clock_end = control_start + directive.end()
+        break
+else:
+    raise ValueError("Unclosed clock control section")
+payload += "\n" + esb[clock_start:clock_end]
 clocked_writer = re.search(r"^static int esb_write_clocked\(", esb, re.MULTILINE)
 if clocked_writer:
-    payload += "\nstatic atomic_t tx_clock_users;\n"
-payload += "\n" + function(esb, "clocks_stop")
-if clocked_writer:
-    payload += "\n" + function(esb, "esb_release_tx_clock")
     payload += "\n" + function(esb, "esb_write_clocked")
 payload += "\n" + function(esb, "esb_write")
 if re.search(r"^int esb_write_ping\(", esb, re.MULTILINE):
@@ -141,6 +153,8 @@ recovery += "\nstatic void receive_valid_pong(void) { do {\n" + esb[start:end] +
 
 channels = constants + "\n" + block(esb, r"^static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS\[\] = \{", True)
 channels += "\n#define ESB_ALLOWED_CHANNELS_COUNT (sizeof(ESB_ALLOWED_CHANNELS))\n"
+clock_users = re.search(r"^static atomic_t tx_clock_users;", esb, re.MULTILINE)
+channels += "\n" + (clock_users.group() if clock_users else "static atomic_t tx_clock_users;") + "\n"
 channels += esb[esb.index("K_MUTEX_DEFINE(esb_radio_lock);"):esb.index("#define TX_ERROR_THRESHOLD")]
 channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_encode\([^;{]*\)\s*\{", False)
 channels += "\n" + block(header, r"^static inline uint8_t esb_rf_channel_decode\([^;{]*\)\s*\{", False)
@@ -262,6 +276,8 @@ int main(void) {
             if name != "esb_remote_cmd_ping":
                 body = f"#if {guard}\n{body}\n#endif"
             matrix_parts[matrix_parts.index(stub)] = body
+        # The raw handlers already present in commands need the same outer
+        # compilation boundary as their source translation unit.
         for name in ("esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off"):
             body = function(esb, name)
             matrix_parts[matrix_parts.index(body)] = f"#if CONFIG_CONNECTION_RAW_COLLECTION\n{body}\n#endif"

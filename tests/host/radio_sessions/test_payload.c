@@ -7,6 +7,25 @@
 #include <stdlib.h>
 
 #define K_FOREVER 0
+#define CONFIG_CLOCK_CONTROL_NRF 1
+#define NRF_CLOCK_HAS_PLL 0
+#define CLOCK_CONTROL_NRF_SUBSYS_HF 0
+#define SYS_INIT(...)
+#define ARG_UNUSED(value) ((void)(value))
+#define K_MUTEX_DEFINE(name) int name
+#define K_SEM_DEFINE(name, initial, maximum) struct k_sem name = {initial, maximum}
+struct k_sem { unsigned count, limit; };
+static inline void k_sem_give(struct k_sem *sem)
+{
+	assert(sem->count < sem->limit);
+	++sem->count;
+}
+static inline int k_sem_take(struct k_sem *sem, int timeout)
+{
+	assert(sem->count > 0);
+	--sem->count;
+	return 0;
+}
 static int esb_radio_lock;
 static void k_mutex_lock(int *lock, int timeout) { ++*lock; }
 static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
@@ -48,7 +67,8 @@ static void host_log(const char *format, ...)
 struct esb_payload {
 	uint8_t pipe, noack, length, data[64];
 };
-static bool esb_initialized = true, clock_status = true, server_time_synced;
+static bool esb_initialized = true, server_time_synced, radio_user_disabled;
+extern bool clock_status;
 static int esb_conn_state = 1;
 static uint8_t tracker_id = 2, ping_counter = 7, ping_ctr_sent;
 static bool ping_pending, ping_failed;
@@ -77,11 +97,49 @@ static unsigned queued_count;
 static unsigned tx_success_count, clock_releases;
 static bool finish_during_wait, deny_admission, check_tx_clock, check_ping_window;
 static int clock_start_error, sync_age = -1;
-static int clk_mgr;
-static void onoff_release(int manager)
+struct onoff_manager { int unused; };
+struct onoff_client;
+typedef void (*notify_callback)(struct onoff_manager *, struct onoff_client *, uint32_t, int);
+struct sys_notify { int result; notify_callback callback; };
+struct onoff_client { struct sys_notify notify; };
+static struct onoff_manager mock_clock_manager;
+static struct onoff_manager *z_nrf_clock_control_get_onoff(int subsystem)
+{
+	return &mock_clock_manager;
+}
+static inline void sys_notify_init_spinwait(struct sys_notify *notify)
+{
+	notify->result = 0;
+	notify->callback = NULL;
+}
+static inline void sys_notify_init_callback(struct sys_notify *notify, notify_callback callback)
+{
+	notify->callback = callback;
+}
+static inline int sys_notify_fetch_result(struct sys_notify *notify, int *result)
+{
+	*result = notify->result;
+	return 0;
+}
+static int onoff_request(struct onoff_manager *manager, struct onoff_client *client)
+{
+	if (clock_start_error) {
+		return clock_start_error;
+	}
+	now_ms += 5; /* Cold HFXO startup may exceed a guarded admission window. */
+	client->notify.result = 0;
+	/* A ready onoff manager may invoke the completion inline. */
+	if (client->notify.callback) {
+		client->notify.callback(manager, client, 0, 0);
+	}
+	return 0;
+}
+static int onoff_release(struct onoff_manager *manager)
 {
 	clock_releases++;
+	return 0;
 }
+static inline void k_yield(void) {}
 int esb_write(uint8_t *data, bool no_ack, size_t length);
 static void interleave(int site)
 {
@@ -92,17 +150,7 @@ static void interleave(int site)
 	uint8_t other[] = {0x70, 0x91, 0x82, 0x73, 0x64};
 	assert(esb_write(other, false, sizeof(other)) == 0);
 }
-static int clocks_start(void)
-{
-	if (clock_start_error) {
-		return clock_start_error;
-	}
-	if (!clock_status) {
-		now_ms += 5; /* Cold HFXO startup may exceed a guarded admission window. */
-		clock_status = true;
-	}
-	return 0;
-}
+/* Clock ownership and admission use the extracted production implementation. */
 static bool connection_get_data_collection(void)
 {
 	return false;
@@ -243,9 +291,13 @@ static void reset(void)
 	batch = false;
 	tdma_enabled = false;
 	idle = true;
-	clock_status = true;
-	clock_releases = 0;
 	clock_start_error = 0;
+	clocks_stop();
+	assert(!clock_status);
+	assert(clocks_init() == 0);
+	assert(clocks_start() == 0);
+	assert(clock_status);
+	clock_releases = 0;
 	now_ms = 1000;
 	finish_during_wait = false;
 	deny_admission = false;
@@ -253,10 +305,16 @@ static void reset(void)
 	check_ping_window = false;
 	sync_age = -1;
 	esb_initialized = true;
+	radio_user_disabled = false;
 	esb_conn_state = 1;
 	channel_wait_normal = channel_search = channel_redirect_pending = false;
 	channel_confirmed = true; channel_legacy_peer = ping_channel_confirm_sent = false;
 	memset(&wom_command, 0, sizeof(wom_command));
+}
+static void cold_clock(void)
+{
+	clocks_stop();
+	assert(!clock_status);
 }
 static void assert_original(unsigned index, const uint8_t *data, size_t length, bool noack)
 {
@@ -291,7 +349,7 @@ static void cold_ping(void)
 {
 	uint8_t ping[13] = {0xF0};
 	reset();
-	clock_status = false;
+	cold_clock();
 	tdma_enabled = true;
 	sync_age = 0;
 	check_tx_clock = true;
@@ -323,7 +381,7 @@ static void deferred_ping_keeps_clock_warm(void)
 {
 	uint8_t ping[13] = {0xF0};
 	reset();
-	clock_status = false;
+	cold_clock();
 	deny_admission = true;
 
 	int err = host_send_ping(ping, false);
@@ -357,7 +415,7 @@ static void deferred_ping_allows_explicit_clock_stop(void)
 {
 	uint8_t ping[13] = {0xF0};
 	reset();
-	clock_status = false;
+	cold_clock();
 	deny_admission = true;
 
 	int err = host_send_ping(ping, false);
@@ -372,7 +430,7 @@ static void clock_start_failure_does_not_queue(void)
 {
 	uint8_t mag[17] = {4, 2};
 	reset();
-	clock_status = false;
+	cold_clock();
 	clock_start_error = -EIO;
 
 	int err = esb_write(mag, true, sizeof(mag));
@@ -386,7 +444,7 @@ static void inactive_radio_does_not_start_clock(void)
 {
 	uint8_t ping[13] = {0xF0};
 	reset();
-	clock_status = false;
+	cold_clock();
 	esb_initialized = false;
 
 	int err = host_send_ping(ping, false);
@@ -400,7 +458,7 @@ static void forced_resync_bypasses_admission(void)
 {
 	uint8_t ping[13] = {0xF0};
 	reset();
-	clock_status = false;
+	cold_clock();
 	deny_admission = true;
 	check_tx_clock = true;
 

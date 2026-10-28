@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -11,7 +12,12 @@
 #define LOG_WRN(...) ((void)0)
 #define LOG_DBG(...) ((void)0)
 #define IS_ENABLED(x) (x)
-#define CONFIG_CLOCK_USE_LFXO 1
+static bool host_clock_lfxo = true;
+#define CONFIG_CLOCK_USE_LFXO host_clock_lfxo
+#define CONFIG_CLOCK_USE_LF_SYNTH (!host_clock_lfxo)
+#define CONFIG_CLOCK_USE_LFXO_MODE_FULL_SWING 0
+#define CONFIG_CLOCK_USE_LFXO_MODE_LOW_SWING 0
+#define CLOCK_LFCLKSRC_SRC_Synth 1
 #define CONFIG_TASK_WDT 1
 #define CONFIG_BUILD_OUTPUT_UF2 ADAFRUIT_FAULT_RECOVERY
 #define CONFIG_BOOTLOADER_MCUBOOT (!ADAFRUIT_FAULT_RECOVERY)
@@ -29,11 +35,11 @@ static pthread_mutex_t rendezvous = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static bool gate_enabled, owner_waiting, contender_waiting, owner_released;
 struct k_mutex { pthread_mutex_t native; };
-#define K_MUTEX_DEFINE(name) struct k_mutex name = { PTHREAD_MUTEX_INITIALIZER }
+#define K_MUTEX_DEFINE(name) struct k_mutex name
 #define K_FOREVER (-1)
 static inline int k_mutex_lock(struct k_mutex *mutex, int timeout)
 {
-    if (gate_enabled && caller == 2) {
+    if (gate_enabled && caller == 2 && mutex_depth == 0) {
         assert(pthread_mutex_trylock(&mutex->native) == EBUSY);
         assert(pthread_mutex_lock(&rendezvous) == 0);
         contender_waiting = true;
@@ -46,14 +52,14 @@ static inline int k_mutex_lock(struct k_mutex *mutex, int timeout)
 }
 static inline int k_mutex_unlock(struct k_mutex *mutex)
 {
-    assert(!irq_depth && mutex_depth == 1);
+    assert(!irq_depth && mutex_depth > 0);
     --mutex_depth;
     assert(pthread_mutex_unlock(&mutex->native) == 0);
     return 0;
 }
 
 typedef enum {
-    NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL,
+    NRF_CLOCK_LFCLK_RC, NRF_CLOCK_LFCLK_XTAL, NRF_CLOCK_LFCLK_SYNTH,
 #if TEST_EXTERNAL
     NRF_CLOCK_LFCLK_XTAL_FULL_SWING, NRF_CLOCK_LFCLK_XTAL_LOW_SWING,
 #endif
@@ -74,13 +80,13 @@ static struct {
     nrf_clock_lfclk_t active, requested;
     bool running, event, request, watchdog, other_event, nvic_pending;
     uint32_t interrupts;
-    enum start_result result[2];
+    enum start_result result[3];
     enum stop_failure stop_failure;
     unsigned int stop_request_left, stop_source_left, start_left;
     unsigned int starts, stops, writes, delays, watchdog_writes, event_clears;
     unsigned int radio_irqs, sensor_irqs, other_irqs, lf_callbacks, reserved_events;
     bool last_lf_policy;
-    struct { unsigned int caller; int task; } trace[6];
+    struct { unsigned int caller; int task; } trace[9];
     unsigned int trace_count;
 } clock_model;
 
@@ -143,7 +149,7 @@ static bool nrf_clock_is_running(int clock, int domain, nrf_clock_lfclk_t *sourc
 static void trace_clock(int task)
 {
     assert(irq_depth == 1);
-    assert(clock_model.trace_count < 6);
+    assert(clock_model.trace_count < sizeof(clock_model.trace) / sizeof(clock_model.trace[0]));
     clock_model.trace[clock_model.trace_count].caller = caller;
     clock_model.trace[clock_model.trace_count++].task = task;
 }
@@ -239,9 +245,12 @@ static void nrfx_coredep_delay_us(uint32_t us)
     }
     shared_clock_irq();
 }
+static void reset_clock_fence(void);
 static void reset_clock(bool watchdog, nrf_clock_lfclk_t source, bool lf_enabled)
 {
     assert(!irq_depth && !mutex_depth);
+    reset_clock_fence();
+    host_clock_lfxo = true;
     memset(&clock_model, 0, sizeof(clock_model));
     clock_model.running = clock_model.request = true;
     clock_model.watchdog = watchdog;
@@ -337,6 +346,23 @@ static int main_imu_suspend(void)
 }
 #include "production.inc"
 
+static void reset_clock_fence(void)
+{
+#if HOST_LF_INIT_FENCE
+    /* Each case models a fresh boot; production never clears this latch. */
+    clock_external_init_disallowed = false;
+#endif
+}
+
+static void init_mutex(struct k_mutex *mutex)
+{
+    pthread_mutexattr_t attributes;
+    assert(pthread_mutexattr_init(&attributes) == 0);
+    assert(pthread_mutexattr_settype(&attributes, PTHREAD_MUTEX_RECURSIVE) == 0);
+    assert(pthread_mutex_init(&mutex->native, &attributes) == 0);
+    assert(pthread_mutexattr_destroy(&attributes) == 0);
+}
+
 static void check_clock_release(bool saved_lf, unsigned int callbacks)
 {
     assert(!irq_depth && !mutex_depth);
@@ -422,6 +448,13 @@ static void *call_clock(void *data)
     else clock_switch(call->target);
     return NULL;
 }
+static void *call_external_init(void *data)
+{
+    const struct clock_call *call = data;
+    caller = call->caller;
+    clock_init_external();
+    return NULL;
+}
 static void test_clock_contention(void)
 {
     for (unsigned int mode = 0; mode < 3; ++mode) {
@@ -492,8 +525,77 @@ static void test_clock_noop_and_shutdown(void)
     }
 }
 
+static void check_late_external_init(void)
+{
+    unsigned int starts = clock_model.starts;
+    unsigned int stops = clock_model.stops;
+    unsigned int writes = clock_model.writes;
+    unsigned int trace_count = clock_model.trace_count;
+    clock_init_external();
+    assert(clock_model.active == NRF_CLOCK_LFCLK_RC);
+    assert(clock_model.starts == starts && clock_model.stops == stops);
+    assert(clock_model.writes == writes && clock_model.trace_count == trace_count);
+}
+
+static void test_external_clock_contention(bool use_lfxo, bool init_first)
+{
+    nrf_clock_lfclk_t external = use_lfxo ? NRF_CLOCK_LFCLK_XTAL : NRF_CLOCK_LFCLK_SYNTH;
+    reset_clock(true, init_first ? NRF_CLOCK_LFCLK_RC : external, false);
+    host_clock_lfxo = use_lfxo;
+    gate_enabled = true;
+    const struct clock_call calls[] = {
+        {1, NRF_CLOCK_LFCLK_RC, !init_first},
+        {2, NRF_CLOCK_LFCLK_RC, init_first},
+    };
+    pthread_t owner, contender;
+    assert(pthread_create(&owner, NULL, init_first ? call_external_init : call_clock,
+                          (void *)&calls[0]) == 0);
+    assert(pthread_mutex_lock(&rendezvous) == 0);
+    while (!owner_waiting) assert(pthread_cond_wait(&changed, &rendezvous) == 0);
+    assert(pthread_create(&contender, NULL, init_first ? call_clock : call_external_init,
+                          (void *)&calls[1]) == 0);
+    while (!contender_waiting) assert(pthread_cond_wait(&changed, &rendezvous) == 0);
+    assert(clock_model.start_left != 0);
+    owner_released = true;
+    assert(pthread_cond_broadcast(&changed) == 0);
+    assert(pthread_mutex_unlock(&rendezvous) == 0);
+    assert(pthread_join(owner, NULL) == 0 && pthread_join(contender, NULL) == 0);
+
+    assert(!reboots && clock_model.running && clock_model.request);
+    assert(clock_model.active == NRF_CLOCK_LFCLK_RC);
+    caller = 0;
+    check_late_external_init();
+    check_clock_release(false, 0);
+}
+
+static void test_external_clock_shutdown_order(void)
+{
+    for (unsigned int use_lfxo = 0; use_lfxo < 2; ++use_lfxo) {
+        nrf_clock_lfclk_t external = use_lfxo ? NRF_CLOCK_LFCLK_XTAL : NRF_CLOCK_LFCLK_SYNTH;
+        reset_clock(true, NRF_CLOCK_LFCLK_RC, false);
+        host_clock_lfxo = use_lfxo;
+        clock_init_external();
+        assert(clock_model.active == external);
+        clock_pre_shutdown();
+        assert(clock_model.active == NRF_CLOCK_LFCLK_RC);
+        check_late_external_init();
+
+        reset_clock(true, NRF_CLOCK_LFCLK_RC, false);
+        host_clock_lfxo = use_lfxo;
+        clock_pre_shutdown();
+        check_late_external_init();
+        assert(!reboots && clock_model.running && clock_model.request);
+
+        test_external_clock_contention(use_lfxo, true);
+        test_external_clock_contention(use_lfxo, false);
+    }
+    puts("LF clock: shutdown fences completed, in-flight and queued external init");
+}
+
 int main(void)
 {
+    init_mutex(&clock_switch_lock);
+    init_mutex(&sensor_lifecycle_lock);
 #if ADAFRUIT_FAULT_RECOVERY
     recovery_supported = true;
     /* GPREGRET owns the streak even if retained RAM is stale or replaced. */
@@ -586,6 +688,7 @@ int main(void)
     test_clock_failures();
     test_clock_contention();
     test_clock_noop_and_shutdown();
+    test_external_clock_shutdown_order();
     reboots = 0;
 
     /* Registration cases start before init, independently of boot-policy cases. */

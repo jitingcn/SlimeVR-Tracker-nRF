@@ -20,7 +20,8 @@
 #pragma once
 
 /* Synchronous switches require thread context with interrupts enabled.
- * Shutdown waits for an in-flight switch before selecting RC for the bootloader. */
+ * Terminal shutdown waits for in-flight external initialization, selects RC,
+ * and prevents later external initialization until reset. */
 void clock_pre_shutdown(void);
 
 void clock_init_external(void);

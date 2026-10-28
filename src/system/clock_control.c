@@ -37,6 +37,9 @@ LOG_MODULE_REGISTER(clock_switch, LOG_LEVEL_INF);
 #define LFCLK_START_TIMEOUT_US 1000000
 
 static K_MUTEX_DEFINE(clock_switch_lock);
+/* Lifecycle entry points retain this recursive mutex through clock_switch().
+ * The shutdown latch is cleared only by reset. */
+static bool clock_external_init_disallowed;
 
 /* Helper to normalize XTAL variants for comparison.
  * XTAL_FULL_SWING and XTAL_LOW_SWING report as XTAL in the actual source. */
@@ -165,12 +168,21 @@ void clock_switch(nrf_clock_lfclk_t source)
 // Switch to RC clock before shut down to avoid any problems with the bootloader
 void clock_pre_shutdown(void)
 {
+	k_mutex_lock(&clock_switch_lock, K_FOREVER);
+	clock_external_init_disallowed = true;
 	clock_switch(NRF_CLOCK_LFCLK_RC);
+	k_mutex_unlock(&clock_switch_lock);
 }
 
 // Switch to external oscillator for LF clock for good TDMA precision
 void clock_init_external(void)
 {
+	k_mutex_lock(&clock_switch_lock, K_FOREVER);
+	if (clock_external_init_disallowed) {
+		k_mutex_unlock(&clock_switch_lock);
+		return;
+	}
+
 	if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO)) {
 #if defined(NRF_CLOCK_USE_EXTERNAL_LFCLK_SOURCES) || defined(__NRFX_DOXYGEN__)
 		if (IS_ENABLED(CONFIG_CLOCK_USE_LFXO_MODE_FULL_SWING)) {
@@ -192,6 +204,7 @@ void clock_init_external(void)
 		LOG_WRN("clock_init_external: LF_SYNTH requested but not supported");
 #endif
 	}
+	k_mutex_unlock(&clock_switch_lock);
 }
 
 // Async version of clock_init_external

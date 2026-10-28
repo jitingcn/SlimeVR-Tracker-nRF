@@ -11,6 +11,10 @@
 #define __maybe_unused
 #define K_MUTEX_DEFINE(name) static int name
 #define K_FOREVER 0
+typedef int atomic_t;
+static inline int atomic_get(const atomic_t *value) { return *value; }
+static inline int atomic_inc(atomic_t *value) { return (*value)++; }
+static inline int atomic_dec(atomic_t *value) { return (*value)--; }
 #define ESB_ST_PAIRING 0
 static void warning_log(const char *format, ...);
 #define LOG_WRN(...) warning_log(__VA_ARGS__)
@@ -33,7 +37,13 @@ static uint32_t radio_session_generation;
 static bool pair_ack_pending, clock_status, ping_failed;
 static bool own_pong_seen, pairing_search_active, radio_user_disabled;
 static uint32_t pairing_request;
-static int persistence_error, channel_error;
+static int persistence_error, channel_error, clock_start_error;
+static unsigned clock_start_calls, clock_cold_starts, pair_payload_writes;
+static unsigned pair_stop_attempts, pair_guarded_stops, pair_sleep_attempts, pair_sleep_guarded;
+static bool interrupt_pair_prepare, interrupt_pair_sleep;
+static int pair_payload_fail_step = -1;
+static bool interrupt_pair_retry;
+static unsigned pair_retry_attempts, pair_retry_stops, pair_retry_ack_cleared;
 static unsigned address_writes, schedule_updates;
 static uint8_t scheduled_slot, scheduled_total;
 static struct esb_payload { uint8_t data[8]; bool noack; } tx_payload_pair;
@@ -132,8 +142,14 @@ static int esb_write_ping(uint8_t *ping, bool force) {
     memcpy(last_probe, ping, sizeof(last_probe));
     ++probes; record_ping_admission(ping_counter); return 0;
 }
-static void clocks_start(void) { clock_status = true; }
-static void clocks_stop(void) { clock_status = false; }
+static int clocks_start(void) {
+    ++clock_start_calls;
+    if (clock_start_error) return clock_start_error;
+    if (!clock_status) ++clock_cold_starts;
+    clock_status = true;
+    return 0;
+}
+static void clocks_stop(void);
 static void esb_set_addr_discovery(void) {}
 static void esb_set_addr_paired(void) {}
 static void tracker_events_session_changed(void) {}
@@ -152,6 +168,17 @@ static bool cancel_pair_after_ack;
 void esb_deinitialize(void);
 static void k_msleep(int delay) {
     now += delay;
+    if (interrupt_pair_sleep && (delay == 20 || delay == 2 || (delay >= 60 && delay <= 82))) {
+        ++pair_sleep_attempts;
+        clocks_stop();
+        if (clock_status) ++pair_sleep_guarded;
+    }
+    if (interrupt_pair_retry && delay == 100) {
+        ++pair_retry_attempts;
+        if (!pair_ack_pending) ++pair_retry_ack_cleared;
+        clocks_stop();
+        if (!clock_status) ++pair_retry_stops;
+    }
     if (cancel_pair_after_ack && delay == 2 && paired_addr[0]) {
         cancel_pair_after_ack = false;
         esb_deinitialize();
@@ -166,9 +193,22 @@ static int esb_initialize(bool tx) {
     return 0;
 }
 static int esb_write_payload(const struct esb_payload *payload) {
-    pair_step = payload->data[1]; return 0;
+    ++pair_payload_writes;
+    if (interrupt_pair_prepare) {
+        ++pair_stop_attempts;
+        clocks_stop();
+        if (clock_status) ++pair_guarded_stops;
+    }
+    pair_step = payload->data[1];
+    if (pair_payload_fail_step == pair_step) {
+        pair_payload_fail_step = -1;
+        return -EIO;
+    }
+    return 0;
 }
 static int esb_start_tx(void) {
+    /* Bound the pre-fix path if pairing transmits despite a failed start. */
+    if (clock_start_error) ++radio_session_generation;
     if (pair_probe_limit && pair_step == 0) {
         assert(pair_probe_count < sizeof(pair_probe_channels));
         pair_probe_channels[pair_probe_count++] = radio_channel;
@@ -204,6 +244,11 @@ void set_status(enum sys_status status, bool value) {
 }
 int get_status(enum sys_status status) { return status_state & status; }
 #include "channels.inc"
+/* Model the production stop guard; the native clock tests exercise the real
+ * onoff manager and ISR path. */
+static void clocks_stop(void) {
+    if (atomic_get(&tx_clock_users) == 0) clock_status = false;
+}
 static void packet_crc(void) {
     rx_payload.data[12] = crc8_ccitt(7, rx_payload.data, 12);
 }
@@ -274,7 +319,14 @@ static void reset(uint8_t home) {
     ping_channel_confirm_sent = false; abort_requests = 0;
     cancel_pair_after_ack = false;
     pair_probe_count = pair_probe_limit = 0;
-    channel_error = persistence_error = 0;
+    channel_error = persistence_error = clock_start_error = 0;
+    clock_start_calls = clock_cold_starts = pair_payload_writes = 0;
+    pair_stop_attempts = pair_guarded_stops = pair_sleep_attempts = pair_sleep_guarded = 0;
+    interrupt_pair_prepare = interrupt_pair_sleep = false;
+    pair_payload_fail_step = -1;
+    interrupt_pair_retry = false;
+    pair_retry_attempts = pair_retry_stops = pair_retry_ack_cleared = 0;
+    assert(atomic_get(&tx_clock_users) == 0);
     radio_user_disabled = own_pong_seen = server_time_synced = false;
     address_writes = schedule_updates = 0;
     metadata_echo_pending = false; acked_remote_command = received_remote_command = 0;
@@ -656,6 +708,63 @@ static void proof_during_channel_hold(void) {
     assert(storage.rf_channel == 84 && !writes);
 }
 
+static void pairing_clock_failure(void) {
+    for (unsigned warm = 0; warm < 2; ++warm) {
+        reset(84); memset(paired_addr, 0, sizeof(paired_addr));
+        pair_ack_pending = false;
+        pair_target = 0xff; registered_at = -1;
+        clock_status = warm;
+        /* The warm case models ownership changing before start acquires it. */
+        clock_start_error = -EIO;
+        unsigned failures = led_test_events[LED_FAILED];
+        esb_pair();
+        assert(clock_start_calls == 1);
+        assert(pair_payload_writes == 0 && !pair_ack_pending);
+        assert(!pairing_search_active && !pair_provisional && !paired_addr[0]);
+        assert(!writes && !address_writes && esb_radio_lock == 0);
+        assert(atomic_get(&tx_clock_users) == 0);
+        assert(led_test_events[LED_FAILED] == failures + 1);
+    }
+    puts("pairing: clock-start failure stops before radio transmission");
+}
+
+static void pairing_clock_send_failure(void) {
+    for (unsigned step = 0; step < 2; ++step) {
+        reset(84); memset(paired_addr, 0, sizeof(paired_addr));
+        pair_ack_pending = false;
+        pair_target = 0xff; registered_at = -1; pair_probe_limit = step + 1;
+        pair_payload_fail_step = step;
+        interrupt_pair_retry = true;
+        clock_status = false;
+        esb_pair();
+        assert(pair_retry_attempts == 1 && pair_retry_stops == 1);
+        assert(pair_retry_ack_cleared == 1 && pair_payload_writes == step + 4);
+        assert(pair_probe_count == step + 1 && clock_start_calls == 2 && clock_cold_starts == 2);
+        assert(atomic_get(&tx_clock_users) == 0 && esb_radio_lock == 0);
+        assert(!pairing_search_active && !pair_provisional && !paired_addr[0]);
+        clocks_stop();
+        assert(!clock_status);
+    }
+    puts("pairing: failed sends release clock before retry");
+}
+
+static void pairing_clock_interleavings(void) {
+    reset(84); memset(paired_addr, 0, sizeof(paired_addr));
+    pair_target = 0xff; registered_at = -1; pair_probe_limit = 1;
+    clock_status = false;
+    interrupt_pair_prepare = interrupt_pair_sleep = true;
+    esb_pair();
+    assert(pair_payload_writes == 3 && pair_probe_count == 1);
+    assert(pair_stop_attempts == 3 && pair_guarded_stops == 3);
+    assert(pair_sleep_attempts == 3 && pair_sleep_guarded == 3);
+    assert(clock_start_calls == 1 && clock_cold_starts == 1);
+    assert(atomic_get(&tx_clock_users) == 0 && esb_radio_lock == 0);
+    assert(!pairing_search_active && !pair_provisional && !paired_addr[0]);
+    clocks_stop();
+    assert(!clock_status);
+    puts("pairing: active burst retains clock across sends and waits");
+}
+
 static void provisional_pairing(void) {
     const uint8_t targets[] = {0, 84, 100};
     for (unsigned i = 0; i < sizeof(targets); ++i) {
@@ -1004,6 +1113,9 @@ int main(void) {
     ota_active = false; esb_deinitialize();
     assert(!esb_initialized && !channel_search && channel_wait_normal && !channel_found);
     assert(storage.rf_channel == 2 && writes == 0 && disables == 1);
+    pairing_clock_failure();
+    pairing_clock_interleavings();
+    pairing_clock_send_failure();
     provisional_pairing();
     struct led_connection_facts facts = {0};
     reset(2); memcpy(paired_addr, storage.paired_addr, sizeof(paired_addr));

@@ -1150,6 +1150,33 @@ static void esb_release_tx_clock(bool keep_clock_warm)
 #if defined(CONFIG_CLOCK_CONTROL_NRF)
 static struct onoff_manager *clk_mgr;
 
+/* Starters may sleep, but stop is also called by the ESB interrupt. */
+static K_MUTEX_DEFINE(clocks_start_lock);
+static K_SEM_DEFINE(clocks_start_sem, 0, 1);
+static struct onoff_client clocks_start_client;
+static int clocks_start_result;
+static uint32_t clocks_stop_generation;
+/* A failed release must not be mistaken for a released reference. */
+static bool clocks_hf_owned;
+
+static void clocks_start_complete(struct onoff_manager *mgr, struct onoff_client *cli,
+				  uint32_t state, int res)
+{
+	ARG_UNUSED(mgr);
+	ARG_UNUSED(cli);
+	ARG_UNUSED(state);
+	clocks_start_result = res;
+	k_sem_give(&clocks_start_sem);
+}
+
+static uint32_t clocks_capture_generation(void)
+{
+	unsigned key = irq_lock();
+	uint32_t generation = clocks_stop_generation;
+	irq_unlock(key);
+	return generation;
+}
+
 static int clocks_init(void)
 {
 	clk_mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
@@ -1163,45 +1190,59 @@ static int clocks_init(void)
 
 SYS_INIT(clocks_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
-int clocks_start(void)
+static int clocks_start_generation(uint32_t generation)
 {
-	if (clock_status) {
-		return 0;
+	int err = 0;
+	k_mutex_lock(&clocks_start_lock, K_FOREVER);
+
+	unsigned key = irq_lock();
+	if (generation != clocks_stop_generation) {
+		irq_unlock(key);
+		err = -ECANCELED;
+		goto out;
 	}
-	int err;
-	int res;
-	struct onoff_client clk_cli;
+	if (clock_status) {
+		irq_unlock(key);
+		goto out;
+	}
+	if (clocks_hf_owned) {
+		/* A previous release failed; do not acquire an unrepresented ref. */
+		irq_unlock(key);
+		err = -EIO;
+		goto out;
+	}
+	irq_unlock(key);
 
-	sys_notify_init_spinwait(&clk_cli.notify);
-
-	err = onoff_request(clk_mgr, &clk_cli);
+	/* The callback may run before onoff_request returns. The client and
+	 * semaphore persist until notification, including across ISR completion. */
+	sys_notify_init_callback(&clocks_start_client.notify, clocks_start_complete);
+	err = onoff_request(clk_mgr, &clocks_start_client);
 	if (err < 0) {
 		LOG_ERR("Clock request failed: %d", err);
-		return err;
+		goto out;
+	}
+	k_sem_take(&clocks_start_sem, K_FOREVER);
+	err = clocks_start_result;
+	if (err < 0) {
+		LOG_ERR("Clock could not be started: %d", err);
+		goto out;
 	}
 
-	/*
-	 * Wait for the HF clock to actually start. A cold HFXO start can take
-	 * several milliseconds. Match the SDK's esb_clocks_start()
-	 * (sdk-nrf/subsys/esb/esb_glue.c): keep waiting until the onoff request
-	 * completes. Returning while the request is still pending would leave
-	 * clk_cli dangling on the onoff manager's client list, and the
-	 * completion ISR would later walk that stale node (bus fault).
-	 */
-	do {
-		err = sys_notify_fetch_result(&clk_cli.notify, &res);
-		if (!err && res) {
-			LOG_ERR("Clock could not be started: %d", res);
-			return res;
+	key = irq_lock();
+	clocks_hf_owned = true;
+	if (generation != clocks_stop_generation) {
+		/* Stop won while this request was in flight. Release only the
+		 * successfully acquired reference, without publishing radio clocks. */
+		int release_err = onoff_release(clk_mgr);
+		if (release_err >= 0) {
+			clocks_hf_owned = false;
 		}
-		if (err == -EAGAIN) {
-			k_yield();
+		irq_unlock(key);
+		if (release_err < 0) {
+			LOG_ERR("Canceled clock release failed: %d", release_err);
 		}
-	} while (err == -EAGAIN);
-
-	if (err) {
-		LOG_ERR("Unexpected return code from sys_notify_fetch_result: %d", err);
-		return err;
+		err = -ECANCELED;
+		goto out;
 	}
 
 #if NRF_CLOCK_HAS_PLL
@@ -1210,44 +1251,63 @@ int clocks_start(void)
 #endif
 
 #if defined(CONFIG_SOC_SERIES_NRF54L)
-	/* nRF54L anomaly 20: constant latency sub-power mode must be active while
-	 * the radio is used, otherwise a TX payload can silently not be
-	 * transmitted and the radio stays stuck (ESB TX FIFO fills up). Mirrors
-	 * what MPSL / nrf_802154 / esb_glue.c do on nRF54L.
-	 */
+	/* -EALREADY still acquires a constlat reference, so every published
+	 * HFXO epoch owns one matching constlat request. */
 	(void)nrfx_power_constlat_mode_request();
 #endif
-
 	clock_status = true;
-	return 0;
+	irq_unlock(key);
+	err = 0;
+out:
+	k_mutex_unlock(&clocks_start_lock);
+	return err;
+}
+
+int clocks_start(void)
+{
+	/* Capture before waiting for another starter; a later stop wins. */
+	return clocks_start_generation(clocks_capture_generation());
 }
 
 void clocks_stop(void)
 {
 	unsigned key = irq_lock();
-	if (atomic_get(&tx_clock_users) != 0 || !clock_status) {
+	if (atomic_get(&tx_clock_users) != 0) {
 		irq_unlock(key);
 		return;
 	}
 
-	/* When using LF synthesizer, HFXO must remain active as it's the source
-	 * for the LF clock. Don't stop HFXO in this case. */
+	/* LF synthesizer uses HFXO as its source, including during startup. */
 	if (IS_ENABLED(CONFIG_CLOCK_USE_LF_SYNTH)) {
+		irq_unlock(key);
 		LOG_DBG("HF clock kept running for LF_SYNTH");
+		return;
+	}
+
+	/* Invalidate queued and in-flight starts even before they are ready. */
+	++clocks_stop_generation;
+	if (!clocks_hf_owned) {
 		irq_unlock(key);
 		return;
 	}
 
-	clock_status = false;
-
-	onoff_release(clk_mgr);
-
+	int err = onoff_release(clk_mgr);
+	if (err >= 0) {
+		clocks_hf_owned = false;
 #if defined(CONFIG_SOC_SERIES_NRF54L)
-	nrfx_power_constlat_mode_free();
+		if (clock_status) {
+			(void)nrfx_power_constlat_mode_free();
+		}
 #endif
+		clock_status = false;
+	}
 	irq_unlock(key);
 
-	LOG_DBG("HF clock stop request");
+	if (err < 0) {
+		LOG_ERR("Clock release failed: %d", err);
+	} else {
+		LOG_DBG("HF clock stop request");
+	}
 }
 
 #else
@@ -1260,26 +1320,34 @@ static K_THREAD_STACK_DEFINE(clocks_thread_id_stack, 512);
 // Wrapper function with correct signature for k_thread_entry_t
 static void clocks_start_wrapper(void *arg1, void *arg2, void *arg3)
 {
-	ARG_UNUSED(arg1);
-	ARG_UNUSED(arg2);
 	ARG_UNUSED(arg3);
-	(void)clocks_start();
+	int err = clocks_start_generation((uint32_t)(uintptr_t)arg1);
+	if (err == 0 && (bool)(uintptr_t)arg2) {
+		clock_init_external_async();
+	}
 }
 
-void clocks_request_start(uint32_t delay_us)
+static void clocks_request_start_internal(uint32_t delay_us, bool init_lf)
 {
+	/* Snapshot at submission, rather than when the delayed worker runs. */
+	uint32_t generation = clocks_capture_generation();
 	k_thread_create(
 		&clocks_thread_id,
 		clocks_thread_id_stack,
 		K_THREAD_STACK_SIZEOF(clocks_thread_id_stack),
 		clocks_start_wrapper,
-		NULL,
-		NULL,
+		(void *)(uintptr_t)generation,
+		(void *)(uintptr_t)init_lf,
 		NULL,
 		CLOCKS_START_THREAD_PRIORITY,
 		0,
 		K_USEC(delay_us)
 	);
+}
+
+void clocks_request_start(uint32_t delay_us)
+{
+	clocks_request_start_internal(delay_us, false);
 }
 
 static struct k_thread clocks_stop_thread_id;
@@ -2218,9 +2286,6 @@ void esb_pair(void)
 				k_mutex_unlock(&esb_radio_lock);
 				return;
 			}
-			if (!clock_status) {
-				clocks_start();
-			}
 			if (!esb_is_idle()) {
 				k_mutex_unlock(&esb_radio_lock);
 				k_msleep(5);
@@ -2266,7 +2331,20 @@ void esb_pair(void)
 			/* Feed ESB watchdog during pairing to prevent timeout */
 			watchdog_feed(WDT_CHANNEL_ESB);
 
+			/* The radio remains active between the three burst steps. */
+			atomic_inc(&tx_clock_users);
+			int clock_err = clocks_start();
+			if (clock_err) {
+				atomic_dec(&tx_clock_users);
+				LOG_ERR("Pairing clock start failed: %d", clock_err);
+				pairing_search_active = false;
+				led_result(pairing, led_event_id(), LED_FAILED);
+				k_mutex_unlock(&esb_radio_lock);
+				return;
+			}
+
 			if (esb_send_pair_step(0)) {
+				atomic_dec(&tx_clock_users);
 				k_mutex_unlock(&esb_radio_lock);
 				k_msleep(100);
 				continue;
@@ -2274,6 +2352,7 @@ void esb_pair(void)
 			k_msleep(20); /* Deferred receiver registration may miss the first burst. */
 			pair_ack_pending = true; // Set before step 1 which expects receiver response
 			if (esb_send_pair_step(1)) {
+				atomic_dec(&tx_clock_users);
 				pair_ack_pending = false;
 				k_mutex_unlock(&esb_radio_lock);
 				k_msleep(100);
@@ -2282,6 +2361,7 @@ void esb_pair(void)
 			k_msleep(2);
 			esb_send_pair_step(2); // "acknowledge" pairing from receiver
 			k_msleep(60 + (k_cycle_get_32() % 23));
+			atomic_dec(&tx_clock_users);
 			k_mutex_unlock(&esb_radio_lock);
 		}
 		/* Pair ACK is only an address hint. Confirm on the paired pipes before
@@ -2357,8 +2437,13 @@ int esb_user_set_enabled(bool enabled)
 {
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
 	int err = 0;
-	if (enabled) err = esb_reinitialize();
-	else esb_deinitialize();
+	if (enabled) {
+		err = esb_reinitialize();
+	} else {
+		esb_deinitialize();
+		/* Terminal radio-off also fences a queued or in-flight start. */
+		clocks_stop();
+	}
 	if (!err) radio_user_disabled = !enabled;
 	k_mutex_unlock(&esb_radio_lock);
 	led_maintenance_publish(LED_OWNER_RADIO, radio_user_disabled);
@@ -2677,6 +2762,10 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length)
 		return -EACCES;
 	}
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING || radio_user_disabled) {
+		k_mutex_unlock(&esb_radio_lock);
+		return -EACCES;
+	}
 	atomic_inc(&tx_clock_users);
 	int err = clocks_start();
 	if (err == 0) {
@@ -2693,6 +2782,10 @@ int esb_write_ping(uint8_t *data, bool force_resync)
 		return -EACCES;
 	}
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
+	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING || radio_user_disabled) {
+		k_mutex_unlock(&esb_radio_lock);
+		return -EACCES;
+	}
 	atomic_inc(&tx_clock_users);
 	int err = clocks_start();
 	if (err == 0) {
@@ -3103,8 +3196,19 @@ static void esb_thread(void)
 	// Read paired address from retained
 	memcpy(paired_addr, retained->paired_addr, sizeof(paired_addr));
 
-	clocks_request_start(0);
-	clock_init_external_async();
+	if (IS_ENABLED(CONFIG_CLOCK_USE_LF_SYNTH) && !IS_ENABLED(CONFIG_CLOCK_USE_LFXO)) {
+		/* LF_SYNTH must not be selected before the HFXO request succeeds. */
+		clocks_request_start_internal(0, true);
+	} else {
+		/* Do not submit a late boot start after terminal radio-off. */
+		k_mutex_lock(&esb_radio_lock, K_FOREVER);
+		if (!radio_user_disabled) {
+			clocks_request_start(0);
+		}
+		k_mutex_unlock(&esb_radio_lock);
+		/* XTAL/other LF startup is independent of HFXO readiness. */
+		clock_init_external_async();
+	}
 
 	while (1) {
 #if CONFIG_CONNECTION_OVER_HID
@@ -3125,7 +3229,10 @@ static void esb_thread(void)
 #if defined(CONFIG_SOC_SERIES_NRF54L)
 		/* Stop HFCLK only after a longer idle period without any ESB TX.
 		 * Frequent XO/PLL restarts are unreliable on nRF54L (anomaly 20). */
-		if (clock_status && esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() &&
+		unsigned key = irq_lock();
+		bool clock_ready = clock_status;
+		irq_unlock(key);
+		if (clock_ready && esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() &&
 		    esb_is_idle() && last_tx_time != 0 &&
 		    (k_uptime_get() - last_tx_time) > ESB_CLOCK_IDLE_STOP_MS) {
 			clocks_stop();
