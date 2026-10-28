@@ -197,6 +197,41 @@ static void runtime_faults_preserve_recovery_policy(void)
     host_sensor_packet_check(&good);
     assert(get_status(SYS_STATUS_SENSOR_ERROR) != 0);
 }
+static void mixed_records_reset_no_progress(void)
+{
+    const struct host_sensor_frame empty = {0, 0}, skipped = {3, 0}, mixed = {3, 1};
+    reset();
+    host_now_ms = 101;
+    for (int cycle = 0; cycle < 3; cycle++) {
+        for (int i = 0; i < 9; i++) host_sensor_packet_check(&skipped);
+        assert(packet_errors == 9 && reboot_requests == 0);
+        host_sensor_packet_check(&mixed);
+        assert(packet_errors == 0 && reboot_requests == 0 && retained_writes == 0);
+    }
+    reset();
+    host_now_ms = 100;
+    host_sensor_packet_check(&empty);
+    assert(packet_errors == 0 && no_packets_since_ms == 0);
+    host_now_ms = 101;
+    host_sensor_packet_check(&empty);
+    assert(packet_errors == 1 && no_packets_since_ms == 101);
+    sensor_int_during_loop = true;
+    host_now_ms = 101 + NO_PACKETS_TIMEOUT_MS;
+    host_sensor_packet_check(&empty);
+    assert(packet_errors == 1 && no_packets_since_ms == 101 && !no_packets_timeout_logged);
+    assert(!sensor_int_during_loop && reboot_requests == 0);
+    host_sensor_packet_check(&empty);
+    assert(no_packets_timeout_logged && get_status(SYS_STATUS_SENSOR_ERROR));
+    sensor_int_during_loop = true;
+    host_sensor_packet_check(&mixed);
+    assert(packet_errors == 0 && no_packets_since_ms == 0 && !no_packets_timeout_logged);
+    assert(!sensor_int_during_loop && get_status(SYS_STATUS_SENSOR_ERROR));
+    ++host_now_ms;
+    host_sensor_packet_check(&empty);
+    assert(packet_errors == 1 && no_packets_since_ms == host_now_ms && !no_packets_timeout_logged);
+    assert(reboot_requests == 0 && retained_writes == 0);
+}
+
 static void system_and_safety_remain_distinct(void)
 {
     reset();
@@ -242,6 +277,7 @@ int main(void)
     scan_classification_and_init_fallback();
     successful_rescan_clears_cause();
     runtime_faults_preserve_recovery_policy();
+    mixed_records_reset_no_progress();
     system_and_safety_remain_distinct();
     coherent_bridge_snapshot();
     puts("Sensor faults: scan/init/FIFO typed causes share long-pair glyph; rescan, status masks, safety and coherent snapshots preserved");

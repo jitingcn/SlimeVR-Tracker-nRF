@@ -3276,7 +3276,7 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 				}
 			}
 		}
-	} else if (frame->processed_packets == frame->packets && frame->packets > 0) {
+	} else if (frame->processed_packets > 0) {
 		packet_errors = 0;
 		no_packets_since_ms = 0;
 		no_packets_timeout_logged = false;
