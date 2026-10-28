@@ -386,32 +386,6 @@ void watchdog_resume(wdt_channel_id_t channel)
 	}
 }
 
-
-
-void watchdog_suspend_all(void)
-{
-	if (watchdog_initialized) {
-		task_wdt_suspend();
-		LOG_DBG("All watchdog channels suspended");
-	}
-}
-
-void watchdog_resume_all(void)
-{
-	if (watchdog_initialized) {
-		task_wdt_resume();
-		LOG_DBG("All watchdog channels resumed");
-	}
-}
-
-const char *watchdog_get_channel_name(wdt_channel_id_t channel)
-{
-	if (channel < WDT_CHANNEL_COUNT) {
-		return channel_names[channel];
-	}
-	return "unknown";
-}
-
 #endif /* CONFIG_TASK_WDT */
 
 #if defined(CONFIG_TASK_WDT) || ADAFRUIT_FAULT_RECOVERY

@@ -1687,12 +1687,6 @@ bool sensor_tcal_get_enabled(void)
 	return enabled;
 }
 
-// Get boot calibration status
-bool sensor_boot_cal_is_completed(void)
-{
-	return retained->bootCalState.completed;
-}
-
 // Get boot calibration D_offset
 void sensor_boot_cal_get_doffset(float offset[3])
 {

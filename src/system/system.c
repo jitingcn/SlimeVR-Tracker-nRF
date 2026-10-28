@@ -748,14 +748,6 @@ static void warm_dirty_mark_locked(uint16_t id, void *ptr, size_t len)
 	};
 }
 
-bool sys_warm_is_dirty(void)
-{
-	k_mutex_lock(&sys_storage_lock, K_FOREVER);
-	bool dirty = warm_dirty_count > 0;
-	k_mutex_unlock(&sys_storage_lock);
-	return dirty;
-}
-
 void sys_warm_transaction_begin(void)
 {
 	k_mutex_lock(&sys_storage_lock, K_FOREVER);

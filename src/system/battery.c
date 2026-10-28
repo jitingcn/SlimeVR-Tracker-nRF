@@ -409,10 +409,6 @@ static const struct battery_level_point levels[] = {
 #endif
 };
 
-int read_batt() {
-	return read_batt_mV(NULL);
-}
-
 int read_batt_mV(int* out) {
 	int rc = battery_measure_enable(true);
 

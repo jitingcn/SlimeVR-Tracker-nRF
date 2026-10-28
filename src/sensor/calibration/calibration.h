@@ -237,7 +237,6 @@ bool sensor_tcal_assess_quality(float current_temp, tcal_quality_t *quality);
 // Boot calibration functions
 void sensor_tcal_boot_calibration_check(void);
 int sensor_boot_cal_set_enabled(bool enabled);
-bool sensor_boot_cal_is_completed(void);
 void sensor_boot_cal_get_doffset(float offset[3]);
 void sensor_boot_cal_reset(void); // Reset boot calibration state (call before reboot/shutdown, not before WoM)
 

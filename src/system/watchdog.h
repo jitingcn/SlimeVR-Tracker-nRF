@@ -100,24 +100,6 @@ void watchdog_resume(wdt_channel_id_t channel);
  */
 uint8_t watchdog_get_ota_gpregret(void);
 
-/**
- * @brief Suspend all watchdog channels before entering low power mode
- */
-void watchdog_suspend_all(void);
-
-/**
- * @brief Resume all watchdog channels after exiting low power mode
- */
-void watchdog_resume_all(void);
-
-/**
- * @brief Get the name of a watchdog channel
- *
- * @param channel Channel ID
- * @return Channel name string
- */
-const char *watchdog_get_channel_name(wdt_channel_id_t channel);
-
 #else /* !CONFIG_TASK_WDT */
 /*
  * Stub implementations when Task WDT is disabled.
@@ -134,13 +116,6 @@ static inline void watchdog_feed(wdt_channel_id_t channel) { (void)channel; }
 static inline void watchdog_pause(wdt_channel_id_t channel) { (void)channel; }
 static inline void watchdog_resume(wdt_channel_id_t channel) { (void)channel; }
 static inline uint8_t watchdog_get_ota_gpregret(void) { return 0; }
-static inline void watchdog_suspend_all(void) {}
-static inline void watchdog_resume_all(void) {}
-static inline const char *watchdog_get_channel_name(wdt_channel_id_t channel)
-{
-	(void)channel;
-	return "disabled";
-}
 #endif /* CONFIG_TASK_WDT */
 #if defined(CONFIG_TASK_WDT) || \
 	(CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT && CONFIG_SOC_SERIES_NRF52)

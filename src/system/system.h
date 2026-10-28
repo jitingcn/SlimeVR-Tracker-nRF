@@ -65,7 +65,6 @@ void sys_warm_transaction_end(bool retained_changed);
 void sys_warm_feedback_arm(uint32_t identity); /* Call only with warm transaction held. */
 #endif
 int sys_flush_warm(void); /* Existing eager flush policy; negative persistence error. */
-bool sys_warm_is_dirty(void);
 void sys_read(uint16_t id, void *data, size_t len);
 /* Caller-confirmed reset; cancels deferred IMU writes before clearing storage.
  * Storage errors are logged; live runtime settings still require a reboot. */

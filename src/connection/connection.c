@@ -188,26 +188,6 @@ uint32_t get_ping_interval_ms(void)
 static void connection_thread(void);
 K_THREAD_DEFINE(connection_thread_id, 2048, connection_thread, NULL, NULL, NULL, CONNECTION_THREAD_PRIORITY, K_FP_REGS, 0);
 
-void connection_clocks_request_start(void)
-{
-	clocks_request_start(0);
-}
-
-void connection_clocks_request_start_delay_us(uint32_t delay_us)
-{
-	clocks_request_start(delay_us);
-}
-
-void connection_clocks_request_stop(void)
-{
-	clocks_stop();
-}
-
-void connection_clocks_request_stop_delay_us(uint32_t delay_us)
-{
-	clocks_request_stop(delay_us);
-}
-
 uint8_t connection_get_id(void)
 {
 	return tracker_id;
@@ -223,11 +203,6 @@ void connection_set_id(uint8_t id)
 		(atomic_val_t)(k_uptime_get_32() + ping_phase_ms(PING_INTERVAL_MS))
 	);
 	tdma_init(id);
-}
-
-uint8_t connection_get_packet_sequence(void)
-{
-	return packet_sequence;
 }
 
 enum sub_packet_type {

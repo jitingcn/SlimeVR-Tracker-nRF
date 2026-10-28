@@ -35,12 +35,6 @@ void test_mode_user_set(bool enable)
 	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_SUCCESS);
 }
 
-void test_mode_user_set_target_tps(uint16_t tps)
-{
-	test_mode_set_target_tps(tps);
-	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_SUCCESS);
-}
-
 void test_mode_set_target_tps(uint16_t tps)
 {
 	atomic_set(&test_mode_target_tps, tps); /* 0 = reset to default; clamped at read */

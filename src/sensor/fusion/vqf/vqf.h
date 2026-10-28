@@ -65,10 +65,7 @@ void vqf_get_quat(float *q);
 bool vqf_get_rest_detected(void);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 bool vqf_get_mag_dist_detected(void);
-float vqf_get_mag_ref_norm(void);
 void vqf_get_mag_ref(float *norm, float *dip);
-float vqf_get_delta(void);
-void vqf_set_delta(float delta);
 #endif
 
 // Debug information structure

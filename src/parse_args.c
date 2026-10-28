@@ -73,34 +73,6 @@ size_t parse_args(char *str, char *argv[], size_t size)
 	return argc;
 }
 
-int32_t parse_i32(const char *str, uint8_t base)
-{
-	long long res = strtoll(str, NULL, base);
-
-	if (res < INT32_MIN) {
-		res = INT32_MIN;
-		errno = ERANGE;
-	}
-	if (res > INT32_MAX) {
-		res = INT32_MAX;
-		errno = ERANGE;
-	}
-
-	return (int32_t)res;
-}
-
-uint32_t parse_u32(const char *str, uint8_t base)
-{
-	unsigned long long res = strtoull(str, NULL, base);
-
-	if (res > UINT32_MAX) {
-		res = UINT32_MAX;
-		errno = ERANGE;
-	}
-
-	return (uint32_t)res;
-}
-
 uint64_t parse_u64(const char *str, uint8_t base)
 {
 	return strtoull(str, NULL, base);

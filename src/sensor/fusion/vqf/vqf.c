@@ -1726,25 +1726,10 @@ static void vqf_get_quat6(float *q)
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-float vqf_get_mag_ref_norm(void)
-{
-	return getMagRefNorm(&state);
-}
-
 void vqf_get_mag_ref(float *norm, float *dip)
 {
 	*norm = getMagRefNorm(&state);
 	*dip = getMagRefDip(&state);
-}
-
-float vqf_get_delta(void)
-{
-	return getDelta(&state);
-}
-
-void vqf_set_delta(float delta)
-{
-	state.delta = delta;
 }
 #endif
 

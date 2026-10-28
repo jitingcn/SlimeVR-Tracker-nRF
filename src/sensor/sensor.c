@@ -405,14 +405,6 @@ static const sensor_fusion_t *sensor_fusion = &sensor_fusion_eqf;
 int fusion_id = FUSION_EQF;
 #endif
 
-bool sensor_fusion_get_rest_detected(void)
-{
-	if (!sensor_fusion || !sensor_fusion->get_rest_detected) {
-		return false;
-	}
-	return sensor_fusion->get_rest_detected();
-}
-
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 bool sensor_fusion_get_mag_dist_detected(void)
 {
@@ -971,19 +963,6 @@ const char *sensor_get_sensor_fusion_name(void)
 		return "None";
 	}
 	return fusion_names[fusion_id];
-}
-
-int sensor_get_sensor_temperature(float *ptr)
-{
-	if (sensor_imu == &sensor_imu_none || (k_uptime_get() - last_temp_time > 1000)) {
-		if (get_status(SYS_STATUS_SENSOR_ERROR)) {
-			return -2; // no imu!
-		} else {
-			return -1; // imu probably not scanned yet or temp not read yet or last valid temp is old
-		}
-	}
-	*ptr = temp;
-	return 0;
 }
 
 void sensor_scan_thread(void)
@@ -3924,13 +3903,6 @@ void main_imu_resume(void)
 	k_sem_give(&sensor_loop_gate);
 	k_mutex_unlock(&sensor_lifecycle_lock);
 	LOG_INF("Resumed sensor thread");
-}
-
-void main_imu_wakeup(void)
-{
-	if (!atomic_get(&main_suspended)) { // don't wake up if pending suspension
-		k_wakeup(&sensor_thread_id);
-	}
 }
 
 int main_imu_restart(void)

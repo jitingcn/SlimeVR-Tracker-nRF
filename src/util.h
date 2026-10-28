@@ -64,8 +64,6 @@
 void q_normalize(const float* q, float* out);
 void q_multiply(const float* x, const float* y, float* out);
 void q_conj(const float* q, float* out);
-void q_negate(const float* q, float* out);
-float q_diff_mag(const float* x, const float* y);
 void v_rotate(const float* v, const float* q, float* out);
 float v_avg(const float* a);
 float v_diff_mag(const float* a, const float* b);
@@ -82,6 +80,5 @@ void apply_BAinv(float xyz[3], float BAinv[4][3]);
 void a_to_lin_a(const float *q, const float *a, float *lin_a);
 
 void q_fem(const float *q, float *out);
-void q_iem(const float *v, float *out);
 
 #endif

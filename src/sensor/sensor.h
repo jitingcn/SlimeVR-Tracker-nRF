@@ -36,8 +36,6 @@ bool sensor_output_ready(void);
  * Active raw calibration consumers must reject the interrupted stream. */
 void sensor_gyro_report_discontinuity(void);
 
-int sensor_get_sensor_temperature(float *);
-
 /* Suspended sensors may be queried when already initialized, but not rescanned. */
 int sensor_request_scan(bool force, bool user_feedback);
 
@@ -65,7 +63,6 @@ void sensor_mag_ref_reset(void);
 #endif
 
 /* Fusion policy accessors (backend-agnostic; prefer over vqf_* / eqf_*). */
-bool sensor_fusion_get_rest_detected(void);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 bool sensor_fusion_get_mag_dist_detected(void);
 /* Thread-safe requests, applied only by sensor before the next magnetic feed. */
@@ -85,7 +82,6 @@ void wait_for_threads(void);
 int main_imu_suspend(void);
 bool main_imu_is_suspended(void);
 void main_imu_resume(void);
-void main_imu_wakeup(void);
 int main_imu_restart(void);
 
 #if CONFIG_SENSOR_USE_TCAL

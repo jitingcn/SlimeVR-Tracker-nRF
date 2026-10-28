@@ -81,34 +81,6 @@ void q_conj(const float* q, float* out) {
 	out[3] = -q[3];
 }
 
-void q_negate(const float* q, float* out) {
-#if CONFIG_CMSIS_DSP
-	arm_negate_f32(q, out, 4);
-#else
-	out[0] = -q[0];
-	out[1] = -q[1];
-	out[2] = -q[2];
-	out[3] = -q[3];
-#endif
-}
-
-float q_diff_mag(const float *x, const float *y)
-{
-	/* same as quatmultiply(quatconj(x), y, z), where s is scalar of z
-	 * to handle possible inverted quaternions, it should be enough to make sure s is positive
-	 */
-#if CONFIG_CMSIS_DSP
-	float s;
-	arm_dot_prod_f32(x, y, 4, &s);
-	s = fabsf(s);
-#else
-	float s = fabsf(x[0]*y[0] + x[1]*y[1] + x[2]*y[2] + x[3]*y[3]);
-#endif
-	if (s > 1)
-		return 0;
-	return 2 * acosf(s);
-}
-
 void v_rotate(const float* v, const float* q, float* out)  // TODO: not the most optimal
 {
 	float p[4] = {0, v[0], v[1], v[2]};
@@ -232,31 +204,3 @@ void q_fem(const float* q, float* out) {
 	out[2] = s * q[3];
 }
 
-void q_iem(const float* v, float* out) {
-#if CONFIG_CMSIS_DSP
-	float d;
-	arm_dot_prod_f32(v, v, 3, &d);
-	float sqrt_d;
-	arm_sqrt_f32(d + EPS, &sqrt_d);
-	float inv_sqrt_d = 1.0f / sqrt_d;
-	float a = (M_PI / 2) * d * inv_sqrt_d;
-	float s, c;
-	// arm_sin_cos_f32() expects theta in DEGREES, while 'a' is in radians.
-	arm_sin_cos_f32(a * (180.0f / M_PI), &s, &c);
-	float k = s * inv_sqrt_d;
-	out[0] = c;
-	out[1] = k * v[0];
-	out[2] = k * v[1];
-	out[3] = k * v[2];
-#else
-	float d = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-	float inv_sqrt_d = 1 / sqrtf(d + EPS);  // inversesqrt
-	float a = (M_PI / 2) * d * inv_sqrt_d;
-	float s = sinf(a);
-	float k = s * inv_sqrt_d;
-	out[0] = cosf(a);
-	out[1] = k * v[0];
-	out[2] = k * v[1];
-	out[3] = k * v[2];
-#endif
-}
