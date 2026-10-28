@@ -1758,8 +1758,8 @@ int sensor_set_mag_enabled(bool enabled)
 	}
 
 	int pm_err = sys_interface_suspend();
-	if (!err) {
-		err = pm_err;
+	if (pm_err < 0) {
+		LOG_ERR("Magnetometer interface suspension failed: %d", pm_err);
 	}
 
 	if (err < 0) {
@@ -1791,6 +1791,10 @@ int sensor_set_mag_enabled(bool enabled)
 #endif
 
 	main_imu_resume();
+	if (pm_err < 0) {
+		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(), LED_PARTIAL);
+		return pm_err;
+	}
 	LOG_INF("Magnetometer %s", enabled ? "enabled" : "disabled");
 	return sensor_operation_result(LED_OWNER_MAG, storage_err, true);
 }
@@ -1853,6 +1857,20 @@ void sensor_request_fusion_bias_reset(void)
 	atomic_or(&fusion_requests, FUSION_REQUEST_BIAS);
 }
 
+static void sensor_discard_partial_samples(void)
+{
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+	gyro_oversample_count = 0;
+	gyro_dq_acc[0] = 1.0f;
+	gyro_dq_acc[1] = gyro_dq_acc[2] = gyro_dq_acc[3] = 0.0f;
+	memset(gyro_merge_bias_dps, 0, sizeof(gyro_merge_bias_dps));
+#endif
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+	accel_oversample_count = 0;
+	memset(accel_oversample_sum, 0, sizeof(accel_oversample_sum));
+#endif
+}
+
 /* Only the sensor thread mutates live fusion. Never wait for this thread from
  * calibration: BMI retrim, power and rescan can have it suspended. */
 static void sensor_apply_calibration_frame(void)
@@ -1873,15 +1891,7 @@ static void sensor_apply_calibration_frame(void)
 	if (!requests && effect == SENSOR_CALIBRATION_UNCHANGED && !reset) {
 		return;
 	}
-#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-	gyro_oversample_count = 0;
-	gyro_dq_acc[0] = 1.0f;
-	gyro_dq_acc[1] = gyro_dq_acc[2] = gyro_dq_acc[3] = 0.0f;
-#endif
-#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
-	accel_oversample_count = 0;
-	memset(accel_oversample_sum, 0, sizeof(accel_oversample_sum));
-#endif
+	sensor_discard_partial_samples();
 	if (reset) {
 		int err = main_imu_restart();
 		if (err) {
@@ -3849,6 +3859,7 @@ int main_imu_restart(void)
 	}
 	heated_resting = false;
 #endif
+	sensor_discard_partial_samples();
 	atomic_clear(&output_ready);
 	sensor_calibration_reset_gyro_reference();
 	sys_cancel_WOM();

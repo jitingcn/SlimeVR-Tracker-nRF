@@ -14,7 +14,7 @@ from c_extract import extract_block
 ROOT = Path(os.environ.get('SOURCE_ROOT', Path(__file__).resolve().parents[3]))
 
 def function(source, name):
-    return extract_block(source, rf'^(?:static )?(?:ALWAYS_INLINE )?(?:void|bool|float) {re.escape(name)}\([^;{{]*\)\s*\{{')
+    return extract_block(source, rf'^(?:static )?(?:ALWAYS_INLINE )?(?:void|bool|float|int) {re.escape(name)}\([^;{{]*\)\s*\{{')
 
 def conditional(source, pattern):
     """Keep a complete source conditional, including its inactive branches."""
@@ -404,11 +404,139 @@ int main(void) {
     puts("Current sensor periods match merge and magnetometer mode");
 }
 '''
+mag_acquire_start = sensor.index('\t// Read magnetometer\n')
+# Transition and acquisition bodies are production code; hardware, PM, storage,
+# scheduling and LED leaves are modeled below.
+mag_acquire_end = sensor.index('#if CONFIG_CONNECTION_RAW_COLLECTION', mag_acquire_start)
+transition_test = preamble + r'''
+#include <errno.h>
+#define CONFIG_SENSOR_TCAL_HEATED 1
+#define CONFIG_SENSOR_MAG_ODR 50
+#define LOG_INF(...) ((void)0)
+#define LOG_WRN(...) ((void)0)
+#define LOG_ERR(...) ((void)0)
+#define LED_OWNER_MAG 1
+#define LED_PARTIAL 2
+#define LED_ACCEPTED 3
+#define LED_APPLIED_NOT_SAVED 4
+#define MAG_ENABLED_ID 9
+#define TRACKER_REST_RESET 7
+typedef int atomic_t;
+static int atomic_get(atomic_t *v) { return *v; }
+static void atomic_set(atomic_t *v, int n) { *v=n; }
+static void atomic_clear(atomic_t *v) { *v=0; }
+static bool mag_available=true, mag_enabled, sensor_sensor_init=true, main_ok=true;
+static bool skip_fusion_save, hardware_on, heated_resting;
+static atomic_t main_suspended, output_ready, mag_persistence_error;
+static int magneto_progress, pm_error, restart_error, enable_error;
+static int mag_reads, ref_resets, restart_calls, partial_events;
+static float gyro_actual_time=.0025f, accel_actual_time=.005f, mag_actual_time=.02f;
+static unsigned gyro_oversample_n=CONFIG_SENSOR_GYRO_OVERSAMPLING;
+static int64_t next_mag_read_ticks, mag_read_period_ticks=1;
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+static int gyro_oversample_count;
+static float gyro_dq_acc[4], gyro_merge_bias_dps[3];
+#endif
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+static int accel_oversample_count;
+static float accel_oversample_sum[3];
+#endif
+static struct {bool mag_enabled;} retained_data;
+static typeof(retained_data) *retained=&retained_data;
+static int main_imu_suspend(void) { main_suspended=1; return 0; }
+static void main_imu_resume(void) { main_suspended=0; }
+static void sensor_release_failed_restart(void) {}
+static int sys_interface_resume(void) { return 0; }
+static int sys_interface_suspend(void) { return pm_error; }
+static int sensor_mag_runtime_enable(void) { if (enable_error) return enable_error; hardware_on=true; return 0; }
+static void sensor_mag_runtime_disable(void) { hardware_on=false; }
+static int sys_write(int id, void *dest, const void *src, size_t n) {
+    assert(id==MAG_ENABLED_ID); memcpy(dest,src,n); return 0;
+}
+static int sys_request_system_reboot(void) { return 0; }
+static int led_request_id(void) { return 0; }
+static int led_event_id(void) { return 0; }
+static void led_request_event(int owner,int req,int event,int outcome) {
+    (void)owner; (void)req; (void)event; if(outcome==LED_PARTIAL) partial_events++;
+}
+static int sensor_operation_result(int owner,int err,bool applied) {
+    (void)owner; (void)applied; return err;
+}
+static void sensor_refresh_sensor_ids(void) {}
+static void sensor_mag_ref_reset(void) { ref_resets++; }
+static void sensor_mag_timing_reset(void) { next_mag_read_ticks=0; }
+static void sensor_calibration_reset_gyro_reference(void) {}
+static void sys_cancel_WOM(void) {}
+static void tracker_events_sensor_invalidate(int reason) { (void)reason; }
+static void tracker_events_notify(void) {}
+static bool connection_get_data_collection(void) { return false; }
+static bool connection_get_data_collection_batch(void) { return false; }
+static void sensor_send_raw_metadata(void) {}
+static int sensor_temperature_invalidate(void) { return restart_error; }
+static void sensor_temperature_resume(void) {}
+static bool sensor_fusion_get_mag_ref(float *norm,float *dip) { *norm=0; *dip=0; return false; }
+static void sensor_fusion_set_mag_ref(float norm,float dip) { (void)norm; (void)dip; }
+static float last_fusion_mag;
+static void fusion_init(float g,float a,float m) { (void)g; (void)a; last_fusion_mag=m; restart_calls++; }
+static struct {void (*init)(float,float,float);} backend={fusion_init};
+static typeof(backend) *sensor_fusion=&backend;
+static bool read_mag(float *out) { assert(hardware_on); mag_reads++; out[0]=7; return true; }
+static struct {bool (*mag_read)(float *);} mag_driver={read_mag};
+static typeof(mag_driver) *sensor_mag=&mag_driver;
+static int64_t k_uptime_ticks(void) { return 10; }
+typedef struct {float raw_m[3]; bool new_mag_data;} sensor_loop_frame_t;
+''' + extract_block(sensor, r'^struct fusion_periods\s*\{', semicolon=True) + '\n' + \
+    extract_block(sensor, r'^static struct fusion_periods sensor_fusion_periods\([^;{}]*\)\s*\{') + '\n' + \
+    function(sensor, 'sensor_discard_partial_samples') + '\n' + \
+    function(sensor, 'main_imu_restart') + '\n' + \
+    function(sensor, 'sensor_set_mag_enabled') + '\n' + \
+    'static void acquire(sensor_loop_frame_t *frame) {\n' + sensor[mag_acquire_start:mag_acquire_end] + '\n}\n' + r'''
+static void pending_samples(void) {
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+    gyro_oversample_count=2; gyro_dq_acc[0]=.5f; gyro_merge_bias_dps[2]=3;
+#endif
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+    accel_oversample_count=1; accel_oversample_sum[1]=4;
+#endif
+}
+static void assert_discarded(void) {
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+    assert(!gyro_oversample_count && gyro_dq_acc[0]==1 && gyro_dq_acc[1]==0);
+    assert(gyro_merge_bias_dps[2]==0);
+#endif
+#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
+    assert(!accel_oversample_count && accel_oversample_sum[1]==0);
+#endif
+}
+int main(void) {
+    sensor_loop_frame_t frame={0};
+    pm_error=-EIO; pending_samples();
+    assert(sensor_set_mag_enabled(true)==-EIO);
+    assert(mag_enabled && hardware_on && retained->mag_enabled && !main_suspended);
+    assert(last_fusion_mag==.02f && restart_calls==1 && ref_resets==1 && partial_events==1);
+    assert_discarded(); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==7 && mag_reads==1);
+    pending_samples();
+    assert(sensor_set_mag_enabled(false)==-EIO);
+    assert(!mag_enabled && !hardware_on && !retained->mag_enabled && !main_suspended);
+    assert(last_fusion_mag==0 && restart_calls==2 && ref_resets==2 && partial_events==2);
+    assert_discarded(); acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==1);
+    pm_error=0; restart_error=-EBUSY; pending_samples();
+    assert(sensor_set_mag_enabled(true)==-EBUSY);
+    assert(mag_enabled && hardware_on && main_suspended && restart_calls==2);
+    restart_error=0; assert(main_imu_restart()==0); assert_discarded();
+    puts("PM failure preserves actual mode; restart discards partial gyro and accel samples");
+}
+'''
 with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
     tmp = Path(tmp)
     cc = shlex.split(os.environ.get('CC', 'cc'))
     jobs = [('vqf', vqf_test, ['-I'+str(ROOT/'vqf-c/src'), str(ROOT/'vqf-c/src/vqf.c')]),
             ('eqf', eqf_test, []), ('periods', period_test, [])]
+    for n in (1, 4):
+        jobs.append((f'transition{n}', transition_test,
+                     [f'-DCONFIG_SENSOR_GYRO_OVERSAMPLING={n}', f'-DCONFIG_SENSOR_ACCEL_OVERSAMPLING={n}']))
     for index, axes in enumerate(('mx,my,mz','my,-mx,-mz','my,mx,mz','-mx,my,mz')):
         jobs.append((f'gravity{index}', gravity_test, ['-DSENSOR_MAGNETOMETER_AXES_ALIGNMENT='+axes]))
     for name, text, extra in jobs:
