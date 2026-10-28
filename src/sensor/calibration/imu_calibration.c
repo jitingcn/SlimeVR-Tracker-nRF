@@ -139,17 +139,18 @@ void sensor_calibration_imu_load(void)
 	memcpy(initial.gyro_bias, retained->gyroBias, sizeof(initial.gyro_bias));
 	memcpy(initial.accel_matrix, retained->accBAinv, sizeof(initial.accel_matrix));
 	float zero[3] = {0};
-	bool heal_bias = !v_finite(initial.accel_bias, 3) || !v_finite(initial.gyro_bias, 3)
-		|| !v_epsilon(initial.accel_bias, zero, 0.5f)
-		|| !v_epsilon(initial.gyro_bias, zero, 50.0f);
-	if (heal_bias) {
+	bool heal_accel_bias = !v_finite(initial.accel_bias, 3) || !v_epsilon(initial.accel_bias, zero, 0.5f);
+	bool heal_gyro_bias = !v_finite(initial.gyro_bias, 3) || !v_epsilon(initial.gyro_bias, zero, 50.0f);
+	if (heal_accel_bias) {
 		memset(initial.accel_bias, 0, sizeof(initial.accel_bias));
-		memset(initial.gyro_bias, 0, sizeof(initial.gyro_bias));
 		sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, initial.accel_bias, sizeof(initial.accel_bias));
+	}
+	if (heal_gyro_bias) {
+		memset(initial.gyro_bias, 0, sizeof(initial.gyro_bias));
 		sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, initial.gyro_bias, sizeof(initial.gyro_bias));
 	}
 #if CONFIG_SENSOR_USE_TCAL
-	if (heal_bias) {
+	if (heal_gyro_bias) {
 		retained->bootCalState.doffset_valid = false;
 		memset(retained->bootCalState.doffset, 0, sizeof(retained->bootCalState.doffset));
 	}
@@ -159,7 +160,7 @@ void sensor_calibration_imu_load(void)
 		sensor_calibration_identity_accel(initial.accel_matrix);
 		sys_write(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, initial.accel_matrix, sizeof(initial.accel_matrix));
 	}
-	if (heal_bias || heal_matrix) {
+	if (heal_accel_bias || heal_gyro_bias || heal_matrix) {
 		retained_update();
 		LOG_WRN("Invalid stored IMU calibration cleared before sampling");
 	}

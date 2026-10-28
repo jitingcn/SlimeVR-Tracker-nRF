@@ -21,6 +21,7 @@ void sensor_tcal_clear_doffset(void)
 }
 static int storage_result;
 static unsigned storage_writes;
+static unsigned accel_bias_writes, gyro_bias_writes;
 static unsigned retained_updates;
 static unsigned error_logs;
 static int logged_error;
@@ -28,7 +29,8 @@ static const float zero[3];
 
 int sys_write(uint16_t id, void *ptr, const void *data, size_t len)
 {
-	(void)id;
+	accel_bias_writes += id == MAIN_ACCEL_BIAS_ID;
+	gyro_bias_writes += id == MAIN_GYRO_BIAS_ID;
 	/* Match production's eager retained update even when persistence fails. */
 	memcpy(ptr, data, len);
 	storage_writes++;
@@ -359,7 +361,8 @@ static void check_invalid_startup(bool nonfinite)
 	assert(sensor_calibration_imu_ready());
 	sensor_imu_calibration_t healed = snapshot();
 	vector_equal(healed.accel_bias, zero);
-	vector_equal(healed.gyro_bias, zero);
+	const float valid_gyro[3] = {1.0f, 0.0f, 0.0f};
+	vector_equal(healed.gyro_bias, valid_gyro);
 	float identity[4][3];
 	sensor_calibration_identity_accel(identity);
 	for (unsigned row = 0; row < 4; row++) {
@@ -367,9 +370,11 @@ static void check_invalid_startup(bool nonfinite)
 		vector_equal(retained->accBAinv[row], identity[row]);
 	}
 	vector_equal(retained->accelBias, zero);
-	vector_equal(retained->gyroBias, zero);
-	assert(!retained->bootCalState.doffset_valid);
-	vector_equal(retained->bootCalState.doffset, zero);
+	vector_equal(retained->gyroBias, valid_gyro);
+	assert(retained->bootCalState.doffset_valid);
+	const float valid_offset[3] = {1.0f, 2.0f, 3.0f};
+	vector_equal(retained->bootCalState.doffset, valid_offset);
+	assert(accel_bias_writes == 1 && gyro_bias_writes == 0);
 	assert(retained->fusion_id == 7);
 	assert(!sensor_calibration_fusion_stale());
 	float accel[3] = {1.0f, 2.0f, 3.0f};
@@ -392,6 +397,30 @@ static void test_out_of_bounds_startup(void)
 {
 	check_invalid_startup(false);
 }
+
+static void check_invalid_gyro_startup(bool nonfinite, bool invalid_accel)
+{
+	sensor_calibration_identity_accel(retained->accBAinv);
+	const float valid_accel[3] = {0.1f, -0.2f, 0.3f};
+	memcpy(retained->accelBias, valid_accel, sizeof(valid_accel));
+	if (invalid_accel) retained->accelBias[0] = NAN;
+	retained->gyroBias[0] = nonfinite ? INFINITY : 50.0f;
+	retained->bootCalState.doffset_valid = true;
+	retained->bootCalState.doffset[0] = 1.0f;
+	sensor_calibration_imu_load();
+	sensor_imu_calibration_t healed = snapshot();
+	vector_equal(healed.accel_bias, invalid_accel ? zero : valid_accel);
+	vector_equal(retained->accelBias, invalid_accel ? zero : valid_accel);
+	vector_equal(healed.gyro_bias, zero);
+	vector_equal(retained->gyroBias, zero);
+	assert(!retained->bootCalState.doffset_valid);
+	vector_equal(retained->bootCalState.doffset, zero);
+	assert(accel_bias_writes == (unsigned)invalid_accel && gyro_bias_writes == 1);
+}
+
+static void test_nonfinite_gyro_startup(void) { check_invalid_gyro_startup(true, false); }
+static void test_out_of_bounds_gyro_startup(void) { check_invalid_gyro_startup(false, false); }
+static void test_both_invalid_startup(void) { check_invalid_gyro_startup(true, true); }
 
 static void test_pending_bias_atomic_application_and_busy(void)
 {
@@ -807,6 +836,9 @@ int main(void)
 	test_stored_matrix_sanity();
 	run_isolated(test_nonfinite_startup);
 	run_isolated(test_out_of_bounds_startup);
+	run_isolated(test_nonfinite_gyro_startup);
+	run_isolated(test_out_of_bounds_gyro_startup);
+	run_isolated(test_both_invalid_startup);
 	test_startup_and_load_once();
 	test_pending_bias_atomic_application_and_busy();
 	test_invalid_candidates_leave_applied_unchanged();
