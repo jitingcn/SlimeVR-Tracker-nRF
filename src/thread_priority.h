@@ -14,7 +14,8 @@
 #define SENSOR_REQUEST_SCAN_THREAD_PRIORITY 7
 #define SENSOR_SCAN_THREAD_PRIORITY 7
 #define SENSOR_LOOP_THREAD_PRIORITY 7
-#define LED_THREAD_PRIORITY 6
+/* PWM STOPPED waits must not block sensor sampling or the power shutdown timeout. */
+#define LED_THREAD_PRIORITY 10
 #define DISABLE_DFU_THREAD_PRIORITY 6
 /* Below the sensor loop (7): the battery poll bitbangs the nPM1300 over
  * gpio-i2c (busy-wait), which would otherwise stall the sensor loop. */
