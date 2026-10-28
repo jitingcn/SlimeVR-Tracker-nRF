@@ -80,6 +80,12 @@ def main():
     ownership += "static atomic_t tcal_accum_reset_generation;\nstatic uint32_t tcal_accum_seen_reset_generation;\n"
     for name in ("tcal_accum_reset", "tcal_accum_request_reset", "tcal_accum_apply_reset", "update_tcal_state", "tcal_save_point"):
         ownership += function(runtime, name) + "\n"
+    ownership += calibration[calibration.index("int sensor_tcal_clear("):
+                             calibration.index("// Check if current temperature needs calibration")] + "\n"
+    system = (ROOT / "src/system/system.c").read_text()
+    ownership += "#define k_mutex_lock system_storage_lock\n#define k_mutex_unlock system_storage_unlock\n"
+    ownership += function(system, "sys_clear") + "\n"
+    ownership += "#undef k_mutex_lock\n#undef k_mutex_unlock\n"
     finite = function((ROOT / "src/util.c").read_text(), "v_finite")
     with tempfile.TemporaryDirectory(prefix="tcal-backup-") as directory:
         work = Path(directory)

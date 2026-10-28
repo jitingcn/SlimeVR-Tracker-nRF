@@ -111,6 +111,11 @@ static struct { float gyroSensScale[3]; unsigned build_timestamp; uint8_t wom_id
 static __typeof__(retained_data) *retained = &retained_data;
 static unsigned warm_dirty_count;
 static void retained_update(void) {}
+static void retained_reset(void) {
+    memset(retained, 0, sizeof(*retained));
+    for (unsigned i = 0; i < 3; i++) retained->gyroSensScale[i] = 1.0f;
+    retained->build_timestamp = BUILD_TIMESTAMP;
+}
 static void sensor_calibration_clear_begin(void) { assert(!power_plan_lock.depth); }
 static void sensor_calibration_clear_end(void) { assert(!power_plan_lock.depth); }
 static void sensor_calibration_online_mag_cancel_pending(void) {}

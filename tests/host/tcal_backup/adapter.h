@@ -83,8 +83,9 @@ struct retained_fixture {
     float tempCalCoeffs[3][4];
     bool tcal_enabled;
     float gyroTemp;
-    float gyroBias[3], accelBias[3], magBias[4][3], gyroSensScale;
+    float gyroBias[3], accelBias[3], magBias[4][3], gyroSensScale[3];
     unsigned fusion_id;
+    unsigned build_timestamp;
     struct { bool doffset_valid; float doffset[3]; } bootCalState;
 };
 static struct retained_fixture retained_data, flash_data;

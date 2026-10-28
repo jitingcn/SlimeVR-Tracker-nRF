@@ -14,6 +14,57 @@ static void import_while_saver_waits(void) {
      * wakes. Clearing a boolean reset flag here used to resurrect stale data. */
     tcal_accum_apply_reset();
 }
+
+static int reset_action;
+static bool expect_invalidation;
+static void clear_while_saver_waits(void) {
+    uint32_t before = (uint32_t)atomic_get(&tcal_accum_reset_generation);
+    int result;
+    assert(tcal_accum.active && tcal_accum.sample_count == 42);
+    switch (reset_action) {
+    case 0: result = sensor_tcal_clear(); break;
+    case 1: result = sensor_tcal_remove_point(0); break;
+    case 2: result = sys_clear(); break;
+    case 3: result = sensor_tcal_remove_point(1); break;
+    default: assert(!"unknown reset action");
+    }
+    if (fail_id >= 0 || flush_error || nvs_clear_error) assert(result == -EIO);
+    else assert(result == 0);
+    assert((uint32_t)atomic_get(&tcal_accum_reset_generation) == before + expect_invalidation);
+    assert(tcal_accum.active && tcal_accum.sample_count == 42);
+    committed = *retained;
+    committed_writes = persist_calls;
+    tcal_accum_apply_reset();
+    assert(tcal_accum.active != expect_invalidation);
+    assert(tcal_accum.sample_count == (expect_invalidation ? 0 : 42));
+}
+
+static void test_clear_while_saver_waits(int action, bool invalidate, bool storage_error) {
+    seed(1, true);
+    tcal_accum_apply_reset();
+    tcal_accum.active = true;
+    tcal_accum.sample_count = 42;
+    reset_action = action;
+    expect_invalidation = invalidate;
+    fail_id = action == 0 && storage_error ? MAIN_GYRO_TCAL_POINTS_ID : -1;
+    flush_error = action == 1 && storage_error ? -EIO : 0;
+    nvs_clear_error = action == 2 && storage_error ? -EIO : 0;
+    const float old_bias[3] = {7, 8, 9};
+    uint32_t stale = (uint32_t)atomic_get(&tcal_accum_reset_generation);
+    before_storage_acquire = clear_while_saver_waits;
+    tcal_save_point(30, old_bias, 25, stale);
+    if (invalidate) {
+        unchanged(&committed, committed_writes);
+        assert(retained->tempCalPoints[30].temp == 0);
+    } else {
+        assert(retained->tempCalPoints[30].temp == 25);
+        assert(!memcmp(retained->tempCalPoints[30].bias, old_bias, sizeof(old_bias)));
+    }
+    assert(!warm_transaction && !lock_depth);
+    fail_id = -1;
+    flush_error = nvs_clear_error = 0;
+}
+
 int main(void) {
     assert(console_serial_start() == 0);
     seed(4, true); export_model();
@@ -30,6 +81,13 @@ int main(void) {
     assert(retained->tempCalPoints[30].temp == 25);
     assert(!memcmp(retained->tempCalPoints[30].bias, old_bias, sizeof(old_bias)));
     assert(warm_marks > marks && !warm_transaction && !lock_depth);
+    test_clear_while_saver_waits(0, true, false);
+    test_clear_while_saver_waits(0, true, true);
+    test_clear_while_saver_waits(1, true, false);
+    test_clear_while_saver_waits(1, true, true);
+    test_clear_while_saver_waits(2, true, false);
+    test_clear_while_saver_waits(2, false, true);
+    test_clear_while_saver_waits(3, false, false);
     /* A maintenance owner blocks both automatic saver and normal request clear.
      * Nested begin fails and must not relinquish the outer owner's reservation. */
     assert(sensor_calibration_maintenance_begin() == 0);

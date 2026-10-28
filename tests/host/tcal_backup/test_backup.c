@@ -21,7 +21,7 @@ static void seed(unsigned count, bool enabled) {
     retained->gyroBias[0] = 17.5f;
     retained->accelBias[2] = -8.5f;
     retained->magBias[3][1] = 1.25f;
-    retained->gyroSensScale = 1.01f;
+    retained->gyroSensScale[0] = 1.01f;
     retained->fusion_id = 42;
     for (unsigned j = 0; j < count; j++) {
         unsigned i = count == TCAL_BUFFER_SIZE ? j : j * (TCAL_BUFFER_SIZE - 1) / (count > 1 ? count - 1 : 1);
@@ -75,7 +75,7 @@ static void unrelated(const struct retained_fixture *before) {
     assert(!memcmp(before->gyroBias, retained->gyroBias, sizeof(before->gyroBias)));
     assert(!memcmp(before->accelBias, retained->accelBias, sizeof(before->accelBias)));
     assert(!memcmp(before->magBias, retained->magBias, sizeof(before->magBias)));
-    assert(before->gyroSensScale == retained->gyroSensScale);
+    assert(!memcmp(before->gyroSensScale, retained->gyroSensScale, sizeof(before->gyroSensScale)));
 }
 static void cold_restore(void) {
     memset(retained, 0, sizeof(*retained));

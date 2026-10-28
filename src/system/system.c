@@ -2,6 +2,9 @@
 #include "test_mode.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
+#if CONFIG_SENSOR_USE_TCAL
+#include "sensor/calibration/tcal_runtime.h"
+#endif
 #include "connection/connection.h"
 #include "connection/esb.h"
 #include "system/esb_ota.h"
@@ -942,6 +945,9 @@ int sys_clear(void)
 	sensor_calibration_sensitivity_clear_begin();
 #endif
 	retained_reset();
+#if CONFIG_SENSOR_USE_TCAL
+	tcal_accum_request_reset();
+#endif
 	nvs_init = false;
 	atomic_set(&wom_timeout_delay_ms, WOM_TIMEOUT_DEFAULT_MS);
 

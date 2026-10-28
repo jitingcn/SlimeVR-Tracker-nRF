@@ -47,6 +47,7 @@ static int clear_result;
 static int wom_timeout_delay_ms;
 #if CONFIG_SENSOR_USE_TCAL
 static int warm_tcal_armed, warm_tcal_receipt_count;
+static void tcal_accum_request_reset(void) {}
 #endif
 static int warm_dirty_count;
 #define WOM_TIMEOUT_DEFAULT_MS 600000

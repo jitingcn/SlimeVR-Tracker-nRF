@@ -32,3 +32,45 @@ static struct led_token calibration_led_accept(int id) { (void)id; return (struc
 static uint32_t calibration_next_generation(void) { return requested_generation + 1; }
 static void tracker_events_notify(void) {}
 static void calibration_signal_wake(void) {}
+
+static int flush_error, nvs_clear_error;
+static int sys_flush_warm(void) { assert(warm_transaction); return flush_error; }
+static void sensor_calibration_clear_begin(void) {}
+static void sensor_calibration_clear_end(void) {}
+static void sensor_calibration_online_mag_cancel_pending(void) {}
+static int sys_wom_timeout_change_begin(void) { return 0; }
+static void sys_wom_timeout_change_end(bool changed) { (void)changed; }
+static int fs, sys_storage_lock, warm_tcal_armed, warm_tcal_receipt_count, warm_dirty_count;
+static bool nvs_init;
+static atomic_t wom_timeout_delay_ms;
+#define WOM_TIMEOUT_DEFAULT_MS 1000
+#define BUILD_TIMESTAMP 42
+#define LED_OWNER_SYSTEM 2
+#define LED_FAILED 1
+#define LED_SUCCESS 2
+static void retained_reset(void) {
+    memset(retained, 0, sizeof(*retained));
+    for (unsigned i = 0; i < 3; i++) retained->gyroSensScale[i] = 1.0f;
+    retained->build_timestamp = BUILD_TIMESTAMP;
+    retained->tcal_enabled = true;
+}
+static int led_request_id(void) { return 1; }
+static int led_event_id(void) { return 1; }
+static void led_request_event(int owner, int request, int event, int result) {
+    (void)owner; (void)request; (void)event; (void)result;
+}
+static bool sys_nvs_init(void) { return true; }
+static int nvs_clear(int *store) {
+    (void)store;
+    if (nvs_clear_error) return nvs_clear_error;
+    memset(&flash_data, 0, sizeof(flash_data));
+    return 0;
+}
+static void system_storage_lock(void *lock, int timeout) {
+    (void)lock; (void)timeout;
+    sys_warm_transaction_begin();
+}
+static void system_storage_unlock(void *lock) {
+    (void)lock;
+    sys_warm_transaction_end(false);
+}

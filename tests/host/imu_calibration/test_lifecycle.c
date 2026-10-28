@@ -54,6 +54,13 @@ static unsigned resumes;
 #define BUILD_TIMESTAMP 1234
 #define LOG_INF(...) ((void)0)
 #define printk(...) ((void)0)
+static void tcal_accum_request_reset(void) {}
+static void retained_reset(void)
+{
+	memset(retained, 0, sizeof(*retained));
+	for (unsigned i = 0; i < 3; i++) retained->gyroSensScale[i] = 1.0f;
+	retained->build_timestamp = BUILD_TIMESTAMP;
+}
 
 static void watchdog_resume(int channel) { (void)channel; }
 static void k_sem_give(struct k_sem *sem) { sem->count++; resumes++; }

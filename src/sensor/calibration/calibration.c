@@ -1156,6 +1156,7 @@ int sensor_tcal_clear(void)
 	memset(retained->tempCalPoints, 0, sizeof(retained->tempCalPoints));
 	memset(retained->tempCalCoeffs, 0, sizeof(retained->tempCalCoeffs));
 	memset(&retained->tempCalState, 0, sizeof(retained->tempCalState)); // Clear the whole state struct
+	tcal_accum_request_reset();
 	sensor_tcal_refresh_model();
 	sensor_tcal_unlock();
 
@@ -1179,14 +1180,8 @@ int sensor_tcal_clear(void)
 		sizeof(retained->tempCalCoeffs)
 	);
 	sys_warm_transaction_end(false);
-
-
-	// Reset continuous accumulator sampling state
 #if CONFIG_SENSOR_TCAL_HEATED
-	tcal_accum_request_reset();
 	sensor_calibration_maintenance_end();
-#else
-	tcal_accum_reset();
 #endif
 
 	printk("All temperature calibration data and D_offset have been cleared.\n");
@@ -1233,6 +1228,7 @@ int sensor_tcal_remove_point(int index_to_remove)
 		}
 		retained->tempCalState.count = new_count;
 		retained->tempCalState.valid = false;
+		tcal_accum_request_reset();
 		sensor_tcal_refresh_model();
 		sensor_tcal_unlock();
 
@@ -1245,7 +1241,6 @@ int sensor_tcal_remove_point(int index_to_remove)
 	}
 	sys_warm_transaction_end(false);
 #if CONFIG_SENSOR_TCAL_HEATED
-	tcal_accum_request_reset();
 	sensor_calibration_maintenance_end();
 #endif
 	return sensor_operation_result(LED_OWNER_TCAL, err, true);
