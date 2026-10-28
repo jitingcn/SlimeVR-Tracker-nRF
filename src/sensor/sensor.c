@@ -264,7 +264,6 @@ static void sensor_send_raw_metadata(void);
 
 static float sensor_actual_time;
 static int16_t sensor_fifo_threshold;
-static int64_t sensor_data_time; // ticks
 static bool sensor_fast_first_update_pending;
 static bool sensor_wom_fast_wake_resume_pending;
 
@@ -2004,8 +2003,6 @@ static bool sensor_startup_discard_logged;
 
 static void sensor_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	// Use to time latency
-	sensor_data_time = k_uptime_ticks();
 	sensor_window_ints++;
 	k_sem_give(&sensor_int_sem);
 }
@@ -3447,7 +3444,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 			memset(lin_a, 0, sizeof(lin_a)); // zero out linear acceleration when no motion detected
 		}
 
-		connection_update_sensor_data(reported_quat, lin_a, sensor_data_time);
+		connection_update_sensor_data(reported_quat, lin_a);
 		last_sensor_send_time = now;
 
 		if (!resting) {
@@ -3614,16 +3611,13 @@ static void sensor_loop_wait(int64_t time_begin)
 	}
 
 #if IMU_INT_EXISTS
-	sensor_data_time = 0; // reset data time
 	int64_t wait_begin_ticks = k_uptime_ticks();
 	if (k_sem_take(&sensor_int_sem, K_NO_WAIT) == 0) {
 		/* INT arrived while the loop was still processing: loop immediately to catch up. */
 		LOG_DBG("FIFO THS/WM/WTM triggered during loop");
 		sensor_int_during_loop = true;
 		k_yield();
-	} else if (k_sem_take(&sensor_int_sem, K_MSEC(sensor_update_time_ms + 10)) == 0) {
-		/* Woken by FIFO watermark interrupt; sensor_data_time set by ISR. */
-	} else {
+	} else if (k_sem_take(&sensor_int_sem, K_MSEC(sensor_update_time_ms + 10)) != 0) {
 		/* No INT in the window - FIFO watermark edge was missed or not produced. */
 		sensor_int_timeouts++;
 		LOG_DBG("Sensor interrupt timeout (%u)", sensor_int_timeouts);

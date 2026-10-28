@@ -61,9 +61,9 @@ struct host_mutex { int held; };
 static int host_mutex_lock(struct host_mutex *p, int timeout) {(void)timeout; p->held++; return 0;}
 #define k_mutex_lock(p,t) host_mutex_lock((p),(t))
 #define k_mutex_unlock(p) do {assert((p)->held>0);(p)->held--;} while(0)
-struct k_sem {unsigned count;};
-#define K_SEM_DEFINE(name,initial,limit) struct k_sem name={initial}
-static void k_sem_give(struct k_sem *p) {p->count++;}
+struct k_sem {unsigned count, limit;};
+#define K_SEM_DEFINE(name,initial,limit) struct k_sem name={initial,limit}
+static void k_sem_give(struct k_sem *p) {if(p->count<p->limit) p->count++;}
 #include "system/power_request.h"
 #include "system/status.h"
 static int status_state;
@@ -102,7 +102,7 @@ static bool detector_pending, detector_rest=true;
 static float pose[4]={1},pose6[4]={1},q[4],sensor_loop_avg_a[3]={0,0,1};
 static bool independent_heading, invalid_6d;
 static float last_q[4]={1},last_lin_a[3],transmitted_q[4];
-static int64_t last_sensor_send_time,last_suspend_attempt_time,sensor_data_time;
+static int64_t last_sensor_send_time,last_suspend_attempt_time;
 static float sensor_window_fused_angle_rad;
 static unsigned sensor_window_publishes,transmissions;
 static int test_mode_min_send_interval_ms(void) {return 1000;}
@@ -110,8 +110,8 @@ static void sensor_compute_device_and_reported_quat(float *src,float *device,flo
     memcpy(device,src,4*sizeof(float));memcpy(reported,src,4*sizeof(float));
 }
 static void sensor_rotate_sensor_vector_to_device_frame(float *src,float *out) {(void)src;(void)out;}
-static void connection_update_sensor_data(float *pose,float *lin,int64_t time) {
-    (void)lin;(void)time;memcpy(transmitted_q,pose,sizeof(transmitted_q));transmissions++;
+static void connection_update_sensor_data(float *pose,float *lin) {
+    (void)lin;memcpy(transmitted_q,pose,sizeof(transmitted_q));transmissions++;
 }
 static bool local_rest,cal_rest;
 static unsigned auto_calibrations;
@@ -164,6 +164,12 @@ static void sensor_loop_wait(int64_t time_begin) {
 }
 static void sensor_loop_leave(void) {}
 '''
+fixture += '''
+struct device;
+struct gpio_callback;
+static struct k_sem sensor_int_sem = {0, 1};
+static uint32_t sensor_window_ints;
+''' + function('sensor_interrupt_handler') + '\n'
 fixture += function('status_ready', (ROOT / 'src/system/status.c').read_text()) + '\n'
 for pattern in (r'^static struct power_request_mailbox power_requests;',
                 r'^static K_SEM_DEFINE\(power_wake_sem,.*?;',
@@ -437,6 +443,9 @@ static void pm_frame_failure_contracts(void) {
 }
 int main(void) {
     assert(host_init()==0);
+    sensor_interrupt_handler(NULL, NULL, 0);
+    sensor_interrupt_handler(NULL, NULL, 0);
+    assert(sensor_window_ints==2 && sensor_int_sem.count==1);
     interrupt_acquire=true;frame_once();
     assert(suspended==1 && resumed==1);
     assert(!detector_pending && !local_rest && !cal_rest);

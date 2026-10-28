@@ -56,6 +56,9 @@ static inline void sys_put_le32(uint32_t value, uint8_t dst[4]) {
 static bool radio=true, usb=true, test_enabled, ota, error, event_due=true, raw, raw_pending;
 static bool sensor_ids_set, ota_suppressed;
 static sensor_data_snapshot_t sensor_data_snapshot;
+static float sensor_last_q[4];
+static unsigned publication_wakes;
+static void connection_signal_wake(void) { publication_wakes++; }
 static int64_t ota_suppress_start_time;
 static uint8_t tracker_id=2, packet_sequence=19;
 static uint8_t batt=60, batt_v=94, sensor_temp=133, imu_id=9, mag_id=10;
@@ -206,6 +209,30 @@ static void reset(void) {
     last_mag_time=last_info_time=last_status_time=last_runtime_time=now_ms;
     batt=60; batt_v=94; sensor_temp=133; tracker_svr_status=11; tracker_status=12;
     sent_len=0; memset(sent,0,sizeof(sent)); memset(mirrored,0,sizeof(mirrored));
+}
+static void test_sensor_update_generation(void) {
+    reset();
+    memset(sensor_last_q, 0, sizeof(sensor_last_q));
+    publication_wakes = 0;
+    sensor_data_capture_t before = capture();
+    float q[4] = {1, 0, 0, 0}, a[3] = {1, 2, 3};
+    connection_update_sensor_data(q, a);
+    sensor_data_capture_t first = capture();
+    assert(first.qa_generation == before.qa_generation + 1 && qa_pending());
+    assert(!first.precise && !memcmp(first.q, q, sizeof(q)) && !memcmp(first.a, a, sizeof(a)));
+    assert(publication_wakes == 1);
+    connection_update_sensor_data(q, a);
+    sensor_data_capture_t second = capture();
+    assert(second.qa_generation == first.qa_generation + 1 && second.precise && publication_wakes == 2);
+    sensor_data_snapshot_commit(&sensor_data_snapshot, &first, SENSOR_STREAM_QA);
+    assert(qa_pending());
+    float invalid[4] = {NAN, 0, 0, 0};
+    connection_update_sensor_data(invalid, a);
+    sensor_data_capture_t after_invalid = capture();
+    assert(after_invalid.qa_generation == second.qa_generation && publication_wakes == 2);
+    assert(!memcmp(after_invalid.q, q, sizeof(q)));
+    sensor_data_snapshot_commit(&sensor_data_snapshot, &second, SENSOR_STREAM_QA);
+    assert(!qa_pending());
 }
 static const uint8_t *body_for(uint8_t wanted) {
     if (sent[0]!=ESB_COMPOSITE_TYPE) return sent[0]==wanted ? sent+2 : NULL;
@@ -537,6 +564,7 @@ static void test_backoff_and_control_priority(void) {
     send_error=0; iteration(); assert(test_rate_schedule.next_due_us==10007812 && radio_rotations==1 && packet_sequence==20);
 }
 int main(void) {
+    test_sensor_update_generation();
     test_protocol_events(); test_numerical_encoders(); test_refusal_retry_and_newer_publication();
     test_capture_after_readiness_hint();
     test_independent_streams(); test_immutable_bytes_and_radio_authority(); test_normal_service_and_bounds();
@@ -557,7 +585,8 @@ def build_source(source=None):
     constants = "\n".join(re.findall(r"^#define (?:ESB_|SUB_PACKET_)[^\n]*", header, re.MULTILINE))
     constants += "\n" + "\n".join(re.findall(r"^#define SEND_RETRY_[^\n]*", source, re.MULTILINE))
     utility = (ROOT / "src/util.c").read_text()
-    parts = [constants, PREFIX, function(utility, "q_fem")]
+    parts = [constants, PREFIX, function(utility, "q_fem"), function(utility, "q_epsilon"),
+             function(source, "connection_update_sensor_data")]
     start = source.index("enum sub_packet_type {")
     end = source.index("\nvoid connection_update_sensor_ids(", start)
     parts.append(source[start:end])

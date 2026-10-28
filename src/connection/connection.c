@@ -403,11 +403,8 @@ void connection_update_sensor_ids(int imu, int mag)
 	sensor_ids_set = true;
 }
 
-void connection_update_sensor_data(float *q, float *a, int64_t data_time)
+void connection_update_sensor_data(float *q, float *a)
 {
-	// data_time is in system ticks, nonzero means valid measurement
-	// TODO: use data_time to measure latency! the latency should be calculated up to before radio sent data
-
 	// Reject NaN quaternions to prevent sending invalid data to server
 	if (isnan(q[0]) || isnan(q[1]) || isnan(q[2]) || isnan(q[3])) {
 		LOG_WRN("Rejected NaN quaternion");

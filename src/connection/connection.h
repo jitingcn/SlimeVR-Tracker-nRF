@@ -38,7 +38,7 @@ uint8_t connection_get_id(void);
 void connection_set_id(uint8_t id);
 
 void connection_update_sensor_ids(int imu_id, int mag_id);
-void connection_update_sensor_data(float *q, float *a, int64_t data_time); // ticks
+void connection_update_sensor_data(float *q, float *a);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 void connection_update_sensor_mag(float *m);
 #endif
