@@ -381,6 +381,65 @@ ZTEST(hid_lifecycle, test_reset_retains_buffer_until_completion)
 {
 	check_config_loss(USBD_MSG_RESET);
 }
+
+ZTEST(hid_lifecycle, test_submission_failure_counts_only_real_packets)
+{
+	const uint8_t counts[] = { 0, 1, 2, 3, 4, 5, 16 };
+	const int errors[] = { -ENOMEM, -EACCES, -EIO };
+	for (size_t e = 0; e < ARRAY_SIZE(errors); e++) {
+		for (size_t n = 0; n < ARRAY_SIZE(counts); n++) {
+			fixture_start();
+			enqueue_error = errors[e];
+			last_registration_sent = k_uptime_get() - REGISTRATION_INTERVAL;
+			for (uint8_t i = 0; i < counts[n]; i++) {
+				queue_packet(i + 1U);
+			}
+			send_report();
+			zassert_equal(atomic_get(&enqueue_calls), 1);
+			zassert_equal(dropped_reports, counts[n]);
+			zassert_equal(max_dropped_reports, counts[n]);
+			zassert_equal(atomic_get(&hid_cons), atomic_get(&hid_prod));
+			zassert_false(hid_report_inflight);
+
+			last_registration_sent = k_uptime_get();
+			send_report();
+			zassert_equal(atomic_get(&enqueue_calls), 1);
+			enqueue_error = 0;
+			queue_packet(0x71);
+			send_report();
+			zassert_equal(atomic_get(&enqueue_calls), 2);
+			zassert_equal(submit_stage[0], 0x71);
+			zassert_equal(dropped_reports, counts[n]);
+			input_report_done_cb(&hid_device, submit_stage);
+		}
+	}
+}
+
+ZTEST(hid_lifecycle, test_disconnect_during_failed_submit_counts_staged_packets)
+{
+	fixture_start();
+	enqueue_error = -EACCES;
+	block_enqueue = true;
+	queue_packet(0x61);
+	queue_packet(0x62);
+	k_thread_create(&sender_thread, sender_stack, K_THREAD_STACK_SIZEOF(sender_stack),
+			send_entry, NULL, NULL, NULL, HID_THREAD_PRIORITY, 0, K_NO_WAIT);
+	zassert_ok(k_sem_take(&enqueue_entered, K_SECONDS(1)));
+	uint8_t stage[USB_REPORT_SIZE_BYTES];
+	memcpy(stage, submit_stage, sizeof(stage));
+	notify(USBD_MSG_VBUS_REMOVED, 0);
+	zassert_false(hid_configured);
+	zassert_true(hid_report_inflight);
+	zassert_mem_equal(submit_stage, stage, sizeof(stage));
+	k_sem_give(&release_enqueue);
+	zassert_ok(k_sem_take(&sender_done, K_SECONDS(1)));
+	zassert_ok(k_thread_join(&sender_thread, K_SECONDS(1)));
+	zassert_false(hid_report_inflight);
+	zassert_mem_equal(submit_stage, stage, sizeof(stage));
+	zassert_equal(dropped_reports, 2);
+	zassert_equal(max_dropped_reports, 2);
+	zassert_equal(atomic_get(&hid_cons), atomic_get(&hid_prod));
+}
 ZTEST(hid_lifecycle, test_submission_error_and_early_completion)
 {
 	fixture_start();
@@ -388,11 +447,13 @@ ZTEST(hid_lifecycle, test_submission_error_and_early_completion)
 	queue_packet(0x51);
 	send_report();
 	zassert_false(hid_report_inflight);
+	zassert_equal(dropped_reports, 1);
 	enqueue_error = 0;
 	complete_during_enqueue = true;
 	queue_packet(0x52);
 	send_report();
 	zassert_false(hid_report_inflight);
+	zassert_equal(dropped_reports, 1);
 	complete_during_enqueue = false;
 	queue_packet(0x53);
 	send_report();

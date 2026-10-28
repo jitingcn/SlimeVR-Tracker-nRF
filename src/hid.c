@@ -175,6 +175,11 @@ static void send_report(void)
 		/* A failed submission does not transfer buffer ownership. */
 		key = k_spin_lock(&hid_state_lock);
 		hid_report_inflight = false;
+		/* Registration fillers do not represent dropped queued packets. */
+		dropped_reports += MIN(pending, PACKETS_PER_USB_REPORT);
+		if (dropped_reports > max_dropped_reports) {
+			max_dropped_reports = dropped_reports;
+		}
 		k_spin_unlock(&hid_state_lock, key);
 		if (ret != -EACCES) {
 			LOG_ERR("Failed to submit report: %d", ret);
