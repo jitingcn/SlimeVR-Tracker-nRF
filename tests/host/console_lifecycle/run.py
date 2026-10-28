@@ -13,7 +13,10 @@ from c_extract import extract_block
 
 HERE = Path(__file__).resolve().parent
 SRC = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2])) / "src"
-source = (SRC / "console.c").read_text()
+baseline = os.environ.get("BASELINE_REV")
+source = (subprocess.check_output(["rtk", "proxy", "git", "show", f"{baseline}:src/console.c"],
+                                  cwd=HERE.parents[2], text=True) if baseline else
+          (SRC / "console.c").read_text())
 
 
 def function(name, text=source):
@@ -63,3 +66,31 @@ with tempfile.TemporaryDirectory(prefix="tracker-console-lifecycle-") as directo
                     str(HERE / "test_console.c"), "-o", str(binary),
                 ], check=True)
                 subprocess.run([str(binary)], check=True)
+    binary = temporary / "uart-reset"
+    subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+        "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+        "-Wno-unused-function", "-Wno-unused-variable",
+        "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+        "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(SRC),
+        "-DCONSOLE_TEST_UART=1", "-DCONFIG_SENSOR_USE_ACCEL_CALIBRATION=0",
+        "-DCONFIG_CONNECTION_RAW_COLLECTION=0", "-DCONFIG_SENSOR_USE_MAGNETOMETER=0",
+        str(HERE / "test_console.c"), "-o", str(binary),
+    ], check=True)
+    subprocess.run([str(binary)], check=True)
+    rtt_parts = [
+        source[source.index("#define CONSOLE_RESET_CONFIRM_MS"):
+               source.index("\n#if USB_EXISTS || UART_CONSOLE_EXISTS", source.index("#define CONSOLE_RESET_CONFIRM_MS"))],
+        function("parse_args", (SRC / "parse_args.c").read_text()),
+        *[function(name) for name in ("console_reset_cancel", "console_reset_confirm",
+                                      "console_cmd_reset", "console_thread")],
+    ]
+    (temporary / "production_rtt.inc").write_text("\n\n".join(rtt_parts))
+    (temporary / "SEGGER_RTT.h").write_text("")
+    binary = temporary / "rtt-reset"
+    subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
+        "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+        "-g", "-O1", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+        "-fno-pie", "-no-pie", "-I", str(temporary), "-I", str(SRC),
+        str(HERE / "test_rtt_reset.c"), "-o", str(binary),
+    ], check=True)
+    subprocess.run([str(binary)], check=True)

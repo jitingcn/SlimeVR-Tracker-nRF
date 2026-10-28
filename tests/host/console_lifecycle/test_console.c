@@ -88,8 +88,13 @@ void sensor_calibration_online_mag_diagnostics(struct online_mag_diagnostics *ou
 static int sensor_request_calibration_mag(void) { magnetic_calibrations++; return 0; }
 #endif
 #define CONFIG_USE_SLIMENRF_CONSOLE 1
+#ifdef CONSOLE_TEST_UART
+#define USB_EXISTS 0
+#define UART_CONSOLE_EXISTS 1
+#else
 #define USB_EXISTS 1
 #define UART_CONSOLE_EXISTS 0
+#endif
 #include "console.h"
 #include "system/led.h"
 static jmp_buf worker_idle;
@@ -262,6 +267,14 @@ static void receive(const char *text)
     stage(text);
     irq_callback(console_uart_dev, NULL);
 }
+static void receive_overlong(void)
+{
+    char text[CONSOLE_LINE_MAX_LEN + 2];
+    memset(text, 'x', CONSOLE_LINE_MAX_LEN);
+    text[CONSOLE_LINE_MAX_LEN] = '\n';
+    text[CONSOLE_LINE_MAX_LEN + 1] = '\0';
+    receive(text);
+}
 static struct console_line_message dequeue(void)
 {
     struct console_line_message message;
@@ -298,6 +311,37 @@ static void smoke_console_command(const char *input, unsigned prior_rejects)
 
 int main(void)
 {
+#ifdef CONSOLE_TEST_UART
+    console_serial_start();
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 0);
+    receive_overlong();
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 0);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 1);
+
+    receive("reset all\n");
+    receive_overlong();
+    receive("reset all\n");
+    run_worker();
+    assert(clear_calls == 1);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 2);
+
+    receive("reset all\nreset all\n");
+    receive_overlong();
+    run_worker();
+    assert(clear_calls == 3);
+    receive("help\nhelp\nhelp\nreset all\n");
+    receive("lost\n");
+    run_worker();
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 3);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 4);
+    puts("UART reset loss ordering passed");
+#else
     /* Startup stale UART bytes are still discarded before readiness. */
     stage("stale\n");
     console_serial_start();
@@ -466,6 +510,52 @@ int main(void)
     receive("reset all\n"); run_worker();
     assert(clear_calls == 2);
 
+    /* Loss belongs between completed lines, not to their dispatch order. */
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 2);
+    receive_overlong();
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 2);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 3);
+
+    receive("reset all\n");
+    receive_overlong();
+    receive("reset all\n");
+    run_worker();
+    assert(clear_calls == 3);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 4);
+
+    receive("reset all\nreset all\n");
+    receive_overlong();
+    run_worker();
+    assert(clear_calls == 5);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 5);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 6);
+
+    receive("help\nhelp\nhelp\nreset all\n");
+    receive("lost\n"); /* The bounded queue is full. */
+    run_worker();
+    assert(clear_calls == 6);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 6);
+    receive("reset all\n"); run_worker();
+    assert(clear_calls == 7);
+
+    printed[0] = '\0';
+    receive("reset all\n"); run_worker();
+    receive("x\breset all\n"); run_worker();
+    assert(clear_calls == 8);
+
+    /* Confirmation starts when the first queued command is dispatched. */
+    receive("reset all\nreset all\n");
+    now_ms += 60000;
+    run_worker();
+    assert(clear_calls == 9);
+
     const char *bad_sens[] = {
         "sens 1,,2,3\n", "sens 1,2,3,\n", "sens ,1,2\n", "sens 1,2,\n",
         "sens 1,2\n", "sens 1,2,3,4\n", "sens 1,nan,3\n", "sens inf,2,3\n",
@@ -510,5 +600,6 @@ int main(void)
     assert(strstr(printed, "Receiver address: 665544332211") != NULL);
     assert(strstr(printed, "Device address: 665544332211") != NULL);
     puts("tracker production console lifecycle: PASS");
+#endif
     return 0;
 }

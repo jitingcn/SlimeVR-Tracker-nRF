@@ -96,6 +96,7 @@ static int64_t console_reset_deadline;
 
 static const struct device *const console_uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
 static uint32_t console_command_session;
+static uint32_t console_command_loss_generation;
 #if USB_EXISTS
 static struct k_thread console_thread_id;
 static K_THREAD_STACK_DEFINE(console_thread_stack, 1536);
@@ -113,6 +114,8 @@ BUILD_ASSERT(CONSOLE_LINE_MAX_LEN >= 2, "Console line buffer must hold an empty 
 struct console_line_message {
 	uint32_t epoch;
 	uint32_t session;
+	/* Losses are ordered with completed lines, not worker dispatch. */
+	uint32_t loss_generation;
 #if CONFIG_SENSOR_USE_TCAL
 	uint32_t input_generation;
 #endif
@@ -143,6 +146,8 @@ struct console_input_state {
 	uint16_t tail;
 	uint32_t epoch;
 	uint32_t session;
+	uint32_t loss_generation;
+	uint32_t reset_loss_generation;
 	char line[CONSOLE_LINE_MAX_LEN];
 	uint8_t echo[CONSOLE_ECHO_BUFFER_SIZE];
 	uint16_t echo_head;
@@ -229,6 +234,7 @@ static void console_finish_line_locked(void)
 	if (!console_input.overflow) {
 		message.epoch = console_input.epoch;
 		message.session = console_input.session;
+		message.loss_generation = console_input.loss_generation;
 #if CONFIG_SENSOR_USE_TCAL
 		message.input_generation = sensor_tcal_backup_input_generation();
 #endif
@@ -238,11 +244,14 @@ static void console_finish_line_locked(void)
 		memcpy(message.line, console_input.line, length);
 		message.line[length] = '\0';
 		if (k_msgq_put(&console_line_msgq, &message, K_NO_WAIT) != 0) {
+			console_input.loss_generation++;
 #if CONFIG_SENSOR_USE_TCAL
 			sensor_tcal_backup_input_lost();
 #endif
 			console_echo_put_locked('\a');
 		}
+	} else {
+		console_input.loss_generation++;
 	}
 #if CONFIG_SENSOR_USE_TCAL
 	k_sem_give(&console_input_wake);
@@ -790,7 +799,13 @@ static bool console_reset_confirm(void)
 	}
 #endif
 	int64_t now = k_uptime_get();
+#if USB_EXISTS || UART_CONSOLE_EXISTS
+	bool confirmed = console_reset_armed && now < console_reset_deadline &&
+		console_input.reset_loss_generation == console_command_loss_generation;
+	console_input.reset_loss_generation = console_command_loss_generation;
+#else
 	bool confirmed = console_reset_armed && now < console_reset_deadline;
+#endif
 	console_reset_armed = !confirmed;
 	console_reset_deadline = now + CONSOLE_RESET_CONFIRM_MS;
 #if USB_EXISTS || UART_CONSOLE_EXISTS
@@ -798,7 +813,7 @@ static bool console_reset_confirm(void)
 #endif
 	if (!confirmed) {
 		printk("Reset clears pairing, sensor calibration, and battery calibration. "
-		       "Repeat 'reset all' within 10 seconds to confirm; any other input cancels.\n");
+		       "Repeat 'reset all' within 10 seconds to confirm; any other submitted line cancels.\n");
 	}
 	return confirmed;
 }
@@ -2839,6 +2854,7 @@ static void console_thread(void)
 #endif
 		char *line = message.line;
 		console_command_session = message.session;
+		console_command_loss_generation = message.loss_generation;
 #if CONFIG_SENSOR_USE_TCAL
 		console_command_input_generation = message.input_generation;
 #endif
