@@ -71,10 +71,6 @@
  * Front side (facing out) is +Z
  */
 
-#if defined(CONFIG_BOARD_SLIMENRF_R3)
-#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, -mx, -mz
-#endif
-
 #if defined(CONFIG_BOARD_FOXSMOL40_UF2)
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz
 #endif
