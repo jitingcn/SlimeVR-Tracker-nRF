@@ -73,7 +73,9 @@ def restore_source():
         "connection_get_data_collection", "connection_get_data_collection_batch",
         "connection_get_data_collection_batch_rate"))
     util = (SRC / "util.c").read_text()
-    parts.insert(1, function(util, "v_finite"))
+    magneto = (SRC / "sensor/calibration/magneto.c").read_text()
+    parts[1:1] = [function(util, "v_finite"), function(util, "v_avg"), function(util, "v_epsilon"),
+                  function(magneto, "mag_bainv_structurally_ok")]
     build = (SRC / "build_defines.h").read_text()
     parts.append("\n".join(re.findall(r"^#define SVR_MAG_STATUS_[^\n]+", build, re.MULTILINE)))
     parts.append(function(build, "get_server_constant_mag_id"))

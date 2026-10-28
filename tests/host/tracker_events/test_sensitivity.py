@@ -51,6 +51,7 @@ static struct led_token sensitivity_feedback;
 static struct {
     float gyroSensScale[3], magBias[3], magBAinv[4][3];
     uint8_t mag_online_calibration_mode;
+    struct { float last_buf_avg_norm; uint8_t update_count, reserved[3]; } onlineMagState;
 } data;
 static typeof(data) *retained = &data;
 static unsigned writes, retained_updates, successes, cancellations, failures;
@@ -80,7 +81,6 @@ static void magneto_online_replace_BAinv_and_reset(float matrix[4][3], int owner
 }
 static void magneto_online_runtime_configure(bool enabled) { (void)enabled; }
 bool sensor_calibration_get_online_mag_enabled(void) { return false; }
-static void magneto_online_snapshot_BAinv(float matrix[4][3]) { memset(matrix,0,12*sizeof(float)); }
 static bool mag_bainv_structurally_ok(float matrix[4][3],float tolerance) { (void)matrix; (void)tolerance; return false; }
 static void magneto_online_runtime_load_retained(void) {}
 static int cal_online_mag_update_count(void) { return 0; }

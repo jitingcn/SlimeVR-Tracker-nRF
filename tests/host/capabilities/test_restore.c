@@ -2,6 +2,7 @@
 #define CONFIG_SENSOR_TCAL_HEATED 0
 #define CONFIG_SENSOR_MAG_ODR 50
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,7 +13,9 @@
 #include "retained.h"
 #include "system/led.h"
 #include "sensor/calibration/online_mag.h"
+#include "sensor/calibration/mag_common.h"
 #include "util.h"
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 #define LOG_ERR(...) ((void)0)
@@ -22,7 +25,8 @@ struct retained_data *retained = &storage;
 static bool warm_boot, ram_retention_valid;
 static unsigned nvs_reads, retained_updates, imu_loads, model_restores, model_configures, online_loads;
 static bool configured_online;
-static float live_matrix[4][3], magBias[3];
+static float live_matrix[4][3], pending_matrix[4][3], magBias[3];
+static bool defer_replacement;
 static struct { uint16_t addr; } sensor_imu_dev, sensor_mag_dev;
 static uint8_t sensor_imu_dev_reg, sensor_mag_dev_reg;
 static bool mag_enabled = true, mag_available = true, mag_calibrated = true;
@@ -53,17 +57,12 @@ void magneto_online_replace_BAinv_and_reset(const float matrix[4][3], uint16_t o
 {
     assert(operation == 0 && feedback.session == 0);
     model_restores++;
-    memcpy(live_matrix, matrix, sizeof(live_matrix));
+    memcpy(defer_replacement ? pending_matrix : live_matrix, matrix, sizeof(live_matrix));
 }
 void magneto_online_runtime_configure(bool enabled) { configured_online = enabled; model_configures++; }
 void magneto_online_runtime_load_retained(void) { online_loads++; }
 static bool sensor_calibration_get_online_mag_enabled(void) { return configured_online; }
 void magneto_online_snapshot_BAinv(float out[4][3]) { memcpy(out, live_matrix, sizeof(live_matrix)); }
-static bool mag_bainv_structurally_ok(const float matrix[4][3], float minimum)
-{
-    (void)minimum;
-    return matrix[1][0] > 0 && matrix[2][1] > 0 && matrix[3][2] > 0;
-}
 int cal_online_mag_update_count(void) { return 0; }
 uint32_t cal_online_mag_norm_count(void) { return 0; }
 static void connection_update_sensor_ids(int imu, int mag);
@@ -111,8 +110,10 @@ static void magnetic_equal(const struct retained_data *expected)
     assert(memcmp(&retained->onlineMagState, &expected->onlineMagState, sizeof(retained->onlineMagState)) == 0);
 }
 
-static void restore_case(bool warm, bool invalid)
+enum mag_case { MAG_VALID, MAG_NONFINITE, MAG_SINGULAR, MAG_EMPTY, MAG_IDENTITY };
+static void restore_case(bool warm, enum mag_case kind, bool deferred)
 {
+    bool invalid = kind == MAG_NONFINITE || kind == MAG_SINGULAR || kind == MAG_EMPTY;
     memset(&storage, 0, sizeof(storage));
     storage.mag_enabled = true;
     storage.mag_online_calibration_mode = invalid ? 255 : 1;
@@ -133,10 +134,16 @@ static void restore_case(bool warm, bool invalid)
     storage.imu_reg = 0x75;
     for (size_t i = 0; i < sizeof(storage.sensor_data); i++)
         storage.sensor_data[i] = (uint8_t)(0xa3U + 37U * i);
-    if (invalid) {
+    if (kind == MAG_NONFINITE) {
         uint32_t nan = 0x7fc12345;
         memcpy(&storage.magBAinv[2][1], &nan, sizeof(nan));
         memcpy(&storage.magBias[0], &nan, sizeof(nan));
+    } else if (kind == MAG_SINGULAR) {
+        storage.magBAinv[2][1] = 0;
+    } else if (kind == MAG_EMPTY) {
+        memset(storage.magBAinv, 0, sizeof(storage.magBAinv));
+    } else if (kind == MAG_IDENTITY) {
+        storage.magBAinv[0][0] = 0;
     }
     flash = storage;
     struct retained_data expected = storage;
@@ -149,6 +156,10 @@ static void restore_case(bool warm, bool invalid)
     warm_boot = warm;
     nvs_reads = retained_updates = imu_loads = model_restores = model_configures = online_loads = 0;
     configured_online = false;
+    defer_replacement = deferred;
+    memset(pending_matrix, 0, sizeof(pending_matrix));
+    memset(live_matrix, 0, sizeof(live_matrix));
+    live_matrix[1][0] = live_matrix[2][1] = live_matrix[3][2] = 1;
     memset(&sensor_imu_dev, 0, sizeof(sensor_imu_dev));
     sensor_imu_dev_reg = 0xff;
     memset(&sensor_mag_dev, 0, sizeof(sensor_mag_dev));
@@ -171,13 +182,20 @@ static void restore_case(bool warm, bool invalid)
 #if CONFIG_SENSOR_USE_MAGNETOMETER
     assert(sensor_get_mag_enabled() && sensor_get_mag_available() && sensor_get_mag_calibrated());
     assert(sensor_get_mag_odr() == 50 && published_mag == 3 && published_mag_status == 2);
-    assert(model_restores == 1 && model_configures == 1 && online_loads == 1 && configured_online);
+    assert(model_restores == 1 && model_configures == 1 && configured_online);
     assert(retained->mag_online_calibration_mode == (invalid ? 0 : 1));
     if (invalid) {
-        assert(live_matrix[2][1] == 1 && retained->magBias[0] == 0);
+        const float zero_matrix[4][3] = {{0}};
+        const uint8_t zero_metadata[sizeof(retained->onlineMagState)] = {0};
+        assert(!memcmp(retained->magBAinv, zero_matrix, sizeof(zero_matrix)));
+        assert(!memcmp(&retained->onlineMagState, zero_metadata, sizeof(zero_metadata)));
+        assert(!memcmp(deferred ? pending_matrix : live_matrix, zero_matrix, sizeof(zero_matrix)));
+        if (kind == MAG_NONFINITE) assert(retained->magBias[0] == 0);
     } else {
-        assert(live_matrix[0][0] == 0.25f && live_matrix[1][0] == 1);
+        assert((deferred ? pending_matrix : live_matrix)[1][0] == 1);
+        if (warm) assert(retained->onlineMagState.update_count == 17);
     }
+    assert(online_loads == (invalid ? 0U : 1U));
 #else
     magnetic_equal(&expected);
     assert(!sensor_get_mag_enabled() && !sensor_get_mag_available() && !sensor_get_mag_calibrated());
@@ -197,10 +215,12 @@ static void restore_case(bool warm, bool invalid)
 int main(void)
 {
     assert(MAIN_SENSOR_DATA_ID == 30 && sizeof(storage.sensor_data) == 128);
-    restore_case(true, false);
-    restore_case(true, true);
-    restore_case(false, false);
-    restore_case(false, true);
+    for (int warm = 0; warm <= 1; warm++) {
+        for (enum mag_case kind = MAG_VALID; kind <= MAG_IDENTITY; kind++) {
+            restore_case(warm, kind, false);
+            restore_case(warm, kind, true);
+        }
+    }
     printf("warm/cold retained restore raw=%d mag=%d: PASS\n", CONFIG_CONNECTION_RAW_COLLECTION, CONFIG_SENSOR_USE_MAGNETOMETER);
     return 0;
 }

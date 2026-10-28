@@ -402,13 +402,16 @@ void sensor_calibration_read(void)
 		memset(retained->magBias, 0, sizeof(retained->magBias));
 		healed = true;
 	}
-	if (!v_finite(&retained->magBAinv[0][0], 12)) {
-		float identity[4][3] = {{0}};
-		for (int i = 0; i < 3; i++) {
-			identity[i + 1][i] = 1.0f;
+	bool retained_mag_valid = mag_bainv_structurally_ok(retained->magBAinv, 0.0f);
+	if (!retained_mag_valid) {
+		static const float empty_matrix[4][3];
+		static const uint8_t empty_metadata[sizeof(retained->onlineMagState)];
+		if (memcmp(retained->magBAinv, empty_matrix, sizeof(empty_matrix)) != 0 ||
+		    memcmp(&retained->onlineMagState, empty_metadata, sizeof(empty_metadata)) != 0) {
+			memset(retained->magBAinv, 0, sizeof(retained->magBAinv));
+			memset(&retained->onlineMagState, 0, sizeof(retained->onlineMagState));
+			healed = true;
 		}
-		memcpy(retained->magBAinv, identity, sizeof(identity));
-		healed = true;
 	}
 #endif
 	bool sensitivity_healed = false;
@@ -447,18 +450,14 @@ void sensor_calibration_read(void)
 		retained->mag_online_calibration_mode != MAG_ONLINE_CALIBRATION_DISABLED
 	);
 	LOG_INF("Online mag calibration: %s", sensor_calibration_get_online_mag_enabled() ? "enabled" : "disabled");
-	if (sensor_calibration_get_online_mag_enabled()) {
-		float live_snapshot[4][3];
-		magneto_online_snapshot_BAinv(live_snapshot);
-		if (mag_bainv_structurally_ok(live_snapshot, 0.0f)) {
-			magneto_online_runtime_load_retained();
-			if (cal_online_mag_update_count() > 0 || cal_online_mag_norm_count() > 0) {
-				LOG_INF(
-					"Online mag runtime restored (%d updates, %u norm samples)",
-					cal_online_mag_update_count(),
-					cal_online_mag_norm_count()
-				);
-			}
+	if (sensor_calibration_get_online_mag_enabled() && retained_mag_valid) {
+		magneto_online_runtime_load_retained();
+		if (cal_online_mag_update_count() > 0 || cal_online_mag_norm_count() > 0) {
+			LOG_INF(
+				"Online mag runtime restored (%d updates, %u norm samples)",
+				cal_online_mag_update_count(),
+				cal_online_mag_norm_count()
+			);
 		}
 	}
 #endif
