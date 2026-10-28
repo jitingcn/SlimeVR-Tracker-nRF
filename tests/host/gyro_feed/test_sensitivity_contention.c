@@ -204,6 +204,7 @@ int main(void)
     memcpy(persisted, retained->gyroSensScale, sizeof(persisted));
     retained = NULL;
     assert(!sensor_calibration_sensitivity_init());
+    sensor_calibration_read();
     assert(imu_loads == 0 && !sensitivity_cache_seeded);
     retained = &retained_data;
     sensor_calibration_read();
