@@ -9,6 +9,7 @@
 struct host_write {
 	uint8_t reg;
 	uint8_t value;
+	uint8_t bank;
 };
 
 static struct host_write writes[128];
@@ -16,6 +17,8 @@ static size_t write_count;
 static uint8_t registers[256];
 static size_t transaction_count;
 static size_t fail_transaction;
+static bool icm_banked, fail_write_applied;
+static uint8_t icm_bank;
 static int fail_read_reg = -1;
 static size_t interval_bytes;
 static uint8_t fifo_count_reg;
@@ -35,6 +38,8 @@ void host_bus_reset(void)
 	write_count = 0;
 	transaction_count = 0;
 	fail_transaction = 0;
+	icm_banked = fail_write_applied = false;
+	icm_bank = 0;
 	fail_read_reg = -1;
 	interval_bytes = 0;
 	gyro_discontinuities = 0;
@@ -43,9 +48,17 @@ void host_bus_reset(void)
 
 size_t host_bus_write_count(void) { return write_count; }
 uint8_t host_bus_write_reg(size_t index) { return writes[index].reg; }
+uint8_t host_bus_write_bank(size_t index) { return writes[index].bank; }
 uint8_t host_bus_write_value(size_t index) { return writes[index].value; }
 void host_bus_set_register(uint8_t reg, uint8_t value) { registers[reg] = value; }
 void host_bus_fail_transaction(size_t transaction) { fail_transaction = transaction; }
+size_t host_bus_transaction_count(void) { return transaction_count; }
+void host_bus_icm_banked(bool applied_on_failure)
+{
+	icm_banked = true;
+	fail_write_applied = applied_on_failure;
+}
+uint8_t host_bus_current_bank(void) { return icm_bank; }
 
 int sensor_interface_spi_configure(enum sensor_interface_dev dev, uint32_t frequency, uint32_t dummy_reads)
 {
@@ -62,11 +75,16 @@ int ssi_reg_write_byte(enum sensor_interface_dev dev, uint8_t reg, uint8_t value
 {
 	(void)dev;
 	transaction_count++;
-	if (fail_transaction == transaction_count)
+	bool failed = fail_transaction == transaction_count;
+	if (failed && (!icm_banked || !fail_write_applied))
 		return -1;
 	registers[reg] = value;
 	if (write_count < sizeof(writes) / sizeof(writes[0]))
-		writes[write_count++] = (struct host_write){reg, value};
+		writes[write_count++] = (struct host_write){reg, value, icm_bank};
+	if (icm_banked && reg == 0x76)
+		icm_bank = value;
+	if (failed)
+		return -1;
 	return 0;
 }
 

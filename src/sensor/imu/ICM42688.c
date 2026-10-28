@@ -343,8 +343,14 @@ uint8_t icm_setup_WOM(void)
 	);                                                                                 // set accel ODR and FS
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_PWR_MGMT0, aMode_LP); // set accel and gyro modes
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_INTF_CONFIG1, 0x00);  // set low power clock
+	if (err) {
+		goto fail;
+	}
 	k_msleep(1);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_REG_BANK_SEL, 0x04); // select register bank 4
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_REG_BANK_SEL, 0x04); // select register bank 4
+	if (err) {
+		goto restore_bank;
+	}
 	err |= ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		ICM42688_ACCEL_WOM_X_THR,
@@ -353,14 +359,22 @@ uint8_t icm_setup_WOM(void)
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_ACCEL_WOM_Y_THR, 0x08); // set wake thresholds
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_ACCEL_WOM_Z_THR, 0x08); // set wake thresholds
 	k_msleep(1);
+restore_bank:
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_REG_BANK_SEL, 0x00); // select register bank 0
+	if (err) {
+		goto fail;
+	}
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_INT_SOURCE1, 0x07);  // enable WOM interrupt
 	k_msleep(50); // Existing WOM settling delay; required margin remains unverified.
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_SMD_CONFIG, 0x01); // enable WOM feature
 	if (err) {
-		LOG_ERR("Communication error");
+		goto fail;
 	}
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
+
+fail:
+	LOG_ERR("Communication error");
+	return 0xFF;
 }
 
 const sensor_imu_t sensor_imu_icm42688

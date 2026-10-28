@@ -70,11 +70,12 @@ static int ping_failures;
 static int64_t connection_error_start_time, pair_start_time;
 static void set_status(int status, bool value) { assert(status == SYS_STATUS_CONNECTION_ERROR); connection_error = value; }
 #if CONFIG_SENSOR_USE_TCAL
+static unsigned boot_cal_resets;
 static unsigned accum_resets;
 static void sensor_tcal_lock(void) {}
 static void sensor_tcal_unlock(void) {}
 static void tcal_accum_request_reset(void) { accum_resets++; }
-static void sensor_boot_cal_reset(void) {}
+static void sensor_boot_cal_reset(void) { boot_cal_resets++; }
 static int sensor_request_fusion_reset(bool feedback) { (void)feedback; return 0; }
 #if CONFIG_SENSOR_TCAL_HEATED
 static bool maintenance_busy;
@@ -104,6 +105,8 @@ static bool finish_during_preparation;
 static bool observe_abort_clear;
 static int abort_gap_observations;
 static unsigned notices, shutdown_prepares;
+static unsigned shutdown_prepare_attempts, warm_flushes, mag_cold_starts, retained_writes;
+static unsigned wom_records, wom_mag_saves;
 static bool shutdown_allowed;
 static int suspend_result, shutdown_result, sensor_shutdown_calls, suspend_calls;
 static bool flash_ready;
@@ -157,9 +160,14 @@ static bool link_ready = true;
 static bool esb_ready(void) { return link_ready; }
 static bool status_ready(void) { return link_ready; }
 #if IMU_INT_EXISTS
-static void sensor_calibration_online_mag_retained_save(void) {}
-static void sensor_record_wom_sleep(void) {}
-static int sensor_setup_WOM(void) { wom_setup_calls++; return wom_pin; }
+static void sensor_calibration_online_mag_retained_save(void) { wom_mag_saves++; }
+static void sensor_record_wom_sleep(void) { wom_records++; }
+static int sensor_setup_WOM(void)
+{
+	wom_setup_calls++;
+	if (wom_pin < 0) shutdown_allowed = false;
+	return wom_pin;
+}
 #define NRF_DT_GPIOS_TO_PSEL(a,b) 0
 #define NRF_GPIO_PIN_DIR_INPUT 0
 #define NRF_GPIO_PIN_INPUT_DISCONNECT 0
@@ -188,12 +196,14 @@ static void tracker_events_notify(void) {}
 static void *observe_memset(void *destination, int value, size_t size);
 static void power_iteration(void);
 static bool sys_system_reboot(void);
+static bool sys_reboot_prepared(void);
 bool esb_ota_is_active(void);
 static int prepare_upgrade(void);
 
 static bool connection_get_ota_suppressed(void) { return ota_suppressed; }
 static bool configure_system_off(void)
 {
+	shutdown_prepare_attempts++;
 	if (!shutdown_allowed) {
 		return false;
 	}
@@ -209,9 +219,9 @@ static bool configure_system_off(void)
 	assert(notices == before_cancel);
 	return true;
 }
-static int sys_flush_warm(void) { return 0; }
-static void sensor_calibration_online_mag_cold_start(void) {}
-static void sensor_retained_write(void) {}
+static int sys_flush_warm(void) { warm_flushes++; return 0; }
+static void sensor_calibration_online_mag_cold_start(void) { mag_cold_starts++; }
+static void sensor_retained_write(void) { retained_writes++; }
 static void set_regulator(int regulator) { (void)regulator; }
 static void sys_disconnect_interface_pins(void) {}
 static int power_battery_current_pptt(void) { return 5000; }
@@ -338,6 +348,8 @@ static void fixture(void)
 	finish_during_preparation = false;
 	notices = shutdown_prepares = 0;
 	notice_phase = notice_detail = wom_pin = 0;
+	shutdown_prepare_attempts = warm_flushes = mag_cold_starts = retained_writes = 0;
+	wom_records = wom_mag_saves = 0;
 	wom_setup_calls = 0;
 	link_ready = true;
 	wom_planned = wom_announced = wom_ready_timeout_initialized = wom_manual = false;
@@ -355,6 +367,7 @@ static void fixture(void)
 	ota_feedback_state = LED_NONE;
 #if CONFIG_SENSOR_USE_TCAL
 	atomic_set(&tcal_auto_calibration_enabled, false);
+	boot_cal_resets = 0;
 	accum_resets = 0;
 #if CONFIG_SENSOR_TCAL_HEATED
 	maintenance_busy = false;
@@ -800,7 +813,21 @@ static void wom_supersession_and_failure(void)
 	assert(physical_offs == 0 && physical_reboots == 1);
 	assert(notices == 3 && notice_log[1].phase == POWER_WOM_CANCELLED);
 	assert(notice_log[2].phase == POWER_WILL_REBOOT);
-	assert(notice_log[2].prepares == 1); /* best effort after WOM setup failure */
+	assert(notice_log[2].prepares == 1);
+	assert(shutdown_prepare_attempts == 1 && shutdown_prepares == 1);
+	assert(wom_setup_calls == 1 && wom_records == 0 && wom_mag_saves == 0);
+	assert(warm_flushes == 1 && mag_cold_starts == 1 && retained_writes == 1);
+#if CONFIG_SENSOR_USE_TCAL
+	assert(boot_cal_resets == 1);
+#endif
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	sensor_update_sensor_state(true);
+	idle_until(now_ms + 5000);
+	assert(physical_offs == 1 && physical_reboots == 0);
+	assert(shutdown_prepare_attempts == 1 && shutdown_prepares == 1);
+	assert(wom_setup_calls == 1 && wom_records == 1 && wom_mag_saves == 1);
+	assert(warm_flushes == 1 && mag_cold_starts == 0 && retained_writes == 1);
 }
 
 static void consumed_intent_cleanup(void)

@@ -26,6 +26,11 @@ uint8_t host_bus_register(uint8_t reg);
 size_t host_bus_write_count(void);
 uint8_t host_bus_write_reg(size_t index);
 uint8_t host_bus_write_value(size_t index);
+uint8_t host_bus_write_bank(size_t index);
+void host_bus_fail_transaction(size_t transaction);
+size_t host_bus_transaction_count(void);
+void host_bus_icm_banked(bool applied_on_failure);
+uint8_t host_bus_current_bank(void);
 void host_bus_fifo(uint8_t reg, bool bytes);
 size_t host_bus_interval_bytes(void);
 unsigned host_bus_gyro_discontinuities(void);
@@ -165,6 +170,68 @@ static void test_lsm_wom(const struct lsm_wom_case *d)
 	}
 }
 
+static void test_wom_bus_failures(void)
+{
+	const struct {
+		const char *name;
+		uint8_t (*setup)(void);
+		bool banked;
+	} drivers[] = {
+		{"ICM42686", icm42686_setup_WOM, true},
+		{"ICM42688", icm_setup_WOM, true},
+		{"LSM6DSM", lsm6dsm_setup_WOM, false},
+		{"LSM6DSO", lsm6dso_setup_WOM, false},
+	};
+	for (size_t i = 0; i < sizeof(drivers) / sizeof(drivers[0]); i++) {
+		host_bus_reset();
+		if (drivers[i].banked) host_bus_icm_banked(false);
+		assert(drivers[i].setup() == (NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW));
+		size_t transactions = host_bus_transaction_count();
+		assert(transactions > 0);
+		if (drivers[i].banked) {
+			assert(host_bus_current_bank() == 0);
+			for (size_t j = 0; j < host_bus_write_count(); j++) {
+				uint8_t reg = host_bus_write_reg(j);
+				if (reg >= ICM42688_ACCEL_WOM_X_THR && reg <= ICM42688_ACCEL_WOM_Z_THR)
+					assert(host_bus_write_bank(j) == 4);
+			}
+		}
+		for (size_t failure = 1; failure <= transactions; failure++) {
+			host_bus_reset();
+			if (drivers[i].banked) host_bus_icm_banked(false);
+			host_bus_fail_transaction(failure);
+			assert(drivers[i].setup() == 0xFF);
+			if (drivers[i].banked) {
+				for (size_t j = 0; j < host_bus_write_count(); j++) {
+					uint8_t reg = host_bus_write_reg(j);
+					if (reg >= ICM42688_ACCEL_WOM_X_THR && reg <= ICM42688_ACCEL_WOM_Z_THR)
+						assert(host_bus_write_bank(j) == 4);
+				}
+				if (failure != 10) assert(host_bus_current_bank() == 0);
+			}
+		}
+		if (drivers[i].banked) {
+			for (unsigned applied = 0; applied < 2; applied++) {
+				host_bus_reset();
+				host_bus_icm_banked(applied);
+				host_bus_fail_transaction(6);
+				assert(drivers[i].setup() == 0xFF && host_bus_current_bank() == 0);
+				for (size_t j = 0; j < host_bus_write_count(); j++) {
+					uint8_t reg = host_bus_write_reg(j);
+					assert(reg < ICM42688_ACCEL_WOM_X_THR || reg > ICM42688_ACCEL_WOM_Z_THR);
+				}
+				host_bus_reset();
+				host_bus_icm_banked(applied);
+				host_bus_fail_transaction(10);
+				assert(drivers[i].setup() == 0xFF);
+				assert(writes_value(ICM42688_INT_SOURCE1, 0x07) == 0);
+				assert(writes_value(ICM42688_SMD_CONFIG, 0x01) == 0);
+			}
+		}
+		printf("%s WOM: %zu individual bus failures rejected\n", drivers[i].name, transactions);
+	}
+}
+
 static void test_dso_fifo_discontinuity(void)
 {
 	const uint8_t flags[] = {0, 1U << 5, 1U << 3, 1U << 6};
@@ -212,6 +279,7 @@ int main(int argc, char **argv)
 		assert(a > 0 && g > 0);
 	}
 	if (argc == 1 || !strcmp(argv[1], "wom")) {
+		test_wom_bus_failures();
 		const struct lsm_wom_case wom_drivers[] = {
 			{"LSM6DSM", lsm6dsm_init, lsm6dsm_update_fs, lsm6dsm_setup_WOM,
 			 LSM6DSM_CTRL1, LSM6DSM_CTRL2, LSM6DSM_WAKE_UP_THS, false},

@@ -59,7 +59,7 @@ for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_power_policy_lock",
              "sys_request_WOM_now", "sys_wom_ready", "sys_plan_WOM",
              "sys_power_state_request", "sys_request_system_off", "sys_request_system_reboot",
              "sys_ota_reboot_reserve", "sys_ota_reboot_resolve", "sys_power_notice",
-             "sys_WOM", "sys_system_off", "sys_system_reboot", "sys_battery_dock_system_off"):
+             "sys_WOM", "sys_system_off", "sys_system_reboot", "sys_reboot_prepared", "sys_battery_dock_system_off"):
     parts.append(function(power, name))
 parts += [block(sensor, r"^enum sensor_sensor_mode \{", True),
           block(sensor, r"^enum sensor_sensor_timeout \{", True)]

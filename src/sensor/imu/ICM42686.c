@@ -378,10 +378,17 @@ uint8_t icm42686_setup_WOM(void)
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_INTF_CONFIG1,
 							  0x00); // set low power clock
 
+	if (err) {
+		goto fail;
+	}
+
 	k_msleep(1);
 
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_REG_BANK_SEL,
-							  0x04); // select register bank 4
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_REG_BANK_SEL,
+				 0x04); // select register bank 4
+	if (err) {
+		goto restore_bank;
+	}
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_ACCEL_WOM_X_THR, 0x08);
 
@@ -391,8 +398,12 @@ uint8_t icm42686_setup_WOM(void)
 
 	k_msleep(1);
 
+restore_bank:
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_REG_BANK_SEL,
-							  0x00); // select register bank 0
+				  0x00); // select register bank 0
+	if (err) {
+		goto fail;
+	}
 
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_INT_SOURCE1,
 							  0x07); // enable WOM interrupt
@@ -403,10 +414,14 @@ uint8_t icm42686_setup_WOM(void)
 							  0x01); // enable WOM feature
 
 	if (err) {
-		LOG_ERR("Communication error");
+		goto fail;
 	}
 
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW;
+
+fail:
+	LOG_ERR("Communication error");
+	return 0xFF;
 }
 
 const sensor_imu_t sensor_imu_icm42686

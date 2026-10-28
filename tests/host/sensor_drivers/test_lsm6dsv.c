@@ -23,6 +23,7 @@ static struct {
 	uint64_t now, next_op;
 	uint32_t latency;
 	unsigned starts, writes, data_reads, status_reads;
+	unsigned transactions, fail_transaction;
 	const sensor_ext_ssi_t *ext;
 	struct {
 		bool armed, bank, any_bank, applied_write;
@@ -66,6 +67,8 @@ void host_k_usleep(int32_t us) { assert(us >= 0); advance(us); }
 static int transfer(enum operation op, uint8_t reg, int value)
 {
 	advance(hw.latency);
+	if (++hw.transactions == hw.fail_transaction)
+		return -ENXIO;
 	if (hw.fault.armed && hw.fault.op == op && hw.fault.reg == reg &&
 		(hw.fault.any_bank || hw.fault.bank == hw.bank) &&
 		(hw.fault.value < 0 || hw.fault.value == value)) {
@@ -421,6 +424,22 @@ static void test_fifo_destructive_loss_notification(void)
 	assert(gyro_discontinuities == 3);
 }
 
+static void test_wom_bus_failures(void)
+{
+	reset_model(false, false);
+	hw.transactions = 0;
+	assert(lsm_setup_WOM() != 0xFF);
+	unsigned transactions = hw.transactions;
+	assert(transactions > 3);
+	for (unsigned failure = 1; failure <= transactions; failure++) {
+		reset_model(false, false);
+		hw.transactions = 0;
+		hw.fail_transaction = failure;
+		assert(lsm_setup_WOM() == 0xFF);
+	}
+	printf("LSM6DSV WOM: %u individual bus failures rejected\n", transactions);
+}
+
 int main(void)
 {
 	test_nack(false);
@@ -437,6 +456,7 @@ int main(void)
 	test_prefetch_policy_lifecycle();
 	test_ambiguous_write_is_not_replayed();
 	test_shutdown_after_stop_failure();
+	test_wom_bus_failures();
 	test_fifo_destructive_loss_notification();
 	puts("LSM6DSV full-driver proxy regressions passed");
 	return 0;

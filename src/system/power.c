@@ -57,6 +57,8 @@ LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 static bool sys_WOM(bool force, uint32_t generation);
 static bool sys_system_off(void);
 static bool sys_system_reboot(void);
+static bool sys_reboot_prepared(void);
+static void sys_power_notice(uint8_t code);
 
 static int sys_power_state_request(enum sys_power_request id);
 
@@ -664,12 +666,6 @@ static bool sys_WOM(bool force, uint32_t generation)
 	if (!configure_system_off()) {
 		return false;
 	}
-	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-	sensor_calibration_online_mag_retained_save();
-#endif
-	sensor_record_wom_sleep();
-	sensor_retained_write();
 #if WOM_USE_DCDC // In case DCDC is more efficient in the ~10-100uA range
 	set_regulator(SYS_REGULATOR_DCDC); // Make sure DCDC is selected
 #else
@@ -683,9 +679,15 @@ static bool sys_WOM(bool force, uint32_t generation)
 		tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WOM_CANCELLED,
 			force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
 		tracker_events_notify();
-		sys_system_reboot(); /* owner-private emergency path after shutdown prep */
-		return true;
+		sys_power_notice(POWER_WILL_REBOOT);
+		return sys_reboot_prepared();
 	}
+	sys_flush_warm(); /* adaptive cal → NVS before retained-only sleep */
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	sensor_calibration_online_mag_retained_save();
+#endif
+	sensor_record_wom_sleep();
+	sensor_retained_write();
 	LOG_INF("Configured IMU wake up");
 #if CONFIG_SENSOR_FAST_WOM_WAKE && NRF_POWER_HAS_GPREGRET \
 	&& (defined(POWER_GPREGRET2_GPREGRET_Msk) || defined(POWER_GPREGRET_MaxCount))
@@ -804,6 +806,11 @@ static bool sys_system_reboot(void) // TODO: add timeout
 	if (!configure_system_off()) {
 		return false;
 	}
+	return sys_reboot_prepared();
+}
+
+static bool sys_reboot_prepared(void)
+{
 	sys_flush_warm(); /* persist warm cal before reboot (covers OTA reboot path) */
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_calibration_online_mag_cold_start();

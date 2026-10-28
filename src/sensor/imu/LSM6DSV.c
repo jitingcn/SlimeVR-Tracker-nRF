@@ -625,6 +625,7 @@ uint8_t lsm_setup_WOM(void)
 	); // INT H_LACTIVE active low, PP_OD open-drain
 	if (err) {
 		LOG_ERR("Communication error");
+		return 0xFF;
 	}
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
