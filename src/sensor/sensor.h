@@ -38,6 +38,7 @@ void sensor_gyro_report_discontinuity(void);
 
 int sensor_get_sensor_temperature(float *);
 
+/* Suspended sensors may be queried when already initialized, but not rescanned. */
 int sensor_request_scan(bool force, bool user_feedback);
 
 void sensor_scan_read(void);
@@ -78,7 +79,9 @@ int sensor_request_fusion_reset(bool user_feedback);
 void sensor_request_fusion_bias_reset(void);
 
 void wait_for_threads(void);
-/* Failure means the caller must not reconfigure hardware or stop clocks. */
+/* Failure means the caller must not reconfigure hardware or stop clocks.
+ * A successful suspension is owned by the caller until resume; shutdown
+ * transfers the still-suspended subsystem to the power thread. */
 int main_imu_suspend(void);
 bool main_imu_is_suspended(void);
 void main_imu_resume(void);

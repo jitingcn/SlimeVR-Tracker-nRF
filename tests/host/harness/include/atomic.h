@@ -14,4 +14,9 @@ static inline atomic_val_t atomic_set(atomic_t *target, atomic_val_t value)
 	return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
 }
 
+static inline atomic_val_t atomic_clear(atomic_t *target)
+{
+	return atomic_set(target, 0);
+}
+
 #endif

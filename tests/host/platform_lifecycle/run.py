@@ -37,7 +37,7 @@ for path, names in (
     ("system/clock_control.c", ("normalize_source", "lfclk_running_source_get", "lfclk_start_source", "clock_switch", "clock_pre_shutdown")),
     ("system/watchdog.c", ("watchdog_init", "watchdog_register_thread", "watchdog_feed", "watchdog_pause", "watchdog_resume")),
     ("system/power.c", ("sys_interface_action", "sys_interface_suspend", "sys_interface_resume")),
-    ("sensor/sensor.c", ("sensor_shutdown", "sensor_setup_WOM")),
+    ("sensor/sensor.c", ("sensor_transfer_suspension_to_power", "sensor_shutdown", "sensor_setup_WOM")),
 ):
     source_path = args.clock_source if path == "system/clock_control.c" and args.clock_source else SRC / path
     source = source_path.read_text()

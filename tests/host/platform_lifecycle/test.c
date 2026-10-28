@@ -325,6 +325,16 @@ static const struct driver *sensor_imu = &driver, *sensor_mag = &driver;
 static void sensor_calibration_set_consumer_ready(bool ready) {}
 static void sensor_mag_timing_reset(void) {}
 static int sensor_request_scan(bool a, bool b) { return scan_result; }
+static K_MUTEX_DEFINE(sensor_lifecycle_lock);
+static int sensor_owner_token;
+static void *const power_thread_id = &sensor_owner_token;
+static void *sensor_suspend_owner = &sensor_owner_token;
+static void *k_current_get(void) { return &sensor_owner_token; }
+static int main_imu_suspend(void)
+{
+    sensor_suspend_owner = k_current_get();
+    return 0;
+}
 #include "production.inc"
 
 static void check_clock_release(bool saved_lf, unsigned int callbacks)

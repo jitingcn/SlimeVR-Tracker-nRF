@@ -394,7 +394,10 @@ static void esb_remote_cmd_meow(void)
 static void esb_remote_cmd_scan(void)
 {
 	LOG_INF("Executing remote command: SCAN");
-	sensor_request_scan(true, true);
+	int err = sensor_request_scan(true, true);
+	if (err) {
+		LOG_ERR("Remote sensor scan failed: %d", err);
+	}
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER

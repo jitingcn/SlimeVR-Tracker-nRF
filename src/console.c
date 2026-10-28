@@ -1749,7 +1749,10 @@ static void console_cmd_scan(size_t argc, char **argv)
 		return;
 	}
 	ARG_UNUSED(argv);
-	sensor_request_scan(true, true);
+	int err = sensor_request_scan(true, true);
+	if (err) {
+		printk("Error: Sensor scan failed: %d.\n", err);
+	}
 }
 
 static void console_calibrate_acc(void)

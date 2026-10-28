@@ -271,9 +271,66 @@ static bool sensor_wom_fast_wake_resume_pending;
 static bool sensor_fusion_init;
 static bool sensor_sensor_init;
 
-static bool sensor_sensor_scanning;
-
 static atomic_t main_suspended;
+/*
+ * The lifecycle mutex owns thread creation/join and suspension leases.  The
+ * activity mutex is held by the loop from before initialization through each
+ * complete iteration; a suspend is successful only after acquiring it.
+ */
+K_MUTEX_DEFINE(sensor_lifecycle_lock);
+K_MUTEX_DEFINE(sensor_activity_lock);
+K_SEM_DEFINE(sensor_loop_gate, 0, 1);
+static atomic_t sensor_loop_stop;
+/* Existing static power thread is the only owner after terminal shutdown. */
+extern const k_tid_t power_thread_id;
+static k_tid_t sensor_suspend_owner;
+enum sensor_thread_role {
+	SENSOR_THREAD_NONE,
+	SENSOR_THREAD_SCAN,
+	SENSOR_THREAD_LOOP,
+};
+static enum sensor_thread_role sensor_thread_role;
+
+#ifndef SENSOR_LIFECYCLE_LOCK_TIMEOUT_MS
+#define SENSOR_LIFECYCLE_LOCK_TIMEOUT_MS 10000
+#endif
+#ifndef SENSOR_ACTIVITY_TIMEOUT_MS
+#define SENSOR_ACTIVITY_TIMEOUT_MS 5000
+#endif
+
+static bool sensor_loop_enter(void)
+{
+	for (;;) {
+		k_mutex_lock(&sensor_activity_lock, K_FOREVER);
+		if (atomic_get(&sensor_loop_stop)) {
+			k_mutex_unlock(&sensor_activity_lock);
+			return false;
+		}
+		if (!atomic_get(&main_suspended)) {
+			return true;
+		}
+		k_mutex_unlock(&sensor_activity_lock);
+		k_sem_take(&sensor_loop_gate, K_FOREVER);
+	}
+}
+
+static void sensor_loop_leave(void)
+{
+	k_mutex_unlock(&sensor_activity_lock);
+}
+
+static int sensor_lifecycle_lock_take(void)
+{
+	int err = k_mutex_lock(&sensor_lifecycle_lock, K_MSEC(SENSOR_LIFECYCLE_LOCK_TIMEOUT_MS));
+	return err ? -ETIMEDOUT : 0;
+}
+
+static int sensor_activity_quiesce(void)
+{
+	int err = k_mutex_lock(&sensor_activity_lock, K_MSEC(SENSOR_ACTIVITY_TIMEOUT_MS));
+	return err ? -ETIMEDOUT : 0;
+}
+
 
 bool main_imu_is_suspended(void)
 {
@@ -281,14 +338,13 @@ bool main_imu_is_suspended(void)
 }
 static bool main_running = false;
 
-/* Cooperative idle/scan wait bits — replaces k_usleep(1) spins in suspend paths. */
+/* Idle publication also serves the calibration scheduling hint. */
 K_EVENT_DEFINE(sensor_life_events);
 #define SENSOR_LIFE_IDLE BIT(0)
-#define SENSOR_LIFE_SCAN_DONE BIT(1)
 
 static int sensor_life_events_init(void)
 {
-	k_event_set(&sensor_life_events, SENSOR_LIFE_IDLE | SENSOR_LIFE_SCAN_DONE);
+	k_event_set(&sensor_life_events, SENSOR_LIFE_IDLE);
 	return 0;
 }
 SYS_INIT(sensor_life_events_init, APPLICATION, 0);
@@ -305,17 +361,6 @@ static void sensor_life_mark_busy(void)
 	main_running = true;
 }
 
-static void sensor_life_mark_scan_start(void)
-{
-	k_event_clear(&sensor_life_events, SENSOR_LIFE_SCAN_DONE);
-	sensor_sensor_scanning = true;
-}
-
-static void sensor_life_mark_scan_done(void)
-{
-	sensor_sensor_scanning = false;
-	k_event_post(&sensor_life_events, SENSOR_LIFE_SCAN_DONE);
-}
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 static bool mag_available;
@@ -798,24 +843,28 @@ static void sensor_loop(void);
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 2048);
 
+static void sensor_startup_thread(void *arg1, void *arg2, void *arg3)
+{
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+	int err = sensor_request_scan(true, false);
+	if (err) {
+		LOG_ERR("Startup sensor scan failed: %d", err);
+	}
+}
+
 K_THREAD_DEFINE(
 	sensor_init_thread_id,
 	384,
-	sensor_request_scan,
-	true,
+	sensor_startup_thread,
+	NULL,
 	NULL,
 	NULL,
 	SENSOR_REQUEST_SCAN_THREAD_PRIORITY,
 	0,
 	0
 );
-
-/* init thread handles starting scanner on the main thread, and then switches to the loop, before returning
-   afterwards, other calls to start scanner will stop the loop on their thread and start the scanner on its own; it will
-   also wait for the scanner to finish if the loop needs to handle power off, it should start another thread or
-   otherwise offload the call so it does not try to kill itself in this case, it is appropriate to queue the request to
-   power thread
-*/
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
@@ -905,7 +954,6 @@ void sensor_scan_thread(void)
 	if (err || suspend_err) {
 		sensor_sensor_init = false;
 		set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
-		sensor_life_mark_scan_done();
 	}
 
 	/* Handoff: sensor_loop re-registers WDT_CHANNEL_SENSOR. Remove this
@@ -946,15 +994,9 @@ static int sensor_scan_imu_once(void)
 
 int sensor_scan(void)
 {
-	if (sensor_sensor_scanning) {
-		if (k_event_wait(&sensor_life_events, SENSOR_LIFE_SCAN_DONE, false, K_MSEC(10000)) == 0) {
-			LOG_WRN("sensor_scan wait for prior scan timed out");
-		}
-	}
 	if (sensor_sensor_init) {
 		return 0; // already initialized
 	}
-	sensor_life_mark_scan_start();
 #if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
 	if (!sensor_wom_history_initialized) {
 		sensor_session_woke_from_wom = retained->wom_sleep_pending;
@@ -1009,7 +1051,6 @@ int sensor_scan(void)
 			|| sensor_imus[imu_id] == &sensor_imu_none) {
 			sensor_scan_clear(); // clear invalid sensor data
 			sensor_imu = &sensor_imu_none;
-			sensor_life_mark_scan_done();
 			LOG_ERR("IMU not supported");
 			set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
 			return -1; // an IMU was detected but not supported
@@ -1019,7 +1060,6 @@ int sensor_scan(void)
 	} else {
 		sensor_scan_clear(); // clear invalid sensor data
 		sensor_imu = &sensor_imu_none;
-		sensor_life_mark_scan_done();
 		set_sensor_fault(SYS_SENSOR_FAULT_MISSING);
 		return -1; // no IMU detected! something is very wrong
 	}
@@ -1169,19 +1209,30 @@ int sensor_scan(void)
 	sensor_refresh_sensor_ids();
 
 	sensor_sensor_init = true; // successfully initialized
-	sensor_life_mark_scan_done();
 	set_sensor_fault(SYS_SENSOR_FAULT_NONE); // clear scan error and its local cause
 	return 0;
 }
 
-int sensor_request_scan(bool force, bool user_feedback)
+static int sensor_request_scan_locked(bool force, bool user_feedback)
 {
+	/* A failed join must never make the scanner's object or stack reusable. */
+	if (sensor_thread_role == SENSOR_THREAD_SCAN) {
+		LOG_ERR("Previous sensor scan has not been joined");
+		return user_feedback ? sensor_operation_result(LED_OWNER_SENSOR, -EBUSY, false) : -EBUSY;
+	}
 	if (sensor_sensor_init && !force) {
 		if (user_feedback) {
 			sensor_operation_result(LED_OWNER_SENSOR, 0, true);
 		}
 		return 0; // already initialized
 	}
+	/* An active or terminal lease must never be undone by a queued scan.
+	 * An ownerless stop is reserved for a failed nonterminal restart. */
+	if (atomic_get(&main_suspended) && sensor_suspend_owner != NULL) {
+		LOG_WRN("Sensor scan rejected while suspended");
+		return user_feedback ? sensor_operation_result(LED_OWNER_SENSOR, -EBUSY, false) : -EBUSY;
+	}
+
 
 	// Protect against forced scan when sensor loop is healthy and actively producing data.
 	//
@@ -1238,7 +1289,7 @@ int sensor_request_scan(bool force, bool user_feedback)
 
 	int suspend_err = main_imu_suspend();
 	if (suspend_err) {
-		LOG_ERR("Sensor scan blocked by heater shutdown: %d", suspend_err);
+		LOG_ERR("Sensor scan could not quiesce the sensor: %d", suspend_err);
 		return user_feedback ? sensor_operation_result(LED_OWNER_SENSOR, suspend_err, false) : suspend_err;
 	}
 	struct led_token feedback = led_begin(LED_OWNER_SENSOR, led_request_id());
@@ -1251,18 +1302,32 @@ int sensor_request_scan(bool force, bool user_feedback)
 	}
 	atomic_clear(&output_ready);
 
-	/* Pause watchdog before aborting thread to prevent timeout */
-	watchdog_pause(WDT_CHANNEL_SENSOR);
-
-	/* Force rescan still needs hard abort: sensor may be blocked in I2C/FIFO wait.
-	 * Cooperative idle events cover OTA/suspend; keep abort only for this path. */
-	k_thread_abort(&sensor_thread_id); // stop the sensor thread // TODO: may need to handle fusion state
+	/* The loop is quiescent. Ask it to exit at the gate and join before
+	 * reusing its thread object and stack; never abort a bus owner. */
+	if (sensor_thread_role == SENSOR_THREAD_LOOP) {
+		atomic_set(&sensor_loop_stop, true);
+		k_sem_give(&sensor_loop_gate);
+		int join_err = k_thread_join(&sensor_thread_id, K_MSEC(SENSOR_ACTIVITY_TIMEOUT_MS));
+		if (join_err) {
+			atomic_clear(&sensor_loop_stop);
+			main_imu_resume();
+			LOG_ERR("Sensor loop did not exit: %d", join_err);
+			if (user_feedback) {
+				sensor_calibration_result(feedback, LED_FAILED);
+			} else {
+				sensor_calibration_stage(initialization_feedback, LED_NONE);
+				initialization_feedback = (struct led_token){0};
+			}
+			return -ETIMEDOUT;
+		}
+		sensor_thread_role = SENSOR_THREAD_NONE;
+		atomic_clear(&sensor_loop_stop);
+	}
 	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
 	tracker_events_notify();
-	LOG_INF("Aborted sensor thread");
 	sensor_life_mark_idle();
-	sensor_life_mark_scan_done();
-	atomic_set(&main_suspended, false);
+	sensor_suspend_owner = NULL;
+	atomic_clear(&main_suspended);
 	sensor_sensor_init = false;
 	main_ok = false;
 	if (force) {
@@ -1276,6 +1341,7 @@ int sensor_request_scan(bool force, bool user_feedback)
 #endif
 		LOG_INF("Requested sensor scan");
 	}
+	sensor_thread_role = SENSOR_THREAD_SCAN;
 	k_thread_create(
 		&sensor_thread_id,
 		sensor_thread_id_stack,
@@ -1288,8 +1354,14 @@ int sensor_request_scan(bool force, bool user_feedback)
 		0,
 		K_NO_WAIT
 	);
-	k_thread_join(&sensor_thread_id, K_FOREVER); // wait for the thread to finish
-	if (sensor_sensor_init && force) {
+	/* The lifecycle lock serializes every join and reuse, including suspend.
+	 * The scan watchdog remains armed if a driver never returns. */
+	int join_err = k_thread_join(&sensor_thread_id, K_FOREVER);
+	if (!join_err) {
+		sensor_thread_role = SENSOR_THREAD_NONE;
+	}
+	if (!join_err && sensor_sensor_init && force) {
+		sensor_thread_role = SENSOR_THREAD_LOOP;
 		k_thread_create(
 			&sensor_thread_id,
 			sensor_thread_id_stack,
@@ -1304,7 +1376,7 @@ int sensor_request_scan(bool force, bool user_feedback)
 		);
 		LOG_INF("Started sensor loop");
 	}
-	int result = !sensor_sensor_init;
+	int result = join_err ? join_err : (sensor_sensor_init ? 0 : -EIO);
 	if (user_feedback) {
 		sensor_calibration_result(feedback, result ? LED_FAILED : LED_SUCCESS);
 	} else if (result) {
@@ -1312,6 +1384,23 @@ int sensor_request_scan(bool force, bool user_feedback)
 		initialization_feedback = (struct led_token){0};
 	}
 	return result;
+}
+
+int sensor_request_scan(bool force, bool user_feedback)
+{
+	/* The scanner/loop cannot join or wait for itself. Check before taking
+	 * lifecycle_lock, which another caller may hold while waiting for it. */
+	if (k_current_get() == &sensor_thread_id) {
+		return user_feedback ? sensor_operation_result(LED_OWNER_SENSOR, -EDEADLK, false) : -EDEADLK;
+	}
+	int err = sensor_lifecycle_lock_take();
+	if (err) {
+		LOG_ERR("Sensor scan lifecycle wait timed out");
+		return user_feedback ? sensor_operation_result(LED_OWNER_SENSOR, err, false) : err;
+	}
+	err = sensor_request_scan_locked(force, user_feedback);
+	k_mutex_unlock(&sensor_lifecycle_lock);
+	return err;
 }
 
 void sensor_scan_read(void) // TODO: move some of this to sys?
@@ -1451,38 +1540,57 @@ void sensor_record_wom_sleep(void)
 #endif
 }
 
+/* A terminal shutdown stays suspended; only power may continue it. */
+static void sensor_transfer_suspension_to_power(void)
+{
+	k_mutex_lock(&sensor_lifecycle_lock, K_FOREVER);
+	if (sensor_suspend_owner == k_current_get()) {
+		sensor_suspend_owner = power_thread_id;
+	}
+	k_mutex_unlock(&sensor_lifecycle_lock);
+}
+/* A failed nonterminal restart remains stopped but can be retried safely. */
+static void sensor_release_failed_restart(void)
+{
+	k_mutex_lock(&sensor_lifecycle_lock, K_FOREVER);
+	if (sensor_suspend_owner == k_current_get()) {
+		sensor_suspend_owner = NULL;
+	}
+	k_mutex_unlock(&sensor_lifecycle_lock);
+}
+
+
 int sensor_shutdown(void) // Communicate all imus to shut down
 {
+	int err = 0;
 #if CONFIG_SENSOR_TCAL_HEATED
 	bool was_ok = main_ok;
 	main_ok = false;
-	int err = sensor_temperature_invalidate();
+	err = sensor_temperature_invalidate();
 	if (err) {
 		main_ok = was_ok;
 		LOG_ERR("Sensor shutdown blocked by heater: %d", err);
-		return err;
+		goto release_lease;
 	}
 #else
 	main_ok = false;
 #endif
 	sensor_calibration_set_consumer_ready(false);
 	/*
-	 * Do not call sensor_request_scan() here. Rescan aborts the sensor thread and
-	 * re-probes the bus; during OTA / power-off the bus or sensor clock may already
-	 * be unavailable, so a probe fails and raises SENSOR_ERROR. Shutdown only talks
-	 * to drivers that are already bound.
+	 * Do not rescan here: during OTA / power-off the bus or sensor clock may
+	 * already be unavailable. Shutdown only talks to drivers already bound.
 	 */
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	sensor_mag_timing_reset();
 #endif
 	if (!sensor_sensor_init || sensor_imu == NULL || sensor_imu == &sensor_imu_none) {
 		LOG_INF("sensor_shutdown: sensors not initialized, skip");
-		return 0;
+		goto release_lease;
 	}
 
-	int resume_err = sys_interface_resume();
-	if (resume_err) {
-		return resume_err;
+	err = sys_interface_resume();
+	if (err) {
+		goto release_lease;
 	}
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (mag_available && mag_enabled && sensor_mag != NULL && sensor_mag != &sensor_mag_none) {
@@ -1490,12 +1598,22 @@ int sensor_shutdown(void) // Communicate all imus to shut down
 	}
 #endif
 	sensor_imu->shutdown();
-	return sys_interface_suspend();
+	err = sys_interface_suspend();
+release_lease:
+	/* The shutdown owner is done touching drivers. Keep the stop latched and
+	 * transfer it only to the power thread, never to calibration or scans. */
+	sensor_transfer_suspension_to_power();
+	return err;
 }
 
 int sensor_setup_WOM(void)
 {
-	int err = sensor_request_scan(false, false);
+	/* The power thread retains the shutdown lease through WOM setup. */
+	int err = main_imu_suspend();
+	if (err) {
+		return err;
+	}
+	err = sensor_request_scan(false, false);
 	if (err) {
 		return err;
 	}
@@ -1603,7 +1721,7 @@ int sensor_set_mag_enabled(bool enabled)
 	LOG_INF("%s magnetometer (runtime)...", enabled ? "Enabling" : "Disabling");
 	int suspend_err = main_imu_suspend();
 	if (suspend_err) {
-		LOG_ERR("Magnetometer change blocked by heater shutdown: %d", suspend_err);
+		LOG_ERR("Magnetometer change could not quiesce the sensor: %d", suspend_err);
 		return sensor_operation_result(LED_OWNER_MAG, suspend_err, false);
 	}
 	int err = sys_interface_resume();
@@ -1637,6 +1755,7 @@ int sensor_set_mag_enabled(bool enabled)
 	int restart_err = main_imu_restart();
 	if (restart_err) {
 		LOG_ERR("Fusion restart failed; sensor left suspended: %d", restart_err);
+		sensor_release_failed_restart();
 		led_request_event(LED_OWNER_MAG, led_request_id(), led_event_id(), LED_PARTIAL);
 		return restart_err;
 	}
@@ -3448,7 +3567,6 @@ static void sensor_loop_wait(int64_t time_begin)
 		if (sensor_fusion->take_rest_observation) {
 			sensor_fusion->take_rest_observation(NULL);
 		}
-		k_thread_suspend(&sensor_thread_id);
 	}
 
 	sensor_life_mark_busy();
@@ -3456,12 +3574,18 @@ static void sensor_loop_wait(int64_t time_begin)
 
 void sensor_loop(void)
 {
+	/* The gate precedes even initialization: main_running is not yet true
+	 * when this thread first becomes eligible to access the bus. */
+	if (!sensor_loop_enter()) {
+		return;
+	}
 #if CONFIG_SENSOR_TCAL_HEATED
 	int heater_err = sensor_temperature_invalidate();
 	if (heater_err) {
 		LOG_ERR("Sensor initialization blocked by heater shutdown: %d", heater_err);
 		sensor_calibration_stage(initialization_feedback, LED_NONE);
 		initialization_feedback = (struct led_token){0};
+		sensor_loop_leave();
 		return;
 	}
 	heated_resting = false;
@@ -3471,6 +3595,7 @@ void sensor_loop(void)
 	if (!sensor_sensor_init) {
 		sensor_calibration_stage(initialization_feedback, LED_NONE);
 		initialization_feedback = (struct led_token){0};
+		sensor_loop_leave();
 		return;
 	}
 	sensor_life_mark_busy();
@@ -3478,6 +3603,7 @@ void sensor_loop(void)
 	if (watchdog_register_thread(WDT_CHANNEL_SENSOR, 0) < 0) {
 		LOG_ERR("Sensor watchdog registration failed");
 		sys_reboot(SYS_REBOOT_COLD);
+		sensor_loop_leave();
 		return;
 	}
 	int err = sys_interface_resume();
@@ -3499,7 +3625,11 @@ void sensor_loop(void)
 	}
 	sensor_calibration_stage(initialization_feedback, LED_NONE);
 	initialization_feedback = (struct led_token){0};
+	sensor_loop_leave();
 	while (1) {
+		if (!sensor_loop_enter()) {
+			return;
+		}
 		int64_t time_begin = k_uptime_get();
 		sensor_window_iters++;
 		if (main_ok && sensor_calibration_imu_ready()) {
@@ -3518,6 +3648,7 @@ void sensor_loop(void)
 			sensor_loop_handle_data_collection(&frame.dc_active);
 			if (!main_ok) {
 				sensor_loop_wait(time_begin);
+				sensor_loop_leave();
 				continue;
 			}
 #endif
@@ -3525,6 +3656,7 @@ void sensor_loop(void)
 			sensor_loop_acquire(&frame);
 			if (!main_ok) {
 				sensor_loop_wait(time_begin);
+				sensor_loop_leave();
 				continue;
 			}
 			uint64_t acq_us = k_ticks_to_us_near64(k_uptime_ticks() - acq_begin_ticks);
@@ -3543,15 +3675,10 @@ void sensor_loop(void)
 				int64_t vqf_begin_ticks = k_uptime_ticks();
 				sensor_motion_prepare(frame.sensor_epoch, k_uptime_get());
 				if (!sensor_motion_frame_current(frame.sensor_epoch)) {
-					/* Stale frame: the sensor epoch moved, or a suspension
-					 * is pending. Drop the frame, but still run the loop
-					 * tail - it publishes the idle signal the shutdown
-					 * path waits for and is the only place this thread
-					 * self-suspends. Skipping it leaves the thread in the
-					 * acquisition path while the power thread force
-					 * suspends it, which strands a synchronous bus
-					 * transaction and blocks the shutdown sequence. */
+					/* Finish the iteration and release the activity lock
+					 * before the suspension owner uses the sensor bus. */
 					sensor_loop_wait(time_begin);
+					sensor_loop_leave();
 					continue;
 				}
 				sensor_loop_process_fifo(&frame);
@@ -3571,6 +3698,7 @@ void sensor_loop(void)
 		}
 
 		sensor_loop_wait(time_begin);
+		sensor_loop_leave();
 	}
 }
 
@@ -3586,12 +3714,41 @@ void wait_for_threads(void)
 
 int main_imu_suspend(void)
 {
+	if (k_current_get() == &sensor_thread_id) {
+		return -EDEADLK;
+	}
+	int err = sensor_lifecycle_lock_take();
+	if (err) {
+		LOG_ERR("Sensor suspension lifecycle wait timed out");
+		return err;
+	}
+	if (sensor_thread_role == SENSOR_THREAD_SCAN) {
+		LOG_ERR("Sensor scan has not been joined");
+		err = -EBUSY;
+		goto unlock_lifecycle;
+	}
+	if (atomic_get(&main_suspended)) {
+		if (sensor_suspend_owner) {
+			err = sensor_suspend_owner == k_current_get() ? 0 : -EBUSY;
+			goto unlock_lifecycle;
+		}
+#if CONFIG_SENSOR_TCAL_HEATED
+		/* A failed restart may have left heater shutdown incomplete. */
+		err = sensor_temperature_invalidate();
+		if (err) {
+			LOG_ERR("Sensor recovery blocked by heater shutdown: %d", err);
+			goto unlock_lifecycle;
+		}
+#endif
+		sensor_suspend_owner = k_current_get();
+		goto unlock_lifecycle;
+	}
 #if CONFIG_SENSOR_TCAL_HEATED
 	/* Close publication/admission before requesting the owner to suspend. */
-	int err = sensor_temperature_invalidate();
+	err = sensor_temperature_invalidate();
 	if (err) {
 		LOG_ERR("Sensor suspension blocked by heater shutdown: %d", err);
-		return err;
+		goto unlock_lifecycle;
 	}
 #endif
 	atomic_set(&main_suspended, true);
@@ -3600,45 +3757,65 @@ int main_imu_suspend(void)
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_SUSPENDED);
 	tracker_events_notify();
-	/* Thread cannot feed once frozen or self-suspended; pause WDT in all paths. */
-	watchdog_pause(WDT_CHANNEL_SENSOR);
-	if (!main_running) { // don't suspend if already stopped (TODO: may be called from sensor thread)
-		return 0;        // thread self-suspends at end of sensor_loop_wait when main_suspended
+
+	/* This covers both initialization and complete loop iterations. Never
+	 * suspend/abort a thread in a driver, and never pause its watchdog until
+	 * the activity owner has actually left the bus. */
+	err = sensor_activity_quiesce();
+	if (err) {
+		LOG_ERR("Sensor suspension activity wait timed out");
+		atomic_clear(&main_suspended);
+		sensor_calibration_set_consumer_ready(main_ok);
+#if CONFIG_SENSOR_TCAL_HEATED
+		sensor_temperature_resume();
+#endif
+		k_sem_give(&sensor_loop_gate);
+		goto unlock_lifecycle;
 	}
-	if (sensor_sensor_scanning) {
-		if (k_event_wait(&sensor_life_events, SENSOR_LIFE_SCAN_DONE, false, K_MSEC(10000)) == 0) {
-			LOG_WRN("main_imu_suspend scan wait timed out");
-		}
+	sensor_suspend_owner = k_current_get();
+	if (sensor_thread_role == SENSOR_THREAD_LOOP) {
+		watchdog_pause(WDT_CHANNEL_SENSOR);
 	}
-	if (main_running) {
-		if (k_event_wait(&sensor_life_events, SENSOR_LIFE_IDLE, false, K_MSEC(5000)) == 0) {
-			LOG_WRN("main_imu_suspend idle wait timed out");
-		}
-	}
-	k_thread_suspend(&sensor_thread_id);
 	if (sensor_fusion->take_rest_observation) {
 		sensor_fusion->take_rest_observation(NULL);
 	}
+	k_mutex_unlock(&sensor_activity_lock);
 	LOG_INF("Suspended sensor thread");
-	return 0;
+unlock_lifecycle:
+	k_mutex_unlock(&sensor_lifecycle_lock);
+	return err;
 }
 
 void main_imu_resume(void)
 {
-	if (!atomic_get(&main_suspended)) { // not suspended
+	if (k_current_get() == &sensor_thread_id) {
+		LOG_ERR("Sensor cannot resume itself");
+		return;
+	}
+	k_mutex_lock(&sensor_lifecycle_lock, K_FOREVER);
+	if (!atomic_get(&main_suspended)) {
+		k_mutex_unlock(&sensor_lifecycle_lock);
+		return;
+	}
+	if (sensor_suspend_owner != k_current_get()) {
+		LOG_WRN("Sensor resume rejected: suspension belongs to another thread");
+		k_mutex_unlock(&sensor_lifecycle_lock);
 		return;
 	}
 	tracker_events_sensor_invalidate(TRACKER_REST_INITIALIZING);
 	tracker_events_notify();
-	watchdog_resume(WDT_CHANNEL_SENSOR);
+	if (sensor_thread_role == SENSOR_THREAD_LOOP) {
+		watchdog_resume(WDT_CHANNEL_SENSOR);
+	}
 	sensor_calibration_set_consumer_ready(main_ok);
-	/* Resume may immediately preempt us with the higher-priority sensor thread.
-	 * Publish before waking it so the loop cannot self-suspend on stale intent. */
-	atomic_set(&main_suspended, false);
+	sensor_suspend_owner = NULL;
+	/* Publish readiness before the higher-priority loop can leave its gate. */
+	atomic_clear(&main_suspended);
 #if CONFIG_SENSOR_TCAL_HEATED
 	sensor_temperature_resume();
 #endif
-	k_thread_resume(&sensor_thread_id);
+	k_sem_give(&sensor_loop_gate);
+	k_mutex_unlock(&sensor_lifecycle_lock);
 	LOG_INF("Resumed sensor thread");
 }
 

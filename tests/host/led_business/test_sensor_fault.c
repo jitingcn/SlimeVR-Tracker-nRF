@@ -50,7 +50,7 @@ static const struct host_sensor_driver sensor_imu_none, supported_imu = {1};
 static const struct host_sensor_driver *sensor_imus[] = {NULL, &supported_imu, &sensor_imu_none};
 static const struct host_sensor_driver *sensor_imu;
 static bool sensor_sensor_init;
-static unsigned scan_clears, scan_completions, retained_writes, reboot_requests;
+static unsigned scan_clears, retained_writes, reboot_requests;
 static int reboot_result;
 static int packet_errors;
 static int64_t no_packets_since_ms;
@@ -58,7 +58,6 @@ static bool no_packets_timeout_logged, sensor_int_during_loop;
 struct host_sensor_frame { int packets, processed_packets; };
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 static void sensor_scan_clear(void) { ++scan_clears; }
-static void sensor_life_mark_scan_done(void) { ++scan_completions; }
 static void sensor_retained_write(void) { ++retained_writes; }
 static int sys_request_system_reboot(void) { ++reboot_requests; return reboot_result; }
 #include "sensor_fault_production.inc"
@@ -74,7 +73,7 @@ static void reset(void)
     transmitted_status = 0;
     sensor_imu = &sensor_imu_none;
     sensor_sensor_init = false;
-    scan_clears = scan_completions = retained_writes = reboot_requests = 0;
+    scan_clears = retained_writes = reboot_requests = 0;
     reboot_result = 0;
     packet_errors = 0;
     no_packets_since_ms = 0;
@@ -103,7 +102,7 @@ static void scan_classification_and_init_fallback(void)
 {
     reset();
     assert(host_sensor_scan_result(-1) == -1);
-    assert(scan_clears == 1 && scan_completions == 1);
+    assert(scan_clears == 1);
     assert(get_status(SYS_STATUS_SENSOR_ERROR) == SYS_STATUS_SENSOR_ERROR);
     status_wake_sem.count = 0;
     host_sensor_outer_init_failure(-EIO);
@@ -114,7 +113,7 @@ static void scan_classification_and_init_fallback(void)
     for (unsigned i = 0; i < ARRAY_SIZE(unsupported_ids); ++i) {
         reset();
         assert(host_sensor_scan_result(unsupported_ids[i]) == -1);
-        assert(scan_clears == 1 && scan_completions == 1);
+        assert(scan_clears == 1);
         publish();
         assert(engine.winner.semantic == LED_SENSOR_FAULT);
     }

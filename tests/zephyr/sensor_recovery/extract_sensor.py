@@ -5,7 +5,7 @@ import sys
 
 
 def function(source, name):
-    match = re.search(rf"^(?:static )?(?:void|int) {name}\([^;]*?\)\s*\{{", source, re.M)
+    match = re.search(rf"^(?:static )?(?:void|int|bool) {name}\([^;]*?\)\s*\{{", source, re.M)
     if not match:
         raise RuntimeError(f"Cannot find {name}")
     body = source.index("{", match.start())
@@ -23,5 +23,6 @@ def function(source, name):
 
 source = Path(sys.argv[1]).read_text()
 Path(sys.argv[2]).write_text(
-    function(source, "sensor_loop_wait") + function(source, "main_imu_resume")
+    function(source, "sensor_loop_enter") + function(source, "sensor_loop_leave")
+    + function(source, "main_imu_resume")
 )

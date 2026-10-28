@@ -41,7 +41,14 @@ static bool hold_write, write_entered, clear_waiting, release_write;
 static atomic_t main_suspended;
 static atomic_t output_ready;
 static bool main_ok = true;
-static int sensor_thread_id;
+static int sensor_thread_id, calibration_thread_id, power_thread_id;
+static int *sensor_suspend_owner = &calibration_thread_id;
+static int *k_current_get(void) { return &calibration_thread_id; }
+static K_MUTEX_DEFINE(sensor_lifecycle_lock);
+enum sensor_thread_role { SENSOR_THREAD_NONE, SENSOR_THREAD_SCAN, SENSOR_THREAD_LOOP };
+static enum sensor_thread_role sensor_thread_role = SENSOR_THREAD_LOOP;
+struct k_sem { unsigned count; };
+static struct k_sem sensor_loop_gate;
 static unsigned resumes;
 #define WDT_CHANNEL_SENSOR 0
 #define BUILD_TIMESTAMP 1234
@@ -49,7 +56,7 @@ static unsigned resumes;
 #define printk(...) ((void)0)
 
 static void watchdog_resume(int channel) { (void)channel; }
-static void k_thread_resume(int *thread) { (void)thread; resumes++; }
+static void k_sem_give(struct k_sem *sem) { sem->count++; resumes++; }
 
 /* Semantic LED leaves. Submission is observed per semantic so the fixture can
  * assert the reset-all receipt without reimplementing LED policy. */
@@ -331,6 +338,7 @@ static void test_unavailable_consumer_and_recovery(void)
 	main_imu_resume();
 	assert(sensor_calibration_reset_imu() == -EAGAIN);
 	atomic_set(&main_suspended, true);
+	sensor_suspend_owner = k_current_get();
 	main_ok = true;
 	main_imu_resume();
 	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
@@ -355,8 +363,9 @@ static void test_bmi_resume_cannot_reopen_terminal_gate(void)
 	assert(retained->gyroBias[0] == 4.0f);
 	assert(retained->fusion_id == 0);
 	atomic_set(&main_suspended, true);
-	main_imu_resume(); // real caller used by late BMI cleanup
-	assert(resumes == 1);
+	sensor_suspend_owner = &power_thread_id;
+	main_imu_resume(); // late BMI cleanup cannot release the power owner's stop
+	assert(resumes == 0 && atomic_get(&main_suspended));
 	assert(sensor_calibration_reset_imu() == -ESHUTDOWN);
 	assert(sensor_calibration_reset_accel() == -ESHUTDOWN);
 	assert(sys_clear() == 0); // reset barrier must not reopen the terminal gate

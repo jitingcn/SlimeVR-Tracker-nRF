@@ -36,6 +36,7 @@ transmit_policy = publish[begin:publish.index('// Periodic retained save', begin
 rest = source[source.index('static struct sensor_rest_detector rest_detector;'):source.index('static int sensor_scan(void);')]
 dwell = source[source.index('#ifndef SENSOR_REST_ENTER_STABLE_MS'):source.index('#define SENSOR_ACTIVITY_STARTUP_GUARD_MS')]
 fixture = r'''
+#include <errno.h>
 #include <math.h>
 #include "util.h"
 #include "sensor/motion_state.h"
@@ -55,8 +56,10 @@ fixture = r'''
 #define CONFIG_DELAY_SLEEP_ON_STATUS 1
 #define IMU_INT_EXISTS 1
 #define K_FOREVER (-1)
-#define K_MUTEX_DEFINE(name) struct {int held;} name
-#define k_mutex_lock(p,t) do {(void)(t);(p)->held++;} while(0)
+struct host_mutex { int held; };
+#define K_MUTEX_DEFINE(name) struct host_mutex name
+static int host_mutex_lock(struct host_mutex *p, int timeout) {(void)timeout; p->held++; return 0;}
+#define k_mutex_lock(p,t) host_mutex_lock((p),(t))
 #define k_mutex_unlock(p) do {assert((p)->held>0);(p)->held--;} while(0)
 struct k_sem {unsigned count;};
 #define K_SEM_DEFINE(name,initial,limit) struct k_sem name={initial}
@@ -75,18 +78,26 @@ static bool esb_ready(void) {return true;}
 #define SENSOR_ACTIVITY_STARTUP_GUARD_MS 5000
 #define CONFIG_ACTIVE_TIMEOUT_MEANINGFUL_MOTION_MS 3000
 #define WDT_CHANNEL_SENSOR 0
-#define SENSOR_LIFE_IDLE 1
-#define SENSOR_LIFE_SCAN_DONE 2
+#define SENSOR_LIFECYCLE_LOCK_TIMEOUT_MS 10000
+#define SENSOR_ACTIVITY_TIMEOUT_MS 5000
 #define K_MSEC(x) (x)
 #define atomic_set(p,v) (*(p)=(v))
 #define atomic_get(p) (*(p))
 #define atomic_clear(p) atomic_set(p,0)
 #define FUSION_VQF 1
 #define FUSION_EQF 2
-static bool main_suspended, main_running=true, main_ok=true, sensor_sensor_scanning;
+static bool main_suspended, main_running=true, main_ok=true;
 static int output_ready;
-static int sensor_thread_id, sensor_life_events;
-static unsigned suspended, resumed, idle_timeouts;
+static int sensor_thread_id, caller_thread;
+typedef int *k_tid_t;
+static k_tid_t sensor_suspend_owner;
+static k_tid_t k_current_get(void) {return &caller_thread;}
+enum sensor_thread_role { SENSOR_THREAD_NONE, SENSOR_THREAD_SCAN, SENSOR_THREAD_LOOP };
+static enum sensor_thread_role sensor_thread_role = SENSOR_THREAD_LOOP;
+static K_MUTEX_DEFINE(sensor_lifecycle_lock);
+static K_MUTEX_DEFINE(sensor_activity_lock);
+static K_SEM_DEFINE(sensor_loop_gate, 0, 1);
+static unsigned suspended, resumed;
 static bool detector_pending, detector_rest=true;
 static float pose[4]={1},pose6[4]={1},q[4],sensor_loop_avg_a[3]={0,0,1};
 static bool independent_heading, invalid_6d;
@@ -130,14 +141,8 @@ static const typeof(backend) *sensor_fusion=&backend;
 static int fusion_id=FUSION_VQF;
 static void sensor_diagnostics_on_cal_gyro(float *g) {(void)g;}
 static void sensor_calibration_set_consumer_ready(bool x) {(void)x;}
-static void watchdog_pause(int x) {(void)x;}
-static void watchdog_resume(int x) {(void)x;}
-static void k_thread_suspend(int *x) {(void)x; suspended++;}
-static void k_thread_resume(int *x) {(void)x; assert(!main_suspended); resumed++;}
-static int k_event_wait(int *event,int mask,bool reset,int timeout) {
-    (void)event;(void)reset;assert(mask==SENSOR_LIFE_IDLE && timeout==5000);
-    now_ms+=timeout; idle_timeouts++; return 0;
-}
+static void watchdog_pause(int x) {(void)x; suspended++;}
+static void watchdog_resume(int x) {(void)x; resumed++;}
 static int64_t k_uptime_ticks(void) {return now_ms;}
 static void sensor_update_sensor_state(bool resting);
 static void sensor_runtime_calibration_check(bool resting) {cal_rest=resting;}
@@ -157,6 +162,7 @@ static void sensor_loop_wait(int64_t time_begin) {
     assert(time_begin<=now_ms);
     frame_waits++;
 }
+static void sensor_loop_leave(void) {}
 '''
 fixture += function('status_ready', (ROOT / 'src/system/status.c').read_text()) + '\n'
 for pattern in (r'^static struct power_request_mailbox power_requests;',
@@ -176,6 +182,7 @@ fixture += 'static int64_t wom_timeout_get_delay_ms(void) { return CONFIG_ACTIVE
 fixture += function('sensor_uses_normal_timeout') + '\n'
 fixture += function('sensor_get_active_timeout_delay') + '\n' + function('sensor_update_sensor_state') + '\n'
 fixture += dwell + '\n' + rest + '\n' + function('feed_calibrated_gyro') + '\n' + function('sensor_update_session_motion') + '\n'
+fixture += function('sensor_lifecycle_lock_take') + '\n' + function('sensor_activity_quiesce') + '\n'
 fixture += function('main_imu_suspend') + '\n' + function('main_imu_resume') + '\n'
 fixture += r'''
 static uint64_t sensor_window_acq_us, sensor_window_acq_max_us;
@@ -431,7 +438,7 @@ static void pm_frame_failure_contracts(void) {
 int main(void) {
     assert(host_init()==0);
     interrupt_acquire=true;frame_once();
-    assert(suspended==1 && resumed==1 && idle_timeouts==1);
+    assert(suspended==1 && resumed==1);
     assert(!detector_pending && !local_rest && !cal_rest);
     drain(700);assert(known==0 && unknown>0);
     interrupt_acquire=false;frame_once();drain(300);assert(known>=2);
