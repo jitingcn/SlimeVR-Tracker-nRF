@@ -116,6 +116,19 @@ static inline void power_request_finish(struct power_request_mailbox *mailbox,
 	}
 	k_spin_unlock(&mailbox->lock, key);
 }
+/* The power thread may attempt battery/dock OFF without claiming a mailbox
+ * request. A failed private attempt must release only its physical gate; a
+ * queued/retry generation remains untouched, and an executing claim keeps
+ * its gate until the token-checked power_request_finish(). */
+static inline void power_request_finish_private(struct power_request_mailbox *mailbox)
+{
+	k_spinlock_key_t key = k_spin_lock(&mailbox->lock);
+	if (mailbox->state != POWER_REQUEST_EXECUTING) {
+		mailbox->physical_started = false;
+	}
+	k_spin_unlock(&mailbox->lock, key);
+}
+
 
 /* Revoke only reversible WOM, leaving any other mailbox owner untouched.
  * Return whether intent may be withdrawn (also true if the mailbox no longer

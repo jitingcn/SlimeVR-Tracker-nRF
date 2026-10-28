@@ -234,6 +234,29 @@ ZTEST(power_request, test_ota_cannot_preempt_physical_shutdown)
 	zassert_equal(power_request_ota_reserve(&private_mailbox), -EBUSY);
 }
 
+ZTEST(power_request, test_failed_private_gate_preserves_mailbox_owner)
+{
+	struct power_request_mailbox mailbox = {0};
+	struct k_sem wake;
+	uint32_t generation = 0;
+	k_sem_init(&wake, 0, 1);
+
+	/* A producer can queue before the private owner commits its gate. */
+	zassert_equal(power_request_submit(&mailbox, SYS_POWER_REQ_REBOOT, &wake), 0);
+	uint32_t queued_generation = mailbox.generation;
+	zassert_true(power_request_start_physical(&mailbox, false));
+	zassert_equal(power_request_ota_reserve(&mailbox), -EBUSY);
+	power_request_finish_private(&mailbox);
+	zassert_equal(power_request_begin(&mailbox, &generation), SYS_POWER_REQ_REBOOT);
+	zassert_equal(generation, queued_generation);
+	zassert_true(power_request_start_physical(&mailbox, true));
+	power_request_finish_private(&mailbox);
+	zassert_true(mailbox.physical_started, "An executing token retains its gate");
+	power_request_finish(&mailbox, SYS_POWER_REQ_REBOOT, generation, false);
+	zassert_false(mailbox.physical_started);
+	zassert_equal(power_request_ota_reserve(&mailbox), 0);
+}
+
 ZTEST(power_request, test_cancelled_wom_cannot_commit_or_finish_same_kind_replacement)
 {
 	struct power_request_mailbox mailbox = {0};

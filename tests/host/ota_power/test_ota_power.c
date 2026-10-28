@@ -531,7 +531,7 @@ static void power_notices(void)
 	/* Owner-private battery/dock entry must use the same pre-teardown window. */
 	fixture(); memset(&ota, 0, sizeof(ota));
 	sleep_observer = observe_airtime;
-	assert(sys_system_off());
+	sys_battery_dock_system_off();
 	assert(physical_offs == 1 && notice_phase == POWER_WILL_SHUTDOWN);
 #if !IMU_INT_EXISTS
 	fixture(); memset(&ota, 0, sizeof(ota));
@@ -539,6 +539,39 @@ static void power_notices(void)
 	sensor_update_sensor_state(true);
 	assert(notices == 0 && physical_offs == 0);
 #endif
+}
+
+static void private_off_failure_releases_only_its_gate(void)
+{
+	fixture(); memset(&ota, 0, sizeof(ota));
+	shutdown_allowed = false;
+	sys_battery_dock_system_off();
+	assert(!power_requests.physical_started && physical_offs == 0);
+	assert(sys_ota_reboot_reserve() == 0);
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_request_system_reboot() == 0);
+	uint32_t queued_generation = power_requests.generation;
+	shutdown_allowed = false;
+	sys_battery_dock_system_off();
+	assert(!power_requests.physical_started);
+	assert(power_requests.state == POWER_REQUEST_QUEUED);
+	assert(power_requests.request == SYS_POWER_REQ_REBOOT);
+	assert(power_requests.generation == queued_generation);
+	uint32_t claimed_generation = 0;
+	assert(power_request_begin(&power_requests, &claimed_generation) == SYS_POWER_REQ_REBOOT);
+	assert(claimed_generation == queued_generation);
+	assert(power_request_start_physical(&power_requests, true));
+	power_request_finish_private(&power_requests);
+	assert(power_requests.physical_started); /* executing token still owns it */
+	power_request_finish(&power_requests, SYS_POWER_REQ_REBOOT, claimed_generation, false);
+	assert(!power_requests.physical_started);
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_ota_reboot_reserve() == 0);
+	sys_battery_dock_system_off();
+	assert(power_requests.ota_reboot == POWER_OTA_REBOOT_RESERVED);
+	assert(!power_requests.physical_started);
 }
 
 #if IMU_INT_EXISTS
@@ -1492,6 +1525,7 @@ int main(void)
 	abort_precedes_queued_commands();
 	inactive_abort_does_not_cancel_next_begin();
 	power_notices();
+	private_off_failure_releases_only_its_gate();
 #if IMU_INT_EXISTS
 #if CONFIG_SENSOR_TCAL_HEATED
 	pending_heat_veto();

@@ -320,6 +320,20 @@ static void sys_update_battery_tracker_voltage(int mv, bool charging)
 }
 static void sys_update_battery_tracker(int16_t soc, bool charging) { ++soc_updates; }
 static int16_t sys_get_calibrated_battery_pptt(int16_t soc) { return soc; }
+struct k_spinlock { bool held; };
+typedef int k_spinlock_key_t;
+static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
+{
+    assert(!lock->held);
+    lock->held = true;
+    return 0;
+}
+static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
+{
+    (void)key;
+    assert(lock->held);
+    lock->held = false;
+}
 static bool sys_system_off(void) { ++shutdowns; return true; }
 /* The live serializer, not a battery-flag echo, supplies these wire bytes. */
 static uint8_t batt, batt_v;

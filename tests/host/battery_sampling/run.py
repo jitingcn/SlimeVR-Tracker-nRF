@@ -18,6 +18,7 @@ power = (SRC / "power.c").read_text()
 filter_source = (SRC / "power_battery.c").read_text()
 battery = (SRC / "battery.c").read_text()
 system = (SRC / "system.c").read_text()
+power_request = (SRC / "power_request.h").read_text()
 connection = (ROOT / "src/connection/connection.c").read_text()
 connection_source = extract_block(connection, r"^void connection_update_battery\([^;{]*\)\s*\{")
 
@@ -87,6 +88,13 @@ end = power.index('\n#if CONFIG_SENSOR_TCAL_HEATED', start)
 locals_source = power[start:end]
 start = power.index('\t\tbool docked = dock_read();')
 end = power.index('\n\t}', power.index('(void)k_sem_take(&power_wake_sem, K_MSEC(100));', start))
+private_off = "\n".join(
+    extract_block(power_request, rf"^(?:enum|struct) {name} \{{", semicolon=True)
+    for name in ("sys_power_request", "power_request_state", "power_ota_reboot_state", "power_request_mailbox")
+)
+private_off += "\nstatic struct power_request_mailbox power_requests;\n"
+private_off += extract_block(power_request, r"^static inline void power_request_finish_private\([^;{]*\)\s*\{")
+private_off += "\n" + function(power, "sys_battery_dock_system_off")
 iteration = 'static void power_iteration(void) {\n' + power[start:end] + '\n}'
 main_source = (ROOT / "src/main.c").read_text()
 boot_start = main_source.index("\n#if USER_SHUTDOWN_ENABLED\n")
@@ -97,7 +105,7 @@ with tempfile.TemporaryDirectory(prefix='tracker-battery-sampling-') as director
     temporary = Path(directory)
     (temporary / 'production.inc').write_text(
         filter_source + '\n' + feedback + '\n' + connection_source + '\n'
-        + locals_source + '\n' + iteration + '\n' + boot_policy)
+        + locals_source + '\n' + private_off + '\n' + iteration + '\n' + boot_policy)
     for name, pmic, board, heater, chg_only, no_gpio in (
         ("gpio", 0, None, 0, 0, 0),
         ("pmic", 1, None, 0, 0, 0),

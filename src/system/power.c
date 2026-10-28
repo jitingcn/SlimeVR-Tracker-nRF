@@ -875,6 +875,14 @@ bool heater_external_power_present(void)
 	return present;
 }
 #endif
+/* Private battery/dock attempts have no mailbox completion token. */
+static void sys_battery_dock_system_off(void)
+{
+	if (!sys_system_off()) {
+		power_request_finish_private(&power_requests);
+	}
+}
+
 
 
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
@@ -1080,7 +1088,7 @@ static void power_thread(void)
 				LOG_WRN("Discharged battery");
 				sys_update_battery_tracker(0, device_plugged);
 			}
-			sys_system_off(); /* owner-private battery/dock shutdown */
+			sys_battery_dock_system_off();
 		}
 
 		if (fresh_battery_sample)
