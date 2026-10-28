@@ -197,7 +197,7 @@ static struct fusion_stub *sensor_fusion = &fusion;
 static struct i2c_dt_spec sensor_imu_dev = { .bus = &twim_device, .addr = 0 };
 static uint8_t sensor_imu_dev_reg = 0xff;
 static int sensor_imu_id;
-static bool sensor_sensor_init, main_running, main_ok;
+static bool sensor_sensor_init, main_running, main_ok, sensor_fusion_init;
 static bool no_packets_timeout_logged, sensor_wom_fast_wake_resume_pending;
 static int packet_errors, force_scan_request_count, sensor_scan_last_power_up_delay_ms;
 static int64_t force_scan_request_times[FORCE_SCAN_THRESHOLD], last_sensor_send_time;
@@ -219,10 +219,12 @@ static K_THREAD_STACK_DEFINE(requester3_stack, 4096);
 static struct k_sem loop_entered, loop_hold, loop_progress, done1, done2, done3;
 static struct k_sem suspended, allow_resume, scan_resume_entered, scan_resume_gate;
 static struct k_sem loop_exit_waiting, loop_exit_gate, self_done;
+static struct k_sem old_publish_entered, old_publish_release;
 static struct k_sem power_acquired, allow_power_resume;
 static bool requester1_created, requester2_created, requester3_created, wdt_scan_active, wdt_sensor_active;
 static bool hold_loop_init, hold_scan_resume, shutdown_on_suspend, hold_loop_exit, self_test, power_setup_wom;
 static bool recoverable_failure;
+static bool allow_frames, hold_old_publish;
 static int heater_stop_error, heater_stop_attempts;
 static int scan_suspend_error, shutdown_result, result1, result2, result3, self_scan_result, self_suspend_result;
 static float processing_work_time_ema_ms, sensor_window_fused_angle_rad;
@@ -267,7 +269,7 @@ static int sys_interface_suspend(void) { return scan_suspend_error; }
 static void sys_reboot(int kind) { ARG_UNUSED(kind); }
 static void watchdog_feed(int channel) { ARG_UNUSED(channel); }
 static void set_sensor_fault_if_unset(int fault) { ARG_UNUSED(fault); }
-static bool sensor_calibration_imu_ready(void) { return false; }
+static bool sensor_calibration_imu_ready(void) { return allow_frames; }
 static void sensor_apply_calibration_frame(void) {}
 static uint32_t tracker_events_sensor_epoch(void) { return 1; }
 static void sensor_loop_acquire(sensor_loop_frame_t *frame) { ARG_UNUSED(frame); }
@@ -275,7 +277,16 @@ static void sensor_motion_prepare(uint32_t epoch, int64_t now) { ARG_UNUSED(epoc
 static bool sensor_motion_frame_current(uint32_t epoch) { ARG_UNUSED(epoch); return true; }
 static void sensor_loop_process_fifo(sensor_loop_frame_t *frame) { ARG_UNUSED(frame); }
 static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t now) { ARG_UNUSED(frame); ARG_UNUSED(now); }
-static void sensor_loop_publish(sensor_loop_frame_t *frame) { ARG_UNUSED(frame); }
+static void sensor_loop_publish(sensor_loop_frame_t *frame)
+{
+    ARG_UNUSED(frame);
+    if (hold_old_publish) {
+        k_sem_give(&old_publish_entered);
+        k_sem_take(&old_publish_release, K_FOREVER);
+        atomic_set(&output_ready, 1);
+        hold_old_publish = false;
+    }
+}
 static void set_sensor_fault(int fault) { ARG_UNUSED(fault); }
 static void sensor_scan_read(void) {}
 static void sensor_scan_write(void) {}
@@ -331,6 +342,7 @@ static void sensor_temperature_resume(void) {}
 static int sensor_init(void)
 {
     atomic_inc(&loop_starts);
+    sensor_fusion_init = true;
     atomic_set(&loop_active, 1);
     if (self_test) {
         self_scan_result = sensor_request_scan(true, false);
@@ -450,6 +462,8 @@ static void before(void *fixture)
     k_sem_init(&scan_resume_gate, 0, 1);
     k_sem_init(&loop_exit_waiting, 0, 1);
     k_sem_init(&loop_exit_gate, 0, 1);
+    k_sem_init(&old_publish_entered, 0, 1);
+    k_sem_init(&old_publish_release, 0, 1);
     k_sem_init(&self_done, 0, 1);
     k_sem_init(&power_acquired, 0, 1);
     k_sem_init(&allow_power_resume, 0, 1);
@@ -467,7 +481,7 @@ static void before(void *fixture)
     atomic_clear(&sensor_loop_stop); atomic_clear(&loop_active); atomic_clear(&loop_starts);
     sensor_thread_role = SENSOR_THREAD_NONE;
     sensor_suspend_owner = NULL;
-    sensor_sensor_init = main_running = main_ok = false;
+    sensor_sensor_init = main_running = main_ok = sensor_fusion_init = false;
     no_packets_timeout_logged = sensor_wom_fast_wake_resume_pending = false;
     sensor_imu_dev.addr = 0; sensor_imu_dev_reg = 0xff; sensor_imu = &sensor_imu_none;
     packet_errors = force_scan_request_count = 0;
@@ -477,6 +491,7 @@ static void before(void *fixture)
     wdt_scan_active = wdt_sensor_active = hold_first_irq = false;
     hold_loop_init = hold_scan_resume = shutdown_on_suspend = hold_loop_exit = self_test = power_setup_wom = false;
     recoverable_failure = false;
+    allow_frames = hold_old_publish = false;
     scan_suspend_error = shutdown_calls = wom_calls = 0;
     heater_stop_error = heater_stop_attempts = 0;
     shutdown_result = result1 = result2 = result3 = self_scan_result = self_suspend_result = -99;
@@ -488,6 +503,7 @@ static void after(void *fixture)
     if (requester2_created) k_thread_abort(&requester2);
     if (requester3_created) k_thread_abort(&requester3);
     k_sem_give(&loop_exit_gate);
+    k_sem_give(&old_publish_release);
     if (sensor_thread_role == SENSOR_THREAD_LOOP) {
         atomic_set(&sensor_loop_stop, true);
         k_sem_give(&loop_hold);
@@ -605,6 +621,27 @@ ZTEST(sensor_lifecycle, test_suspend_waits_for_initialization)
     zassert_equal(k_sem_take(&done2, K_SECONDS(1)), 0);
     zassert_equal(k_sem_take(&loop_progress, K_SECONDS(1)), 0);
     zassert_true(wdt_sensor_active);
+}
+
+ZTEST(sensor_lifecycle, test_old_publication_cannot_survive_suspend_resume)
+{
+    allow_frames = true;
+    hold_old_publish = true;
+    start_first();
+    zassert_equal(k_sem_take(&done1, K_SECONDS(2)), 0);
+    zassert_equal(k_sem_take(&old_publish_entered, K_SECONDS(1)), 0);
+    start_second(suspend_entry, ESB_THREAD_PRIORITY);
+    k_msleep(1);
+    zassert_true(atomic_get(&main_suspended));
+    zassert_equal(k_sem_take(&suspended, K_NO_WAIT), -EBUSY);
+    k_sem_give(&old_publish_release);
+    zassert_equal(k_sem_take(&suspended, K_SECONDS(1)), 0);
+    zassert_equal(result2, 0);
+    zassert_false(atomic_get(&output_ready));
+    k_sem_give(&allow_resume);
+    zassert_equal(k_sem_take(&done2, K_SECONDS(1)), 0);
+    zassert_false(atomic_get(&main_suspended));
+    zassert_false(sensor_output_ready());
 }
 
 ZTEST(sensor_lifecycle, test_activity_timeout_preserves_watchdog)

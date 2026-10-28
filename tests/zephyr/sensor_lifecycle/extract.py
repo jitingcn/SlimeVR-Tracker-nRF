@@ -38,6 +38,7 @@ if not match:
 (dest / 'scan_funcs.inc').write_text(function(scan, 'sensor_scan_i2c'))
 (dest / 'lifecycle_funcs.inc').write_text(pieces(sensor, [
     'sensor_life_mark_idle', 'sensor_life_mark_busy', 'sensor_lifecycle_lock_take', 'sensor_activity_quiesce',
+    'sensor_output_ready',
     'sensor_loop_enter', 'sensor_loop_leave', 'sensor_scan_imu_once', 'sensor_scan',
     'sensor_scan_thread', 'main_imu_suspend', 'main_imu_resume',
     'sensor_request_scan_locked', 'sensor_request_scan', 'sensor_transfer_suspension_to_power',

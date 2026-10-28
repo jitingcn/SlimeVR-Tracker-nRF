@@ -3878,6 +3878,7 @@ int main_imu_suspend(void)
 		k_sem_give(&sensor_loop_gate);
 		goto unlock_lifecycle;
 	}
+	atomic_clear(&output_ready);
 	sensor_suspend_owner = k_current_get();
 	if (sensor_thread_role == SENSOR_THREAD_LOOP) {
 		watchdog_pause(WDT_CHANNEL_SENSOR);
