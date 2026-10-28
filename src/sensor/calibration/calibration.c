@@ -407,15 +407,28 @@ void sensor_calibration_read(void)
 		healed = true;
 	}
 #endif
+	bool sensitivity_healed = false;
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	/* This seeds the sensor-owned snapshot before imu_load publishes ready. */
+	sensitivity_healed = sensor_calibration_sensitivity_init();
+#else
 	for (int axis = 0; axis < 3; axis++) {
 		if (!sensor_calibration_sensitivity_valid(retained->gyroSensScale[axis])) {
 			retained->gyroSensScale[axis] = 1.0f;
-			healed = true;
+			sensitivity_healed = true;
 		}
 	}
-	if (healed) {
+#endif
+	if (healed || sensitivity_healed) {
 		LOG_WRN("Calibration: cleared invalid values persisted by an older build");
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+		/* Sensitivity healing was already sealed under its writer locks. */
+		if (healed) {
+			retained_update();
+		}
+#else
 		retained_update();
+#endif
 	}
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	memcpy(magBias, retained->magBias, sizeof(magBias));

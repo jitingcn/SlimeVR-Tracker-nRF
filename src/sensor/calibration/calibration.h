@@ -99,6 +99,19 @@ int sensor_calibration_set_sensitivity(const float degrees[3]);
 int sensor_calibration_reset_sensitivity(void);
 /* Shared manual/automatic/load admission: finite gain in inclusive [0.9, 1.1]. */
 bool sensor_calibration_sensitivity_valid(float scale);
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+/* Calibration startup: validate retained gains and seed the sensor-owned
+ * snapshot before IMU-ready publication. Returns true if an axis was healed.
+ * Later calls never rewrite the snapshot while the sensor may be running. */
+bool sensor_calibration_sensitivity_init(void);
+/* Sensor owner: try a coherent scale/epoch snapshot without waiting. A busy
+ * writer leaves both cached gains and the observed epoch unchanged. True means
+ * discard partial cycle observations before feeding this sample. */
+bool sensor_calibration_apply_sensitivity(float g[3], float delta[3]);
+/* Reset-all caller owns storage before bracketing retained scale mutation. */
+void sensor_calibration_sensitivity_clear_begin(void);
+void sensor_calibration_sensitivity_clear_end(void);
+#endif
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 int sensor_calibration_validate_mag(float m_inv[][3], bool write);
 #endif

@@ -248,6 +248,21 @@ set_property(
   APPEND PROPERTY COMPILE_OPTIONS
   -Wno-double-promotion
 )
+if(CONFIG_SENSOR_VQF_ADAPTIVE_BIAS)
+  target_compile_definitions(app PRIVATE VQF_ADAPTIVE_BIAS)
+endif()
+if(CONFIG_SENSOR_VQF_REST_TRANSITION)
+  target_compile_definitions(app PRIVATE VQF_REST_TRANSITION)
+endif()
+if(CONFIG_SENSOR_VQF_FAST_REST_RECOVERY)
+  target_compile_definitions(app PRIVATE VQF_FAST_REST_RECOVERY)
+endif()
+if(CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION)
+  target_compile_definitions(app PRIVATE VQF_CYCLE_BIAS_OBSERVATION)
+endif()
+if(CONFIG_SENSOR_VQF_OUTPUT_OBSERVER)
+  target_compile_definitions(app PRIVATE VQF_OUTPUT_OBSERVER VQF_OUTPUT_TAU_ACC=3.264f)
+endif()
 
 target_include_directories(app PRIVATE src)
 target_include_directories(app PRIVATE vqf-c/src)

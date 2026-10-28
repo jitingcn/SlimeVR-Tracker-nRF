@@ -44,6 +44,17 @@ static uint32_t sensitivity_generation;
 static uint16_t sensitivity_operation;
 static struct led_token sensitivity_feedback;
 
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+/* Initialized before IMU-ready, then updated only by the sensor owner. The
+ * generation and all three axes always describe the same applied epoch. */
+static struct sensitivity_snapshot {
+	float scale[3];
+	uint32_t generation;
+	bool retained_available;
+} sensitivity_cache = {{1.0f, 1.0f, 1.0f}, 0, false};
+static bool sensitivity_cache_seeded;
+#endif
+
 static void sensitivity_replace_locked(uint8_t reason)
 {
 	cal_event_end(sensitivity_operation, CAL_OUTCOME_CANCELLED, CAL_PHASE_APPLIED, reason);
@@ -52,6 +63,81 @@ static void sensitivity_replace_locked(uint8_t reason)
 	sensitivity_operation = 0;
 	sensitivity_generation++;
 }
+
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+bool sensor_calibration_sensitivity_init(void)
+{
+	/* Startup validation must share the writers' storage -> sensitivity
+	 * order, including reset-all. It finishes before IMU-ready is published. */
+	sys_warm_transaction_begin();
+	k_mutex_lock(&sensitivity_lock, K_FOREVER);
+	bool healed = false;
+	if (retained) {
+		for (int i = 0; i < 3; i++) {
+			if (!sensor_calibration_sensitivity_valid(retained->gyroSensScale[i])) {
+				retained->gyroSensScale[i] = 1.0f;
+				healed = true;
+			}
+		}
+		if (healed) {
+			/* A later validation can heal retained state, but must not
+			 * mutate the cache after it belongs to the sensor owner. */
+			if (sensitivity_cache_seeded) {
+				sensitivity_generation++;
+			}
+			retained_update();
+		}
+		if (!sensitivity_cache_seeded) {
+			for (int i = 0; i < 3; i++) {
+				sensitivity_cache.scale[i] = retained->gyroSensScale[i];
+			}
+			sensitivity_cache.generation = sensitivity_generation;
+			sensitivity_cache.retained_available = true;
+			sensitivity_cache_seeded = true;
+		}
+	}
+	k_mutex_unlock(&sensitivity_lock);
+	sys_warm_transaction_end(false);
+	return healed;
+}
+
+bool sensor_calibration_apply_sensitivity(float g[3], float delta[3])
+{
+	/* A writer may hold this mutex throughout NVS. Keep the last complete
+	 * sensor-owned snapshot on contention, including its observed epoch. */
+	bool changed = false;
+	if (k_mutex_lock(&sensitivity_lock, K_NO_WAIT) == 0) {
+		bool available = retained != NULL;
+		if (sensitivity_cache.generation != sensitivity_generation ||
+		    sensitivity_cache.retained_available != available) {
+			for (int i = 0; i < 3; i++) {
+				sensitivity_cache.scale[i] = available ? retained->gyroSensScale[i] : 1.0f;
+			}
+			sensitivity_cache.generation = sensitivity_generation;
+			sensitivity_cache.retained_available = available;
+			changed = true;
+		}
+		k_mutex_unlock(&sensitivity_lock);
+	}
+	for (int i = 0; i < 3; i++) {
+		g[i] *= sensitivity_cache.scale[i];
+		delta[i] *= sensitivity_cache.scale[i];
+	}
+	return changed;
+}
+
+void sensor_calibration_sensitivity_clear_begin(void)
+{
+	/* Reset-all already owns storage, matching the setter's lock order. */
+	k_mutex_lock(&sensitivity_lock, K_FOREVER);
+}
+
+void sensor_calibration_sensitivity_clear_end(void)
+{
+	sensitivity_generation++;
+	k_mutex_unlock(&sensitivity_lock);
+}
+#endif
 
 static void sensitivity_step(uint16_t operation_id, struct led_token feedback, uint8_t phase, uint8_t detail)
 {
@@ -449,6 +535,9 @@ void sensor_calibrate_sens(void)
 		return;
 	}
 	retained->gyroSensScale[axis] = scale;
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	sensitivity_generation++;
+#endif
 	cal_event_end(operation_id, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	sensitivity_operation = 0;
 	sensitivity_feedback = (struct led_token){0};

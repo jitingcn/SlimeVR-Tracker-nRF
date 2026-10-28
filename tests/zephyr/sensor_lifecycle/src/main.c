@@ -9,11 +9,12 @@
 #include "thread_priority.h"
 
 /* These are firmware configuration/input choices, not altered function bodies.
- * No magnetometer or heater support; TWIM timeout is the 25 ms
+ * No magnetometer, heater, or motion-history support; TWIM timeout is the 25 ms
  * selected in tracker prj.conf. Cold scan delay is the production 50 ms. */
 #define CONFIG_DYNAMIC_ACTIVE_TIMEOUT 0
 #define CONFIG_SENSOR_USE_MAGNETOMETER 0
 #define CONFIG_SENSOR_TCAL_HEATED 0
+#define CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION 0
 #define CONFIG_CONNECTION_RAW_COLLECTION 0
 #define CONFIG_SENSOR_STARTUP_DISCARD_MS 100
 #define IMU_INT_EXISTS 0

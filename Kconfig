@@ -502,7 +502,7 @@ endchoice
 
 config VQF_ADAPTIVE_TAU_ACC
     bool "VQF adaptive tauAcc (experimental)"
-    default n
+    default y
     depends on SENSOR_USE_VQF
     help
         Adapt tauAcc within 0.5–8 seconds using acceleration norm deviation
@@ -511,6 +511,77 @@ config VQF_ADAPTIVE_TAU_ACC
         upward and 1.5 seconds downward, with updates every 0.5 seconds.
         This improves measured drift but can worsen inclination under
         simultaneous rotation and translation. Disable for fixed tauAcc.
+
+config SENSOR_VQF_OUTPUT_OBSERVER
+    bool "VQF fixed-tau 6D output inclination observer (experimental)"
+    default y
+    depends on SENSOR_USE_VQF
+    help
+        Use a separate fixed 3.264-second inclination observer for runtime
+        6D output. Gyro propagation and bias remain shared with the unchanged
+        internal adaptive estimator; this is not quaternion smoothing.
+        When a magnetometer is available and enabled, public quaternion and
+        linear acceleration retain the native 9D frame and magnetic heading.
+        Adds 104 runtime bytes and 64 saved bytes (VQF format version 2).
+        Disable for the original public output and version-1 retained format.
+        Offline-derived hardware-test behavior, not a proven drift cure.
+
+config SENSOR_VQF_ADAPTIVE_BIAS
+    bool "VQF adaptive bias strategy A (experimental)"
+    default y
+    depends on SENSOR_USE_VQF
+    select VQF_ADAPTIVE_TAU_ACC
+    help
+        Combine adaptive tauAcc with excitation/recency-dependent motion
+        bias measurement noise and a causally validated temperature predictor.
+        Uses 2-second rest blocks after 3 seconds of settling and requires
+        two informative held-out blocks. Prediction gain is at most 8 and
+        offset is capped at 0.03 degrees/second per temperature excursion.
+        Policy state is transient; retained VQF state stays unchanged.
+        This is an offline-derived hardware-test strategy, not a validated
+        physical temperature calibration.
+
+config SENSOR_VQF_REST_TRANSITION
+    bool "VQF P6 rest-transition bias admission (experimental)"
+    default y
+    depends on SENSOR_VQF_ADAPTIVE_BIAS
+    help
+        Admit bounded slow gyro-LP transitions for fusion bias using prior
+        0.25-second EW gyro moments with at least 1 second of history.
+        Retain original acceleration veto, rest dwell and bias-clip guards.
+        Temperature fitting and external rest consumers retain independent
+        original hard-rest qualification. Policy state is not retained.
+        This exact offline P6 candidate can worsen bias and heading after
+        motion stops; slow-yaw false rest remains unresolved. Hardware-test
+        opt-in only, not a robust or recommended setting.
+
+config SENSOR_VQF_FAST_REST_RECOVERY
+    bool "VQF fast rest observation recovery (experimental)"
+    default y
+    depends on SENSOR_VQF_REST_TRANSITION
+    help
+        Use qualified existing P6 fast moments after twice the native rest
+        dwell, only in a finite post-macro-motion recovery window. The window
+        follows the actual gyro-LP digital-filter tail and biasSigmaRest, not
+        a tuned timeout. Large fast/slow gaps retain the recovery weight.
+        Adds 12 transient bytes including the behavior-identical tail cache.
+        Does not change rest admission or temperature training observations.
+        Independent of cycle bias observation. Hardware-test tradeoffs remain.
+
+config SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+    bool "VQF completed-cycle bias observation (experimental)"
+    default y
+    depends on SENSOR_VQF_REST_TRANSITION
+    help
+        Integrate ordered gyro quaternions at frozen cycle-start bias.
+        Three qualified nonoverlap cycles establish a bounded regime.
+        Consume each completed observation once at the next fresh ACC;
+        locked rows without an observation use native motion bias.
+        Adds 96 transient observer/lifecycle bytes, plus a 4-byte owner
+        generation when sensitivity calibration is enabled. Not serialized.
+        Independent of fast rest recovery; cycle observations take priority.
+        Requires continuous fixed-period gyro and fresh acceleration input.
+        Periodicity does not establish physical closure or zero true yaw.
 
 config VQF_BENCH
     bool "Enable VQF benchmark console command"

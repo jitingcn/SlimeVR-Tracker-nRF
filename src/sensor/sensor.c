@@ -2618,6 +2618,11 @@ static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float f
 
 void sensor_gyro_report_discontinuity(void)
 {
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	/* Only an explicitly lost interval queues the owner-side reset. Decoder
+	 * skips also cover benign metadata/empty records and are not gap signals. */
+	vqf_request_motion_history_reset();
+#endif
 	/* Zero dt is an explicit unknown-interval record, never a replacement
 	 * rate or an extension of the next sample's represented interval. The
 	 * queue's existing session lock/overflow policy owns its publication. */
@@ -2648,6 +2653,11 @@ static void feed_gyro_sample(
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	/* Firmware-ish scale; applied before fusion, same as non-OS path. */
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	if (sensor_calibration_apply_sensitivity(g, reference_delta)) {
+		vqf_discard_motion_history();
+	}
+#else
 	if (retained) {
 		g[0] *= retained->gyroSensScale[0];
 		g[1] *= retained->gyroSensScale[1];
@@ -2656,6 +2666,7 @@ static void feed_gyro_sample(
 		reference_delta[1] *= retained->gyroSensScale[1];
 		reference_delta[2] *= retained->gyroSensScale[2];
 	}
+#endif
 #endif
 
 	if (measured_reset) {
@@ -3010,6 +3021,12 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 
 static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 {
+#if CONFIG_SENSOR_VQF_ADAPTIVE_BIAS
+	/* Match the recorded, signed temperature; NaN preserves the last valid
+	 * observation without inventing a temperature before the first reading. */
+	vqf_update_temperature(frame->raw_collect_temp_c);
+#endif
+
 	// Fuse all data
 	frame->g_count = 0;
 	frame->a_sum[0] = 0;
@@ -3555,6 +3572,9 @@ static void sensor_loop_wait(int64_t time_begin)
 #endif
 
 	if (atomic_get(&main_suspended)) {
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+		vqf_discard_motion_history();
+#endif
 		if (sensor_fusion->take_rest_observation) {
 			sensor_fusion->take_rest_observation(NULL);
 		}
@@ -3743,6 +3763,9 @@ int main_imu_suspend(void)
 	}
 #endif
 	atomic_set(&main_suspended, true);
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	vqf_request_motion_history_reset();
+#endif
 	atomic_clear(&output_ready);
 	sensor_calibration_set_consumer_ready(false);
 	sys_cancel_WOM();

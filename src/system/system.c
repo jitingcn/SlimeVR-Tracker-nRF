@@ -938,6 +938,9 @@ int sys_clear(void)
 	warm_tcal_receipt_count = 0;
 #endif
 	warm_dirty_count = 0;
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	sensor_calibration_sensitivity_clear_begin();
+#endif
 	memset(retained, 0, sizeof(*retained));
 	nvs_init = false;
 	atomic_set(&wom_timeout_delay_ms, WOM_TIMEOUT_DEFAULT_MS);
@@ -948,6 +951,9 @@ int sys_clear(void)
 	retained->gyroSensScale[2] = 1.0f;
 	retained->build_timestamp = BUILD_TIMESTAMP;
 	retained_update();
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	sensor_calibration_sensitivity_clear_end();
+#endif
 	k_mutex_unlock(&sys_storage_lock);
 	sys_wom_timeout_change_end(true);
 	sensor_calibration_clear_end();

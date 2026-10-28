@@ -16,6 +16,20 @@ ROOT = Path(os.environ.get('SOURCE_ROOT', Path(__file__).resolve().parents[3]))
 def function(source, name):
     return extract_block(source, rf'^(?:static )?(?:ALWAYS_INLINE )?(?:void|bool|float) {re.escape(name)}\([^;{{]*\)\s*\{{')
 
+def conditional(source, pattern):
+    """Keep a complete source conditional, including its inactive branches."""
+    matches = list(re.finditer(pattern, source, re.MULTILINE))
+    if len(matches) != 1:
+        raise ValueError(f'Expected one source conditional: {pattern}')
+    start = matches[0].start()
+    depth = 0
+    for directive in re.finditer(r'^[ \t]*#[ \t]*(if|ifdef|ifndef|endif)\b[^\n]*',
+                                 source[start:], re.MULTILINE):
+        depth += -1 if directive[1] == 'endif' else 1
+        if depth == 0:
+            return source[start:start + directive.end()]
+    raise ValueError('Unclosed source conditional')
+
 preamble = '''
 #include <assert.h>
 #include <stdbool.h>
@@ -25,6 +39,10 @@ preamble = '''
 #include <stdio.h>
 '''
 vqf = (ROOT / 'src/sensor/fusion/vqf/vqf.c').read_text()
+output_layout = conditional(
+    vqf, r'^#if IS_ENABLED\(CONFIG_SENSOR_VQF_OUTPUT_OBSERVER\)\nstatic vqf_output_t output_observer;')
+retained_layout = vqf[vqf.index('/* Raw state layouts are not interchangeable'):
+                     vqf.index('static float last_a')]
 vqf_test = preamble + '''
 #include "vqf.h"
 static vqf_params_t params;
@@ -34,13 +52,16 @@ static bool rest_observation_pending;
 static float last_a[3];
 #define ARG_UNUSED(x) ((void)(x))
 #define IS_ENABLED(x) 0
+/* This selective native-MAG fixture intentionally disables app policies.
+ * The full public output/904-byte lifecycle is covered by vqf_adaptive_tau. */
+#define CONFIG_SENSOR_VQF_OUTPUT_OBSERVER 0
 #define DEG_TO_RAD 0.01745329251994329577f
 #define CONST_EARTH_GRAVITY 9.80665f
 static void vqf_track_rest_diag(void) {}
 #define ALWAYS_INLINE inline
 #define BUILD_ASSERT(c,m) _Static_assert(c,m)
 #define printk(...) ((void)0)
-#define VQF_MEM_SIZE (sizeof(vqf_state_t) + sizeof(vqf_coeffs_t))
+''' + output_layout + '\n' + retained_layout + '''
 struct retained_data { unsigned char fusion_data[2048]; };
 static float vqf_init_gyr_time, vqf_init_acc_time, vqf_init_mag_time;
 static uint32_t rest_enter_count, rest_exit_count;
@@ -49,8 +70,8 @@ static bool prev_rest_detected;
 static uint8_t rest_event_idx, rest_event_total;
 ''' + '\n'.join(function(vqf, name) for name in (
     'set_params', 'vqf_float_finite', 'vqf_vec3_finite', 'vqf_loaded_state_valid',
-    'vqf_safe_init_time', 'vqf_init', 'vqf_load', 'vqf_update_gyro', 'vqf_update_accel',
-    'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag',
+    'vqf_safe_init_time', 'vqf_init', 'vqf_load', 'vqf_save', 'vqf_update_gyro', 'vqf_update_accel',
+    'vqf_hard_rest_detected', 'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag',
     'vqf_rebase_gyro_bias')) + r'''
 static void check_gyro_rebase(int warmup) {
     vqf_init(.01f,.01f,.01f);
@@ -94,6 +115,18 @@ static void check_gyro_rebase(int warmup) {
                    || fabs(state.motionBiasEstBiasLpState[j]-shifted.motionBiasEstBiasLpState[j])<2e-5);
         }
     }
+    for(int j=0;j<9;j++)
+        assert(fabs(state.motionBiasEstLastR[j]-shifted.motionBiasEstLastR[j])<2e-6);
+    for(int j=0;j<2;j++)
+        assert(fabs(state.motionBiasEstLastBiasLp[j]-shifted.motionBiasEstLastBiasLp[j])<2e-6);
+    /* A coefficient change immediately after translation must use the
+     * translated actual output, not the pre-handoff cached bias. */
+    vqf_params_t shifted_params=params;vqf_coeffs_t shifted_coeffs=coeffs;
+    setTauAcc(&params,&state,&coeffs,1.5f);
+    setTauAcc(&shifted_params,&shifted,&shifted_coeffs,1.5f);
+    for(int j=0;j<4;j++)
+        assert((isnan(state.motionBiasEstBiasLpState[j]) && isnan(shifted.motionBiasEstBiasLpState[j]))
+               || fabs(state.motionBiasEstBiasLpState[j]-shifted.motionBiasEstBiasLpState[j])<2e-5);
     /* Compare with a native replay that used translated coordinates from
      * its very first sample, including warm-up -> mature transitions. */
     for(int i=0;i<400;i++) {
@@ -167,11 +200,11 @@ int main(void) {
     vqf_update_accel(still,.01f);
     assert(vqf_take_rest_observation(NULL) && !vqf_take_rest_observation(&rest));
     unsigned char saved[VQF_MEM_SIZE];
-    memcpy(saved,&state,sizeof(state)); memcpy(saved+sizeof(state),&coeffs,sizeof(coeffs));
+    vqf_save(saved);
     vqf_update_accel(still,.01f); vqf_load(saved);
     assert(!vqf_take_rest_observation(&rest));
-    vqf_state_t bad_state; memcpy(&bad_state,saved,sizeof(bad_state));
-    bad_state.bias[0]=NAN; memcpy(saved,&bad_state,sizeof(bad_state));
+    vqf_state_t bad_state; memcpy(&bad_state,saved+sizeof(vqf_saved_header_t),sizeof(bad_state));
+    bad_state.bias[0]=NAN; memcpy(saved+sizeof(vqf_saved_header_t),&bad_state,sizeof(bad_state));
     vqf_update_accel(still,.01f); vqf_load(saved);
     assert(!vqf_take_rest_observation(&rest)); /* rejection/reinit early return */
     vqf_update_accel(still,.01f); vqf_init(.01f,.01f,.01f);

@@ -33,6 +33,9 @@ void vqf_init(float g_time, float a_time, float m_time);
 void vqf_load(const void *data);
 void vqf_save(void *data);
 
+/* Causal last-finite hold; the policy's 1 s LP advances at gyro fusion steps. */
+void vqf_update_temperature(float temperature_c);
+
 void vqf_update_gyro(float *g, float time);
 void vqf_update_accel(float *a, float time);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -44,6 +47,12 @@ void vqf_get_gyro_bias(float *g_off);
 void vqf_set_gyro_bias(float *g_off);
 /* New gyro input = old input + delta_dps, in input-IMU axes. */
 void vqf_rebase_gyro_bias(const float delta_dps[3]);
+#if IS_ENABLED(CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION)
+/* Fusion owner only: discard transient cycles, retain q/bias. */
+void vqf_discard_motion_history(void);
+/* Other threads: notify the owner; never clear a paused estimator mid-call. */
+void vqf_request_motion_history_reset(void);
+#endif
 
 void vqf_update_gyro_sanity(float *g, float *m);
 int vqf_get_gyro_sanity(void);
@@ -51,6 +60,8 @@ int vqf_get_gyro_sanity(void);
 void vqf_get_lin_a(float *lin_a);
 void vqf_get_quat(float *q);
 
+/* Original hard rest qualification, also used by queued observations.
+ * Experimental P6 admission is private to fusion bias estimation. */
 bool vqf_get_rest_detected(void);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 bool vqf_get_mag_dist_detected(void);

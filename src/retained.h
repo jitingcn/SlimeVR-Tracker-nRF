@@ -70,7 +70,11 @@ struct retained_data {
 
 
 	uint8_t fusion_id; // fusion_data_stored
-	uint8_t fusion_data[784];
+#if CONFIG_SENSOR_VQF_OUTPUT_OBSERVER
+	uint8_t fusion_data[904]; // VQF v2: native state+coeffs and output LP+actual yaw gauge
+#else
+	uint8_t fusion_data[840]; // VQF v1 or other fusion implementations
+#endif
 
 	uint16_t imu_addr;
 	uint16_t mag_addr;
