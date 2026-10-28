@@ -3342,9 +3342,6 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 
 static void sensor_loop_publish(sensor_loop_frame_t *frame)
 {
-	// Update fusion gyro sanity? // TODO: use to detect drift and correct or suspend tracking
-	//			sensor_fusion->update_gyro_sanity(g, m);
-
 	// Get updated quaternion from fusion
 	sensor_fusion->get_quat(q);
 	float q_norm2 = q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3];

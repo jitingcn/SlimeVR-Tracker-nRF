@@ -1632,17 +1632,6 @@ void vqf_rebase_gyro_bias(const float delta_dps[3])
 #endif
 }
 
-void vqf_update_gyro_sanity(float *g, float *m)
-{
-	// TODO: does vqf tell us a "recovery state"
-}
-
-int vqf_get_gyro_sanity(void)
-{
-	// TODO: does vqf tell us a "recovery state"
-	return 0;
-}
-
 void vqf_get_lin_a(float *lin_a)
 {
 	float q[4] = {0};
@@ -2138,9 +2127,6 @@ const sensor_fusion_t sensor_fusion_vqf = {
 	.get_gyro_bias = vqf_get_gyro_bias,
 	.set_gyro_bias = vqf_set_gyro_bias,
 	.rebase_gyro_bias = vqf_rebase_gyro_bias,
-
-	.update_gyro_sanity = vqf_update_gyro_sanity,
-	.get_gyro_sanity = vqf_get_gyro_sanity,
 
 	.get_lin_a = vqf_get_lin_a,
 	.get_quat = vqf_get_quat,

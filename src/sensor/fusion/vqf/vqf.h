@@ -54,9 +54,6 @@ void vqf_discard_motion_history(void);
 void vqf_request_motion_history_reset(void);
 #endif
 
-void vqf_update_gyro_sanity(float *g, float *m);
-int vqf_get_gyro_sanity(void);
-
 void vqf_get_lin_a(float *lin_a);
 void vqf_get_quat(float *q);
 

@@ -1471,16 +1471,6 @@ void eqf_get_lin_a(float *lin_a)
 	lin_a[2] = last_a_ms2[2] - grav[2] * CONST_EARTH_GRAVITY;
 }
 
-void eqf_update_gyro_sanity(float *g, float *m)
-{
-	(void)g; (void)m;
-}
-
-int eqf_get_gyro_sanity(void)
-{
-	return 0;
-}
-
 bool eqf_get_rest_detected(void)
 {
 	return rest_detected;
@@ -1540,8 +1530,6 @@ const sensor_fusion_t sensor_fusion_eqf = {
 	.get_gyro_bias = eqf_get_gyro_bias,
 	.set_gyro_bias = eqf_set_gyro_bias,
 	.rebase_gyro_bias = eqf_rebase_gyro_bias,
-	.update_gyro_sanity = eqf_update_gyro_sanity,
-	.get_gyro_sanity = eqf_get_gyro_sanity,
 	.get_lin_a = eqf_get_lin_a,
 	.get_quat = eqf_get_quat,
 	.get_rest_detected = eqf_get_rest_detected,

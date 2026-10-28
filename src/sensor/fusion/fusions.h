@@ -39,14 +39,5 @@ const char *fusion_names[] = {
 	"VQF",
 	"EqF"
 };
-const sensor_fusion_t *sensor_fusions[] = {
-	NULL,
-	&sensor_fusion_vqf,
-#if IS_ENABLED(CONFIG_SENSOR_USE_EQF)
-	&sensor_fusion_eqf
-#else
-	NULL
-#endif
-};
 
 #endif

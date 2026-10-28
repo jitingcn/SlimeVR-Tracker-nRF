@@ -133,9 +133,6 @@ typedef struct sensor_fusion {
 	/* Input coordinate change (new input = old + delta), not a measurement. */
 	void (*rebase_gyro_bias)(const float delta_dps[3]);
 
-	void (*update_gyro_sanity)(float *, float *);
-	int (*get_gyro_sanity)(void);
-
 	void (*get_lin_a)(float *);
 	void (*get_quat)(float *);
 	/* NULL when no magnetically independent inclination estimate is available. */
