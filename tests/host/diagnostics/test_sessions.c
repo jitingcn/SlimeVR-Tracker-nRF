@@ -6,7 +6,6 @@
 /* Compile production diagnostics, replacing only kernel/time and output leaves. */
 #define SLIMENRF_SENSOR
 #define CONFIG_SENSOR_USE_VQF 0
-#define CONFIG_SENSOR_RANGE_STATS 0
 #define CONFIG_VQF_BENCH 0
 float sensor_get_accel_odr(void);
 #include "../../../src/sensor/diagnostics.c"

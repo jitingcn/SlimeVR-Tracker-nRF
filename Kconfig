@@ -83,7 +83,8 @@ config BATTERY_USE_REG_LDO_MAPPING
 config BATTERY_NO_MAPPING
     bool "Disable battery voltage mapping"
     help
-      Always map to 100% battery. Disables battery monitoring.
+      Report 100% for any measured voltage. Battery measurement remains enabled,
+      and measurement errors are still reported.
 
 endchoice
 
@@ -636,10 +637,11 @@ menu "Temperature Calibration Settings"
 depends on SENSOR_USE_TCAL
 
 config SENSOR_POLY_DEGREE
-    int "Polynomial degree"
+    int "Legacy polynomial coefficient storage degree"
     default 3
     help
-        The degree of the polynomial to fit (e.g., 3 for a cubic curve).
+        Size the legacy polynomial coefficient array in retained memory and NVS.
+        The current MLS calibration does not use these coefficients.
 
 config SENSOR_POLY_TEMP_MIN
     int "Calibration minimum temperature (C)"

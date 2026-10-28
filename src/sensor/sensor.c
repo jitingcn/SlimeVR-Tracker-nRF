@@ -2159,9 +2159,6 @@ int sensor_init(void)
 	float accel_range = CONFIG_SENSOR_ACCEL_FS;
 	float gyro_range = CONFIG_SENSOR_GYRO_FS;
 	sensor_imu->update_fs(accel_range, gyro_range, &accel_actual_range, &gyro_actual_range);
-#if CONFIG_SENSOR_RANGE_STATS
-	sensor_diagnostics_set_ranges(accel_actual_range, gyro_actual_range);
-#endif
 	LOG_INF("Accelerometer range: %.2fg", (double)accel_actual_range);
 	LOG_INF("Gyroscope range: %.2fdps", (double)gyro_actual_range);
 
@@ -2738,10 +2735,6 @@ static void feed_gyro_sample(
 
 static void feed_calibrated_accel(float *a, float dt, float *a_sum, int *a_count)
 {
-#if CONFIG_SENSOR_RANGE_STATS
-	// Update range statistics with calibrated accel data
-	sensor_diagnostics_on_cal_accel(a);
-#endif // CONFIG_SENSOR_RANGE_STATS
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING <= 1
 	sensor_rest_detector_update_accel(&rest_detector, a, dt);
 	if (rest_detector.accel.frame_invalid) sensor_motion_state.frame_invalid = true;
@@ -2776,7 +2769,7 @@ static void feed_accel_sample(
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
 	/* Observe each calibrated sample before averaging can hide a transient.
 	 * Do not enqueue extra calibration samples: its original merged cadence
-	 * and fusion/range-statistics cadence remain unchanged. */
+	 * and fusion cadence remain unchanged. */
 	float rest_a[3] = {raw_a[0], raw_a[1], raw_a[2]};
 	sensor_calibration_apply_accel(rest_a);
 	sensor_rest_detector_update_accel(&rest_detector, rest_a, accel_actual_time);

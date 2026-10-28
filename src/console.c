@@ -1146,28 +1146,6 @@ static void print_sensor_detail(void)
 	}
 	print_mag_calibration_status();
 #endif
-
-#if CONFIG_SENSOR_RANGE_STATS
-	const sensor_range_stats_t *stats = sensor_get_range_stats();
-	if (stats->initialized) {
-		float gyro_peak = 0;
-		float accel_peak = 0;
-		for (int i = 0; i < 3; i++) {
-			float g_peak = fmaxf(fabsf(stats->gyro_min[i]), fabsf(stats->gyro_max[i]));
-			float a_peak = fmaxf(fabsf(stats->accel_min[i]), fabsf(stats->accel_max[i]));
-			if (g_peak > gyro_peak) {
-				gyro_peak = g_peak;
-			}
-			if (a_peak > accel_peak) {
-				accel_peak = a_peak;
-			}
-		}
-		printk("\nRuntime range peaks (this session):\n");
-		printk("  Gyro: %.2f deg/s\n", (double)gyro_peak);
-		printk("  Accel: %.3f g\n", (double)accel_peak);
-		printk("  Samples: %llu (use 'range' for details)\n", stats->sample_count);
-	}
-#endif // CONFIG_SENSOR_RANGE_STATS
 }
 
 static void print_connection(void)
@@ -1493,8 +1471,6 @@ static void print_help(void)
 		"  debug [duration]           Start sensor debug mode at FIFO rate (1-%us, default 1s)\n",
 		SENSOR_DEBUG_MAX_DURATION_SEC
 	);
-	printk("  range                      Show sensor range statistics (min/max values)\n");
-	printk("  range reset                Reset sensor range statistics\n");
 #if CONFIG_VQF_BENCH
 	printk("  vqfbench [iterations]      Benchmark VQF update paths (default 1000)\n");
 #endif
@@ -2494,37 +2470,6 @@ static void console_cmd_debug(size_t argc, char **argv)
 	sensor_debug_start(duration);
 }
 
-static void console_cmd_range(size_t argc, char **argv)
-{
-	char *arg = argc > 1 ? argv[1] : NULL;
-	if (arg != NULL && strcmp(arg, "reset") != 0) {
-		printk("Usage: range [reset]\n");
-		return;
-	}
-	if (arg != NULL && !console_require_args(argc, 2, 2)) {
-		return;
-	}
-
-#if CONFIG_SENSOR_RANGE_STATS
-	if (arg && strcmp(arg, "reset") == 0) {
-		int err = sensor_reset_range_stats();
-		if (err) {
-			printk("Sensor range statistics reset rejected: %d.\n", err);
-		} else {
-			printk("Sensor range statistics have been reset.\n");
-		}
-	} else {
-		sensor_print_range_stats();
-	}
-#else
-	ARG_UNUSED(arg);
-	printk("Sensor range statistics not enabled in configuration.\n");
-	if (arg != NULL) {
-		console_reject();
-	}
-#endif // CONFIG_SENSOR_RANGE_STATS
-}
-
 #if CONFIG_VQF_BENCH
 static void console_cmd_vqfbench(size_t argc, char **argv)
 {
@@ -2763,7 +2708,6 @@ static const struct console_cmd console_cmds[] = {
 #if CONFIG_THREAD_ANALYZER
 	{"stack", console_cmd_stack, CONSOLE_QUERY},
 #endif
-	{"range", console_cmd_range, CONSOLE_MIXED},
 #if CONFIG_VQF_BENCH
 	{"vqfbench", console_cmd_vqfbench, CONSOLE_MUTATION},
 #else
@@ -2803,9 +2747,6 @@ static bool console_command_mutates(const struct console_cmd *command, size_t ar
 			strcmp(subcommand, "export") == 0 || strcmp(subcommand, "check") == 0 || strcmp(subcommand, "test") == 0 ||
 			(strcmp(subcommand, "boot") == 0 && argc == 2) ||
 			(strcmp(subcommand, "heat") == 0 && argc > 2 && strcmp(argv[2], "status") == 0));
-	}
-	if (strcmp(command->name, "range") == 0) {
-		return subcommand != NULL && strcmp(subcommand, "reset") == 0;
 	}
 	if (strcmp(command->name, "ping") == 0) {
 		return subcommand == NULL || strcmp(subcommand, "stats") != 0;

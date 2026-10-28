@@ -401,7 +401,9 @@ static const struct battery_level_point levels[] = {
 	{500, 3400},
 	{0, 3200},
 #else
+#if !CONFIG_BATTERY_NO_MAPPING
 #warning "Battery voltage map not defined"
+#endif
 	{10000, 0},
 	{0, 0},
 #endif
