@@ -159,6 +159,8 @@
 
 &i2s0 {
 	status = "okay";
+	/* Let ESB RADIO (priority 1) preempt LED I2S. */
+	interrupts = <37 2>;
 	pinctrl-0 = <&i2s0_default>;
 	pinctrl-1 = <&i2s0_sleep>;
 	pinctrl-names = "default", "sleep";
