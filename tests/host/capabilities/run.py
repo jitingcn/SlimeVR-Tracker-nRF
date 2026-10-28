@@ -111,7 +111,7 @@ static int sensor_wait_accel(float out[3], int timeout) {
         prelude, '#include "sensor/magneto/magneto1_4.h"',
         "#if CONFIG_SENSOR_USE_MAGNETOMETER\n" + state + "\n#endif",
         constants, "typedef struct { float x,y,z; } Vector3;",
-        function(util, "v_diff_mag"), function(util, "v_epsilon"),
+        function(util, "v_finite"), function(util, "v_diff_mag"), function(util, "v_epsilon"),
         function(mag, "magneto_reset"), function(bias, "isAccRest"),
         function(mag, "sensor_calibration_collect_accel_poses"),
     ))

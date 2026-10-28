@@ -23,6 +23,9 @@
 #ifndef SLIMENRF_CAL_BIAS_COLLECT_H
 #define SLIMENRF_CAL_BIAS_COLLECT_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 // =============================================================================
 // Offset-bias collection constants
 // =============================================================================
@@ -68,8 +71,17 @@ int sensor_offsetBias_internal(
 int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_range);
 
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-/* Rest detector used by accelerometer pose capture in cal_mag.c. */
-int isAccRest(float *acc, float *pre_acc, float threshold, int *t, int restdelta);
+struct sensor_accel_observation;
+struct accel_rest_state {
+	float previous[3];
+	uint32_t last_sequence;
+	uint32_t last_observed_ms;
+	uint32_t stable_since_ms;
+	bool initialized;
+};
+/* Classify distinct fresh observations using their publication times. */
+bool isAccRest(const struct sensor_accel_observation *observation, uint32_t now_ms,
+	uint32_t max_gap_ms, float threshold, struct accel_rest_state *state);
 #endif
 
 #endif /* SLIMENRF_CAL_BIAS_COLLECT_H */

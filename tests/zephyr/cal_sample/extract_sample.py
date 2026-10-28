@@ -27,7 +27,7 @@ void sensor_calibration_samples_end(void)
 # Exercise the real destructive acquisition path through the real queue and
 # the AutoGSens admission guard. Only the SSI bus is injected by the test.
 def function(text, name):
-    return extract_block(text, rf"^(?:static )?(?:void|int|bool|uint16_t) {name}\([^;]*?\)\s*\{{")
+    return extract_block(text, rf"^(?:static )?(?:void|int|bool|float|uint16_t) {name}\([^;]*?\)\s*\{{")
 
 
 sensor = (root / "src/sensor/sensor.c").read_text()
@@ -38,6 +38,8 @@ bias = (root / "src/sensor/calibration/bias_collect.c").read_text()
 dso = (root / "src/sensor/imu/LSM6DSO.c").read_text()
 body += "\n" + function(sensor, "sensor_gyro_report_discontinuity")
 body += "\n" + function(util, "v_finite")
+body += "\n" + function(util, "v_diff_mag")
+body += "\n" + function(bias, "isAccRest")
 body += "\n" + extract_block(sens, r"^struct sensitivity_stream\s*\{", semicolon=True)
 body += "\n" + function(sens, "sensitivity_wait_sample")
 body += "\n" + function(bias, "sensor_offsetBias_internal")

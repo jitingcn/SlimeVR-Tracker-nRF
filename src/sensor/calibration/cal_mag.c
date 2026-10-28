@@ -304,7 +304,13 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 	int64_t last_motion_event = -1000;
 	float rawData[3];
 	float pre_acc[3] = {0};
-	int resttime = 0;
+	struct accel_rest_state rest_state = {0};
+	struct sensor_accel_observation observation;
+	float rate = sensor_get_accel_odr() / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
+	/* Allow three output periods and two polling intervals, up to the existing wait timeout. */
+	uint32_t max_gap_ms = isfinite(rate) && rate > 0.0f
+		? (uint32_t)fminf(1000.0f, fmaxf(100.0f, 40.0f + ceilf(3000.0f / rate)))
+		: 1000U;
 
 	Vector3 captured_dirs[CALIB_TARGET_SAMPLES];
 	int captured_count = 0;
@@ -339,14 +345,15 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 				break;
 			}
 
-			if (sensor_wait_accel(rawData, K_MSEC(1000))) {
+			if (sensor_wait_accel_observation(&observation, K_MSEC(1000))) {
 				cal_event_end(op, CAL_OUTCOME_FAILED, CAL_PHASE_WAIT_POSE, CAL_REASON_SAMPLE_TIMEOUT);
 				tracker_events_notify();
 				return -2; // Timeout, magneto state not handled here
 			}
 
-			int rest = isAccRest(rawData, pre_acc, THRESHOLD_ACC, &resttime, 100);
-			memcpy(pre_acc, rawData, sizeof(rawData)); // Update previous data
+			int rest = isAccRest(&observation, k_uptime_get_32(), max_gap_ms, THRESHOLD_ACC, &rest_state);
+			memcpy(rawData, observation.v, sizeof(rawData));
+			memcpy(pre_acc, rawData, sizeof(rawData));
 
 			if (rest == 1) {
 				// Device is stationary, now check if this pose is new
@@ -415,6 +422,7 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 		cal_event_step(op, CAL_PHASE_CAPTURE_POSE, captured_count + 1);
 		tracker_events_notify();
 		sensor_calibration_stage(feedback, LED_COLLECT_STILL);
+		sensor_discard_pending_accel();
 
 		int sample_idx = 0;
 		while (sample_idx < SAMPLES_PER_ORIENTATION) {
@@ -449,10 +457,12 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 		}
 
 		if (sample_idx == -1) {
+			rest_state.initialized = false;
 			continue;
 		}
 
 		captured_count++;
+		rest_state.initialized = false;
 		cal_event_step(op, CAL_PHASE_POSE_DONE, captured_count);
 		tracker_events_notify();
 		sensor_calibration_result(feedback, LED_STAGE_ACK);

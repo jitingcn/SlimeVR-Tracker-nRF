@@ -57,6 +57,10 @@ static atomic_t sample_session;
 static uint32_t gyro_sample_sequence;
 #define CAL_SAMPLE_CHANNEL_MASK (CAL_SAMPLE_ACCEL | CAL_SAMPLE_GYRO | CAL_SAMPLE_MAG)
 static bool accel_snapshot_valid;
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+static uint32_t accel_observation_sequence;
+static uint32_t accel_observation_time;
+#endif
 #if CONFIG_SENSOR_TCAL_HEATED
 static int64_t accel_snapshot_time;
 #endif
@@ -135,6 +139,10 @@ void sensor_sample_accel(const float a[3])
 	k_spinlock_key_t key = k_spin_lock(&sample_lock);
 	memcpy(latest_accel, a, sizeof(latest_accel));
 	accel_snapshot_valid = true;
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+	accel_observation_sequence++;
+	accel_observation_time = k_uptime_get_32();
+#endif
 	#if CONFIG_SENSOR_TCAL_HEATED
 	accel_snapshot_time = k_uptime_get();
 	#endif
@@ -229,6 +237,28 @@ static int wait_latest_accel(float a[3], k_timeout_t timeout)
 	}
 	return 0;
 }
+
+#if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+int sensor_wait_accel_observation(struct sensor_accel_observation *observation, k_timeout_t timeout)
+{
+	if (wait_latest_accel(observation->v, timeout) != 0) {
+		return -1;
+	}
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
+	memcpy(observation->v, latest_accel, sizeof(observation->v));
+	observation->sequence = accel_observation_sequence;
+	observation->observed_ms = accel_observation_time;
+	k_spin_unlock(&sample_lock, key);
+	return 0;
+}
+
+void sensor_discard_pending_accel(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&sample_lock);
+	k_msgq_purge(&accel_sample_queue);
+	k_spin_unlock(&sample_lock, key);
+}
+#endif
 
 bool wait_for_motion(bool motion, int samples)
 {

@@ -27,6 +27,10 @@ PRELUDE = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef CONFIG_SENSOR_USE_ACCEL_CALIBRATION
+#define CONFIG_SENSOR_USE_ACCEL_CALIBRATION 1
+#endif
+#define CONFIG_SENSOR_ACCEL_OVERSAMPLING 1
 #define CONFIG_SENSOR_USE_TCAL 1
 #define CONFIG_SENSOR_TCAL_HEATED 0
 #define CONFIG_SENSOR_POLY_TEMP_MIN 20
@@ -52,6 +56,7 @@ PRELUDE = r'''
 #define MAIN_GYRO_TEMP_ID 2
 #define printk(...) ((void)0)
 #include "sensor/calibration/mag_fit.h"
+struct sensor_accel_observation { float v[3]; uint32_t sequence, observed_ms; };
 union mag_cal_workspace mag_cal_workspace;
 double norm_sum, sample_count;
 static struct {
@@ -71,6 +76,8 @@ static bool running, admission, inject_motion;
 static int mag_wait_error, solver_error;
 static int64_t now;
 static unsigned reads, pose_limit, motion_retries, ends, commits, solver_calls, token_reads;
+static unsigned pose_number, accel_sequence, accel_drains;
+static uint32_t first_capture_ms;
 static uint8_t outcome, reason, phase, completion_reason, pending_phase;
 static uint16_t current_operation = 41, pending_operation;
 static float pending_matrix[4][3];
@@ -138,6 +145,8 @@ void cal_event_start(uint16_t op, uint8_t p, uint8_t detail) {
 void cal_event_step(uint16_t op, uint8_t p, uint8_t detail) {
     assert(op == current_operation);
     pending_phase = p;
+    if (p == CAL_PHASE_CAPTURE_POSE && first_capture_ms == 0) first_capture_ms = (uint32_t)now;
+    if (p == CAL_PHASE_POSE_DONE) pose_number = detail;
     if (p == CAL_PHASE_RETRY && detail == CAL_REASON_MOTION) {
         assert(ends == 0); motion_retries++;
     }
@@ -152,6 +161,8 @@ void cal_event_set_completion_reason(uint16_t op, uint8_t why) {
 }
 void tracker_events_notify(void) {}
 static int64_t k_uptime_get(void) { return now; }
+static uint32_t k_uptime_get_32(void) { return (uint32_t)now; }
+static float sensor_get_accel_odr(void) { return 100.0f; }
 static void k_msleep(int ms) { now += ms; }
 static void watchdog_feed(int channel) { (void)channel; }
 static void wait_for_threads(void) {}
@@ -169,17 +180,24 @@ static int sensor_wait_mag(float m[3], int timeout) {
 }
 static int sensor_wait_accel(float a[3], int timeout) {
     (void)timeout;
-    unsigned i = reads++;
-    unsigned pose = i / 700;
+    reads++;
+    unsigned pose = pose_number;
     if (pose >= pose_limit) pose=pose_limit-1;
     memset(a, 0, 3*sizeof(float));
     a[pose % 3] = pose < 3 ? 1 : -1;
-    /* First stationary capture starts after 22 reads. One real vector jump
-     * then stable data exercises retry without mocking the owner decision. */
-    if (inject_motion && i == 22) { a[0]=0; a[1]=1; }
+    if (inject_motion && pending_phase == CAL_PHASE_CAPTURE_POSE) {
+        a[0]=0; a[1]=1; inject_motion=false;
+    }
     now += 2;
     return 0;
 }
+static int sensor_wait_accel_observation(struct sensor_accel_observation *observation, int timeout) {
+    int err=sensor_wait_accel(observation->v,timeout);
+    observation->observed_ms=(uint32_t)now;
+    observation->sequence=++accel_sequence;
+    return err;
+}
+static void sensor_discard_pending_accel(void) { accel_drains++; }
 void magneto_center_reset(mag_center_estimator_t *value) { memset(value,0,sizeof(*value)); }
 static void magneto_online_snapshot_BAinv(float out[4][3]) { memcpy(out,live_matrix,sizeof(live_matrix)); }
 static void magneto_online_reset(void) { online_resets++; }
@@ -291,6 +309,8 @@ static void reset_case(void) {
     memset(live_matrix,0,sizeof(live_matrix)); memset(durable_matrix,0,sizeof(durable_matrix));
     raw_available=invalid_fit=mag_cal_led_pending=false;
     online_resets=metadata_clears=0; requested_storage_error=feedback_storage_result=0;
+    pose_number=accel_sequence=accel_drains=0;
+    first_capture_ms=0;
     running=admission=inject_motion=false; now=0;
     mag_wait_error=solver_error=0; reads=0; pose_limit=6;
     motion_retries=ends=commits=solver_calls=token_reads=0;
@@ -315,6 +335,32 @@ static void reset_case(void) {
 TESTS = r'''
 static void expect_vector(const float actual[3], const float expected[3]) {
     for (unsigned axis=0; axis<3; axis++) assert(fabsf(actual[axis]-expected[axis]) < 0.000001f);
+}
+static void test_accel_rest_observations(void) {
+    struct accel_rest_state state={0};
+    struct sensor_accel_observation sample={{1,0,0},0,0};
+    for (unsigned i=0; i<=100; i++) {
+        sample.sequence=i+1; sample.observed_ms=i*20;
+        assert(isAccRest(&sample,sample.observed_ms,100,.02f,&state)==(i==100));
+    }
+    assert(!isAccRest(&sample,2001,100,.02f,&state));
+    sample.v[0]=.9f; sample.sequence++; sample.observed_ms+=20;
+    assert(!isAccRest(&sample,sample.observed_ms,100,.02f,&state));
+    for (unsigned i=1; i<=100; i++) {
+        sample.sequence++; sample.observed_ms+=20;
+        assert(isAccRest(&sample,sample.observed_ms,100,.02f,&state)==(i==100));
+    }
+    sample.sequence++; sample.observed_ms+=101;
+    assert(!isAccRest(&sample,sample.observed_ms,100,.02f,&state));
+    assert(!isAccRest(&sample,sample.observed_ms+101,100,.02f,&state));
+    assert(!state.initialized);
+    state=(struct accel_rest_state){0};
+    sample.observed_ms=UINT32_MAX-999;
+    for (unsigned i=0; i<=100; i++) {
+        sample.sequence++;
+        assert(isAccRest(&sample,sample.observed_ms,100,.02f,&state)==(i==100));
+        sample.observed_ms+=20;
+    }
 }
 static void seed_confirmed_mag(void) {
     reset_case();
@@ -459,6 +505,7 @@ int main(void) {
     float matrix[4][3]; int captured=0;
     assert(sensor_calibration_collect_accel_poses(matrix,&captured) == -3);
     assert(captured == 6 && motion_retries == 1 && ends == 0 && token_reads == 1);
+    assert(first_capture_ms >= 2000 && accel_drains >= 7);
 
     reset_case(); pose_limit=5;
     sensor_calibrate_accel();
@@ -479,6 +526,7 @@ int main(void) {
     assert(commits == 0);
     test_manual_replacement();
     test_imu_tcal_preserves_measured_candidate();
+    test_accel_rest_observations();
     test_imu_tcal_late_storage_failure();
     puts("manual MAG recovery / partial handoff / IMU T-Cal measured candidate and late storage receipt: PASS");
     return 0;
@@ -511,7 +559,7 @@ def main():
     source = "\n\n".join((
         PRELUDE, tcal_constants, tcal_direction, IMU_LEAVES,
         state, constants, "typedef struct { float x,y,z; } Vector3;",
-        function(util,"v_diff_mag"), function(util,"v_epsilon"), function(util,"apply_BAinv"),
+        function(util,"v_finite"), function(util,"v_diff_mag"), function(util,"v_epsilon"), function(util,"apply_BAinv"),
         function(calibration,"sensor_calibration_process_mag"),
         function(mag,"magneto_reset"), function(mag,"magneto_min_dir_range"), HELPERS,
         function(mag,"manual_finish"), function(mag,"manual_cancelled"),

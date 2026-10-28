@@ -38,32 +38,28 @@
 LOG_MODULE_REGISTER(cal_bias_collect, LOG_LEVEL_INF);
 
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-int isAccRest(float *acc, float *pre_acc, float threshold, int *t, int restdelta)
+bool isAccRest(const struct sensor_accel_observation *observation, uint32_t now_ms,
+	uint32_t max_gap_ms, float threshold, struct accel_rest_state *state)
 {
-	float delta[3];
-	delta[0] = acc[0] - pre_acc[0];
-	delta[1] = acc[1] - pre_acc[1];
-	delta[2] = acc[2] - pre_acc[2];
-
-#if CONFIG_CMSIS_DSP
-	float norm_sq;
-	arm_dot_prod_f32(delta, delta, 3, &norm_sq);
-	float norm_diff;
-	arm_sqrt_f32(norm_sq, &norm_diff);
-#else
-	float norm_diff = sqrtf(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
-#endif
-
-	if (norm_diff <= threshold) {
-		*t += restdelta;
-	} else {
-		*t = 0;
+	if ((uint32_t)(now_ms - observation->observed_ms) > max_gap_ms ||
+	    !v_finite(observation->v, 3)) {
+		state->initialized = false;
+		return false;
 	}
-
-	if (*t > 2000) {
-		return 1;
+	if (state->initialized && observation->sequence == state->last_sequence) {
+		return false;
 	}
-	return 0;
+	bool stable = state->initialized &&
+		(uint32_t)(observation->observed_ms - state->last_observed_ms) <= max_gap_ms &&
+		v_diff_mag(observation->v, state->previous) <= threshold;
+	if (!stable) {
+		state->stable_since_ms = observation->observed_ms;
+	}
+	memcpy(state->previous, observation->v, sizeof(state->previous));
+	state->last_sequence = observation->sequence;
+	state->last_observed_ms = observation->observed_ms;
+	state->initialized = true;
+	return stable && (uint32_t)(observation->observed_ms - state->stable_since_ms) >= 2000U;
 }
 #endif
 

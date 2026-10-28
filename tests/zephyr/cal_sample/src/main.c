@@ -177,6 +177,42 @@ ZTEST(cal_sample, test_idle_has_no_queue_traffic_but_live_accel)
 	zassert_not_equal(sensor_wait_mag(value, K_NO_WAIT), 0);
 }
 
+ZTEST(cal_sample, test_pose_observation_and_capture_purge)
+{
+	sensor_calibration_samples_begin(CAL_SAMPLE_ACCEL);
+	publish(CAL_SAMPLE_ACCEL, 1);
+	k_msleep(5);
+	uint32_t before_publish = k_uptime_get_32();
+	publish(CAL_SAMPLE_ACCEL, 2);
+	uint32_t after_publish = k_uptime_get_32();
+	k_msleep(5);
+	struct sensor_accel_observation observation;
+	zassert_equal(sensor_wait_accel_observation(&observation, K_NO_WAIT), 0);
+	zassert_equal(observation.v[0], 2);
+	zassert_true((uint32_t)(observation.observed_ms - before_publish) <=
+	             (uint32_t)(after_publish - before_publish));
+	uint32_t previous_sequence = observation.sequence;
+	zassert_not_equal(sensor_wait_accel_observation(&observation, K_NO_WAIT), 0);
+	publish(CAL_SAMPLE_ACCEL, 3);
+	publish(CAL_SAMPLE_ACCEL, 4);
+	sensor_discard_pending_accel();
+	zassert_not_equal(sensor_wait_accel_observation(&observation, K_NO_WAIT), 0);
+	float value[3];
+	zassert_not_equal(sensor_wait_accel(value, K_NO_WAIT), 0);
+	publish(CAL_SAMPLE_ACCEL, 5);
+	zassert_equal(sensor_wait_accel_observation(&observation, K_NO_WAIT), 0);
+	zassert_equal(observation.v[0], 5);
+	zassert_true(observation.sequence - previous_sequence == 3);
+	struct accel_rest_state rest = {0};
+	zassert_false(isAccRest(&observation, k_uptime_get_32(), 100, .02f, &rest));
+	zassert_true(rest.initialized);
+	publish(CAL_SAMPLE_ACCEL, 6);
+	k_msleep(120);
+	zassert_equal(sensor_wait_accel_observation(&observation, K_NO_WAIT), 0);
+	zassert_false(isAccRest(&observation, k_uptime_get_32(), 100, .02f, &rest));
+	zassert_false(rest.initialized, "A stale queued observation was treated as newly acquired");
+}
+
 ZTEST(cal_sample, test_selected_fifo_overflow_and_end_freshness)
 {
 	float value[3];
