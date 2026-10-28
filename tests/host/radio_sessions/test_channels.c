@@ -46,7 +46,7 @@ static bool interrupt_pair_retry;
 static unsigned pair_retry_attempts, pair_retry_stops, pair_retry_ack_cleared;
 static unsigned address_writes, schedule_updates;
 static uint8_t scheduled_slot, scheduled_total;
-static struct esb_payload { uint8_t data[8]; bool noack; } tx_payload_pair;
+static struct esb_payload { uint8_t data[64], length; bool noack; } tx_payload_pair;
 static uint8_t pair_target, pair_step;
 static uint8_t pair_probe_channels[320], last_probe_channel;
 static unsigned pair_probe_count, pair_probe_limit;
@@ -54,7 +54,7 @@ static void receive_pair(void);
 static bool inject_late_pong;
 static void late_pong(void);
 static unsigned irq_depth, deferred_pongs, delivered_pongs;
-static bool pong_after_clock_read, pong_irq_pending;
+static bool pong_after_clock_read, replace_after_clock_read, pong_irq_pending;
 static void dispatch_pong_irq(void);
 static unsigned irq_lock(void) {
     unsigned key = irq_depth;
@@ -81,17 +81,20 @@ static uint8_t tracker_id = 3, ping_counter, epoch;
 static uint32_t ping_ctr_sent;
 static int64_t ping_send_time;
 #define PING_HISTORY_SIZE 8
-static struct { uint8_t counter; uint32_t ping_ticks, ping_ticks_kernel; bool valid; } ping_history[PING_HISTORY_SIZE];
+struct ping_history_entry { uint8_t counter; uint32_t ping_ticks, ping_ticks_kernel; bool valid; };
+static struct ping_history_entry ping_history[PING_HISTORY_SIZE];
 static unsigned ping_history_idx;
 static uint64_t k_uptime_ticks(void) { return (uint64_t)now; }
+static uint64_t k_ticks_to_ms_floor64(uint64_t ticks) { return ticks; }
 static uint64_t net_ticks_from_kernel64(uint64_t ticks) { return ticks; }
 static void record_ping_admission(uint8_t counter);
 static int64_t warning_times[256];
 static uint32_t warning_failures[256];
-static unsigned warning_count;
+static unsigned warning_count, timeout_warnings;
 static bool trace_warnings;
 static void warning_log(const char *format, ...) {
     assert(!irq_depth);
+    if (strstr(format, "threshold")) { ++timeout_warnings; return; }
     if (!strstr(format, "total")) return;
     assert(warning_count < 256);
     va_list args; va_start(args, format);
@@ -113,6 +116,11 @@ static int64_t k_uptime_get(void) {
         pong_irq_pending = true;
         if (irq_depth) ++deferred_pongs;
         else dispatch_pong_irq();
+    }
+    if (replace_after_clock_read) {
+        replace_after_clock_read = false;
+        ++now;
+        record_ping_admission(ping_counter);
     }
     return sampled;
 }
@@ -302,7 +310,7 @@ static void dispatch_pong_irq(void) {
 
 static void reset(uint8_t home) {
     assert(!irq_depth);
-    pong_after_clock_read = pong_irq_pending = inject_late_pong = false;
+    pong_after_clock_read = replace_after_clock_read = pong_irq_pending = inject_late_pong = false;
     deferred_pongs = delivered_pongs = 0;
     tdma_resets = tx_flushes = rx_flushes = 0;
     ping_interval_ms = 1497;
@@ -310,7 +318,8 @@ static void reset(uint8_t home) {
     esb_conn_state = ESB_ST_PAIRED; connection_error_start_time = 0;
     ping_pending = ping_failed = false; ping_send_time = 0;
     ping_success_streak = 0; ping_counter = 0; ping_ctr_sent = 0;
-    warning_count = 0; last_tx.type = ESB_PING_TYPE;
+    memset(ping_history, 0, sizeof(ping_history)); ping_history_idx = 0;
+    warning_count = timeout_warnings = 0; last_tx.type = ESB_PING_TYPE;
     esb_initialized = true; idle = true; ota_active = false;
     ota_rx_head = ota_rx_tail = 0; ping_failures = 3;
     channel_search = channel_wait_normal = channel_found = channel_heard = false;
@@ -454,6 +463,43 @@ static void warning_lifecycle(void) {
         ++now; (void)esb_channel_search_poll(false);
         assert(warning_count == before + 1);
     }
+}
+
+static void ping_timeout_races(void) {
+    for (unsigned callback_first = 0; callback_first < 2; ++callback_first) {
+        reset(84); channel_confirmed = true; ping_failures = TX_ERROR_THRESHOLD - 1;
+        record_ping_admission(ping_counter);
+        now += get_ping_interval_ms() - 99;
+        pong_after_clock_read = true;
+        if (callback_first) failed_tx(); else maintenance_timeout();
+        assert(delivered_pongs == 1 && !ping_pending && !ping_failed);
+        assert(ping_failures == 0 && !connection_error_start_time && timeout_warnings == 0);
+
+        reset(84); channel_confirmed = true; ping_failures = TX_ERROR_THRESHOLD - 1;
+        record_ping_admission(ping_counter);
+        uint32_t old_counter = ping_ctr_sent;
+        now += get_ping_interval_ms() - 99;
+        replace_after_clock_read = true;
+        if (callback_first) failed_tx(); else maintenance_timeout();
+        assert(ping_pending && ping_ctr_sent == old_counter + 1 && ping_send_time == now);
+        assert(ping_failures == TX_ERROR_THRESHOLD - 1 && !ping_failed && timeout_warnings == 0);
+
+        reset(84); channel_confirmed = true; ping_failures = TX_ERROR_THRESHOLD - 1;
+        record_ping_admission(ping_counter);
+        now += get_ping_interval_ms() - 99;
+        if (callback_first) {
+            failed_tx();
+            maintenance_timeout();
+        } else {
+            maintenance_timeout();
+            failed_tx();
+        }
+        assert(!ping_pending && ping_failed && ping_failures == TX_ERROR_THRESHOLD);
+        assert(connection_error_start_time == now && timeout_warnings == 1);
+        normal_packet(0, 1);
+        assert(!accept_pong() && ping_failures == TX_ERROR_THRESHOLD);
+    }
+    puts("channels: PONG and replacement beat stale timeouts, one claimant records a real timeout");
 }
 
 static void pong_age(void) {
@@ -1046,6 +1092,7 @@ int main(void) {
     assert(ping_history[0].valid && ping_history[0].ping_ticks == 0
         && ping_history[0].ping_ticks_kernel == 0);
     assert(host_ping_history(0) && !host_ping_history(1));
+    ping_timeout_races();
     if (getenv("RADIO_EVEN_ONLY")) {
         scan_sequences();
         advertised_channels();

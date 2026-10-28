@@ -52,6 +52,7 @@ static void host_tx_success(void);
 
 #define CONFIG_CONNECTION_TDMA 1
 #define CONFIG_ESB_MAX_PAYLOAD_LENGTH 64
+#define ESB_PING_TYPE 0xF0
 static void host_log(const char *format, ...)
 {
 }
@@ -78,11 +79,12 @@ static struct {
 	size_t length;
 	int64_t timestamp;
 } last_tx;
-static struct {
+struct ping_history_entry {
 	uint8_t counter;
 	uint32_t ping_ticks, ping_ticks_kernel;
 	bool valid;
-} ping_history[PING_HISTORY_SIZE];
+};
+static struct ping_history_entry ping_history[PING_HISTORY_SIZE];
 static unsigned ping_history_idx, consecutive_enomem_errors;
 static unsigned esb_write_dropped, esb_write_dup_queued, esb_write_queued;
 static int64_t last_enomem_time, last_tx_time, ping_send_time;
@@ -93,6 +95,8 @@ static void esb_clear_time_sync_state(void) { server_time_synced = false; }
 static void tdma_set_enabled(bool enabled) { tdma_enabled = enabled; }
 static void connection_request_ping_resync(void) {}
 static int hook_site, queue_calls, queue_failures;
+static unsigned irq_depth;
+static bool defer_pong_on_queue, pong_waiting, coherent_pong;
 static struct esb_payload queued[8];
 static unsigned queued_count;
 static unsigned tx_success_count, clock_releases;
@@ -190,6 +194,7 @@ static uint64_t k_uptime_ticks(void)
 {
 	return (uint64_t)now_ms * 32;
 }
+static uint64_t k_ticks_to_ms_floor64(uint64_t ticks) { return ticks / 32; }
 static uint64_t net_ticks_from_kernel64(uint64_t ticks)
 {
 	return ticks;
@@ -254,6 +259,11 @@ static int esb_write_payload(const struct esb_payload *payload)
 	}
 	assert(queued_count < 8);
 	queued[queued_count++] = *payload;
+	if (defer_pong_on_queue && payload->data[0] == ESB_PING_TYPE) {
+		assert(irq_depth != 0);
+		defer_pong_on_queue = false;
+		pong_waiting = true;
+	}
 	return 0;
 }
 static void esb_start_queued_tx(void)
@@ -285,10 +295,24 @@ static int esb_initialize(bool enabled)
 }
 static unsigned irq_lock(void)
 {
-	return 0;
+	return irq_depth++;
 }
 static void irq_unlock(unsigned key)
 {
+	assert(irq_depth == key + 1);
+	irq_depth = key;
+	if (irq_depth == 0 && pong_waiting) {
+		const struct esb_payload *payload = &queued[queued_count - 1];
+		unsigned index = (ping_history_idx + PING_HISTORY_SIZE - 1) % PING_HISTORY_SIZE;
+		assert(ping_pending && ping_ctr_sent == payload->data[2]);
+		assert(ping_send_time == now_ms && ping_history[index].valid);
+		assert(ping_history[index].counter == ping_ctr_sent);
+		assert(ping_history[index].ping_ticks == (uint32_t)now_ms * 32);
+		assert(ping_history[index].ping_ticks_kernel == (uint32_t)now_ms * 32);
+		pong_waiting = false;
+		ping_pending = false;
+		coherent_pong = true;
+	}
 }
 #include "payload.inc"
 
@@ -297,6 +321,8 @@ static void reset(void)
 	queued_count = 0;
 	queue_calls = 0;
 	queue_failures = 0;
+	defer_pong_on_queue = pong_waiting = coherent_pong = false;
+	assert(irq_depth == 0);
 	batch = false;
 	tdma_enabled = false;
 	idle = true;
@@ -598,6 +624,32 @@ static void wom_response_payload(void)
 	}
 }
 
+static void ping_publication(void)
+{
+	uint8_t ping[13] = {ESB_PING_TYPE};
+	reset();
+	hook_site = 0;
+	idle = false;
+	defer_pong_on_queue = true;
+	uint8_t counter = ping_counter;
+	assert(esb_write(ping, false, sizeof(ping)) == 0);
+	assert(coherent_pong && !ping_pending && ping_ctr_sent == counter);
+
+	reset();
+	hook_site = 0;
+	ping_pending = true;
+	ping_failed = false;
+	ping_ctr_sent = 41;
+	ping_send_time = now_ms - 200;
+	counter = ping_counter;
+	unsigned index = ping_history_idx;
+	queue_failures = 2;
+	assert(esb_write(ping, false, sizeof(ping)) == -ENOMEM);
+	assert(ping_pending && !ping_failed && ping_ctr_sent == 41);
+	assert(ping_send_time == now_ms - 200 && ping_counter == counter && ping_history_idx == index);
+	puts("payload: PONG sees one complete PING and failed replacement preserves the pending PING");
+}
+
 int main(void)
 {
 	const char *scenario = getenv("RADIO_SCENARIO");
@@ -660,5 +712,6 @@ int main(void)
 	fw_info_before_normal();
 	restart_blocks_ordinary_writer();
 	wom_response_payload();
+	ping_publication();
 	return 0;
 }

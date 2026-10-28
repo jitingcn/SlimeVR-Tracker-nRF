@@ -23,6 +23,9 @@ static struct {
 static unsigned drops, starts, clock_stops;
 static unsigned milestone_logs, threshold_logs, pairing_logs, ordinary_logs;
 static unsigned logged_success, logged_failed, logged_rate;
+static unsigned irq_depth;
+static unsigned irq_lock(void) { return irq_depth++; }
+static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
 
 static int64_t k_uptime_get(void) { return now_ms; }
 static uint32_t k_uptime_get_32(void) { return (uint32_t)now_ms; }
@@ -38,6 +41,7 @@ static void debug_log(const char *format, ...) { (void)format; }
  * production cases have two warning classes and one three-counter stats log. */
 static void warning_log(const char *format, ...)
 {
+    assert(!irq_depth);
     if (strstr(format, "threshold")) ++threshold_logs;
     else ++milestone_logs;
 }

@@ -1381,6 +1381,29 @@ void clocks_request_stop(uint32_t delay_us)
 	);
 }
 
+static void esb_ping_timeout(int64_t now)
+{
+	bool threshold_reached = false;
+	unsigned key = irq_lock();
+	if (ping_pending && now >= ping_send_time
+	    && now - ping_send_time > (get_ping_interval_ms() - 100)) {
+		ping_pending = false;
+		ping_failed = true;
+		ping_success_streak = 0;
+		ping_failures++;
+		if (ping_failures == TX_ERROR_THRESHOLD) {
+			connection_error_start_time = now;
+			esb_conn_state = ESB_ST_RECOVERING;
+			threshold_reached = true;
+		}
+	}
+	irq_unlock(key);
+	if (threshold_reached) {
+		LOG_WRN("Ping failure threshold reached (%d failures), starting timeout timer",
+			TX_ERROR_THRESHOLD);
+	}
+}
+
 void event_handler(struct esb_evt const *event)
 {
 	static uint32_t tx_success_count = 0;
@@ -1448,24 +1471,7 @@ void event_handler(struct esb_evt const *event)
 			}
 		}
 
-		// Only count ping failures for connection timeout
-		if (ping_pending && k_uptime_get() - ping_send_time > (get_ping_interval_ms() - 100)) {
-			ping_failed = true;
-			ping_pending = false;    // Clear the pending flag
-			ping_success_streak = 0; // Reset recovery streak on any failure
-			ping_failures++;
-
-			if (ping_failures == TX_ERROR_THRESHOLD) // consecutive ping failures
-			{
-				connection_error_start_time = k_uptime_get(); // Mark when connection errors started
-				esb_conn_state = ESB_ST_RECOVERING;
-				LOG_WRN(
-					"Ping failure threshold reached (%d failures), starting "
-					"timeout timer",
-					TX_ERROR_THRESHOLD
-				);
-			}
-		}
+		esb_ping_timeout(k_uptime_get());
 
 		if (esb_conn_state != ESB_ST_PAIRING && !connection_get_data_collection() && esb_is_idle()) {
 #if defined(CONFIG_SOC_SERIES_NRF54L)
@@ -2468,6 +2474,36 @@ void esb_process_ota_rx_queue(void)
 	}
 }
 
+/* MANUAL_START can drain an already-active FIFO. Keep RX masked until the
+ * successful queue operation and its PING identity and timestamps are visible. */
+static int esb_queue_ping(const struct esb_payload *payload)
+{
+	unsigned key = irq_lock();
+	int status = esb_write_payload(payload);
+	if (status == 0) {
+		uint64_t kernel_ticks = k_uptime_ticks();
+		struct ping_history_entry *entry = &ping_history[ping_history_idx];
+		entry->counter = payload->data[2];
+		entry->ping_ticks = (uint32_t)net_ticks_from_kernel64(kernel_ticks);
+		entry->ping_ticks_kernel = (uint32_t)kernel_ticks;
+		entry->valid = true;
+		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
+		ping_send_time = (int64_t)k_ticks_to_ms_floor64(kernel_ticks);
+		ping_ctr_sent = payload->data[2];
+		ping_channel_confirm_sent = (payload->data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
+		wom_command.sent_flag = payload->data[7];
+		wom_command.sent_token =
+			(payload->data[7] == ESB_PING_FLAG_WOM_RESULT
+			 || payload->data[7] == ESB_PING_FLAG_WOM_ERROR)
+			? ((uint16_t)payload->data[10] << 8) | payload->data[11] : 0;
+		ping_counter++;
+		ping_failed = false;
+		ping_pending = true;
+	}
+	irq_unlock(key);
+	return status;
+}
+
 static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 {
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
@@ -2575,7 +2611,8 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 	}
 
 	// Try to queue the packet (now inside the TDMA slot window)
-	int queue_status = esb_write_payload(&tx_payload);
+	int queue_status = is_ping && data_length == ESB_PING_LEN
+		? esb_queue_ping(&tx_payload) : esb_write_payload(&tx_payload);
 
 	if (queue_status == -ENOMEM && drop_on_fifo_full) {
 		esb_write_dropped++;
@@ -2592,7 +2629,8 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 			k_msleep(1);
 			drop_failed_tx_payload_if_pending();
 		}
-		queue_status = esb_write_payload(&tx_payload);
+		queue_status = is_ping && data_length == ESB_PING_LEN
+			? esb_queue_ping(&tx_payload) : esb_write_payload(&tx_payload);
 	}
 
 	// manually repeat raw IMU/mag packets for better reliability
@@ -2618,25 +2656,9 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 		queue_status = dup_ret;
 	}
 #endif
-	/* A queued counter is not usable until both transmit stamps are stored. */
 	if (is_ping && queue_status == 0 && data_length == ESB_PING_LEN) {
-		unsigned key = irq_lock();
-		ping_failed = false;
-		ping_counter++;
-		ping_history[ping_history_idx].counter = tx_payload.data[2];
-		ping_history[ping_history_idx].valid = false;
-		ping_ctr_sent = tx_payload.data[2];
-		ping_channel_confirm_sent = (tx_payload.data[7] & ESB_PING_FLAG_CHANNEL_CONFIRM) != 0;
-		wom_command.sent_flag = tx_payload.data[7];
-		wom_command.sent_token =
-			(tx_payload.data[7] == ESB_PING_FLAG_WOM_RESULT
-			 || tx_payload.data[7] == ESB_PING_FLAG_WOM_ERROR)
-			? ((uint16_t)tx_payload.data[10] << 8) | tx_payload.data[11] : 0;
-		ping_pending = true;
-		irq_unlock(key);
 		LOG_DBG("PING queued (ctr=%u)", (unsigned)tx_payload.data[2]);
 	} else if (is_ping && queue_status != 0) {
-		ping_pending = false;
 		// PING failed to queue - this is critical!
 		const char *err_str = "unknown";
 		if (queue_status == -ENOMEM) {
@@ -2728,23 +2750,6 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 		esb_write_queued++;
 	}
 
-	/*
-	 * Record ping send timestamps here — after TDMA wait and queuing —
-	 * so that ping_history[].ping_ticks and ping_send_time reflect the
-	 * moment the radio actually begins transmitting.
-	 */
-	if (tx_payload.data[0] == ESB_PING_TYPE && queue_status == 0) {
-		/* Single 64-bit T1 sample; low 32 bits stay the kernel-domain
-		 * RTT stamp, full value converts to network ticks. */
-		uint64_t t1_kernel64 = k_uptime_ticks();
-		unsigned key = irq_lock();
-		ping_history[ping_history_idx].ping_ticks = (uint32_t)net_ticks_from_kernel64(t1_kernel64);
-		ping_history[ping_history_idx].ping_ticks_kernel = (uint32_t)t1_kernel64;
-		ping_history[ping_history_idx].valid = true;
-		ping_history_idx = (ping_history_idx + 1) % PING_HISTORY_SIZE;
-		irq_unlock(key);
-		ping_send_time = k_uptime_get();
-	}
 	/*
 	 * In MANUAL_START mode the radio auto-drains the FIFO once started.
 	 * esb_start_tx() only needs to kick the first packet; if -EBUSY,
@@ -3313,22 +3318,7 @@ static void esb_thread(void)
 			}
 		}
 
-		if (ping_pending && (now_idle - ping_send_time) > (get_ping_interval_ms() - 100)) {
-			// Consider missing PONG a failure, clear pending
-			ping_failed = true;
-			ping_pending = false;
-			ping_success_streak = 0;
-			ping_failures++;
-			if (ping_failures == TX_ERROR_THRESHOLD) {
-				connection_error_start_time = now_idle;
-				esb_conn_state = ESB_ST_RECOVERING;
-				LOG_WRN(
-					"Ping failure threshold reached (%d failures), starting "
-					"timeout timer",
-					TX_ERROR_THRESHOLD
-				);
-			}
-		}
+		esb_ping_timeout(now_idle);
 
 		/* Feed watchdog at end of each loop iteration */
 		watchdog_feed(WDT_CHANNEL_ESB);

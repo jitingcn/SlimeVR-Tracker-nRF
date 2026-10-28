@@ -49,6 +49,7 @@ for directive in re.finditer(r"^[ \t]*#\s*(if|ifdef|ifndef|endif)\b[^\n]*", esb[
 else:
     raise ValueError("Unclosed clock control section")
 payload += "\n" + esb[clock_start:clock_end]
+payload += "\n" + function(esb, "esb_queue_ping")
 clocked_writer = re.search(r"^static int esb_write_clocked\(", esb, re.MULTILINE)
 if clocked_writer:
     payload += "\n" + function(esb, "esb_write_clocked")
@@ -96,6 +97,7 @@ switch = handler.index("\tswitch (event->evt_id)")
 end = handler.index("\tcase ESB_EVENT_RX_RECEIVED:")
 tx_failures = constants + "\n"
 tx_failures += "\n".join(re.findall(r"^#define TX_ERROR_THRESHOLD[^\n]*", esb, re.MULTILINE))
+tx_failures += "\n#ifndef HOST_PING_TIMEOUT_DEFINED\n" + function(esb, "esb_ping_timeout") + "\n#endif\n"
 tx_failures += "\n" + handler[start:switch]
 tx_failures += "\nstatic void host_tx_event(struct esb_evt const *event) {\n"
 tx_failures += handler[switch:end] + "\n}\n}\n"
@@ -115,7 +117,8 @@ for name in sorted(set(re.findall(r", (esb_remote_cmd_\w+)\}", registry)) - set(
     commands.append(f"static void {name}(void) {{ }}")
 commands.append(function((SRC / "system/system.c").read_text(), "sys_command_shutdown"))
 commands.insert(0, function((SRC / "system/system.c").read_text(), "sys_command_shutdown_request"))
-commands += [registry, function(esb, "esb_remote_command_execute"), function(esb, "esb_thread")]
+commands += [registry, function(esb, "esb_remote_command_execute"),
+             function(esb, "esb_ping_timeout"), function(esb, "esb_thread")]
 # Exercise the production control-admission tail after PONG validation.
 start = esb.index("\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)")
 end = esb.index("\n\t\t\t\t}\n\t\t\t} break;", start)
@@ -163,24 +166,22 @@ channels += "\n" + wom_state + "\n" + function(esb, "esb_wom_reset")
 channels += "\n" + function(esb, "esb_remote_command_supported")
 channels += "\n" + function(esb, "esb_get_ping_ack_flag")
 channels += "\n" + function(esb, "esb_get_ping_request_data")
-# Reuse actual successful-PING accounting without pulling hardware admission
-# and TDMA into the channel fixture. Both constructs exist in baseline sources.
+channels += "\n#define HOST_PING_TIMEOUT_DEFINED 1\n" + function(esb, "esb_ping_timeout")
+channels += "\nstatic int record_ping_payload(const struct esb_payload *p) { (void)p; assert(irq_depth); return 0; }\n"
+channels += "#define esb_write_payload record_ping_payload\n" + function(esb, "esb_queue_ping")
+channels += "\n#undef esb_write_payload\n"
 channels += "\nstatic void record_ping_admission(uint8_t counter) {\n"
-channels += "bool is_ping = true; int queue_status = 0; unsigned data_length = ESB_PING_LEN;\n"
-channels += "struct { uint8_t data[ESB_PING_LEN]; } tx_payload = {{ESB_PING_TYPE, 0, counter}};\n"
+channels += "struct esb_payload tx_payload = { .length = ESB_PING_LEN, .data = {ESB_PING_TYPE, 0, counter} };\n"
 channels += "tx_payload.data[7] = esb_get_ping_ack_flag();\n"
 channels += "esb_get_ping_request_data(&tx_payload.data[8]);\n"
-channels += block(esb, r"^\tif \(is_ping && queue_status == 0 && data_length == ESB_PING_LEN\) \{")
-channels += "\n" + block(esb, r"^\tif \(tx_payload.data\[0\] == ESB_PING_TYPE && queue_status == 0\) \{")
-channels += "\n}\n"
+channels += "assert(esb_queue_ping(&tx_payload) == 0);\n}\n"
 start = esb.index("\t\t\t\t\tuint32_t ping_ticks_for_this_ctr = 0;")
 end = esb.index("uint32_t rtt_us = 0;", start)
 channels += ("\nstatic bool host_ping_history(uint8_t rx_ctr) {\n" + esb[start:end]
              + "\n(void)ping_ticks_for_this_ctr; (void)ping_ticks_kernel_for_this_ctr;"
              + "\nreturn ping_history_valid;\n}\n")
 channels += "\nstatic void maintenance_timeout(void) { int64_t now_idle = k_uptime_get();\n"
-channels += block(esb, r"^\t\tif \(ping_pending && \(now_idle - ping_send_time\) > \(get_ping_interval_ms\(\) - 100\)\) \{")
-channels += "\n}\n"
+channels += "\tesb_ping_timeout(now_idle);\n}\n"
 channels += "\n" + function(esb, "esb_deinitialize")
 channels += "\n" + function(esb, "esb_channel_search_poll")
 start = esb.index("\t\t\t\tif (rx_payload.data[0] == ESB_PONG_TYPE)")
