@@ -48,7 +48,8 @@ struct tracker_report {
 #define PACKET_SIZE_BYTES sizeof(struct tracker_report)
 #define PACKETS_PER_USB_REPORT 4
 #define USB_REPORT_SIZE_BYTES (PACKET_SIZE_BYTES * PACKETS_PER_USB_REPORT)
-#define RING_PACKET_CAPACITY (3 * PACKETS_PER_USB_REPORT)
+/* The capacity divides the uint32_t index range, preserving order at wrap. */
+#define RING_PACKET_CAPACITY 16
 
 /*
  * The connection thread produces and the HID thread consumes this packet

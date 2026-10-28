@@ -257,6 +257,41 @@ static void queue_packet(uint8_t value)
 	zassert_true(hid_write_packet_n(packet));
 }
 
+ZTEST(hid_lifecycle, test_packet_order_across_index_wrap)
+{
+	const uint32_t starts[] = { 100U, UINT32_MAX - 3U, UINT32_MAX };
+	for (size_t n = 0; n < ARRAY_SIZE(starts); n++) {
+		fixture_start();
+		atomic_set(&hid_prod, (atomic_val_t)starts[n]);
+		atomic_set(&hid_cons, (atomic_val_t)starts[n]);
+		for (uint8_t i = 1; i <= 5; i++) {
+			queue_packet(i);
+		}
+		send_report();
+		for (uint8_t i = 0; i < PACKETS_PER_USB_REPORT; i++) {
+			zassert_equal(submit_stage[i * PACKET_SIZE_BYTES], i + 1U);
+		}
+		zassert_equal(dropped_reports, 1);
+		zassert_equal((uint32_t)atomic_get(&hid_cons), starts[n] + 5U);
+		zassert_equal((uint32_t)atomic_get(&hid_prod), starts[n] + 5U);
+		input_report_done_cb(&hid_device, submit_stage);
+	}
+
+	fixture_start();
+	for (uint8_t i = 1; i <= 16; i++) {
+		queue_packet(i);
+	}
+	uint8_t packet[PACKET_SIZE_BYTES] = {17};
+	zassert_false(hid_write_packet_n(packet));
+	send_report();
+	for (uint8_t i = 0; i < PACKETS_PER_USB_REPORT; i++) {
+		zassert_equal(submit_stage[i * PACKET_SIZE_BYTES], i + 1U);
+	}
+	zassert_equal(dropped_reports, 12);
+	input_report_done_cb(&hid_device, submit_stage);
+	zassert_true(hid_write_packet_n(packet));
+}
+
 ZTEST(hid_lifecycle, test_unplug_during_enqueue_reconnect_and_delayed_completion)
 {
 	fixture_start();
