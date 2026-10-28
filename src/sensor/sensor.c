@@ -371,6 +371,28 @@ static atomic_t mag_persistence_error;
 static bool skip_fusion_save;
 #endif
 
+struct fusion_periods {
+	float gyro;
+	float accel;
+	float mag;
+};
+
+static struct fusion_periods sensor_fusion_periods(void)
+{
+	struct fusion_periods periods = {
+		.gyro = gyro_actual_time * (float)gyro_oversample_n,
+		.accel = accel_actual_time * CONFIG_SENSOR_ACCEL_OVERSAMPLING,
+		.mag = 0.0f,
+	};
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	if (mag_available && mag_enabled) {
+		periods.mag = mag_actual_time > 0.0f && mag_actual_time < 10.0f
+			? mag_actual_time : 1.0f / CONFIG_SENSOR_MAG_ODR;
+	}
+#endif
+	return periods;
+}
+
 #if CONFIG_SENSOR_USE_VQF
 static const sensor_fusion_t *sensor_fusion = &sensor_fusion_vqf; // TODO: change from server
 int fusion_id = FUSION_VQF;
@@ -2257,9 +2279,10 @@ int sensor_init(void)
 		vqf_update_sensor_ids(sensor_imu_id);
 	}
 #endif
+	struct fusion_periods periods = sensor_fusion_periods();
 	if (retained->fusion_id == fusion_id) // Check if the retained fusion data is valid and matches the selected fusion
 	{                                     // Load state if the data is valid (fusion was initialized before)
-		sensor_fusion->load(retained->fusion_data);
+		sensor_fusion->load(retained->fusion_data, periods.gyro, periods.accel, periods.mag);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 		/* Retained fusion may describe an unconfirmed trial matrix from before
 		 * sleep. Reacquire only its magnetic domain against confirmed storage. */
@@ -2268,23 +2291,7 @@ int sensor_init(void)
 		retained->fusion_id = 0; // Invalidate retained fusion data
 		retained_update();
 	} else {
-		// Determine effective gyro time step for fusion
-#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-		float fusion_gyro_time = (gyro_oversample_n > 1) ? gyro_effective_time : gyro_actual_time;
-#else
-		float fusion_gyro_time = gyro_actual_time;
-#endif
-		// Determine effective accel time step for fusion
-#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
-		float fusion_accel_time = accel_effective_time;
-#else
-		float fusion_accel_time = accel_actual_time;
-#endif
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, mag_actual_time);
-#else
-		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, 0.0f);
-#endif
+		sensor_fusion->init(periods.gyro, periods.accel, periods.mag);
 	}
 
 #if IMU_INT_EXISTS
@@ -3852,30 +3859,16 @@ int main_imu_restart(void)
 #endif
 	if (main_ok) // only restart fusion if initialized
 	{
-		// Determine effective gyro time step for fusion (must match sensor_init logic)
-#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
-		float fusion_gyro_time = (gyro_oversample_n > 1) ? gyro_effective_time : gyro_actual_time;
-#else
-		float fusion_gyro_time = gyro_actual_time;
-#endif
-		// Determine effective accel time step for fusion
-#if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
-		float fusion_accel_time = accel_effective_time;
-#else
-		float fusion_accel_time = accel_actual_time;
-#endif
+		struct fusion_periods periods = sensor_fusion_periods();
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-		// Prefer mag_actual_time; some drivers can still return INFINITY from update_odr.
-		float fusion_mag_time
-			= (mag_actual_time > 0.0f && mag_actual_time < 10.0f) ? mag_actual_time : (1.0f / CONFIG_SENSOR_MAG_ODR);
 		float saved_ref_norm = 0.0f, saved_ref_dip = 0.0f;
 		bool had_mag_ref = sensor_fusion_get_mag_ref(&saved_ref_norm, &saved_ref_dip);
-		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, fusion_mag_time);
+#endif
+		sensor_fusion->init(periods.gyro, periods.accel, periods.mag);
+#if CONFIG_SENSOR_USE_MAGNETOMETER
 		if (had_mag_ref && saved_ref_norm > 0) {
 			sensor_fusion_set_mag_ref(saved_ref_norm, saved_ref_dip);
 		}
-#else
-		sensor_fusion->init(fusion_gyro_time, fusion_accel_time, 0.0f);
 #endif
 	}
 #if CONFIG_SENSOR_TCAL_HEATED

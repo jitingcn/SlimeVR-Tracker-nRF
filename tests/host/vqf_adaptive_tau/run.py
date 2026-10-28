@@ -320,7 +320,7 @@ static void retained_motion_cache(void) {
         for(int j=0;j<16;j++) assert(saved.before[j]==0xA5 && saved.after[j]==0xA5);
         vqf_saved_header_t header;memcpy(&header,saved.data,sizeof(header));
         assert(header.magic==VQF_SAVED_MAGIC && header.version==VQF_SAVED_VERSION && header.size==VQF_MEM_SIZE);
-        vqf_init(.01f,.01f,.01f);vqf_load(saved.data);
+        vqf_init(.01f,.01f,.01f);vqf_load(saved.data,.01f,.01f,.01f);
         assert(params.tauAcc==3.264f);
         assert(!memcmp(expected.motionBiasEstLastR,state.motionBiasEstLastR,sizeof(state.motionBiasEstLastR)));
         assert(!memcmp(expected.motionBiasEstLastBiasLp,state.motionBiasEstLastBiasLp,sizeof(state.motionBiasEstLastBiasLp)));
@@ -337,16 +337,16 @@ static void retained_motion_cache(void) {
         if(field==1) header.version++;
         if(field==2) header.size--;
         unsigned char invalid[VQF_MEM_SIZE];memcpy(invalid,saved.data,sizeof(invalid));
-        memcpy(invalid,&header,sizeof(header));vqf_load(invalid);
+        memcpy(invalid,&header,sizeof(header));vqf_load(invalid,.01f,.01f,.01f);
         assert_motion_cache_cold(&state);assert(state.bias[0]==0 && params.tauAcc==3.264f);
     }
     unsigned char legacy[784]={0};float identity=1;
-    memcpy(legacy,&identity,sizeof(identity));vqf_load(legacy);
+    memcpy(legacy,&identity,sizeof(identity));vqf_load(legacy,.01f,.01f,.01f);
     assert_motion_cache_cold(&state);assert(state.bias[0]==0);
     /* Last outputs are finite state, unlike legitimate LP NaN markers. */
     vqf_state_t poisoned;memcpy(&poisoned,saved.data+sizeof(vqf_saved_header_t),sizeof(poisoned));
     poisoned.motionBiasEstLastR[2]=NAN;
-    memcpy(saved.data+sizeof(vqf_saved_header_t),&poisoned,sizeof(poisoned));vqf_load(saved.data);
+    memcpy(saved.data+sizeof(vqf_saved_header_t),&poisoned,sizeof(poisoned));vqf_load(saved.data,.01f,.01f,.01f);
     assert_motion_cache_cold(&state);
 }
 #if CONFIG_SENSOR_VQF_ADAPTIVE_BIAS
@@ -537,7 +537,7 @@ static struct thermal_result thermal_history(bool completed,int partial,int rese
         thermal_sample(20.f,(float[3]){i%2 ? 8*thermal_noise:-8*thermal_noise,0,0});
     thermal_leave();
     if(reset==1) {
-        unsigned char saved[VQF_MEM_SIZE];vqf_save(saved);vqf_load(saved);
+        unsigned char saved[VQF_MEM_SIZE];vqf_save(saved);vqf_load(saved,.25f,.25f,.25f);
     } else if(reset==2) {
         vqf_set_gyro_bias((float[3]){0,0,0});
     } else if(reset==3) {
@@ -692,7 +692,7 @@ static void training_temperature_lifecycle(void) {
     memset(&saved,0xA5,sizeof(saved));vqf_save(saved.data);
     for(int i=0;i<16;i++) assert(saved.before[i]==0xA5 && saved.after[i]==0xA5);
     vqf_update_temperature(23.f);vqf_update_gyro(g,.01f);
-    vqf_load(saved.data);assert_policy_cold();
+    vqf_load(saved.data,.01f,.01f,.01f);assert_policy_cold();
     vqf_update_temperature(21.f);vqf_update_gyro(g,.01f);
     assert(training_temperature_policy.matched && vqf_training_temperature()==21.f);
     /* Both a partly averaged native LP and a settled LP are warm history.
@@ -704,7 +704,7 @@ static void training_temperature_lifecycle(void) {
             vqf_update_gyro(g,.01f);vqf_update_accel(a,.01f);
         }
         vqf_state_t native_before=state;
-        vqf_save(saved.data);vqf_load(saved.data);assert_policy_cold();
+        vqf_save(saved.data);vqf_load(saved.data,.01f,.01f,.01f);assert_policy_cold();
         assert(!memcmp(native_before.restGyrLpState,state.restGyrLpState,sizeof(state.restGyrLpState)));
         assert(!memcmp(native_before.restLastGyrLp,state.restLastGyrLp,sizeof(state.restLastGyrLp)));
         vqf_update_temperature(20.f);vqf_update_gyro(g,.01f);
@@ -732,9 +732,8 @@ static void strategy_lifecycle(void) {
     unsigned char saved[VQF_MEM_SIZE];vqf_save(saved);
     vqf_state_t before=state;
     vqf_init(.0025f,.005f,.0025f);assert_policy_cold();
-    vqf_load(saved);assert_policy_cold();
-    assert(!memcmp(before.bias,state.bias,sizeof(state.bias)));
-    assert(!memcmp(before.biasP,state.biasP,sizeof(state.biasP)));
+    vqf_load(saved,.0025f,.005f,.0025f);assert_policy_cold();
+    assert(state.bias[0]==0 && coeffs.gyrTs==.0025f && coeffs.accTs==.005f);
     warm_policy();
     float bias[3]={.01f,.02f,.03f},old_tau=params.tauAcc;
     before=state;vqf_set_gyro_bias(bias);assert_policy_cold();
@@ -936,7 +935,7 @@ static void transition_consumers(void) {
     assert(!vqf_take_rest_observation(&observed));
     unsigned char saved[VQF_MEM_SIZE];vqf_save(saved);
     vqf_update_gyro(g,dt);
-    vqf_load(saved);
+    vqf_load(saved,dt,.01f,.01f);
     assert(!vqf_take_rest_observation(&observed) && !vqf_get_rest_detected());
     float zero_bias[3]={0,0,0};
     vqf_set_gyro_bias(zero_bias);
@@ -975,7 +974,7 @@ int main(void) {
     unsigned char saved[VQF_MEM_SIZE];
     vqf_save(saved);
     float q_before[4],q_after[4];getQuat6D(&state,q_before);
-    vqf_load(saved);
+    vqf_load(saved,.0025f,.01f,.01f);
     getQuat6D(&state,q_after);
     assert(!memcmp(before.gyrQuat,state.gyrQuat,sizeof(state.gyrQuat)));
     assert(!memcmp(before.accQuat,state.accQuat,sizeof(state.accQuat)));
@@ -991,7 +990,7 @@ int main(void) {
     assert(params.tauAcc==3.264f); /* restarted controller interval */
     before.bias[0]=NAN;
     memcpy(saved+sizeof(vqf_saved_header_t),&before,sizeof(before));
-    vqf_load(saved);
+    vqf_load(saved,.0025f,.01f,.01f);
     assert(state.bias[0]==0 && params.tauAcc==3.264f);
     for(int rate=100;rate<=400;rate*=2) {
         float dt=1.f/rate;

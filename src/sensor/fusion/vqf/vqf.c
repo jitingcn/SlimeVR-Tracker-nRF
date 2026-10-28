@@ -317,11 +317,6 @@ BUILD_ASSERT(sizeof(vqf_saved_header_t) == 8, "VQF retained header ABI changed")
 BUILD_ASSERT(VQF_MEM_SIZE == 840 + VQF_OUTPUT_SAVED_SIZE, "VQF retained ABI changed");
 
 static float last_a[3] = {0};
-/* Sample periods from the last vqf_init(); used to re-init cleanly when a
- * corrupt (non-finite) retained state is rejected at load. */
-static float vqf_init_gyr_time;
-static float vqf_init_acc_time;
-static float vqf_init_mag_time;
 #if defined(CONFIG_VQF_BENCH)
 static volatile float vqf_bench_sink;
 static vqf_params_t vqf_bench_params;
@@ -893,9 +888,6 @@ void vqf_init(float g_time, float a_time, float m_time)
 {
 	rest_observation_pending = false;
 	set_params();
-	vqf_init_gyr_time = g_time;
-	vqf_init_acc_time = a_time;
-	vqf_init_mag_time = m_time;
 	initVqf(&params, &state, &coeffs, g_time, a_time, m_time);
 #if IS_ENABLED(CONFIG_SENSOR_VQF_FAST_REST_RECOVERY)
 	stop_macro_reset();
@@ -1259,20 +1251,8 @@ static bool vqf_loaded_state_valid(void)
 	       && vqf_float_finite(coeffs.magTs);
 }
 
-/* Prefer the period recorded by vqf_init(); fall back to the loaded coeffs,
- * then a fixed 100 Hz default so a corrupt block can't give zero-time filters. */
-static float vqf_safe_init_time(float saved_time, float loaded_time)
-{
-	if (vqf_float_finite(saved_time) && saved_time > 0.0f) {
-		return saved_time;
-	}
-	if (vqf_float_finite(loaded_time) && loaded_time > 0.0f) {
-		return loaded_time;
-	}
-	return 0.01f;
-}
 
-void vqf_load(const void *data)
+void vqf_load(const void *data, float g_time, float a_time, float m_time)
 {
 	rest_observation_pending = false;
 	BUILD_ASSERT(
@@ -1285,24 +1265,25 @@ void vqf_load(const void *data)
 	    || header.size != VQF_MEM_SIZE) {
 		/* Never interpret another version/configuration's payload layout. */
 		printk("VQF: rejecting incompatible retained layout, reinitializing\n");
-		vqf_init(
-			vqf_safe_init_time(vqf_init_gyr_time, coeffs.gyrTs),
-			vqf_safe_init_time(vqf_init_acc_time, coeffs.accTs),
-			vqf_safe_init_time(vqf_init_mag_time, coeffs.magTs)
-		);
+		vqf_init(g_time, a_time, m_time);
+		return;
+	}
+	const uint8_t *payload = (const uint8_t *)data + sizeof(header);
+	memcpy(&coeffs, payload + sizeof(state), sizeof(coeffs));
+	/* Match the normalization performed by initVqf, including disabled mag. */
+	float gyr_ts = g_time > 0.0f ? g_time : 0.01f;
+	float acc_ts = a_time > 0.0f ? a_time : gyr_ts;
+	float mag_ts = m_time > 0.0f ? m_time : gyr_ts;
+	if (coeffs.gyrTs != gyr_ts || coeffs.accTs != acc_ts || coeffs.magTs != mag_ts) {
+		printk("VQF: rejecting retained sampling periods, reinitializing\n");
+		vqf_init(g_time, a_time, m_time);
 		return;
 	}
 	set_params();
-	const uint8_t *payload = (const uint8_t *)data + sizeof(header);
 	memcpy(&state, payload, sizeof(state));
-	memcpy(&coeffs, payload + sizeof(state), sizeof(coeffs));
 	if (!vqf_loaded_state_valid()) {
 		printk("VQF: rejecting non-finite retained state, reinitializing\n");
-		vqf_init(
-			vqf_safe_init_time(vqf_init_gyr_time, coeffs.gyrTs),
-			vqf_safe_init_time(vqf_init_acc_time, coeffs.accTs),
-			vqf_safe_init_time(vqf_init_mag_time, coeffs.magTs)
-		);
+		vqf_init(g_time, a_time, m_time);
 		return;
 	}
 	/* Retained memory stores state+coeffs, not params or the controller.
@@ -1317,9 +1298,7 @@ void vqf_load(const void *data)
 #if IS_ENABLED(CONFIG_SENSOR_VQF_OUTPUT_OBSERVER)
 	if (!vqf_output_load(payload + sizeof(state) + sizeof(coeffs))) {
 		printk("VQF: rejecting invalid output retained state, reinitializing\n");
-		vqf_init(vqf_safe_init_time(vqf_init_gyr_time, coeffs.gyrTs),
-			 vqf_safe_init_time(vqf_init_acc_time, coeffs.accTs),
-			 vqf_safe_init_time(vqf_init_mag_time, coeffs.magTs));
+		vqf_init(g_time, a_time, m_time);
 		return;
 	}
 #endif

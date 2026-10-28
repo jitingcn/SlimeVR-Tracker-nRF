@@ -121,7 +121,8 @@ float sensor_get_processing_work_time_ms(void); /* processing-work EMA, not full
 
 typedef struct sensor_fusion {
 	void (*init)(float, float, float); // gyro_time, accel_time, mag_time
-	void (*load)(const void *);
+	/* Load with the current effective sensor periods, even on first boot. */
+	void (*load)(const void *, float, float, float);
 	void (*save)(void *);
 
 	void (*update_gyro)(float *, float);  // deg/s

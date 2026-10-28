@@ -63,14 +63,13 @@ static void vqf_track_rest_diag(void) {}
 #define printk(...) ((void)0)
 ''' + output_layout + '\n' + retained_layout + '''
 struct retained_data { unsigned char fusion_data[2048]; };
-static float vqf_init_gyr_time, vqf_init_acc_time, vqf_init_mag_time;
 static uint32_t rest_enter_count, rest_exit_count;
 static float rest_total_s, rest_last_enter_time, rest_last_duration_s, uptime_s;
 static bool prev_rest_detected;
 static uint8_t rest_event_idx, rest_event_total;
 ''' + '\n'.join(function(vqf, name) for name in (
     'set_params', 'vqf_float_finite', 'vqf_vec3_finite', 'vqf_loaded_state_valid',
-    'vqf_safe_init_time', 'vqf_init', 'vqf_load', 'vqf_save', 'vqf_update_gyro', 'vqf_update_accel',
+    'vqf_init', 'vqf_load', 'vqf_save', 'vqf_update_gyro', 'vqf_update_accel',
     'vqf_hard_rest_detected', 'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag',
     'vqf_rebase_gyro_bias')) + r'''
 static void check_gyro_rebase(int warmup) {
@@ -175,7 +174,35 @@ static void check_static_baseline_handoff(void) {
         for(int j=0;j<4;j++) assert(fabs(q[j]-expected[j])<2e-5);
     }
 }
+static void check_current_period_restore(void) {
+    unsigned char saved[VQF_MEM_SIZE];
+    vqf_params_t p; vqf_state_t s; vqf_coeffs_t c;
+    init_params(&p); initVqf(&p,&s,&c,.0025f,.005f,.02f);
+    s.bias[0]=.125f;
+    vqf_saved_header_t header={VQF_SAVED_MAGIC,VQF_SAVED_VERSION,VQF_MEM_SIZE};
+    memcpy(saved,&header,sizeof(header));
+    memcpy(saved+sizeof(header),&s,sizeof(s));
+    memcpy(saved+sizeof(header)+sizeof(s),&c,sizeof(c));
+    /* This is the first wrapper call, as on a retained reboot. */
+    vqf_load(saved,.0025f,.005f,.02f);
+    assert(state.bias[0]==.125f && coeffs.gyrTs==.0025f);
+    const float changed[4][3]={{.004f,.005f,.02f},{.0025f,.01f,.02f},
+                               {.0025f,.005f,.04f},{.0025f,.005f,0}};
+    for(int i=0;i<4;i++) {
+        vqf_load(saved,changed[i][0],changed[i][1],changed[i][2]);
+        assert(state.bias[0]==0 && coeffs.gyrTs==changed[i][0]);
+        assert(coeffs.accTs==changed[i][1]);
+        assert(coeffs.magTs==(changed[i][2] ? changed[i][2] : changed[i][0]));
+    }
+    header.magic=0; memcpy(saved,&header,sizeof(header));
+    vqf_load(saved,.004f,.008f,0);
+    assert(state.bias[0]==0 && coeffs.gyrTs==.004f && coeffs.accTs==.008f && coeffs.magTs==.004f);
+    vqf_init(.004f,.008f,0); state.bias[0]=.25f; vqf_save(saved);
+    vqf_load(saved,.004f,.008f,0);
+    assert(state.bias[0]==.25f && coeffs.magTs==.004f);
+}
 int main(void) {
+    check_current_period_restore();
     check_static_baseline_handoff();
     check_gyro_rebase(0);   /* no samples: preserve native NaN sentinels */
     check_gyro_rebase(1);   /* partial initialization: translate sums */
@@ -201,11 +228,11 @@ int main(void) {
     assert(vqf_take_rest_observation(NULL) && !vqf_take_rest_observation(&rest));
     unsigned char saved[VQF_MEM_SIZE];
     vqf_save(saved);
-    vqf_update_accel(still,.01f); vqf_load(saved);
+    vqf_update_accel(still,.01f); vqf_load(saved,.01f,.01f,.01f);
     assert(!vqf_take_rest_observation(&rest));
     vqf_state_t bad_state; memcpy(&bad_state,saved+sizeof(vqf_saved_header_t),sizeof(bad_state));
     bad_state.bias[0]=NAN; memcpy(saved+sizeof(vqf_saved_header_t),&bad_state,sizeof(bad_state));
-    vqf_update_accel(still,.01f); vqf_load(saved);
+    vqf_update_accel(still,.01f); vqf_load(saved,.01f,.01f,.01f);
     assert(!vqf_take_rest_observation(&rest)); /* rejection/reinit early return */
     vqf_update_accel(still,.01f); vqf_init(.01f,.01f,.01f);
     assert(!vqf_take_rest_observation(&rest));
@@ -273,7 +300,22 @@ static void check_gyro_rebase(void) {
     eqf_get_gyro_bias(bias_after);
     for(int j=0;j<3;j++) assert(fabsf(bias_after[j]-bias_before[j]-large_delta[j])<1e-4f);
 }
+static void check_current_period_restore(void) {
+    unsigned char saved[1024]={0};
+    eqf_saved_t sample={0};
+    sample.A[0]=sample.A[4]=sample.A[8]=1;
+    sample.a_vec[0]=.25f; sample.d_mag[0]=1; sample.mag_ref_norm=1;
+    sample.magic=EQF_MAGIC; memcpy(saved,&sample,sizeof(sample));
+    eqf_load(saved,.0025f,.005f,0);
+    assert(mode==EQF_RUNNING && st.a_vec[0]==.25f);
+    assert(dt_gyr==.0025f && dt_acc==.005f && dt_mag==0 && init_count==0);
+    sample.magic=0; memcpy(saved,&sample,sizeof(sample));
+    eqf_load(saved,.004f,.008f,.02f);
+    assert(mode==EQF_INIT && st.A[0]==1 && st.a_vec[0]==0 && st.P[0]==.1f);
+    assert(dt_gyr==.004f && dt_acc==.008f && dt_mag==.02f && init_count==0);
+}
 int main(void) {
+    check_current_period_restore();
     check_gyro_rebase();
     eqf_init(.01f,.01f,.01f);
     bool rest=true;
@@ -293,9 +335,9 @@ int main(void) {
     eqf_update_accel(still,.01f); eqf_init(.01f,.01f,.01f);
     assert(!eqf_take_rest_observation(&rest));
     mode=EQF_RUNNING; eqf_update_accel(still,.01f);
-    unsigned char saved[1024]={0}; eqf_load(saved); /* Invalid-load early return. */
+    unsigned char saved[1024]={0}; eqf_load(saved,.0025f,.005f,0); /* Invalid-load early return. */
     assert(!eqf_take_rest_observation(&rest));
-    mode=EQF_RUNNING; eqf_update_accel(still,.01f); eqf_save(saved); eqf_load(saved);
+    mode=EQF_RUNNING; eqf_update_accel(still,.01f); eqf_save(saved); eqf_load(saved,.0025f,.005f,0);
     assert(!eqf_take_rest_observation(&rest));
     st.a_vec[0]=.01f;
     float A[9], b[3], P[36];
@@ -342,11 +384,31 @@ int main(void) {
     puts("Gravity evidence: signed inverse mapping, freshness, angle/norm and EqF rest gate");
 }
 '''
+period_test = preamble + r'''
+#define CONFIG_SENSOR_ACCEL_OVERSAMPLING 2
+#define CONFIG_SENSOR_MAG_ODR 50
+static float gyro_actual_time=.0025f, accel_actual_time=.005f, mag_actual_time=.04f;
+static unsigned gyro_oversample_n=4;
+static bool mag_available=true, mag_enabled=true;
+''' + extract_block(sensor, r'^struct fusion_periods\s*\{', semicolon=True) + '\n' + \
+    extract_block(sensor, r'^static struct fusion_periods sensor_fusion_periods\([^;{}]*\)\s*\{') + r'''
+int main(void) {
+    struct fusion_periods p=sensor_fusion_periods();
+    assert(p.gyro==.01f && p.accel==.01f && p.mag==.04f);
+    gyro_oversample_n=1; mag_enabled=false; p=sensor_fusion_periods();
+    assert(p.gyro==.0025f && p.accel==.01f && p.mag==0);
+    mag_enabled=true; mag_available=false; p=sensor_fusion_periods();
+    assert(p.mag==0);
+    mag_available=true; mag_actual_time=INFINITY; p=sensor_fusion_periods();
+    assert(p.mag==.02f);
+    puts("Current sensor periods match merge and magnetometer mode");
+}
+'''
 with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
     tmp = Path(tmp)
     cc = shlex.split(os.environ.get('CC', 'cc'))
     jobs = [('vqf', vqf_test, ['-I'+str(ROOT/'vqf-c/src'), str(ROOT/'vqf-c/src/vqf.c')]),
-            ('eqf', eqf_test, [])]
+            ('eqf', eqf_test, []), ('periods', period_test, [])]
     for index, axes in enumerate(('mx,my,mz','my,-mx,-mz','my,mx,mz','-mx,my,mz')):
         jobs.append((f'gravity{index}', gravity_test, ['-DSENSOR_MAGNETOMETER_AXES_ALIGNMENT='+axes]))
     for name, text, extra in jobs:

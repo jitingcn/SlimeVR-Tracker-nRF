@@ -376,7 +376,7 @@ static void retained_stages(void) {
         }
 #endif
         struct guarded_save saved; save_guarded(&saved);
-        vqf_init(GYR_DT, ACC_DT, ACC_DT); vqf_load(saved.data);
+        vqf_init(GYR_DT, ACC_DT, ACC_DT); vqf_load(saved.data, GYR_DT, ACC_DT, ACC_DT);
         float q[4]; vqf_get_quat(q); assert(!memcmp(q, public_before, sizeof(q)));
         getQuat6D(&state, q); assert(!memcmp(q, native_before, sizeof(q)));
 #if CONFIG_SENSOR_VQF_OUTPUT_OBSERVER
@@ -390,9 +390,9 @@ static void retained_stages(void) {
         unsigned char bad[SAVED_BYTES]; memcpy(bad, saved.data, sizeof(bad));
         vqf_saved_header_t header; memcpy(&header, bad, sizeof(header));
         header.version = SAVED_VERSION == 2 ? 1 : 2;
-        memcpy(bad, &header, sizeof(header)); vqf_load(bad); assert_cold();
+        memcpy(bad, &header, sizeof(header)); vqf_load(bad, GYR_DT, ACC_DT, ACC_DT); assert_cold();
         memcpy(bad, saved.data, sizeof(bad)); header.version = SAVED_VERSION; header.size--;
-        memcpy(bad, &header, sizeof(header)); vqf_load(bad); assert_cold();
+        memcpy(bad, &header, sizeof(header)); vqf_load(bad, GYR_DT, ACC_DT, ACC_DT); assert_cold();
     }
 }
 #if CONFIG_SENSOR_VQF_OUTPUT_OBSERVER
@@ -432,7 +432,7 @@ static void retained_output_corruption(void) {
             } else {
                 store_double(lp + 8 * (mutation - 16), UINT64_C(0x7ff8000000000001));
             }
-            vqf_load(bad); assert_cold();
+            vqf_load(bad, GYR_DT, ACC_DT, ACC_DT); assert_cold();
             float a[3] = {.1f, -.2f, 1}; send_acc(a); assert_public_and_linear();
         }
     }
@@ -479,7 +479,7 @@ static void public_modes_and_external_retention(void) {
              */
             host_mag_available = !available; host_mag_enabled = !enabled;
             float expected[4]; expected_public(expected);
-            vqf_init(GYR_DT, ACC_DT, ACC_DT); vqf_load(saved.data);
+            vqf_init(GYR_DT, ACC_DT, ACC_DT); vqf_load(saved.data, GYR_DT, ACC_DT, ACC_DT);
             assert(host_mag_available == !available && host_mag_enabled == !enabled);
             float actual[4]; vqf_get_quat(actual);
             assert(!memcmp(actual, expected, sizeof(actual)));
@@ -612,7 +612,7 @@ static void stop_countdown_cache_and_lifecycle(void) {
     for (int row = 0; row < 200; row++) flat_step(40, row, false);
     assert(stop_macro_gate.peak2 < 0);
     struct guarded_save saved; save_guarded(&saved);
-    vqf_load(saved.data);
+    vqf_load(saved.data, GYR_DT, ACC_DT, ACC_DT);
     assert(stop_macro_gate.peak2 > 0 && stop_macro_gate.remaining > 0);
     assert(stop_macro_gate.remaining < 20000 && stop_macro_gate.base_samples == 0);
     uint32_t count = stop_macro_gate.remaining;

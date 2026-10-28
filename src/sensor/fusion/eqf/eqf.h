@@ -13,7 +13,7 @@
 #include "sensor/sensor.h"
 
 void eqf_init(float g_time, float a_time, float m_time);
-void eqf_load(const void *data);
+void eqf_load(const void *data, float g_time, float a_time, float m_time);
 void eqf_save(void *data);
 
 void eqf_update_gyro(float *g, float time);

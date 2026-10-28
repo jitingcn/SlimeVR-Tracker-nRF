@@ -1098,9 +1098,9 @@ void eqf_init(float g_time, float a_time, float m_time)
 	eqf_reset_mag_runtime_state(false);
 }
 
-void eqf_load(const void *data)
+void eqf_load(const void *data, float g_time, float a_time, float m_time)
 {
-	rest_observation_pending = false;
+	eqf_init(g_time, a_time, m_time);
 	BUILD_ASSERT(sizeof(eqf_saved_t) <= sizeof(((struct retained_data *)0)->fusion_data),
 		     "EqF state exceeds fusion_data buffer");
 
@@ -1113,22 +1113,10 @@ void eqf_load(const void *data)
 	eqf_reset_mag_runtime_state(false);
 #endif
 	if (st.magic != EQF_MAGIC) {
-		/* corrupt / first-boot – will re-init on next eqf_init */
-		mode = EQF_INIT;
+		eqf_init(g_time, a_time, m_time);
 		return;
 	}
 	mode = EQF_RUNNING;
-	ortho_counter = 0;
-	memset(last_a_ms2, 0, sizeof(last_a_ms2));
-	/* rest detection starts fresh each boot */
-	memset(rest_gyr_lp, 0, sizeof(rest_gyr_lp));
-	memset(rest_acc_lp, 0, sizeof(rest_acc_lp));
-	rest_gyr_dev = 0.0f;
-	rest_acc_dev = 0.0f;
-	rest_t = 0.0f;
-	rest_detected = false;
-	rest_gyr_lp_init = false;
-	rest_acc_lp_init = false;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	mag_ref_valid = isfinite(st.mag_ref_norm) && st.mag_ref_norm > 0.01f;
 	if (!mag_ref_valid) {

@@ -315,7 +315,7 @@ static void discard_lifecycle_continuity(void) {
         }
         case 1: {
             unsigned char saved[VQF_MEM_SIZE];
-            vqf_save(saved); vqf_load(saved);
+            vqf_save(saved); vqf_load(saved, GYR_DT, ACC_DT, GYR_DT);
             break;
         }
         case 2:
