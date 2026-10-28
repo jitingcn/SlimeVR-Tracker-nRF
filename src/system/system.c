@@ -941,15 +941,10 @@ int sys_clear(void)
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
 	sensor_calibration_sensitivity_clear_begin();
 #endif
-	memset(retained, 0, sizeof(*retained));
+	retained_reset();
 	nvs_init = false;
 	atomic_set(&wom_timeout_delay_ms, WOM_TIMEOUT_DEFAULT_MS);
 
-	// Re-initialize fields that need non-zero default values
-	retained->gyroSensScale[0] = 1.0f;
-	retained->gyroSensScale[1] = 1.0f;
-	retained->gyroSensScale[2] = 1.0f;
-	retained->build_timestamp = BUILD_TIMESTAMP;
 	retained_update();
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
 	sensor_calibration_sensitivity_clear_end();

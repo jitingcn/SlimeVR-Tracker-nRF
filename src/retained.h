@@ -165,6 +165,11 @@ extern struct retained_data *retained;
  */
 bool retained_validate(void);
 
+/* Reset retained data to the same defaults used for invalid retained state.
+ * The current uptime becomes the start of the new accounting interval.
+ */
+void retained_reset(void);
+
 /* Update any generic retained state and recalculate its checksum so
  * subsequent boots can verify the retained state.
  */
