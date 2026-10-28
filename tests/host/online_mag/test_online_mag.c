@@ -704,6 +704,35 @@ static void test_repeated_enable_preserves_trial(void)
 	assert(dirty_marks == 1 && fixture_updates() == 1);
 	assert(!memcmp(storage.magBAinv, active, sizeof(active)));
 }
+static void test_manual_start_rolls_back_only_trial(void)
+{
+	fixture_reset(1000, 1);
+	trial();
+	float confirmed[4][3], active[4][3];
+	memcpy(confirmed, storage.magBAinv, sizeof(confirmed));
+	magneto_online_snapshot_BAinv(active);
+	assert(memcmp(active, confirmed, sizeof(active)) != 0);
+	online.updates = storage.onlineMagState.update_count = 7;
+	storage.onlineMagState.last_buf_avg_norm = .52f;
+	sys_warm_transaction_begin();
+	magneto_online_reset();
+	sys_warm_transaction_end(false);
+	assert(!memcmp(storage.magBAinv, confirmed, sizeof(confirmed)));
+	assert(storage.onlineMagState.update_count == 7);
+	assert(storage.onlineMagState.last_buf_avg_norm == .52f);
+	magneto_online_apply_pending();
+	assert(!memcmp(magBAinv, confirmed, sizeof(confirmed)));
+	assert(!memcmp(storage.magBAinv, confirmed, sizeof(confirmed)));
+	assert(online.updates == 7 && storage.onlineMagState.update_count == 7);
+	assert(storage.onlineMagState.last_buf_avg_norm == .52f);
+	assert(!dirty_marks && !storage_writes);
+	assert(last_end.outcome == CAL_OUTCOME_CANCELLED);
+	unsigned completed = ended_events;
+	magneto_online_apply_pending();
+	assert(ended_events == completed);
+	samples(1, false, true);
+	assert(!memcmp(magBAinv, confirmed, sizeof(confirmed)) && ended_events == completed);
+}
 static void test_rejection_and_rollback(void)
 {
 	fixture_reset(1000, 1);
@@ -888,6 +917,7 @@ int main(void)
 	test_cancel_frozen();
 	test_holdout_and_confirmation();
 	test_repeated_enable_preserves_trial();
+	test_manual_start_rolls_back_only_trial();
 	test_rejection_and_rollback();
 	test_config_persist_failure_cache();
 	test_disabled_mag_clear_waits_for_real_frame_application();

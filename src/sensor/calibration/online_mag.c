@@ -342,13 +342,28 @@ static bool apply_replacement_locked(void)
 	return true;
 }
 
+static bool rollback_cancelled_trial_locked(void)
+{
+	if (online.served == online.generation || !online.trial) {
+		return false;
+	}
+	memcpy(magBAinv, previous, sizeof(previous));
+	online.trial = false;
+	reference_locked(online.dip_known ? online.field : 0, online.dip_known ? online.dip : 0);
+	return true;
+}
+
 /* A disabled magnetometer still has a real sensor-frame model consumer. */
 void magneto_online_apply_pending(void)
 {
 	k_spinlock_key_t key = k_spin_lock(&online_lock);
 	bool applied = apply_replacement_locked();
+	bool rolled_back = rollback_cancelled_trial_locked();
+	if (rolled_back) {
+		finish_cancel_locked();
+	}
 	k_spin_unlock(&online_lock, key);
-	if (applied) {
+	if (applied || rolled_back) {
 		tracker_events_notify();
 	}
 }
@@ -358,11 +373,7 @@ static void service_locked(uint32_t now)
 {
 	apply_replacement_locked();
 	if (online.served != online.generation) {
-		if (online.trial) {
-			memcpy(magBAinv, previous, sizeof(previous));
-			online.trial = false;
-			reference_locked(online.dip_known ? online.field : 0, online.dip_known ? online.dip : 0);
-		}
+		rollback_cancelled_trial_locked();
 		finish_cancel_locked();
 		/* Cancellation invalidates the fit immediately, but its borrowed
 		 * memory is not reusable until the fitter explicitly releases it. */

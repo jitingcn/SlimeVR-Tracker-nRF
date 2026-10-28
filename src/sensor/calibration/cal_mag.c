@@ -107,13 +107,6 @@ int sensor_calibrate_mag(void)
 		manual_cancelled(op, feedback);
 		return -ECANCELED;
 	}
-	float zero[3] = {0};
-	float live_snapshot[4][3];
-	magneto_online_snapshot_BAinv(live_snapshot);
-	if (v_diff_mag(live_snapshot[0], zero) != 0) {
-		manual_finish(op, feedback, CAL_PHASE_COLLECT, CAL_REASON_REPLACED);
-		return -1; // magnetometer calibration already exists
-	}
 
 	if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
 		set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
@@ -196,19 +189,6 @@ int sensor_calibrate_mag(void)
 		return -ECANCELED;
 	}
 	if (sensor_calibration_validate_mag(m_inv, false)) {
-		LOG_INF("Restoring previous calibration");
-		LOG_INF("Magnetometer matrix:");
-		magneto_online_snapshot_BAinv(live_snapshot);
-		for (int i = 0; i < 3; i++) {
-			LOG_INF(
-				"%.5f %.5f %.5f %.5f",
-				(double)live_snapshot[0][i],
-				(double)live_snapshot[1][i],
-				(double)live_snapshot[2][i],
-				(double)live_snapshot[3][i]
-			);
-		}
-		sensor_calibration_validate_mag(NULL, true); // additionally verify old calibration
 		manual_finish(op, feedback, CAL_PHASE_FIT, CAL_REASON_INVALID_MODEL);
 		sys_warm_transaction_end(false);
 		return -1;
@@ -216,6 +196,7 @@ int sensor_calibrate_mag(void)
 		LOG_INF("Applying calibration");
 		cal_event_step(op, CAL_PHASE_APPLY_PENDING, 0);
 		tracker_events_notify();
+		sensor_calibration_online_mag_retained_clear();
 		magneto_online_replace_BAinv_and_reset(m_inv, op, feedback);
 		sensor_fusion_reset_mag_ref();
 		sensor_mag_ref_reset(); // Recompute magRef from new calibration

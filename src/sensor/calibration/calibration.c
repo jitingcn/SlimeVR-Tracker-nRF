@@ -933,7 +933,7 @@ static void calibration_thread(void)
 					tracker_events_notify();
 					break;
 				}
-				requested_storage_error = calibration_clear_mag_owned(NULL, true, (struct led_token){0});
+				magneto_online_reset();
 				sys_warm_transaction_end(false);
 				cal_event_start(operation, CAL_PHASE_IDENTIFY, 0);
 				tracker_events_notify();
@@ -949,7 +949,6 @@ static void calibration_thread(void)
 				sensor_calibration_stage(sensor_calibration_current_feedback(), LED_COLLECT_MOVE);
 				tracker_events_notify();
 				magneto_reset();
-				magneto_online_reset();
 				magneto_progress |= 1 << 7;
 				LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
 				break;

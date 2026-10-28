@@ -92,7 +92,7 @@ void magneto_online_snapshot_BAinv(float out[4][3]);
 void magneto_online_replace_BAinv_and_reset(const float replacement[4][3], uint16_t operation_id,
 	struct led_token feedback);
 void magneto_online_feedback_storage(struct led_token feedback, int result);
-/* Sensor frame owner: replacement application does not require magnetic data. */
+/* Sensor frame owner: replacement and cancelled trial rollback need no magnetic data. */
 void magneto_online_apply_pending(void);
 /* Sensor-only, consumed after sample service and before applying/fusing mag.
  * norm > 0 supplies validated calibrated-domain norm/dip; zero reacquires.
