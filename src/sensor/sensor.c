@@ -1911,7 +1911,7 @@ void sensor_request_fusion_bias_reset(void)
 	atomic_or(&fusion_requests, FUSION_REQUEST_BIAS);
 }
 
-static void sensor_discard_partial_samples(void)
+static void sensor_discard_gyro_window(void)
 {
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 	gyro_oversample_count = 0;
@@ -1919,6 +1919,11 @@ static void sensor_discard_partial_samples(void)
 	gyro_dq_acc[1] = gyro_dq_acc[2] = gyro_dq_acc[3] = 0.0f;
 	memset(gyro_merge_bias_dps, 0, sizeof(gyro_merge_bias_dps));
 #endif
+}
+
+static void sensor_discard_partial_samples(void)
+{
+	sensor_discard_gyro_window();
 #if CONFIG_SENSOR_ACCEL_OVERSAMPLING > 1
 	accel_oversample_count = 0;
 	memset(accel_oversample_sum, 0, sizeof(accel_oversample_sum));
@@ -2700,6 +2705,15 @@ void sensor_gyro_report_discontinuity(void)
 	sensor_sample_gyro(unknown_rate, 0.0f);
 }
 
+static void sensor_reject_gyro_sample(void)
+{
+	sensor_motion_state.frame_invalid = true;
+	sensor_discard_gyro_window();
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+	vqf_discard_motion_history();
+#endif
+}
+
 static void feed_gyro_sample(
 	float *raw_g,
 	int *g_count
@@ -2709,6 +2723,13 @@ static void feed_gyro_sample(
 #endif
 )
 {
+	if (!v_finite(raw_g, 3)) {
+		sensor_reject_gyro_sample();
+		return;
+	}
+	if (raw_g[0] == 0.0f && raw_g[1] == 0.0f && raw_g[2] == 0.0f) {
+		return;
+	}
 #if DEBUG
 	if (valid_acquisition) {
 		total_gyro_samples++;
@@ -2738,6 +2759,10 @@ static void feed_gyro_sample(
 	}
 #endif
 #endif
+	if (!v_finite(g, 3) || !v_finite(reference_delta, 3)) {
+		sensor_reject_gyro_sample();
+		return;
+	}
 
 	if (measured_reset) {
 		float zero[3] = {0};
@@ -2774,7 +2799,6 @@ static void feed_gyro_sample(
 
 	/* Per-sample stats on firmware-compensated g; Δq merge; one fusion step. */
 	sensor_diagnostics_on_cal_gyro(g);
-	if (!v_finite(g, 3)) sensor_motion_state.frame_invalid = true;
 
 	/* Freeze fusion residual bias for the whole window (layer 2). */
 	if (gyro_oversample_count == 0) {
@@ -2792,6 +2816,10 @@ static void feed_gyro_sample(
 
 	float g_feed[3];
 	gyro_dq_to_feed_gyro(g_feed, gyro_effective_time, gyro_merge_bias_dps);
+	if (!v_finite(g_feed, 3)) {
+		sensor_reject_gyro_sample();
+		return;
+	}
 	/* g_feed is post-firmware + fusion_bias carrier; update_gyro subtracts fusion bias. */
 	sensor_fusion->update_gyro(g_feed, gyro_effective_time);
 	(*g_count)++;
@@ -3117,16 +3145,14 @@ static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 
 		sensor_diagnostics_on_decoded_gyro(raw_g);
 
-		if (raw_g[0] != 0 || raw_g[1] != 0 || raw_g[2] != 0) {
-			feed_gyro_sample(
-				raw_g,
-				&frame->g_count
+		feed_gyro_sample(
+			raw_g,
+			&frame->g_count
 #if DEBUG
-				,
-				frame->valid_acquisition
+			,
+			frame->valid_acquisition
 #endif
-			);
-		}
+		);
 
 		if (raw_a[0] != 0 || raw_a[1] != 0 || raw_a[2] != 0) {
 			feed_accel_sample(

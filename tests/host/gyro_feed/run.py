@@ -164,7 +164,8 @@ parts += ['#endif', state, 'static struct {bool frame_invalid;} sensor_motion_st
 parts += [function('feed_calibrated_gyro')]
 parts += ['#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1']
 parts += [function(name) for name in ('gyro_dq_mul', 'gyro_dq_accumulate_sample', 'gyro_dq_to_feed_gyro')]
-parts += ['#endif', function('feed_gyro_sample')]
+parts += ['#endif', function('sensor_discard_gyro_window'),
+          function('sensor_reject_gyro_sample'), function('feed_gyro_sample')]
 main = r'''
 
 static void feed_raw(float raw[3], int *count, bool valid_acquisition) {
@@ -252,6 +253,31 @@ static void sensitivity_lifecycle(int n, int *count) {
     printf("sensitivity lifecycle SIDE=%d N=%d: manual/reset/reset-all same-scale and scale changes, coherent scales and partial merges preserved\n",
         CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION, n);
 }
+static void invalid_gyro(int n, int *count) {
+    const float values[3]={NAN,INFINITY,-INFINITY};
+    const float desired[3]={20,2,-3};
+    for(int axis=0;axis<3;axis++) for(int kind=0;kind<3;kind++) {
+        for(int sample=0;sample<n-1;sample++) feed_desired(desired,count);
+        unsigned feeds=feed_count, calibrated=cal_count, discarded=history_discards;
+        float invalid[3]={1,2,3}; invalid[axis]=values[kind];
+        sensor_motion_state.frame_invalid=false;
+        feed_raw(invalid,count,true);
+        assert(sensor_motion_state.frame_invalid && feed_count==feeds && cal_count==calibrated);
+#if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
+        assert(gyro_oversample_count==0 && gyro_dq_acc[0]==1);
+        assert(gyro_merge_bias_dps[0]==0 && gyro_merge_bias_dps[1]==0 && gyro_merge_bias_dps[2]==0);
+#endif
+#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+        assert(history_discards==discarded+1);
+#else
+        assert(history_discards==discarded);
+#endif
+        for(int sample=0;sample<n;sample++) feed_desired(desired,count);
+        assert(feed_count==feeds+1 && *count==(int)feed_count);
+        for(int j=0;j<3;j++) assert(fabsf(received[feeds][j]-desired[j])<.001f);
+    }
+    puts("nonfinite gyro axes discard partial windows before calibration and fusion");
+}
 int main(int argc, char **argv) {
     int n = argc > 1 ? atoi(argv[1]) : 1;
     int count = 0;
@@ -263,6 +289,10 @@ int main(int argc, char **argv) {
     gyro_effective_time = gyro_actual_time * n;
     gyro_dq_acc[0] = 1.0f;
 #endif
+    if (argc > 2 && !strcmp(argv[2], "invalid")) {
+        invalid_gyro(n, &count);
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[2], "sensitivity")) {
         sensitivity_lifecycle(n, &count);
         return 0;
@@ -368,6 +398,7 @@ static float sensor_tcal_temp = 25.0f;
 static float sensor_tcal_temp_raw = 25.0f;
 static bool sensor_tcal_temp_filter_initialized;
 static int64_t k_uptime_get(void) { return now_ms; }
+static bool bad_only;
 static unsigned temperature_calls, gyro_calls, accel_calls, raw_calls;
 static unsigned expected_temperature_calls;
 static float expected_temperature;
@@ -384,7 +415,7 @@ static uint8_t sensor_fifo_raw_buffer[1];
 static int fifo_process(uint16_t index, uint8_t *data, float *a, float *g) {
     assert(data == sensor_fifo_raw_buffer && index < 2);
     a[2] = 1.0f;
-    g[0] = 1.0f + index;
+    g[0] = bad_only ? NAN : 1.0f + index;
     return 0;
 }
 static const struct {
@@ -392,14 +423,15 @@ static const struct {
 } imu = {fifo_process};
 static const typeof(imu) *sensor_imu = &imu;
 static void sensor_diagnostics_reset_frame(void) {}
-static void sensor_diagnostics_on_decoded_gyro(float *g) { assert(g[0] != 0); }
+static void sensor_diagnostics_on_decoded_gyro(float *g) { assert(bad_only || g[0] != 0); }
 static void sensor_raw_collection_on_sample(float *a, float *g, float t, bool active) {
-    assert(a[2] == 1 && g[0] != 0 && active);
+    assert(a[2] == 1 && (bad_only || g[0] != 0) && active);
     assert_temperature(t);
     raw_calls++;
 }
 static void feed_gyro_sample(float *g, int *count) {
-    assert(g[0] != 0 && temperature_calls == expected_temperature_calls);
+    assert((bad_only || g[0] != 0) && temperature_calls == expected_temperature_calls);
+    if (bad_only) { assert(isnan(g[0])); gyro_calls++; return; }
     gyro_calls++;
     (*count)++;
 }
@@ -449,6 +481,13 @@ int main(void) {
     temp = sensor_tcal_temp_raw = sensor_tcal_temp = 25.0f;
     batch(25.0f, 2); /* A real 25C measurement is valid. */
     batch(25.0f, 0);
+    bad_only=true; gyro_calls=0;
+#if CONFIG_SENSOR_VQF_ADAPTIVE_BIAS
+    expected_temperature_calls=temperature_calls+1;
+#endif
+    sensor_loop_frame_t bad_frame={.packets=1,.dc_active=true,.raw_collect_temp_c=25};
+    expected_temperature=25; sensor_loop_process_fifo(&bad_frame);
+    assert(gyro_calls==1 && bad_frame.g_count==0 && bad_frame.processed_packets==1);
     printf("batch temperature: adaptive=%d tcal=%d vqf=%d eqf=%d; signed, initial/stale, ordering and sample counts preserved\n",
         CONFIG_SENSOR_VQF_ADAPTIVE_BIAS, CONFIG_SENSOR_USE_TCAL,
         CONFIG_SENSOR_USE_VQF, CONFIG_SENSOR_USE_EQF);
@@ -469,7 +508,7 @@ with tempfile.TemporaryDirectory(prefix='sensor-fast-') as directory:
         for compiled, runtime in scenarios:
             binary = tmp/f'gyro-side{side}-{compiled}'
             subprocess.run(shlex.split(os.environ.get('CC','cc')) + ['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie',f'-DCONFIG_SENSOR_GYRO_OVERSAMPLING={compiled}',f'-DCONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION={side}','-DCONFIG_CONNECTION_RAW_COLLECTION=1','-DCONFIG_SENSOR_USE_MAGNETOMETER=1','-I',str(tmp),'-I',str(ROOT/'src'),str(unit),str(ROOT/'src/sensor/motion_state.c'),str(ROOT/'src/util.c'),'-lm','-o',str(binary)],check=True)
-            cases = (None, "rebase", "physical", "sensitivity")
+            cases = (None, "rebase", "physical", "sensitivity", "invalid")
             for scenario in cases:
                 result = subprocess.run([str(binary), str(runtime)] + ([scenario] if scenario else []))
                 if result.returncode:
@@ -491,7 +530,8 @@ with tempfile.TemporaryDirectory(prefix='sensor-fast-') as directory:
             'sensor_calibration_apply_sensitivity', 'sensor_calibration_set_sensitivity',
             'sensor_calibration_reset_sensitivity')),
         function('sensor_calibration_read', calibration),
-        function('feed_calibrated_gyro'), function('feed_gyro_sample'),
+        function('feed_calibrated_gyro'), function('sensor_discard_gyro_window'),
+        function('sensor_reject_gyro_sample'), function('feed_gyro_sample'),
         '#define TEST_CACHE_GENERATION (sensitivity_cache.generation)',
     ]
     (tmp/'sensitivity_contention_sources.inc').write_text('\n\n'.join(contention_parts))

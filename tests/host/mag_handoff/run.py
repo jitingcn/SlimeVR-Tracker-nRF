@@ -264,7 +264,7 @@ eqf_test = preamble + '''
 #define BUILD_ASSERT(c,m) _Static_assert(c,m)
 #define CONST_EARTH_GRAVITY 9.80665f
 struct retained_data { unsigned char fusion_data[1024]; };
-''' + eqf + r'''
+''' + function((ROOT / 'src/util.c').read_text(), 'v_finite') + '\n' + eqf + r'''
 static void check_gyro_rebase(void) {
     eqf_init(.01f,.01f,.01f);
     float delta[3]={.35f,-.2f,.15f};
@@ -314,8 +314,67 @@ static void check_current_period_restore(void) {
     assert(mode==EQF_INIT && st.A[0]==1 && st.a_vec[0]==0 && st.P[0]==.1f);
     assert(dt_gyr==.004f && dt_acc==.008f && dt_mag==.02f && init_count==0);
 }
+static void check_nonfinite_inputs(void) {
+    const float values[3]={NAN,INFINITY,-INFINITY};
+    for(int running=0;running<2;running++) {
+        eqf_init(.0025f,.005f,.02f);
+        if(running) mode=EQF_RUNNING;
+        float g[3]={1,2,3}, a[3]={0,0,1}, m[3]={1,0,0};
+        eqf_update_gyro(g,.0025f); eqf_update_accel(a,.005f); eqf_update_mag(m,.02f);
+        eqf_saved_t before=st;
+        float accel_before[3], mag_before[3], last_before[3], gyro_lp_before[3], accel_lp_before[3];
+        memcpy(accel_before,acc_sum,sizeof(accel_before)); memcpy(mag_before,mag_sum,sizeof(mag_before));
+        memcpy(last_before,last_a_ms2,sizeof(last_before)); memcpy(gyro_lp_before,rest_gyr_lp,sizeof(gyro_lp_before));
+        memcpy(accel_lp_before,rest_acc_lp,sizeof(accel_lp_before));
+        int acc_count=acc_init_count, mag_count=mag_init_count;
+        float candidate=mag_candidate_t, maglp=mag_norm_lp, rest_time=rest_t;
+        for(int axis=0;axis<3;axis++) for(int kind=0;kind<3;kind++) {
+            float bad[3]={1,2,3}; bad[axis]=values[kind];
+            eqf_update_gyro(bad,.0025f); eqf_update_accel(bad,.005f); eqf_update_mag(bad,.02f);
+            eqf_set_gyro_bias(bad); eqf_rebase_gyro_bias(bad);
+            eqf_rebase_mag(values[kind],0); eqf_rebase_mag(1,values[kind]);
+            assert(!memcmp(&before,&st,sizeof(st)));
+            assert(!memcmp(accel_before,acc_sum,sizeof(accel_before)) && acc_count==acc_init_count);
+            assert(!memcmp(mag_before,mag_sum,sizeof(mag_before)) && mag_count==mag_init_count);
+            assert(!memcmp(last_before,last_a_ms2,sizeof(last_before)));
+            assert(!memcmp(gyro_lp_before,rest_gyr_lp,sizeof(gyro_lp_before)));
+            assert(!memcmp(accel_lp_before,rest_acc_lp,sizeof(accel_lp_before)));
+            assert(candidate==mag_candidate_t && maglp==mag_norm_lp && rest_time==rest_t);
+        }
+        if(running) {
+            eqf_update_gyro(g,.0025f); assert(memcmp(&before,&st,sizeof(st)));
+        } else {
+            eqf_update_accel(a,.005f); assert(acc_init_count==acc_count+1);
+        }
+    }
+}
+static void check_poisoned_retained(void) {
+    unsigned char saved[1024]={0};
+    eqf_init(.01f,.01f,.01f); mode=EQF_RUNNING;
+    float g[3]={1,2,3}; eqf_update_gyro(g,.01f); eqf_save(saved);
+    eqf_saved_t good; memcpy(&good,saved,sizeof(good));
+    const float values[3]={NAN,INFINITY,-INFINITY};
+    for(int group=0;group<5;group++) for(int kind=0;kind<3;kind++) {
+        eqf_saved_t bad=good;
+        float *fields[5]={bad.A,bad.a_vec,bad.P,bad.d_mag,&bad.mag_ref_norm};
+        const int sizes[5]={9,3,36,3,1};
+        for(int i=0;i<sizes[group];i++) {
+            bad=good; fields[group][i]=values[kind]; memcpy(saved,&bad,sizeof(bad));
+            eqf_load(saved,.0025f,.005f,.02f);
+            assert(mode==EQF_INIT && st.magic==0 && st.A[0]==1 && st.P[0]==.1f);
+            assert(v_finite(st.A,9) && v_finite(st.a_vec,3) && v_finite(st.P,36));
+            assert(v_finite(st.d_mag,3) && v_finite(&st.mag_ref_norm,1));
+            assert(dt_gyr==.0025f && dt_acc==.005f && dt_mag==.02f);
+        }
+    }
+    eqf_init(.01f,.01f,.01f); eqf_save(saved);
+    eqf_load(saved,.004f,.008f,0);
+    assert(mode==EQF_INIT && st.magic==0 && st.A[0]==1 && dt_gyr==.004f);
+}
 int main(void) {
     check_current_period_restore();
+    check_nonfinite_inputs();
+    check_poisoned_retained();
     check_gyro_rebase();
     eqf_init(.01f,.01f,.01f);
     bool rest=true;
@@ -525,6 +584,7 @@ typedef struct {float raw_m[3]; bool new_mag_data;} sensor_loop_frame_t;
         'sensor_fusion_set_mag_ref', 'sensor_fusion_reset_mag_ref', 'sensor_service_mag_ref',
         'sensor_finish_mag_fusion_restart', 'sensor_service_pending_mag_fusion',
         'sensor_retained_write', 'sensor_invalidate_mag_fusion')) + '\n' + \
+    function(sensor, 'sensor_discard_gyro_window') + '\n' + \
     function(sensor, 'sensor_discard_partial_samples') + '\n' + \
     function(sensor, 'main_imu_restart') + '\n' + \
     function(sensor, 'sensor_set_mag_enabled') + '\n' + \
@@ -603,7 +663,7 @@ with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
     tmp = Path(tmp)
     cc = shlex.split(os.environ.get('CC', 'cc'))
     jobs = [('vqf', vqf_test, ['-I'+str(ROOT/'vqf-c/src'), str(ROOT/'vqf-c/src/vqf.c')]),
-            ('eqf', eqf_test, []), ('periods', period_test, [])]
+            ('eqf', eqf_test, []), ('eqf_fast', eqf_test, ['-ffast-math']), ('periods', period_test, [])]
     for n in (1, 4):
         jobs.append((f'transition{n}', transition_test,
                      [f'-DCONFIG_SENSOR_GYRO_OVERSAMPLING={n}', f'-DCONFIG_SENSOR_ACCEL_OVERSAMPLING={n}']))

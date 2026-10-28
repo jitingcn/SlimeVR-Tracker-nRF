@@ -217,7 +217,7 @@ static inline float v3_norm(const float *v)
 
 static inline float eqf_resolve_dt(float time, float fallback_dt)
 {
-	return (isfinite(time) && time > 0.0f && time < 1.0f) ? time : fallback_dt;
+	return (v_finite(&time, 1) && time > 0.0f && time < 1.0f) ? time : fallback_dt;
 }
 
 static inline float eqf_alpha_from_tau(float tau, float dt)
@@ -1105,6 +1105,12 @@ void eqf_load(const void *data, float g_time, float a_time, float m_time)
 		     "EqF state exceeds fusion_data buffer");
 
 	memcpy(&st, data, sizeof(st));
+	if (st.magic != EQF_MAGIC || !v_finite(st.A, 9) ||
+	    !v_finite(st.a_vec, 3) || !v_finite(st.P, 36) ||
+	    !v_finite(st.d_mag, 3) || !v_finite(&st.mag_ref_norm, 1)) {
+		eqf_init(g_time, a_time, m_time);
+		return;
+	}
 #if !CONFIG_SENSOR_USE_MAGNETOMETER
 	memset(st.d_mag, 0, sizeof(st.d_mag));
 	st.mag_ref_norm = 0.0f;
@@ -1112,13 +1118,9 @@ void eqf_load(const void *data, float g_time, float a_time, float m_time)
 	mag_rebase_pending = false;
 	eqf_reset_mag_runtime_state(false);
 #endif
-	if (st.magic != EQF_MAGIC) {
-		eqf_init(g_time, a_time, m_time);
-		return;
-	}
 	mode = EQF_RUNNING;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	mag_ref_valid = isfinite(st.mag_ref_norm) && st.mag_ref_norm > 0.01f;
+	mag_ref_valid = st.mag_ref_norm > 0.01f;
 	if (!mag_ref_valid) {
 		st.d_mag[0] = 1.0f;
 		st.d_mag[1] = 0.0f;
@@ -1144,7 +1146,7 @@ void eqf_save(void *data)
 
 void eqf_update_gyro(float *g, float time)
 {
-	if (mode != EQF_RUNNING)
+	if (mode != EQF_RUNNING || !v_finite(g, 3))
 		return;
 	float dt = eqf_resolve_dt(time, dt_gyr);
 
@@ -1173,6 +1175,8 @@ void eqf_update_gyro(float *g, float time)
 
 void eqf_update_accel(float *a, float time)
 {
+	if (!v_finite(a, 3))
+		return;
 	float dt = eqf_resolve_dt(time, dt_acc);
 
 	/* store in m/s² for get_lin_a */
@@ -1272,6 +1276,8 @@ void eqf_update_accel(float *a, float time)
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 void eqf_update_mag(float *m, float time)
 {
+	if (!v_finite(m, 3))
+		return;
 	float dt = eqf_resolve_dt(time, dt_mag);
 	float mn = v3_norm(m);
 	if (mn < 1e-10f)
@@ -1419,6 +1425,8 @@ void eqf_get_gyro_bias(float *g_off)
 
 void eqf_set_gyro_bias(float *g_off)
 {
+	if (!v_finite(g_off, 3))
+		return;
 	/* given b in deg/s → set a_vec = −A · b_rad */
 	float b_rad[3] = {
 		g_off[0] * DEG_TO_RAD,
@@ -1434,6 +1442,8 @@ void eqf_set_gyro_bias(float *g_off)
 
 void eqf_rebase_gyro_bias(const float delta_dps[3])
 {
+	if (!v_finite(delta_dps, 3))
+		return;
 	/* b_hat = -A^T*a_vec: b_hat += delta requires a_vec -= A*delta.
 	 * Preserve attitude, covariance, rest evidence and LP initialization. */
 	float delta[3] = {
@@ -1494,6 +1504,8 @@ bool eqf_get_mag_dist_detected(void)
 
 static void eqf_rebase_mag(float norm, float dip)
 {
+	if (!v_finite(&norm, 1) || !v_finite(&dip, 1))
+		return;
 	eqf_set_mag_ref(norm, dip);
 	mag_ref_valid = norm > 0.0f;
 	eqf_reset_mag_runtime_state(false);
