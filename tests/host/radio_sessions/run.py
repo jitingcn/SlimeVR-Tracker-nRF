@@ -31,7 +31,8 @@ header = (SRC / "connection/esb.h").read_text()
 constants = "\n".join(re.findall(r"^#define (?:ESB_|PING_INTERVAL_MS)[^\n]*", header, re.MULTILINE))
 wom_state = block(esb, r"^static struct \{(?=\n\tuint16_t minutes, token;)") + " wom_command;"
 payload = constants + "\n" + "\n".join(re.findall(r"^static struct esb_payload tx_payload = .*;", esb, re.MULTILINE))
-payload += "\n" + wom_state + "\n" + function(esb, "esb_wom_prepare_ping")
+payload += "\n" + wom_state + "\n" + function(esb, "esb_wom_reset")
+payload += "\n" + function(esb, "esb_wom_prepare_ping")
 clocked_writer = re.search(r"^static int esb_write_clocked\(", esb, re.MULTILINE)
 if clocked_writer:
     payload += "\nstatic atomic_t tx_clock_users;\n"
@@ -67,6 +68,13 @@ static void host_tx_success(void)
 """ + esb[start:end] + """
 }
 """
+payload += "\nstatic unsigned host_receiver_restart(void) {\n"
+payload += "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
+payload += "uint32_t g_last_rx_raw_ticks = 123456, ping_rx_ticks = 1234;\n"
+payload += "unsigned continued_after_restart = 0;\ndo {\n"
+payload += block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
+payload += "\ncontinued_after_restart = 1;\n} while (0);\n"
+payload += "return receiver_restart_detections + 256 * continued_after_restart;\n}\n"
 
 # Keep the actual TX cases and lifetime counters observable in the focused
 # failure fixture. Only hardware leaves and the enclosing RX switch are omitted.
@@ -108,9 +116,11 @@ restart_tick_start = esb.index("\t\t\t\t\tuint32_t ping_rx_ticks =")
 restart_tick_end = esb.index(";\n", restart_tick_start) + 1
 commands.append("static unsigned host_receiver_restart(void) {\n"
                 + "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
-                + esb[restart_tick_start:restart_tick_end] + "\n"
+                + "unsigned continued_after_restart = 0;\n"
+                + esb[restart_tick_start:restart_tick_end] + "\ndo {\n"
                 + block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
-                + "\nreturn receiver_restart_detections;\n}")
+                + "\ncontinued_after_restart = 1;\n} while (0);\n"
+                + "return receiver_restart_detections + 256 * continued_after_restart;\n}")
 collection = []
 for name in ("connection_raw_collection_active", "connection_feedback_maintenance_update", "connection_reset_raw_collection", "connection_set_data_collection", "connection_get_data_collection", "connection_set_data_collection_batch", "connection_get_data_collection_batch", "connection_get_data_collection_batch_rate", "connection_send_raw_metadata"):
     collection.append(function(connection, name))
@@ -164,6 +174,13 @@ channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\n" + esb[start
 channels += "\n" + function(esb, "esb_send_pair_step")
 channels += "\n" + function(esb, "esb_pair")
 channels += "\n" + function(esb, "esb_led_connection_facts")
+channels += "\nstatic unsigned host_receiver_restart(void) {\n"
+channels += "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
+channels += "uint32_t g_last_rx_raw_ticks = 123456, ping_rx_ticks = 1234;\n"
+channels += "unsigned continued_after_restart = 0;\ndo {\n"
+channels += block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
+channels += "\ncontinued_after_restart = 1;\n} while (0);\n"
+channels += "return receiver_restart_detections + 256 * continued_after_restart;\n}\n"
 start = esb.index("\t\tif (!paired_addr[0]) // zero, not paired")
 end = esb.index("\n\t\t} else {\n\t\t\tswitch (rx_payload.length)", start)
 channels += "\nstatic void receive_pair(void) { do {\n" + esb[start:end] + "\n}\n} while (0); }\n"

@@ -1583,11 +1583,21 @@ void event_handler(struct esb_evt const *event)
 								ping_rx_ticks,
 								receiver_restart_detections
 							);
+							/* A restarted receiver may reuse the previous 8-bit
+							 * layout epoch. Stop ordinary data until fresh channel
+							 * proof, time sync and a usable NORMAL re-enable TDMA. */
+							channel_wait_normal = true;
+							channel_found = false;
+							channel_confirmed = false;
+							channel_legacy_peer = false;
 							esb_clear_time_sync_state();
 							esb_wom_reset();
 							tdma_set_enabled(false);
 							ping_failures = 0;
 							connection_request_ping_resync();
+							/* Do not accept this pre-proof PONG as the new
+							 * schedule or execute its control payload. */
+							break;
 						}
 						// ====================================================================
 						// RTT and Server Time Offset Calculation (Reference-Point Model)

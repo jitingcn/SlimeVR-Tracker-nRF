@@ -10,7 +10,7 @@
 static int esb_radio_lock;
 static void k_mutex_lock(int *lock, int timeout) { ++*lock; }
 static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
-static bool channel_wait_normal, channel_search, channel_redirect_pending;
+static bool channel_wait_normal, channel_search, channel_redirect_pending, channel_found;
 static bool channel_confirmed = true, channel_legacy_peer, ping_channel_confirm_sent;
 static bool esb_ota_is_active(void) { return false; }
 typedef int atomic_t;
@@ -67,6 +67,10 @@ static unsigned esb_write_dropped, esb_write_dup_queued, esb_write_queued;
 static int64_t last_enomem_time, last_tx_time, ping_send_time;
 static int64_t now_ms = 1000;
 static bool batch, tdma_enabled, idle = true;
+static uint32_t ping_failures;
+static void esb_clear_time_sync_state(void) { server_time_synced = false; }
+static void tdma_set_enabled(bool enabled) { tdma_enabled = enabled; }
+static void connection_request_ping_resync(void) {}
 static int hook_site, queue_calls, queue_failures;
 static struct esb_payload queued[8];
 static unsigned queued_count;
@@ -475,6 +479,23 @@ static void fw_info_before_normal(void)
 	assert(!ping_channel_confirm_sent); /* Failed admission is not a request witness. */
 }
 
+static void restart_blocks_ordinary_writer(void)
+{
+	reset();
+	tdma_enabled = true;
+	server_time_synced = true;
+	channel_found = channel_confirmed = true;
+	assert(host_receiver_restart() == 1);
+	assert(channel_wait_normal && !channel_found && !channel_confirmed);
+	assert(!tdma_enabled && !server_time_synced);
+	uint8_t pose[17] = {1};
+	assert(esb_write(pose, true, sizeof(pose)) == -EAGAIN);
+	assert(queue_calls == 0 && queued_count == 0);
+	uint8_t ping[13] = {ESB_PING_TYPE};
+	assert(esb_write_ping(ping, true) == 0);
+	assert(queued_count == 1 && queued[0].data[7] == ESB_PING_FLAG_CHANNEL_CONFIRM);
+}
+
 static void wom_response_payload(void)
 {
 	for (unsigned proof = 0; proof < 2; ++proof) {
@@ -570,6 +591,7 @@ int main(void)
 	assert_original(0, ordinary, sizeof(ordinary), true);
 	channel_proof_ping_preserves_arguments();
 	fw_info_before_normal();
+	restart_blocks_ordinary_writer();
 	wom_response_payload();
 	return 0;
 }

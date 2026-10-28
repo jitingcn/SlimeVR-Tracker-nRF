@@ -198,6 +198,7 @@ static void tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8
     assert(slot < total && ticks >= 16); epoch = new_epoch;
     ++schedule_updates; scheduled_slot = slot; scheduled_total = total;
 }
+static void connection_request_ping_resync(void) {}
 void set_status(enum sys_status status, bool value) {
     if (value) status_state |= status; else status_state &= ~status;
 }
@@ -485,6 +486,47 @@ static void confirm_channel(uint8_t target) {
     receive_schedule(ESB_PONG_FLAG_NORMAL);
     assert(channel_found);
     assert(!esb_channel_search_poll(false));
+}
+
+static void restart_same_epoch(void) {
+    reset(84);
+    const uint8_t previous_epoch = 77;
+    epoch = previous_epoch;
+    ping_failures = 0;
+    channel_confirm_capable = channel_confirmed = channel_found = true;
+    server_time_synced = true;
+    assert(host_receiver_restart() == 1);
+    assert(channel_wait_normal && !channel_found && !channel_confirmed);
+    assert(!server_time_synced && tdma_resets == 1);
+
+    /* The old epoch must not authorize data or substitute for a fresh,
+     * counter-matched channel confirmation after the receiver clock reset. */
+    assert(esb_channel_search_poll(false));
+    assert(last_probe[7] == ESB_PING_FLAG_CHANNEL_CONFIRM);
+    dedicated_packet(85); assert(!accept_pong() && channel_redirect_pending);
+    assert(channel_wait_normal && !channel_found && !schedule_updates);
+
+    reset(84);
+    epoch = previous_epoch;
+    ping_failures = 0;
+    channel_confirm_capable = channel_confirmed = true;
+    server_time_synced = true;
+    assert(host_receiver_restart() == 1);
+    assert(esb_channel_search_poll(false));
+    dedicated_packet(84); assert(accept_pong() && channel_confirmed);
+    record_ping_admission(ping_counter);
+    normal_packet(0, 1); rx_payload.data[11] = previous_epoch; packet_crc();
+    assert(accept_pong());
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(schedule_updates == 1 && epoch == previous_epoch);
+    assert(channel_wait_normal && !channel_found); /* no modeled time sync */
+    record_ping_admission(ping_counter);
+    normal_packet(0, 1); rx_payload.data[11] = previous_epoch; packet_crc();
+    assert(accept_pong());
+    server_time_synced = true; /* Actual clock estimator is a modeled leaf. */
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(channel_found && !esb_channel_search_poll(false));
+    assert(!channel_wait_normal);
 }
 
 static void advertised_channels(void) {
@@ -907,6 +949,7 @@ int main(void) {
     proof_during_channel_hold();
     legacy_compatibility();
     ota_status_abort();
+    restart_same_epoch();
     owner_command_arguments();
     scan_sequences();
     const uint8_t destinations[] = {0, 4, 100};
