@@ -804,8 +804,13 @@ static int test_ak09940_rejects_invalid_frames(void)
 	bus.registers[AK09940_ST1] = AK09940_ST1_DRDY;
 	bus.registers[AK09940_ST2] = AK09940_ST2_INV;
 	CHECK(!ak_mag_read(m));
-	bus.registers[AK09940_ST2] = AK09940_ST2_DOR;
+	bus.registers[AK09940_ST2] = AK09940_ST2_INV | AK09940_ST2_DOR;
 	CHECK(!ak_mag_read(m));
+	CHECK(m[0] == 1 && m[1] == 2 && m[2] == 3);
+	bus.registers[AK09940_ST2] = AK09940_ST2_DOR;
+	bus.registers[AK09940_HXL] = 10;
+	CHECK(ak_mag_read(m));
+	CHECK(fabsf(m[0] - 0.001f) < 0.000001f && m[1] == 0 && m[2] == 0);
 
 	bus.registers[AK09940_ST2] = 0;
 	bus.registers[AK09940_HXL] = 0xff;

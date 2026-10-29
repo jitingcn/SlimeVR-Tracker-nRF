@@ -146,7 +146,7 @@ bool ak_mag_read(float m[3])
 	}
 
 	uint8_t st2 = frame[11];
-	if (st2 & (AK09940_ST2_INV | AK09940_ST2_DOR)) {
+	if (st2 & AK09940_ST2_INV) {
 		return false;
 	}
 	for (int i = 0; i < 3; i++) {
