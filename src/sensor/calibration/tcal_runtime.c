@@ -216,9 +216,17 @@ static struct {
  * Only the sensor owner advances seen; publishers compare the saved epoch. */
 static atomic_t tcal_accum_reset_generation;
 static uint32_t tcal_accum_seen_reset_generation;
+/* Sensor-owned qualified result. Storage contention pauses new collection,
+ * but ordinary motion resets must not erase this already-qualified point. */
+static struct {
+	float bias[3];
+	float temperature;
+	uint32_t reset_generation;
+	bool valid;
+} tcal_pending_point;
 
 static void tcal_accum_flush(bool heated);
-static void tcal_save_point(int idx, const float bias[3], float measured_temp, uint32_t reset_generation);
+static int tcal_save_point(int idx, const float bias[3], float measured_temp, uint32_t reset_generation);
 static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp);
 static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp);
 static int sensor_tcal_calculate_doffset(const float measured_bias[3], float temp, uint16_t operation,
@@ -434,6 +442,7 @@ void tcal_accum_apply_reset(void)
 	uint32_t generation = (uint32_t)atomic_get(&tcal_accum_reset_generation);
 	if (generation != tcal_accum_seen_reset_generation) {
 		tcal_accum_reset();
+		tcal_pending_point.valid = false;
 		tcal_accum_seen_reset_generation = generation;
 	}
 }
@@ -445,25 +454,28 @@ void tcal_accum_apply_reset(void)
  * (not bucket center): bucket only addresses collisions; we do not assume
  * samples are uniform inside the bin.
  */
-static void tcal_save_point(int idx, const float bias[3], float measured_temp, uint32_t reset_generation)
+/* -EAGAIN retains the immutable point; other results consume or reject it. */
+static int tcal_save_point(int idx, const float bias[3], float measured_temp, uint32_t reset_generation)
 {
 	if (idx < 0 || idx >= TCAL_BUFFER_SIZE) {
 		LOG_WRN("T-Cal: Index %d out of range, skipping", idx);
-		return;
+		return -EINVAL;
 	}
 	if (!v_finite(&measured_temp, 1)) {
 		LOG_WRN("T-Cal: Invalid measured temperature, skipping save");
-		return;
+		return -EINVAL;
 	}
 	/* One NaN point breaks every MLS/LUT lookup (NaN weights pass the
 	 * min-weight gate), so never commit a non-finite bias. */
 	if (!v_finite(bias, 3)) {
 		LOG_WRN("T-Cal: Non-finite bias, skipping save");
-		return;
+		return -EINVAL;
 	}
 
 	/* Storage precedes the session gate, which precedes model ownership. */
-	sys_warm_transaction_begin();
+	if (!sys_warm_transaction_try_begin()) {
+		return -EAGAIN;
+	}
 #if CONFIG_SENSOR_TCAL_HEATED
 	sensor_tcal_heated_lock();
 	if (sensor_tcal_heated_busy_locked() || sensor_tcal_heated_resetting_locked()
@@ -471,13 +483,13 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp, u
 	    || reset_generation != (uint32_t)atomic_get(&tcal_accum_reset_generation)) {
 		sensor_tcal_heated_unlock();
 		sys_warm_transaction_end(false);
-		return;
+		return -ECANCELED;
 	}
 #else
 	if (sensor_calibration_request(CAL_REQUEST_QUERY, CAL_REQUEST_AUTO_SILENT) == CAL_REQUEST_MAINTENANCE ||
 	    reset_generation != (uint32_t)atomic_get(&tcal_accum_reset_generation)) {
 		sys_warm_transaction_end(false);
-		return;
+		return -ECANCELED;
 	}
 #endif
 	sensor_tcal_lock();
@@ -550,7 +562,7 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp, u
 		sensor_tcal_heated_unlock();
 #endif
 		sys_warm_transaction_end(true);
-		return;
+		return 0;
 	}
 	retained->tempCalPoints[idx].temp = measured_temp;
 	memcpy(retained->tempCalPoints[idx].bias, final_bias, sizeof(float) * 3);
@@ -605,6 +617,21 @@ static void tcal_save_point(int idx, const float bias[3], float measured_temp, u
 	}
 	sys_warm_transaction_end(true);
 #endif
+	return 0;
+}
+
+static bool tcal_pending_point_retry(void)
+{
+	if (tcal_pending_point.valid &&
+	    tcal_pending_point.reset_generation != (uint32_t)atomic_get(&tcal_accum_reset_generation)) {
+		tcal_pending_point.valid = false;
+	}
+	if (tcal_pending_point.valid &&
+	    tcal_save_point(TEMP_TO_IDX(tcal_pending_point.temperature), tcal_pending_point.bias,
+	                    tcal_pending_point.temperature, tcal_pending_point.reset_generation) != -EAGAIN) {
+		tcal_pending_point.valid = false;
+	}
+	return tcal_pending_point.valid;
 }
 
 
@@ -829,12 +856,14 @@ static void tcal_accum_flush(bool heated)
 		tcal_accum_reset();
 		return;
 	}
-	tcal_save_point(idx, avg_bias, avg_temp, tcal_accum.reset_generation);
-#else
-	tcal_save_point(idx, avg_bias, avg_temp, tcal_accum.reset_generation);
 #endif
+	memcpy(tcal_pending_point.bias, avg_bias, sizeof(tcal_pending_point.bias));
+	tcal_pending_point.temperature = avg_temp;
+	tcal_pending_point.reset_generation = tcal_accum.reset_generation;
+	tcal_pending_point.valid = true;
 
 	tcal_accum_reset();
+	(void)tcal_pending_point_retry();
 }
 
 /**
@@ -987,7 +1016,7 @@ static void tcal_accum_feed(const float g[3], float temp, bool heated)
 void sensor_tcal_feed_continuous_sample(const float g[3], float temp)
 {
 	tcal_accum_apply_reset();
-	if (sensor_tcal_get_auto_calibration()) {
+	if (!tcal_pending_point_retry() && sensor_tcal_get_auto_calibration()) {
 		tcal_accum_feed(g, temp, false);
 	}
 }
@@ -1023,6 +1052,9 @@ void sensor_tcal_continuous_motion_detected(void)
 #else
 	tcal_accum_apply_reset();
 #endif
+	if (tcal_pending_point_retry()) {
+		return;
+	}
 	if (tcal_accum.active) {
 		if (tcal_accum.observed_count >= TCAL_ACCUM_MIN_SAMPLES) {
 			tcal_accum_flush(false);

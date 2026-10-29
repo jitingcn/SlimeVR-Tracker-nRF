@@ -65,6 +65,106 @@ static void test_clear_while_saver_waits(int action, bool invalidate, bool stora
     flush_error = nvs_clear_error = 0;
 }
 
+/* Feed a genuine qualified ordinary window through the production collector.
+ * Storage is the modeled leaf; pending creation, freeze and retry are real. */
+static void qualify_contended_point(void) {
+    const float bias[3] = {2.0f, 4.0f, 6.0f};
+    seed(0, true);
+    tcal_accum_request_reset();
+    tcal_accum_apply_reset();
+    atomic_set(&tcal_auto_calibration_enabled, 1);
+    tcal_direction_ref_temp = NAN;
+    tcal_current_direction = TCAL_DIR_UNKNOWN;
+    storage_contended = true;
+    unsigned attempts = storage_try_calls;
+    unsigned marks = warm_marks;
+    for (int i = 0; i <= 2500; i++) {
+        now_ms = (int64_t)i * 10;
+        sensor_tcal_feed_continuous_sample(bias, 25.0f);
+    }
+    assert(storage_try_calls == attempts + 1);
+    assert(tcal_pending_point.valid && !tcal_accum.active);
+    assert(tcal_pending_point.temperature == 25.0f);
+    assert(!memcmp(tcal_pending_point.bias, bias, sizeof(bias)));
+    assert(retained->tempCalState.count == 0 && warm_marks == marks);
+}
+
+static void test_nonheated_pending(void) {
+    const float other_bias[3] = {10.0f, 20.0f, 30.0f};
+    for (int motion_retry = 0; motion_retry < 2; motion_retry++) {
+        qualify_contended_point();
+        struct retained_fixture before = *retained;
+        unsigned writes = persist_calls, marks = warm_marks;
+        unsigned acquisitions = storage_acquisitions;
+        unsigned attempts = storage_try_calls;
+        for (int i = 0; i < 3; i++) {
+            sensor_tcal_feed_continuous_sample(other_bias, 30.0f);
+            sensor_tcal_continuous_motion_detected();
+        }
+        assert(storage_try_calls == attempts + 6);
+        assert(tcal_pending_point.valid && !tcal_accum.active);
+        assert(tcal_accum.sample_count == 0 && tcal_accum.observed_count == 0);
+        unchanged(&before, writes);
+        assert(warm_marks == marks && storage_acquisitions == acquisitions);
+        storage_contended = false;
+        if (motion_retry) sensor_tcal_continuous_motion_detected();
+        else sensor_tcal_feed_continuous_sample(other_bias, 30.0f);
+        assert(!tcal_pending_point.valid);
+        assert(storage_acquisitions == acquisitions + 1);
+        assert(retained->tempCalState.count == 1);
+        assert(retained->tempCalPoints[30].temp == 25.0f);
+        const float expected[3] = {2.0f, 4.0f, 6.0f};
+        assert(!memcmp(retained->tempCalPoints[30].bias, expected, sizeof(expected)));
+        assert(retained->tempCalPoints[40].temp == 0.0f);
+        assert(warm_marks == marks + 4);
+        before = *retained; writes = persist_calls; marks = warm_marks;
+        sensor_tcal_continuous_motion_detected();
+        sensor_tcal_continuous_motion_detected();
+        unchanged(&before, writes);
+        assert(warm_marks == marks && storage_acquisitions == acquisitions + 1);
+        assert(!warm_transaction && !lock_depth);
+    }
+    /* Identical qualified result must be consumed without model invalidation,
+     * storage marks or a second acquisition on the next motion notification. */
+    qualify_contended_point();
+    retained->tempCalPoints[30].temp = 25.0f;
+    memcpy(retained->tempCalPoints[30].bias, tcal_pending_point.bias,
+           sizeof(tcal_pending_point.bias));
+    retained->tempCalState.count = 1;
+    retained->gyroTemp = 25.0f;
+    struct retained_fixture before = *retained;
+    unsigned writes = persist_calls, marks = warm_marks;
+    unsigned reference = reference_generation, acquisitions = storage_acquisitions;
+    storage_contended = false;
+    sensor_tcal_continuous_motion_detected();
+    assert(!tcal_pending_point.valid);
+    unchanged(&before, writes);
+    assert(warm_marks == marks && reference_generation == reference);
+    assert(storage_acquisitions == acquisitions + 1);
+    sensor_tcal_continuous_motion_detected();
+    assert(storage_acquisitions == acquisitions + 1);
+    assert(!warm_transaction && !lock_depth);
+    /* Check the unchanged branch's explicit consumed result, not only the
+     * caller's != -EAGAIN decision (which could hide an indeterminate value). */
+    assert(tcal_save_point(30, before.tempCalPoints[30].bias, 25.0f,
+                          (uint32_t)atomic_get(&tcal_accum_reset_generation)) == 0);
+
+    /* Cancellation works both before and after owner-consumption of reset. */
+    for (int consume_reset = 0; consume_reset < 2; consume_reset++) {
+        qualify_contended_point();
+        before = *retained; writes = persist_calls; marks = warm_marks;
+        acquisitions = storage_acquisitions;
+        tcal_accum_request_reset();
+        if (consume_reset) tcal_accum_apply_reset();
+        storage_contended = false;
+        sensor_tcal_continuous_motion_detected();
+        assert(!tcal_pending_point.valid && !tcal_accum.active);
+        unchanged(&before, writes);
+        assert(warm_marks == marks && storage_acquisitions == acquisitions);
+        assert(!warm_transaction && !lock_depth);
+    }
+}
+
 int main(void) {
     assert(console_serial_start() == 0);
     seed(4, true); export_model();
@@ -110,7 +210,8 @@ int main(void) {
     assert(sensor_calibration_request(CAL_REQUEST_CLEAR, CAL_REQUEST_AUTO_SILENT) == 0);
     magneto_progress = 0x80; assert(sensor_calibration_maintenance_begin() == -EBUSY); magneto_progress = 0;
     clear_output(); replay(saved, true); assert(strstr(output, "saved successfully"));
+    test_nonheated_pending();
     assert(!lock_depth && !warm_transaction);
-    puts("real nonheated maintenance/request/saver: stale epoch after import, consumed reset, fresh save, nested ownership and busy admission OK");
+    puts("real nonheated ownership/saver: stale epochs, busy admission, qualified pending freeze, sample/motion exactly-once retry, identical consumption and reset cancellation OK");
     return 0;
 }

@@ -80,7 +80,9 @@ static void console_unrelated_command(size_t argc,char **argv){(void)argc;(void)
 static int sensor_tcal_set_enabled(bool enabled){tcal_compensation_enabled=enabled;return 0;}
 static bool sensor_tcal_get_enabled(void){return tcal_compensation_enabled;}
 static void sensor_tcal_status(void){}
+#if !ACTUAL_OWNERSHIP
 static bool sensor_tcal_get_auto_calibration(void){return false;}
+#endif
 static void sensor_tcal_set_auto_calibration(bool enabled){(void)enabled;}
 static void cmd_reset_tcal(void){}
 #if !ACTUAL_OWNERSHIP

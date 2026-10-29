@@ -91,6 +91,7 @@ SYSTEM = r'''
 #define MAIN_GYRO_TCAL_COEFFS_ID 11
 int sys_write(uint16_t id, void *ptr, const void *data, size_t size);
 void sys_warm_transaction_begin(void);
+bool sys_warm_transaction_try_begin(void);
 void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size);
 void sys_warm_transaction_end(bool schedule);
 void sys_warm_feedback_arm(uint32_t identity);
@@ -134,6 +135,8 @@ SCENARIOS = (
     "accum_motion", "accum_rate", "accum_abort", "accum_nonfinite",
     "power_during_finalize", "ota_during_finalize", "quantized_rise", "sustained_rise",
     "ordinary_start_stop", "ordinary_reset", "ordinary_maintenance", "pi_feedback",
+    "ordinary_pending", "ordinary_pending_motion", "ordinary_pending_reset",
+    "ordinary_pending_autooff", "ordinary_pending_maintenance", "ordinary_pending_heated",
     "integral_headroom", "slot_boundary", "slot_chatter", "slot_revisit",
     "slot_no_overwrite", "start_dwell", "ordinary_interval_ema", "accum_epoch",
     "stop_empty", "stop_reserved", "stop_one", "stop_two", "stop_three",
@@ -176,9 +179,12 @@ def accumulator_source():
     functions = "\n\n".join(function(name, source) for name in (
         "tcal_accum_reset", "tcal_accum_request_reset", "tcal_accum_apply_reset",
         "tcal_save_point", "tcal_accum_check_accel", "tcal_accum_median",
+        "tcal_pending_point_retry",
         "tcal_accum_commit_blocks", "tcal_accum_flush", "tcal_accum_feed",
         "sensor_tcal_heated_accum_feed", "sensor_tcal_heated_accum_finish",
-        "sensor_tcal_continuous_motion_detected"))
+        "sensor_tcal_continuous_motion_detected",
+        "sensor_tcal_feed_continuous_sample", "sensor_tcal_get_auto_calibration",
+        "sensor_tcal_set_auto_calibration"))
     return "\n".join((
         '#include <assert.h>\n#include <stdatomic.h>',
         "typedef atomic_int atomic_t;\ntypedef int atomic_val_t;",
@@ -186,6 +192,7 @@ def accumulator_source():
         "static inline int atomic_clear(atomic_t *p) { return atomic_exchange(p, 0); }",
         "static inline int atomic_get(const atomic_t *p) { return atomic_load(p); }",
         "static inline int atomic_inc(atomic_t *p) { return atomic_fetch_add(p, 1); }",
+        "static atomic_t tcal_auto_calibration_enabled;\nvoid sys_cancel_WOM(void);",
         constants, direction_state, state.group(), reset_state,
         aliases, functions, unaliases,
     ))

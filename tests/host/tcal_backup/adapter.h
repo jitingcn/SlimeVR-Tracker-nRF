@@ -60,6 +60,16 @@ static void sys_warm_transaction_begin(void) {
     }
     warm_transaction = true;
 }
+/* Model an unrelated storage owner, not the collector's retry decision. */
+static bool storage_contended;
+static unsigned storage_try_calls, storage_acquisitions;
+static bool sys_warm_transaction_try_begin(void) {
+    storage_try_calls++;
+    if (storage_contended) return false;
+    sys_warm_transaction_begin();
+    storage_acquisitions++;
+    return true;
+}
 static void sys_warm_transaction_end(bool flush) { (void)flush; assert(warm_transaction); warm_transaction = false; }
 #define LOG_MODULE_REGISTER(...)
 static void host_log(const char *format, ...) { (void)format; }

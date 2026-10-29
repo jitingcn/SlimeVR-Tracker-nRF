@@ -1,7 +1,14 @@
 #pragma once
 /* Hardware/event leaves only. Ownership, request admission, saver and reset
  * generations are compiled verbatim from production below. */
-#define TCAL_ACCUM_ROBUST_BLOCKS 5
+/* Collector constants and ownership are extracted from the actual sources. */
+#define MAX(a,b) ((a)>(b)?(a):(b))
+static atomic_t tcal_auto_calibration_enabled;
+static float sensor_get_gyro_odr(void) { return 100.0f; }
+static bool sensor_peek_accel(float a[3]) {
+    a[0] = a[1] = 0.0f; a[2] = 1.0f;
+    return true;
+}
 K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
 static unsigned requested_operation, requested_generation;

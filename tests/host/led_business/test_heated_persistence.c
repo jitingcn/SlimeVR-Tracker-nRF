@@ -2,6 +2,7 @@
 #include "../led_sync/test_runtime.h"
 
 #define CONFIG_SENSOR_USE_TCAL 1
+#define K_NO_WAIT ((k_timeout_t)0)
 #define MAIN_GYRO_TCAL_POINTS_ID 1
 #define MAIN_GYRO_TCAL_COEFFS_ID 2
 #define MAIN_GYRO_TCAL_STATE_ID 3
@@ -12,10 +13,15 @@
 
 struct k_mutex { unsigned depth; };
 static struct k_mutex sys_storage_lock;
-static void k_mutex_lock(struct k_mutex *mutex, k_timeout_t timeout)
+static bool storage_contended;
+static unsigned storage_acquisitions, receipt_callbacks;
+static void (*receipt_reentry)(void);
+static int k_mutex_lock(struct k_mutex *mutex, k_timeout_t timeout)
 {
-    (void)timeout;
+    if (storage_contended && timeout == K_NO_WAIT) return -EBUSY;
+    ++storage_acquisitions;
     ++mutex->depth;
+    return 0;
 }
 static void k_mutex_unlock(struct k_mutex *mutex)
 {
@@ -51,6 +57,12 @@ static bool heat_locked, model_locked;
 static void sensor_tcal_heated_lock(void)
 {
     assert(!sys_storage_lock.depth && !heat_locked);
+    ++receipt_callbacks;
+    if (receipt_reentry) {
+        void (*callback)(void) = receipt_reentry;
+        receipt_reentry = NULL;
+        callback();
+    }
     heat_locked = true;
 }
 static void sensor_tcal_heated_unlock(void) { assert(heat_locked); heat_locked = false; }
@@ -128,6 +140,16 @@ static void individual_receipts(void)
     }
     outcome(LED_SUCCESS);
 }
+static void reenter_receipt(void)
+{
+    assert(warm_tcal_receipt_count == 0 && warm_transaction_depth == 0);
+    sys_warm_transaction_begin();
+    warm_tcal_receipts[warm_tcal_receipt_count++] = (struct warm_tcal_receipt){
+        .identity = heat.feedback.session + 1, .written = 15,
+    };
+    sys_warm_transaction_end(false);
+}
+
 int main(void)
 {
     /* Run the regression first so archived production fails at the false
@@ -191,6 +213,31 @@ int main(void)
     sys_warm_transaction_end(false);
     assert(heat.warm_pending && sys_storage_lock.depth == 1);
     sys_warm_transaction_end(false);
+    outcome(LED_SUCCESS);
+
+    reset();
+    storage_contended = true;
+    assert(!sys_warm_transaction_try_begin());
+    assert(sys_storage_lock.depth == 0 && warm_transaction_depth == 0);
+    storage_contended = false;
+    unsigned acquisitions = storage_acquisitions;
+    assert(sys_warm_transaction_try_begin());
+    sys_warm_transaction_end(false);
+    assert(storage_acquisitions == acquisitions + 1);
+    sys_warm_transaction_begin();
+    warm_tcal_receipts[warm_tcal_receipt_count++] = (struct warm_tcal_receipt){
+        .identity = heat.feedback.session, .written = 15,
+    };
+    warm_tcal_receipts[warm_tcal_receipt_count++] = (struct warm_tcal_receipt){
+        .identity = heat.feedback.session + 2, .written = 15,
+    };
+    unsigned callbacks = receipt_callbacks;
+    acquisitions = storage_acquisitions;
+    receipt_reentry = reenter_receipt;
+    sys_warm_transaction_end(false);
+    assert(receipt_callbacks == callbacks + 3 && !receipt_reentry);
+    assert(storage_acquisitions == acquisitions + 1);
+    assert(warm_tcal_receipt_count == 0 && warm_transaction_depth == 0 && sys_storage_lock.depth == 0);
     outcome(LED_SUCCESS);
 
     reset(); mark();

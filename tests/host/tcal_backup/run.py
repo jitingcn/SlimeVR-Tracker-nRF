@@ -25,7 +25,7 @@ from console_extract import console_table
 
 
 def function(source, name):
-    return extract_block(source, rf"^(?:static )?(?:(?:void|bool|int|size_t|uint32_t|sensor_tcal_apply_mode_t) |const char \*){re.escape(name)}\([^;{{]*\)\s*\{{")
+    return extract_block(source, rf"^(?:static )?(?:(?:void|bool|int|float|size_t|uint32_t|sensor_tcal_apply_mode_t) |const char \*){re.escape(name)}\([^;{{]*\)\s*\{{")
 
 
 def check_crc(path):
@@ -75,6 +75,15 @@ def main():
     calibration = (ROOT / "src/sensor/calibration/calibration.c").read_text()
     header = (ROOT / "src/sensor/calibration/calibration.h").read_text()
     ownership = '#include "ownership.h"\n'
+    ownership += runtime[runtime.index("#define TCAL_ACCUM_FLUSH_INTERVAL_MS"):
+                         runtime.index("static int64_t runtime_cal_last_time")] + "\n"
+    runtime_header = (ROOT / "src/sensor/calibration/tcal_runtime.h").read_text()
+    bias_header = (ROOT / "src/sensor/calibration/bias_collect.h").read_text()
+    ownership += re.search(r"^#define BIAS_COLLECT_ACCEL_MOTION_THRESHOLD .*$",
+                           bias_header, re.M).group(0) + "\n"
+    for constant in ("TCAL_ACCUM_ACCEL_MOTION_THRESHOLD", "TCAL_WRITE_DTDT_MAX_C_PER_S",
+                     "TCAL_ACCUM_ACCEL_PEEK_DIV"):
+        ownership += re.search(rf"^#define {constant} .*$", runtime_header, re.M).group(0) + "\n"
     for name in ("sensor_calibration_request_id", "cal_request_origin"):
         ownership += extract_block(header, rf"^enum {name}\s*\{{", semicolon=True) + "\n"
     for name in ("calibration_mag_pending", "sensor_calibration_maintenance_begin", "sensor_calibration_maintenance_end", "sensor_calibration_request"):
@@ -82,8 +91,12 @@ def main():
     accum_end = runtime.index("} tcal_accum;") + len("} tcal_accum;")
     accum_start = runtime.rindex("static struct {", 0, accum_end)
     ownership += runtime[accum_start:accum_end] + "\n"
-    ownership += "static atomic_t tcal_accum_reset_generation;\nstatic uint32_t tcal_accum_seen_reset_generation;\n"
-    for name in ("tcal_accum_reset", "tcal_accum_request_reset", "tcal_accum_apply_reset", "update_tcal_state", "tcal_save_point"):
+    ownership += runtime[accum_end:runtime.index("static void tcal_accum_flush", accum_end)] + "\n"
+    for name in ("tcal_accum_reset", "tcal_accum_request_reset", "tcal_accum_apply_reset",
+                 "sensor_tcal_get_auto_calibration", "update_tcal_state", "tcal_save_point",
+                 "tcal_pending_point_retry", "tcal_accum_check_accel", "tcal_accum_median",
+                 "tcal_accum_commit_blocks", "tcal_accum_flush", "tcal_accum_feed",
+                 "sensor_tcal_feed_continuous_sample", "sensor_tcal_continuous_motion_detected"):
         ownership += function(runtime, name) + "\n"
     ownership += calibration[calibration.index("int sensor_tcal_clear("):
                              calibration.index("// Check if current temperature needs calibration")] + "\n"

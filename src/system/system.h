@@ -59,6 +59,8 @@ void reboot_counter_write(uint8_t reboot_counter);
 int sys_write(uint16_t id, void *ptr, const void *data, size_t len);
 void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t len);
 void sys_warm_transaction_begin(void);
+/* Same ownership/end contract as begin; false leaves storage untouched. */
+bool sys_warm_transaction_try_begin(void);
 void sys_warm_transaction_mark(uint16_t id, void *retained_ptr, size_t len);
 void sys_warm_transaction_end(bool retained_changed);
 #if CONFIG_SENSOR_USE_TCAL

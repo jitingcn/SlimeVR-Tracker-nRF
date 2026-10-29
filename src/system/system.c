@@ -756,10 +756,38 @@ void sys_warm_transaction_begin(void)
 #endif
 }
 
+bool sys_warm_transaction_try_begin(void)
+{
+	if (k_mutex_lock(&sys_storage_lock, K_NO_WAIT) != 0) {
+		return false;
+	}
+#if CONFIG_SENSOR_USE_TCAL
+	warm_transaction_depth++;
+#endif
+	return true;
+}
+
 void sys_warm_transaction_mark(uint16_t id, void *retained_ptr, size_t len)
 {
 	warm_dirty_mark_locked(id, retained_ptr, len);
 }
+
+#if CONFIG_SENSOR_USE_TCAL
+/* Only the nonempty outermost completion pays for the immutable batch.
+ * Callbacks can reenter storage after the entire batch is detached. */
+static __attribute__((noinline)) void warm_tcal_detach_and_unlock(void)
+{
+	struct warm_tcal_receipt receipts[WARM_DIRTY_MAX];
+	uint8_t count = warm_tcal_receipt_count;
+	memcpy(receipts, warm_tcal_receipts, count * sizeof(receipts[0]));
+	warm_tcal_receipt_count = 0;
+	k_mutex_unlock(&sys_storage_lock);
+	while (count) {
+		struct warm_tcal_receipt *receipt = &receipts[--count];
+		sensor_tcal_feedback_persisted(receipt->identity, receipt->written, receipt->result);
+	}
+}
+#endif
 
 void sys_warm_transaction_end(bool retained_changed)
 {
@@ -767,13 +795,15 @@ void sys_warm_transaction_end(bool retained_changed)
 		retained_update();
 	}
 #if CONFIG_SENSOR_USE_TCAL
-	bool dispatch = --warm_transaction_depth == 0;
-	if (dispatch) warm_tcal_armed = 0;
+	if (--warm_transaction_depth == 0) {
+		warm_tcal_armed = 0;
+		if (warm_tcal_receipt_count) {
+			warm_tcal_detach_and_unlock();
+			return;
+		}
+	}
 #endif
 	k_mutex_unlock(&sys_storage_lock);
-#if CONFIG_SENSOR_USE_TCAL
-	if (dispatch) warm_tcal_dispatch();
-#endif
 }
 
 void sys_write_warm(uint16_t id, void *retained_ptr, const void *data, size_t len)

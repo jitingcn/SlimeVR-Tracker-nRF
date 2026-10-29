@@ -23,6 +23,8 @@ static uint32_t model_generation = 17, armed_epoch;
 static uint16_t output_duty;
 static int64_t lease_deadline;
 static unsigned writes, arms, offs, feeds, resets, partial_finishes, refreshes, dirty_marks, scheduled;
+static bool storage_busy;
+static unsigned storage_tries;
 static void (*on_storage_begin)(void);
 static bool expect_publication;
 static float publication_tolerance;
@@ -215,6 +217,21 @@ bool sensor_calibration_maintenance_active_locked(void)
 	return maintenance_active;
 }
 
+int sensor_calibration_maintenance_begin(void)
+{
+	if (maintenance_active || sensor_tcal_heated_busy()) return -EBUSY;
+	maintenance_active = true;
+	return 0;
+}
+
+void sensor_calibration_maintenance_end(void)
+{
+	assert(maintenance_active);
+	maintenance_active = false;
+}
+
+void sys_cancel_WOM(void) {}
+
 void sensor_calibration_heated_release_locked(void)
 {
 	assert(gate_depth == 1 && !output_duty);
@@ -296,6 +313,14 @@ void sys_warm_transaction_begin(void)
 		hook();
 	}
 	storage_depth++;
+}
+bool sys_warm_transaction_try_begin(void)
+{
+	assert(!gate_depth && !model_depth && !storage_depth);
+	storage_tries++;
+	if (storage_busy) return false;
+	sys_warm_transaction_begin();
+	return true;
 }
 void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size)
 {
@@ -1409,6 +1434,69 @@ int main(int argc, char **argv)
 		for (int i = 1; i <= 150 && sensor_tcal_heated_busy(); i++)
 			new_sample(20, 25.0f + i * 0.020f * 0.30f, 25.0f, true);
 		stopped(TCAL_HEATED_STOP_RISE_FAST);
+	} else if (!strncmp(which, "ordinary_pending", strlen("ordinary_pending"))) {
+		production_tcal_accum_apply_reset();
+		atomic_set(&tcal_auto_calibration_enabled, true);
+		for (unsigned i = 0; i < 2000; ++i) {
+			now_ms++;
+			sensor_tcal_feed_continuous_sample(bias, 26);
+		}
+		storage_busy = true;
+		unsigned before_refresh = refreshes, before_marks = dirty_marks;
+		tcal_accum_flush(false);
+		assert(tcal_pending_point.valid && !tcal_accum.active);
+		float saved_bias[3];
+		memcpy(saved_bias, tcal_pending_point.bias, sizeof(saved_bias));
+		float saved_temperature = tcal_pending_point.temperature;
+		uint32_t saved_generation = tcal_pending_point.reset_generation;
+		for (unsigned i = 0; i < 10000; ++i) {
+			now_ms++;
+			sensor_tcal_feed_continuous_sample(zero, 35);
+			sensor_tcal_continuous_motion_detected();
+		}
+		assert(storage_tries >= 20001 && !tcal_accum.active);
+		assert(tcal_accum.sample_count == 0 && tcal_accum.observed_count == 0);
+		assert(tcal_pending_point.valid && !memcmp(saved_bias, tcal_pending_point.bias, sizeof(saved_bias)));
+		assert(tcal_pending_point.temperature == saved_temperature &&
+		       tcal_pending_point.reset_generation == saved_generation);
+		assert(refreshes == before_refresh && dirty_marks == before_marks);
+		unchanged();
+		bool cancelled = false;
+		if (!strcmp(which, "ordinary_pending_reset")) {
+			reset_hook();
+			production_tcal_accum_apply_reset();
+			cancelled = true;
+		} else if (!strcmp(which, "ordinary_pending_autooff")) {
+			assert(sensor_tcal_set_auto_calibration(false) == 0);
+			cancelled = true;
+		} else if (!strcmp(which, "ordinary_pending_maintenance")) {
+			maintenance_active = true;
+			cancelled = true;
+		} else if (!strcmp(which, "ordinary_pending_heated")) {
+			sample.sampled_at_ms = now_ms;
+			assert(sensor_tcal_heated_start(44) == 0);
+			stop_hook();
+			cancelled = true;
+		}
+		storage_busy = false;
+		if (cancelled) {
+			sensor_tcal_continuous_motion_detected();
+			assert(!tcal_pending_point.valid);
+			unchanged();
+		} else {
+			memcpy(expected_points, retained->tempCalPoints, sizeof(expected_points));
+			expected_points[TEMP_TO_IDX(saved_temperature)].temp = saved_temperature;
+			memcpy(expected_points[TEMP_TO_IDX(saved_temperature)].bias, saved_bias, sizeof(saved_bias));
+			expect_publication = true;
+			if (!strcmp(which, "ordinary_pending_motion"))
+				sensor_tcal_continuous_motion_detected();
+			else
+				sensor_tcal_feed_continuous_sample(zero, 35);
+			assert(!tcal_pending_point.valid && refreshes == before_refresh + 1);
+			assert(dirty_marks == before_marks + 4 && expected_model_matches());
+			sensor_tcal_continuous_motion_detected();
+			assert(refreshes == before_refresh + 1 && dirty_marks == before_marks + 4);
+		}
 	} else if (!strcmp(which, "ordinary_start_stop") || !strcmp(which, "ordinary_reset") ||
 		   !strcmp(which, "ordinary_maintenance")) {
 		/* An ordinary bucket starts outside a heated session, then its storage
