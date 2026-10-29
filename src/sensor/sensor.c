@@ -2871,63 +2871,13 @@ static void sensor_loop_handle_data_collection(bool *dc_active)
 }
 #endif
 
-static void sensor_loop_acquire(sensor_loop_frame_t *frame)
-{
+static void sensor_loop_read_temperature(
+	sensor_loop_frame_t *frame
 #if CONFIG_SENSOR_TCAL_HEATED
-	uint32_t temperature_read_epoch = sensor_temperature_read_epoch();
-	/* FIFO-backed temperatures belong to this acquisition, not its eventual
-	 * completion. A blocked read must consume freshness, never extend it. */
-	int64_t temperature_sampled_at_ms = k_uptime_get();
+	, uint32_t temperature_read_epoch, int64_t temperature_sampled_at_ms
 #endif
-	// Resume devices
-	int64_t resume_begin_ticks = k_uptime_ticks();
-	if (sys_interface_resume()) {
-		main_ok = false;
-		set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
-		return;
-	}
-	uint64_t resume_us = k_ticks_to_us_near64(k_uptime_ticks() - resume_begin_ticks);
-	if (resume_us > sensor_window_resume_max_us) {
-		sensor_window_resume_max_us = resume_us;
-	}
-
-	// Trigger reconfig on sensor mode change
-	bool reconfig = last_sensor_mode != sensor_mode;
-	last_sensor_mode = sensor_mode;
-
-	// Reading IMUs will take between 2.5ms (~7 samples, low noise) - 7ms (~33 samples, low power)
-	// Magneto sample will take ~400us
-	// Fusing data will take between 100us (~7 samples, low noise) - 500us (~33 samples, low power)
-	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
-
-	// Read gyroscope (FIFO)
-	// Buffer size calculation:
-	// - Worst case is ICM 20 byte packet
-	// - At 1600Hz gyro ODR with 6ms update interval: 1600 * 0.006 = ~10 packets
-	// - At 1000Hz ODR with 33ms low power update: 1000 * 0.033 = ~33 packets
-	// - At 1000Hz ODR with 100ms low power 2 update: 1000 * 0.100 = ~100 packets
-	// - With 4x oversampling at 1600Hz: effectively same as 400Hz but with 4x raw packets
-	uint8_t *rawData = sensor_fifo_raw_buffer;
-	int64_t fifo_begin_ticks = k_uptime_ticks();
-	frame->packets = sensor_imu->fifo_read(rawData, sizeof(sensor_fifo_raw_buffer));
-	uint64_t fifo_us = k_ticks_to_us_near64(k_uptime_ticks() - fifo_begin_ticks);
-	if (fifo_us > sensor_window_fifo_max_us) {
-		sensor_window_fifo_max_us = fifo_us;
-	}
-#if IMU_INT_EXISTS
-	if (sensor_fast_first_update_pending && frame->packets > 0) {
-		sensor_fast_first_update_pending = false;
-		if (sensor_fifo_threshold > 1) {
-			uint8_t restored_pin_config = sensor_imu->setup_DRDY(sensor_fifo_threshold);
-			if (!restored_pin_config) {
-				LOG_WRN("Failed to restore FIFO THS/WM/WTM to %d", sensor_fifo_threshold);
-			} else {
-				LOG_INF("Restored FIFO THS/WM/WTM to %d", sensor_fifo_threshold);
-			}
-		}
-	}
-#endif
-
+)
+{
 #if CONFIG_SENSOR_USE_TCAL
 	// Read IMU temperature after FIFO read so FIFO-backed drivers
 	// can return a sample synchronized with the current accel/gyro batch.
@@ -3012,6 +2962,89 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 		frame->raw_collect_temp_c = temp;
 	}
 #endif
+}
+
+static void sensor_loop_apply_mode(void)
+{
+	switch (sensor_mode) {
+	case SENSOR_SENSOR_MODE_LOW_NOISE:
+		set_update_time_ms(CONFIG_SENSOR_UPDATE_TIME_LOW_NOISE_MS);
+		LOG_INF("Switching sensors to low noise");
+		break;
+	case SENSOR_SENSOR_MODE_LOW_POWER:
+		set_update_time_ms(33);
+		LOG_INF("Switching sensors to low power");
+		break;
+	case SENSOR_SENSOR_MODE_LOW_POWER_2:
+		set_update_time_ms(100);
+		LOG_INF("Switching sensors to low power 2");
+		break;
+	};
+}
+
+static void sensor_loop_acquire(sensor_loop_frame_t *frame)
+{
+#if CONFIG_SENSOR_TCAL_HEATED
+	uint32_t temperature_read_epoch = sensor_temperature_read_epoch();
+	/* FIFO-backed temperatures belong to this acquisition, not its eventual
+	 * completion. A blocked read must consume freshness, never extend it. */
+	int64_t temperature_sampled_at_ms = k_uptime_get();
+#endif
+	// Resume devices
+	int64_t resume_begin_ticks = k_uptime_ticks();
+	if (sys_interface_resume()) {
+		main_ok = false;
+		set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
+		return;
+	}
+	uint64_t resume_us = k_ticks_to_us_near64(k_uptime_ticks() - resume_begin_ticks);
+	if (resume_us > sensor_window_resume_max_us) {
+		sensor_window_resume_max_us = resume_us;
+	}
+
+	// Trigger reconfig on sensor mode change
+	bool reconfig = last_sensor_mode != sensor_mode;
+	last_sensor_mode = sensor_mode;
+
+	// Reading IMUs will take between 2.5ms (~7 samples, low noise) - 7ms (~33 samples, low power)
+	// Magneto sample will take ~400us
+	// Fusing data will take between 100us (~7 samples, low noise) - 500us (~33 samples, low power)
+	// TODO: on any errors set main_ok false and skip (make functions return nonzero)
+
+	// Read gyroscope (FIFO)
+	// Buffer size calculation:
+	// - Worst case is ICM 20 byte packet
+	// - At 1600Hz gyro ODR with 6ms update interval: 1600 * 0.006 = ~10 packets
+	// - At 1000Hz ODR with 33ms low power update: 1000 * 0.033 = ~33 packets
+	// - At 1000Hz ODR with 100ms low power 2 update: 1000 * 0.100 = ~100 packets
+	// - With 4x oversampling at 1600Hz: effectively same as 400Hz but with 4x raw packets
+	uint8_t *rawData = sensor_fifo_raw_buffer;
+	int64_t fifo_begin_ticks = k_uptime_ticks();
+	frame->packets = sensor_imu->fifo_read(rawData, sizeof(sensor_fifo_raw_buffer));
+	uint64_t fifo_us = k_ticks_to_us_near64(k_uptime_ticks() - fifo_begin_ticks);
+	if (fifo_us > sensor_window_fifo_max_us) {
+		sensor_window_fifo_max_us = fifo_us;
+	}
+#if IMU_INT_EXISTS
+	if (sensor_fast_first_update_pending && frame->packets > 0) {
+		sensor_fast_first_update_pending = false;
+		if (sensor_fifo_threshold > 1) {
+			uint8_t restored_pin_config = sensor_imu->setup_DRDY(sensor_fifo_threshold);
+			if (!restored_pin_config) {
+				LOG_WRN("Failed to restore FIFO THS/WM/WTM to %d", sensor_fifo_threshold);
+			} else {
+				LOG_INF("Restored FIFO THS/WM/WTM to %d", sensor_fifo_threshold);
+			}
+		}
+	}
+#endif
+
+	sensor_loop_read_temperature(
+		frame
+#if CONFIG_SENSOR_TCAL_HEATED
+		, temperature_read_epoch, temperature_sampled_at_ms
+#endif
+	);
 
 	// Debug info
 #if DEBUG
@@ -3056,20 +3089,7 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 	{
 		// Apply the next loop's watermark after acquisition; drivers may retain FIFO records.
 		// TODO: causing warnings since packet processing and loop timing still expects previous update_time
-		switch (sensor_mode) {
-		case SENSOR_SENSOR_MODE_LOW_NOISE:
-			set_update_time_ms(CONFIG_SENSOR_UPDATE_TIME_LOW_NOISE_MS);
-			LOG_INF("Switching sensors to low noise");
-			break;
-		case SENSOR_SENSOR_MODE_LOW_POWER:
-			set_update_time_ms(33);
-			LOG_INF("Switching sensors to low power");
-			break;
-		case SENSOR_SENSOR_MODE_LOW_POWER_2:
-			set_update_time_ms(100);
-			LOG_INF("Switching sensors to low power 2");
-			break;
-		};
+		sensor_loop_apply_mode();
 	}
 
 	/* Keep the IMU interface enabled across iterations; suspend/resume

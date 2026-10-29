@@ -380,7 +380,7 @@ int main(int argc, char **argv) {
 
 temperature_selection = source[
     source.index('\tframe->raw_collect_temp_c = NAN;'):
-    source.index('\n\t// Debug info', source.index('\tframe->raw_collect_temp_c = NAN;'))
+    source.index('\n}', source.index('\tframe->raw_collect_temp_c = NAN;'))
 ]
 frame_end = source.index('} sensor_loop_frame_t;') + len('} sensor_loop_frame_t;')
 frame_start = source.rfind('typedef struct {', 0, frame_end)
