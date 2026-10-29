@@ -70,6 +70,9 @@ static void icm45_cache_fifo_temp(const uint8_t *data, uint16_t packets)
 		}
 
 		int16_t raw_temp = (int16_t)((((uint16_t)packet[13]) << 8) | packet[14]);
+		if (raw_temp == INT16_MIN) {
+			continue;
+		}
 		raw_temp_sum += raw_temp;
 		valid_packets++;
 	}
