@@ -1229,6 +1229,24 @@ static int test_rates_fractional_selection(void)
 	return 0;
 }
 
+static int test_rates_qmc_ceiling(void)
+{
+	const float requests[] = {1, 10, 10.5f, 20, 25, 50, 50.5f, 100, 100.5f, 500};
+	const float non_h[] = {1, 10, 50, 50, 50, 50, 100, 100, 200, 200};
+	const uint8_t codes[] = {0x08, 0x18, 0x28, 0x28, 0x28, 0x28, 0x38, 0x38, 0x48, 0x48};
+	for (int h = 0; h < 2; h++) {
+		for (size_t i = 0; i < ARRAY_SIZE(requests); i++) {
+			fake_bus_reset();
+			qmc_set_variant(h != 0);
+			float actual = -1;
+			CHECK(qmc_update_odr(1.0f / requests[i], &actual) == 0);
+			CHECK(float_equal(actual, 1.0f / (h && non_h[i] < 50 ? 50 : non_h[i])));
+			CHECK(bus.registers[0x0b] == (h && i < 2 ? 0x28 : codes[i]));
+		}
+	}
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1275,6 +1293,7 @@ int main(void)
 		{"Modes MMC completion wins", test_modes_mmc_completion_wins},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"Fractional magnetometer rates", test_rates_fractional_selection},
+		{"QMC6309 variant rate ceiling", test_rates_qmc_ceiling},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
 		{"LIS temperatures", test_lis_temperatures_fail_loudly_and_apply_offset},

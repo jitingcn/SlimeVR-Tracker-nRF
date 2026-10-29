@@ -132,7 +132,7 @@ int qmc_update_odr(float period_s, float *actual_period_s)
 	} else if (requested_odr_hz > 50) {
 		odr_code = ODR_100Hz;
 		period_s = 1.f / 100;
-	} else if (qmc6309h || requested_odr_hz > 25) {
+	} else if (qmc6309h || requested_odr_hz > 10) {
 		/* QMC6309H codes 000/001 are unsupported; QMC6309 uses them for 1/10 Hz. */
 		odr_code = ODR_50Hz;
 		period_s = 1.f / 50;
