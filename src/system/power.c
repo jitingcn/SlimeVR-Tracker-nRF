@@ -661,7 +661,15 @@ static bool sys_WOM(bool force, uint32_t generation)
 	k_mutex_unlock(&power_plan_lock);
 	led_quiesce();
 	if (!configure_system_off()) {
-		return false;
+		tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WOM_CANCELLED,
+			force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
+		tracker_events_notify();
+		sys_power_notice(POWER_WILL_REBOOT);
+#if ADAFRUIT_BOOTLOADER
+		sys_skip_dfu();
+#endif
+		sys_reboot(SYS_REBOOT_COLD);
+		return true;
 	}
 #if WOM_USE_DCDC // In case DCDC is more efficient in the ~10-100uA range
 	set_regulator(SYS_REGULATOR_DCDC); // Make sure DCDC is selected

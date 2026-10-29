@@ -53,6 +53,8 @@ parts.append("#if CONFIG_SENSOR_USE_TCAL\n" +
              "\n" + function(tcal, "sensor_tcal_get_auto_calibration") +
              "\n" + function(tcal, "sensor_tcal_set_auto_calibration") + "\n#endif")
 parts.append(function(system, "sys_enter_poweroff"))
+parts.append(function(power, "configure_system_off").replace(
+    "configure_system_off(void)", "configure_system_off_body(void)", 1))
 for name in ("sys_cancel_WOM_locked", "sys_cancel_WOM", "sys_power_policy_lock",
              "sys_power_policy_unlock", "sys_wom_timeout_change_begin",
              "sys_wom_timeout_change_end", "sys_WOM_manual_pending", "sys_wom_vetoed",
@@ -189,6 +191,7 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
             "-fno-pie", "-no-pie",
             "-Wl,--defsym,_flash_used=0x40000",
             f"-DOTA_USE_MCUBOOT={mcuboot}",
+            f"-DADAFRUIT_BOOTLOADER={1 - mcuboot}",
             *([ "-DCONFIG_BOOTLOADER_MCUBOOT=1" ] if mcuboot else []),
             f"-DIMU_INT_EXISTS={imu_int}",
             f"-DCONFIG_SENSOR_USE_LOW_POWER_2={low_power_2}",

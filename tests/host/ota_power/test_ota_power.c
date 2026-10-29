@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <setjmp.h>
 #include "system/power.h"
 #include "system/power_request.h"
 #include <zephyr/sys/atomic.h>
@@ -20,7 +21,9 @@ static bool timeout_reported;
 #define LOG_ERR(...) ((void)0)
 #define CONFIG_BUILD_OUTPUT_UF2 1
 #define CONFIG_DELAY_SLEEP_ON_STATUS 1
+#ifndef ADAFRUIT_BOOTLOADER
 #define ADAFRUIT_BOOTLOADER 0
+#endif
 #define CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN 0
 #define CHARGER_STAT_EXISTS 0
 static unsigned irq_depth;
@@ -63,6 +66,8 @@ static uint16_t sys_get_be16(const uint8_t *p)
 #define CONFIG_USER_SHUTDOWN 1
 #define SYS_STATUS_CALIBRATION_RUNNING 1
 #define SYS_STATUS_CONNECTION_ERROR 2
+#define SYS_STATUS_SENSOR_ERROR 3
+#define SYS_STATUS_SYSTEM_ERROR 4
 #define USER_SHUTDOWN_ENABLED 1
 #define CONFIG_CONNECTION_TIMEOUT_DELAY 60000
 #define TX_ERROR_THRESHOLD 5
@@ -110,6 +115,20 @@ static unsigned shutdown_prepare_attempts, warm_flushes, mag_cold_starts, retain
 static unsigned wom_records, wom_mag_saves;
 static bool shutdown_allowed;
 static int suspend_result, shutdown_result, sensor_shutdown_calls, suspend_calls;
+static unsigned battery_updates, log_waits, skip_dfu_calls, mag_prepares;
+static bool sensor_live, fault_reset_expected;
+static jmp_buf fault_reset;
+#if CONFIG_SENSOR_TCAL_HEATED
+#define TCAL_HEATED_STOP_POWER_DOWN 1
+static int heater_abort_result;
+static unsigned heater_abort_calls;
+static int sensor_tcal_heated_abort(int reason)
+{
+	assert(reason == TCAL_HEATED_STOP_POWER_DOWN);
+	heater_abort_calls++;
+	return heater_abort_result;
+}
+#endif
 static bool flash_ready;
 static int flash_mutations, flash_result, crc_result;
 static uint32_t crc_value;
@@ -126,7 +145,9 @@ static int main_imu_suspend(void)
 {
 	suspend_calls++;
 	if (suspend_observer) suspend_observer();
-	return suspend_result;
+	int result = shutdown_allowed ? suspend_result : -EIO;
+	if (!result) sensor_live = false;
+	return result;
 }
 static int sensor_shutdown(void) { sensor_shutdown_calls++; return shutdown_result; }
 static unsigned ram_launches;
@@ -202,24 +223,26 @@ bool esb_ota_is_active(void);
 static int prepare_upgrade(void);
 
 static bool connection_get_ota_suppressed(void) { return ota_suppressed; }
+static bool configure_system_off_body(void);
 static bool configure_system_off(void)
 {
 	shutdown_prepare_attempts++;
-	if (!shutdown_allowed) {
-		return false;
-	}
 	assert(notices > 0);
 	int64_t lead = now_ms - notice_log[notices - 1].time;
 	assert(lead >= (notice_phase == POWER_WILL_WOM ?
 		TRACKER_EVENT_WOM_ADVANCE_MS : TRACKER_EVENT_POWER_FLUSH_MS));
-	shutdown_prepares++;
-	/* Production teardown suspends the sensor, which attempts cancellation
-	 * after the physical gate. It must not publish a false withdrawal. */
+	bool prepared = configure_system_off_body();
 	unsigned before_cancel = notices;
 	sys_cancel_WOM();
 	assert(notices == before_cancel);
-	return true;
+	return prepared;
 }
+static void sensor_calibration_online_mag_prepare_power_down(void) { mag_prepares++; }
+static void clock_pre_shutdown(void) {}
+static void sensor_calibration_prepare_power_down(void) {}
+static void set_sensor_clock(bool enabled, int rate, float *actual)
+{ (void)enabled; (void)rate; *actual = 0; }
+static void configure_sense_pins(void) { shutdown_prepares++; }
 static int sys_flush_warm(void) { warm_flushes++; return 0; }
 static void sensor_calibration_online_mag_cold_start(void) { mag_cold_starts++; }
 static void sensor_retained_write(void) { retained_writes++; }
@@ -227,15 +250,24 @@ static void set_regulator(int regulator) { (void)regulator; }
 static void sys_disconnect_interface_pins(void) {}
 static int power_battery_current_pptt(void) { return 5000; }
 static bool power_battery_device_plugged(void) { return false; }
-static void sys_update_battery_tracker(int pptt, bool plugged) { (void)pptt; (void)plugged; }
-static void wait_for_logging(void) {}
+static void sys_update_battery_tracker(int pptt, bool plugged)
+{ (void)pptt; (void)plugged; battery_updates++; }
+static void wait_for_logging(void) { log_waits++; }
+#if ADAFRUIT_BOOTLOADER
+static void sys_skip_dfu(void) { skip_dfu_calls++; }
+#endif
 static void sys_poweroff(void)
 {
 	assert(irq_locked && irq_depth);
 	physical_offs++;
 	irq_depth = 0; irq_locked = false; /* Model the terminal return. */
 }
-static void sys_reboot(int mode) { (void)mode; physical_reboots++; }
+static void sys_reboot(int mode)
+{
+	assert(mode == SYS_REBOOT_COLD);
+	physical_reboots++;
+	if (fault_reset_expected) longjmp(fault_reset, 1);
+}
 #if OTA_USE_MCUBOOT
 static int esb_ota_flash_request_mcuboot_upgrade(void) { return prepare_upgrade(); }
 #else
@@ -351,6 +383,13 @@ static void fixture(void)
 	notice_phase = notice_detail = wom_pin = 0;
 	shutdown_prepare_attempts = warm_flushes = mag_cold_starts = retained_writes = 0;
 	wom_records = wom_mag_saves = 0;
+	battery_updates = log_waits = skip_dfu_calls = mag_prepares = 0;
+	sensor_live = true;
+	fault_reset_expected = false;
+#if CONFIG_SENSOR_TCAL_HEATED
+	heater_abort_result = 0;
+	heater_abort_calls = 0;
+#endif
 	wom_setup_calls = 0;
 	link_ready = true;
 	wom_planned = wom_announced = wom_ready_timeout_initialized = wom_manual = false;
@@ -435,6 +474,18 @@ static void prepare_ota_during_request(void)
 
 #if IMU_INT_EXISTS
 static void replace_before_commit(void);
+#endif
+
+#if IMU_INT_EXISTS
+static void power_until_fault_reset(void)
+{
+	fault_reset_expected = true;
+	if (!setjmp(fault_reset)) {
+		power_iteration();
+		assert(!"fault reset must not return to mailbox completion");
+	}
+	fault_reset_expected = false;
+}
 #endif
 
 static void owner_request_dispatch(void)
@@ -535,23 +586,56 @@ static void owner_request_dispatch(void)
 	assert(power_requests.generation == 3 && physical_offs == 1 && notices == 3);
 	owner_trace("wom-replacement-consumed");
 
-	fixture(); memset(&ota, 0, sizeof(ota));
-	deadline = now_ms + 5000;
-	assert(sys_plan_WOM(true, deadline, false) == 0);
-	for (int i = 0; i < 10; i++) {
-		now_ms += 500;
-		assert(sys_plan_WOM(true, deadline, false) == 0);
+	for (int force = 0; force < 2; force++) {
+		for (int stage = 0; stage < 3; stage++) {
+#if !CONFIG_SENSOR_TCAL_HEATED
+			if (stage == 0) continue;
+#endif
+			fixture(); memset(&ota, 0, sizeof(ota));
+			int64_t due = now_ms + 5000;
+			assert(sys_plan_WOM(force, due, false) == 0);
+			for (int i = 0; i < 10; i++) {
+				now_ms += 500;
+				assert(sys_plan_WOM(force, due, false) == 0);
+			}
+#if CONFIG_SENSOR_TCAL_HEATED
+			if (stage == 0) heater_abort_result = -EIO;
+#endif
+			if (stage == 1) suspend_result = -ETIMEDOUT;
+			if (stage == 2) shutdown_result = -EIO;
+			power_until_fault_reset();
+			assert(physical_reboots == 1 && physical_offs == 0);
+			assert(power_requests.physical_started);
+			assert(power_requests.state == POWER_REQUEST_EXECUTING);
+			assert(power_requests.generation == 1);
+			assert(notices == 3 && notice_log[0].phase == POWER_WILL_WOM);
+			assert(notice_log[1].phase == POWER_WOM_CANCELLED);
+			assert(notice_log[1].detail == (force ? POWER_WOM_FORCED : POWER_WOM_NORMAL));
+			assert(notice_log[2].phase == POWER_WILL_REBOOT);
+			assert(shutdown_prepare_attempts == 1 && shutdown_prepares == 0);
+			assert(wom_setup_calls == 0 && wom_records == 0 && wom_mag_saves == 0);
+			assert(warm_flushes == 0 && mag_cold_starts == 0 && retained_writes == 0);
+			assert(battery_updates == 0 && log_waits == 0);
+			assert(skip_dfu_calls == ADAFRUIT_BOOTLOADER);
+			assert(sensor_live == (stage != 2));
+			assert(suspend_calls == (stage != 0));
+			assert(sensor_shutdown_calls == (stage == 2));
+			assert(mag_prepares == (stage != 0));
+#if CONFIG_SENSOR_USE_TCAL
+			assert(boot_cal_resets == 0);
+#endif
+#if CONFIG_SENSOR_TCAL_HEATED
+			assert(heater_abort_calls == 1 && !heater_power_ready());
+#endif
+			sys_cancel_WOM();
+			assert(notices == 3 && power_requests.physical_started);
+			assert(sys_request_system_off() == -EBUSY);
+			assert(sys_request_system_reboot() == -EBUSY);
+			assert(sys_ota_reboot_reserve() == -EBUSY);
+			assert(notices == 3 && physical_reboots == 1);
+			owner_trace("wom-failure-cold-reset");
+		}
 	}
-	shutdown_allowed = false;
-	power_iteration();
-	assert(power_requests.request == SYS_POWER_REQ_WOM_FORCE && power_requests.state == POWER_REQUEST_RETRY);
-	assert(power_requests.generation == 1 && !power_requests.physical_started && physical_offs == 0);
-	assert(shutdown_prepare_attempts == 1);
-	owner_trace("wom-quiescence-failed");
-	power_iteration();
-	assert(power_requests.request == SYS_POWER_REQ_NONE && power_requests.state == POWER_REQUEST_EMPTY);
-	assert(power_requests.generation == 2 && physical_offs == 0 && shutdown_prepare_attempts == 1);
-	owner_trace("wom-failure-consumed");
 #endif
 }
 
@@ -1268,6 +1352,13 @@ static void assert_immediate_recovery(uint8_t error)
 	assert(atomic_get(&ota_reboot_pending));
 	assert(esb_ota_handle_begin(packet, sizeof(packet)) == -EALREADY);
 	assert(!sys_system_off());
+	if (suspend_result || shutdown_result) {
+		power_iteration();
+		assert(physical_reboots == 0 && physical_offs == 0);
+		assert(power_requests.state == POWER_REQUEST_RETRY);
+		assert(warm_flushes == 0 && retained_writes == 0);
+		suspend_result = shutdown_result = 0;
+	}
 	power_iteration();
 	assert(physical_reboots == 1 && physical_offs == 0);
 #if !OTA_USE_MCUBOOT
@@ -1362,6 +1453,7 @@ static void committed_off_rejects_begin(void)
 
 static void request_abort_during_suspend(void)
 {
+	suspend_observer = NULL;
 	assert(esb_ota_is_active() && ota.session_started);
 	esb_ota_request_abort();
 	/* The ESB producer may enqueue intent, never clear the owner's context. */
