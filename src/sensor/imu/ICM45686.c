@@ -363,7 +363,7 @@ static int icm45_configure_clock_and_pads(float clock_rate_hz)
 	if (err) {
 		return err;
 	}
-	// OSC_ID_OVRD=2 uses the gyro oscillator.
+	// OSC_ID_OVRD=2 selects the internal relaxation oscillator (RCOSC).
 	err = ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC1, 0x0F, 0x02);
 	if (err) {
 		return err;
