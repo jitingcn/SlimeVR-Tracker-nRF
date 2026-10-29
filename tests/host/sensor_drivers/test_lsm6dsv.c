@@ -440,8 +440,22 @@ static void test_wom_bus_failures(void)
 	printf("LSM6DSV WOM: %u individual bus failures rejected\n", transactions);
 }
 
+static void test_hp_minimum_rate(void)
+{
+	reset_model(false, false);
+	float accel, gyro;
+	assert(lsm_update_odr(1.0f, 1.0f, &accel, &gyro) == 0);
+	assert((hw.registers[LSM6DSV_CTRL1] & 0x0f) == ODR_7_5Hz);
+	assert((hw.registers[LSM6DSV_CTRL2] & 0x0f) == ODR_7_5Hz);
+	assert(accel == 1.0f / 7.5f && gyro == 1.0f / 7.5f);
+	assert(lsm_update_odr(0.0f, 0.0f, &accel, &gyro) == 0);
+	assert((hw.registers[LSM6DSV_CTRL1] & 0x0f) == ODR_OFF);
+	assert((hw.registers[LSM6DSV_CTRL2] & 0x0f) == ODR_OFF);
+}
+
 int main(void)
 {
+	test_hp_minimum_rate();
 	test_nack(false);
 	test_nack(true);
 	test_configuration_failfast();

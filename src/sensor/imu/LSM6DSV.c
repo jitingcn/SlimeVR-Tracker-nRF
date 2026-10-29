@@ -20,7 +20,7 @@ static uint8_t accel_fs = FS_XL_16G;
 static uint8_t gyro_fs = FS_G_2000DPS;
 
 static const float odr_rates[]
-	= {7680.0f, 3840.0f, 1920.0f, 960.0f, 480.0f, 240.0f, 120.0f, 60.0f, 30.0f, 15.0f, 7.5f, 1.875f};
+	= {7680.0f, 3840.0f, 1920.0f, 960.0f, 480.0f, 240.0f, 120.0f, 60.0f, 30.0f, 15.0f, 7.5f};
 static const uint8_t odr_values[]
 	= {ODR_7_68kHz,
 	   ODR_3_84kHz,
@@ -32,8 +32,7 @@ static const uint8_t odr_values[]
 	   ODR_60Hz,
 	   ODR_30Hz,
 	   ODR_15Hz,
-	   ODR_7_5Hz,
-	   ODR_1_875Hz};
+	   ODR_7_5Hz};
 
 // Store chip type: 0x70 for LSM6DSV, 0x71 for LSM6DSV16B/ISM330BX
 static uint8_t chip_who_am_i = 0x70;
