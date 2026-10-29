@@ -97,6 +97,9 @@ static uint64_t sensor_debug_session(void)
 
 static bool sensor_debug_frame_is_active(void)
 {
+	if (frame.session == 0) {
+		return false;
+	}
 	uint64_t session = sensor_debug_session();
 	return session != 0 && session == frame.session;
 }

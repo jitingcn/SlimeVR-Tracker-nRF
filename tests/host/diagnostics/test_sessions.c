@@ -55,6 +55,8 @@ enum led_admission led_request_event(enum led_owner owner, uint32_t request_id, 
 
 static int64_t now_ms;
 static unsigned int lock_depth;
+static unsigned int lock_calls;
+static unsigned int clock_calls;
 static unsigned int clock_calls_until_restart;
 static void (*pending_console)(void);
 static void (*print_hook)(void);
@@ -73,6 +75,7 @@ static void restart_session(void)
 k_spinlock_key_t k_spin_lock(struct k_spinlock *lock)
 {
 	assert(!lock->held && !lock_depth);
+	lock_calls++;
 	lock->held = 1;
 	lock_depth++;
 	return 0;
@@ -93,6 +96,7 @@ void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
 
 int64_t k_uptime_get(void)
 {
+	clock_calls++;
 	int64_t sampled = now_ms;
 	if (clock_calls_until_restart && --clock_calls_until_restart == 0) {
 		/* A higher-priority console becomes runnable while the sensor checks
@@ -327,6 +331,29 @@ static void test_maintenance_notifies_connection_and_led(void)
 	assert(led_requests[LED_SUCCESS] == 1);
 }
 
+static void test_inactive_frame_has_no_sample_session_work(void)
+{
+	now_ms = 30000;
+	assert(!sensor_debug_is_active());
+	sensor_diagnostics_reset_frame();
+	unsigned int locks_before = lock_calls;
+	unsigned int clocks_before = clock_calls;
+	collect(4, 9);
+	assert(lock_calls == locks_before);
+	assert(clock_calls == clocks_before);
+
+	sensor_debug_start(2);
+	locks_before = lock_calls;
+	clocks_before = clock_calls;
+	collect(4, 11);
+	assert(lock_calls == locks_before);
+	assert(clock_calls == clocks_before);
+	output();
+	unsigned int reports_before = reports;
+	emit(4, 2);
+	assert(reports == reports_before + 1 && last_raw_accel == 2);
+}
+
 int main(void)
 {
 	test_restart_at_expiry();
@@ -336,6 +363,7 @@ int main(void)
 	test_expiry_report_snapshot();
 	test_maintenance_notifies_connection_and_led();
 	test_deadline_rejects_unreserved_output();
+	test_inactive_frame_has_no_sample_session_work();
 	puts("diagnostics sessions: PASS");
 	return 0;
 }
