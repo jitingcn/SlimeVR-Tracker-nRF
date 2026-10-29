@@ -1583,16 +1583,6 @@ static void sensor_transfer_suspension_to_power(void)
 	}
 	k_mutex_unlock(&sensor_lifecycle_lock);
 }
-/* A failed nonterminal restart remains stopped but can be retried safely. */
-static void sensor_release_failed_restart(void)
-{
-	k_mutex_lock(&sensor_lifecycle_lock, K_FOREVER);
-	if (sensor_suspend_owner == k_current_get()) {
-		sensor_suspend_owner = NULL;
-	}
-	k_mutex_unlock(&sensor_lifecycle_lock);
-}
-
 
 int sensor_shutdown(void) // Communicate all imus to shut down
 {
@@ -1664,6 +1654,16 @@ int sensor_setup_WOM(void)
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
+/* A failed nonterminal restart remains stopped but can be retried safely. */
+static void sensor_release_failed_restart(void)
+{
+	k_mutex_lock(&sensor_lifecycle_lock, K_FOREVER);
+	if (sensor_suspend_owner == k_current_get()) {
+		sensor_suspend_owner = NULL;
+	}
+	k_mutex_unlock(&sensor_lifecycle_lock);
+}
+
 static bool sensor_mag_uses_i2c_passthrough(void)
 {
 	return (sensor_mag_dev.addr & 0x80) && !(sensor_imu_dev_reg & 0x80);
