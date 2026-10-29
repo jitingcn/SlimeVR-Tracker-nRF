@@ -19,12 +19,13 @@ static bool boot_success_marked;
 #include <zephyr/device.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/reboot.h>
 
 LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_INF);
 
 /* Give the hardware WDT fallback its full window before forcing a cold reboot.
- * If the hardware fallback was never actually started, this is what recovers
+ * If logging returns and the hardware fallback was not started, this recovers
  * the device instead of freezing forever in the timeout callback. */
 #ifdef CONFIG_TASK_WDT_HW_FALLBACK
 #define WATCHDOG_SOFT_REBOOT_MS \
@@ -92,6 +93,8 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
 		retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
 	}
 
+	LOG_PANIC();
+
 	/* Log critical failure information */
 	LOG_ERR("=== WATCHDOG TIMEOUT ===");
 	LOG_ERR("Failed channel: %d (%s)", channel_id, channel_names[channel]);
@@ -101,8 +104,8 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
 	 * does NOT automatically reboot. The hardware WDT fallback normally
 	 * resets because this callback never returns. If the hardware fallback
 	 * was not actually started, that spin would freeze the device forever
-	 * with the watchdog appearing dead. Escape deterministically: let the
-	 * hardware WDT have its full fallback window, then force a cold reboot.
+	 * with the watchdog appearing dead. If logging returns, let the hardware
+	 * WDT have its full fallback window, then force a cold reboot.
 	 */
 	LOG_ERR("Waiting up to %d ms for hardware WDT, then rebooting",
 		WATCHDOG_SOFT_REBOOT_MS);
