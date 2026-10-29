@@ -3196,6 +3196,16 @@ static void sensor_loop_process_mag(sensor_loop_frame_t *frame)
 }
 #endif
 
+static bool sensor_sample_count_unexpected(int actual, float expected)
+{
+	if (actual == 0) {
+		return false;
+	}
+	int min_expected = (int)expected;
+	int max_expected = (int)(expected + 0.99f);
+	return actual < min_expected - 1 || actual > max_expected + 1;
+}
+
 static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_begin)
 {
 	// Copy average acceleration for this frame
@@ -3260,33 +3270,25 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
 		/* Δq-merge: one fusion gyro step per N high-rate samples (N may be 1 on I2C). */
 		float expected_gyro_timesteps_f = expected_gyro_samples / (float)gyro_oversample_n;
-		if (frame->g_count) {
-			int min_expected = (int)expected_gyro_timesteps_f;           // floor
-			int max_expected = (int)(expected_gyro_timesteps_f + 0.99f); // ceiling
-			if (frame->g_count < min_expected - 1 || frame->g_count > max_expected + 1) {
-				LOG_DBG(
-					"Expected ~%.1f gyro timesteps (Δq-merge %dx), got %d (elapsed %lldms)",
-					(double)expected_gyro_timesteps_f,
-					gyro_oversample_n,
-					frame->g_count,
-					elapsed_ms
-				);
-			}
+		if (sensor_sample_count_unexpected(frame->g_count, expected_gyro_timesteps_f)) {
+			LOG_DBG(
+				"Expected ~%.1f gyro timesteps (Δq-merge %dx), got %d (elapsed %lldms)",
+				(double)expected_gyro_timesteps_f,
+				gyro_oversample_n,
+				frame->g_count,
+				elapsed_ms
+			);
 		}
 #else
 		// Check gyro samples: allow reasonable tolerance for timing variations
 		// Since FIFO threshold uses floor(), actual samples can range from floor to floor+1
-		if (frame->g_count) {
-			int min_expected = (int)expected_gyro_samples;           // floor
-			int max_expected = (int)(expected_gyro_samples + 0.99f); // ceiling
-			if (frame->g_count < min_expected - 1 || frame->g_count > max_expected + 1) {
-				LOG_DBG(
-					"Expected ~%.1f gyro samples, got %d (elapsed %lldms)",
-					(double)expected_gyro_samples,
-					frame->g_count,
-					elapsed_ms
-				);
-			}
+		if (sensor_sample_count_unexpected(frame->g_count, expected_gyro_samples)) {
+			LOG_DBG(
+				"Expected ~%.1f gyro samples, got %d (elapsed %lldms)",
+				(double)expected_gyro_samples,
+				frame->g_count,
+				elapsed_ms
+			);
 		}
 #endif
 
@@ -3294,32 +3296,24 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 		// With accel oversampling, expected fusion timesteps is reduced by oversampling factor
 		float expected_accel_timesteps_f = expected_accel_samples / CONFIG_SENSOR_ACCEL_OVERSAMPLING;
 		// Only warn if actual count is significantly off
-		if (frame->a_count) {
-			int min_expected = (int)expected_accel_timesteps_f;           // floor
-			int max_expected = (int)(expected_accel_timesteps_f + 0.99f); // ceiling
-			if (frame->a_count < min_expected - 1 || frame->a_count > max_expected + 1) {
-				LOG_DBG(
-					"Expected ~%.1f accel timesteps (oversampling %dx), got %d (elapsed %lldms)",
-					(double)expected_accel_timesteps_f,
-					CONFIG_SENSOR_ACCEL_OVERSAMPLING,
-					frame->a_count,
-					elapsed_ms
-				);
-			}
+		if (sensor_sample_count_unexpected(frame->a_count, expected_accel_timesteps_f)) {
+			LOG_DBG(
+				"Expected ~%.1f accel timesteps (oversampling %dx), got %d (elapsed %lldms)",
+				(double)expected_accel_timesteps_f,
+				CONFIG_SENSOR_ACCEL_OVERSAMPLING,
+				frame->a_count,
+				elapsed_ms
+			);
 		}
 #else
 		// Check accel samples: allow reasonable tolerance for timing variations
-		if (frame->a_count) {
-			int min_expected = (int)expected_accel_samples;           // floor
-			int max_expected = (int)(expected_accel_samples + 0.99f); // ceiling
-			if (frame->a_count < min_expected - 1 || frame->a_count > max_expected + 1) {
-				LOG_DBG(
-					"Expected ~%.1f accel samples, got %d (elapsed %lldms)",
-					(double)expected_accel_samples,
-					frame->a_count,
-					elapsed_ms
-				);
-			}
+		if (sensor_sample_count_unexpected(frame->a_count, expected_accel_samples)) {
+			LOG_DBG(
+				"Expected ~%.1f accel samples, got %d (elapsed %lldms)",
+				(double)expected_accel_samples,
+				frame->a_count,
+				elapsed_ms
+			);
 		}
 #endif
 	}
