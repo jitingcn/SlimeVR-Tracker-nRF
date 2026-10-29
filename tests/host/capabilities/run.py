@@ -85,6 +85,7 @@ def restore_source():
 def pose_source():
     fixture = load_pose_fixture()
     mag = (SRC / "sensor/calibration/cal_mag.c").read_text()
+    magneto = (SRC / "sensor/calibration/magneto.c").read_text()
     bias = (SRC / "sensor/calibration/bias_collect.c").read_text()
     util = (SRC / "util.c").read_text()
     prelude = fixture.PRELUDE
@@ -93,25 +94,44 @@ def pose_source():
     sampler = r'''
 static int sensor_wait_accel(float out[3], int timeout) {
     (void)timeout;
-    float z = 1.0f - 2.0f * ((float)pose_index + 0.5f) / 18.0f;
+    unsigned direction = pose_index < pose_limit ? pose_index : pose_limit - 1;
+    float z = 1.0f - 2.0f * ((float)direction + 0.5f) / 18.0f;
     float radius = sqrtf(1.0f - z*z);
-    float angle = 2.3999632297f * (float)pose_index;
+    float angle = 2.3999632297f * (float)direction;
     out[0] = radius*cosf(angle); out[1] = radius*sinf(angle); out[2] = z;
     now += 2; reads++;
+    if (pending_phase == CAL_PHASE_CAPTURE_POSE) {
+        capture_reads++;
+        if (reject_attempt && capture_reads == 18) {
+            out[0] += .2f;
+            rejected_pose = pose_index + 1;
+        } else {
+            float noise = (capture_reads % 2 ? .001f : -.001f);
+            out[0] += noise;
+            if (!reject_attempt) magneto_sample(out[0], out[1], out[2],
+                expected_ata, &expected_norm, &expected_count);
+        }
+    }
     return 0;
 }
 '''
     prelude = prelude.replace(function(prelude, "sensor_wait_accel"), sampler)
     original_step = function(prelude, "cal_event_step")
     prelude = prelude.replace(original_step, original_step.replace(
-        "pending_phase = p;", "pending_phase = p; if (p == CAL_PHASE_POSE_DONE) pose_index = detail;"))
-    prelude = "static unsigned pose_index;\n" + prelude
+        "pending_phase = p;", """pending_phase = p;
+        if (p == CAL_PHASE_CAPTURE_POSE) {
+            capture_reads=0; reject_attempt=(rejected_pose != pose_index+1);
+        }
+        if (p == CAL_PHASE_POSE_DONE) pose_index = detail;"""))
+    prelude = ('#include "sensor/magneto/magneto1_4.h"\nstatic unsigned pose_index;\n'
+               + prelude)
     state = mag[mag.index("uint8_t magneto_progress;"):mag.index("static void magneto_update_dir_range")]
     constants = "\n".join(line for line in mag.splitlines() if line.startswith((
         "#define CALIB_", "#define MIN_ORIENTATION_", "#define THRESHOLD_ACC", "#define SAMPLES_PER_")))
     return "\n\n".join((
         prelude, '#include "sensor/magneto/magneto1_4.h"',
         "#if CONFIG_SENSOR_USE_MAGNETOMETER\n" + state + "\n#endif",
+        "#if CONFIG_SENSOR_USE_MAGNETOMETER\n" + function(magneto, "magneto_center_reset") + "\n#endif",
         constants, "typedef struct { float x,y,z; } Vector3;",
         function(util, "v_finite"), function(util, "v_diff_mag"), function(util, "v_epsilon"),
         function(mag, "magneto_reset"), function(bias, "isAccRest"),

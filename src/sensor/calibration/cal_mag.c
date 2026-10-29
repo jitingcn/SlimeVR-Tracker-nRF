@@ -406,6 +406,17 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 		// Reset timeout counter when a new valid pose is found
 		last_new_pose_time = k_uptime_get();
 
+		/* Only the calibration worker collects poses. Keep rollback storage
+		 * off its stack while preserving accepted-sample addition order. */
+		static struct {
+			double ata[100];
+			double norm_sum;
+			double sample_count;
+		} committed;
+		memcpy(committed.ata, mag_cal_workspace.ata, sizeof(committed.ata));
+		committed.norm_sum = norm_sum;
+		committed.sample_count = sample_count;
+
 		LOG_INF("Capturing pose %d/%d...", captured_count + 1, CALIB_TARGET_SAMPLES);
 		cal_event_step(op, CAL_PHASE_CAPTURE_POSE, captured_count + 1);
 		tracker_events_notify();
@@ -445,6 +456,9 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 		}
 
 		if (sample_idx == -1) {
+			memcpy(mag_cal_workspace.ata, committed.ata, sizeof(committed.ata));
+			norm_sum = committed.norm_sum;
+			sample_count = committed.sample_count;
 			rest_state.initialized = false;
 			continue;
 		}

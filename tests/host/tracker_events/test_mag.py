@@ -187,7 +187,7 @@ static int sensor_wait_accel(float a[3], int timeout) {
     if (pose >= pose_limit) pose=pose_limit-1;
     memset(a, 0, 3*sizeof(float));
     a[pose % 3] = pose < 3 ? 1 : -1;
-    if (inject_motion && pending_phase == CAL_PHASE_CAPTURE_POSE) {
+    if (inject_motion && pending_phase == CAL_PHASE_CAPTURE_POSE && sample_count >= 17) {
         a[0]=0; a[1]=1; inject_motion=false;
     }
     now += 2;
@@ -523,6 +523,7 @@ int main(void) {
     assert(sensor_calibration_collect_accel_poses(matrix,&captured) == -3);
     assert(captured == 6 && motion_retries == 1 && ends == 0 && token_reads == 1);
     assert(first_capture_ms >= 2000 && accel_drains >= 7);
+    assert(sample_count == 3000 && norm_sum == 3000);
 
     reset_case(); pose_limit=5;
     sensor_calibrate_accel();
