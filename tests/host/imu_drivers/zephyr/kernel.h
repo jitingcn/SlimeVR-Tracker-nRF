@@ -8,6 +8,7 @@
 #include "../../harness/include/driver_util.h"
 #define BIT(n) (1UL << (n))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 static inline int64_t k_uptime_get(void) { return 0; }
 /* The host shim has a stationary clock; use microseconds as its tick unit. */

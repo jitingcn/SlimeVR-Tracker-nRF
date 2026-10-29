@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -26,6 +27,36 @@ static uint8_t fifo_count_reg;
 static bool fifo_count_is_bytes;
 static unsigned gyro_discontinuities;
 
+/* Opt-in LSM6DSM word FIFO. Other driver fixtures retain register-only reads. */
+static bool dsm_fifo_enabled;
+static uint16_t dsm_words[2048];
+static size_t dsm_head, dsm_count;
+static uint16_t dsm_pattern, dsm_cycle_words;
+static uint8_t dsm_status_flags;
+
+static void dsm_fifo_status(void)
+{
+	registers[0x3a] = dsm_count & 0xff;
+	registers[0x3b] = ((dsm_count >> 8) & 7) | dsm_status_flags;
+	registers[0x3c] = dsm_pattern & 0xff;
+	registers[0x3d] = (dsm_pattern >> 8) & 3;
+}
+
+void host_bus_dsm_fifo_load(const uint16_t *words, size_t count,
+	uint16_t pattern, uint16_t cycle_words, uint8_t flags)
+{
+	assert(count <= sizeof(dsm_words) / sizeof(dsm_words[0]));
+	assert(cycle_words != 0 && pattern < cycle_words);
+	memcpy(dsm_words, words, count * sizeof(*words));
+	dsm_fifo_enabled = true;
+	dsm_head = 0;
+	dsm_count = count;
+	dsm_pattern = pattern;
+	dsm_cycle_words = cycle_words;
+	dsm_status_flags = flags;
+	dsm_fifo_status();
+}
+
 void sensor_gyro_report_discontinuity(void) { gyro_discontinuities++; }
 unsigned host_bus_gyro_discontinuities(void) { return gyro_discontinuities; }
 
@@ -44,6 +75,8 @@ void host_bus_reset(void)
 	fail_read_reg = -1;
 	interval_bytes = 0;
 	gyro_discontinuities = 0;
+	dsm_fifo_enabled = false;
+	dsm_head = dsm_count = 0;
 	memset(registers, 0, sizeof(registers));
 }
 
@@ -110,6 +143,18 @@ int ssi_burst_read(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uin
 	if (fail_transaction == transaction_count || reg == fail_read_reg)
 		return -1;
 	(void)dev;
+	if (dsm_fifo_enabled && reg == 0x3e) {
+		assert(len % 2 == 0 && len / 2 <= dsm_count);
+		for (uint32_t i = 0; i < len / 2; i++) {
+			uint16_t word = dsm_words[dsm_head++];
+			buf[i * 2] = word & 0xff;
+			buf[i * 2 + 1] = word >> 8;
+		}
+		dsm_count -= len / 2;
+		dsm_pattern = (dsm_pattern + len / 2) % dsm_cycle_words;
+		dsm_fifo_status();
+		return 0;
+	}
 	for (uint32_t i = 0; i < len; i++) buf[i] = registers[(uint8_t)(reg + i)];
 	return 0;
 }

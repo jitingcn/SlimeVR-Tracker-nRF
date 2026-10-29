@@ -14,8 +14,13 @@
 static uint8_t accel_fs = DSM_FS_XL_16G;
 static uint8_t gyro_fs = DSM_FS_G_2000DPS;
 
-static uint8_t fifo_pattern_length;
-static bool fifo_pattern_gyro_dominant; // if more samples are gyro than accel in a pattern
+enum dsm_fifo_kind { DSM_FIFO_NONE, DSM_FIFO_ACCEL, DSM_FIFO_GYRO, DSM_FIFO_MIXED };
+enum dsm_sample_kind { DSM_SAMPLE_GYRO = 1, DSM_SAMPLE_ACCEL = 2 };
+static struct {
+	enum dsm_fifo_kind kind;
+	uint8_t ratio;
+	bool gyro_dominant;
+} fifo_shape;
 
 LOG_MODULE_REGISTER(LSM6DSM, LOG_LEVEL_DBG);
 
@@ -205,26 +210,21 @@ int lsm6dsm_update_odr(
 		return 0; /* already configured — success for err|= callers */
 	}
 
-	uint8_t fifo_odr_bits = MAX(accel_odr_bits, gyro_odr_bits);
-
-	// Convert the ODR-code distance to the FIFO decimation field encoding.
-	uint8_t gyro_decimation_bits = (fifo_odr_bits - gyro_odr_bits) >> 4;
-	gyro_decimation_bits = gyro_decimation_bits >= 6
-							 ? 0
-							 : (gyro_decimation_bits >= 2 ? gyro_decimation_bits + 2 : gyro_decimation_bits + 1);
-
-	uint8_t accel_decimation_bits = (fifo_odr_bits - accel_odr_bits) >> 4;
-	accel_decimation_bits = accel_decimation_bits >= 6
-							  ? 0
-							  : (accel_decimation_bits >= 2 ? accel_decimation_bits + 2 : accel_decimation_bits + 1);
-
-	if (gyro_period_s > accel_period_s) {
-		fifo_pattern_gyro_dominant = false;
-		fifo_pattern_length = accel_period_s == 0 ? 1 : gyro_period_s / accel_period_s + 0.5f;
-	} else {
-		fifo_pattern_gyro_dominant = true;
-		fifo_pattern_length = gyro_period_s == 0 ? 1 : accel_period_s / gyro_period_s + 0.5f;
-	}
+	const bool accel_active = accel_odr_bits != DSM_ODR_OFF;
+	const bool gyro_active = gyro_odr_bits != DSM_ODR_OFF && gyro_sleep_bits == DSM_OP_MODE_G_AWAKE;
+	uint8_t fifo_odr_bits = MAX(accel_active ? accel_odr_bits : 0, gyro_active ? gyro_odr_bits : 0);
+	uint8_t gyro_distance = (fifo_odr_bits - (gyro_active ? gyro_odr_bits : 0)) >> 4;
+	uint8_t accel_distance = (fifo_odr_bits - (accel_active ? accel_odr_bits : 0)) >> 4;
+	uint8_t gyro_decimation_bits = !gyro_active || gyro_distance >= 6
+		? 0 : (gyro_distance >= 2 ? gyro_distance + 2 : gyro_distance + 1);
+	uint8_t accel_decimation_bits = !accel_active || accel_distance >= 6
+		? 0 : (accel_distance >= 2 ? accel_distance + 2 : accel_distance + 1);
+	enum dsm_fifo_kind kind = gyro_decimation_bits
+		? (accel_decimation_bits ? DSM_FIFO_MIXED : DSM_FIFO_GYRO)
+		: (accel_decimation_bits ? DSM_FIFO_ACCEL : DSM_FIFO_NONE);
+	bool gyro_dominant = gyro_odr_bits >= accel_odr_bits;
+	uint8_t ratio = kind == DSM_FIFO_MIXED
+		? (uint8_t)(1u << (gyro_dominant ? accel_distance : gyro_distance)) : 1;
 
 	int err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
@@ -263,6 +263,9 @@ int lsm6dsm_update_odr(
 	last_gyro_mode = gyro_mode;
 	last_accel_odr = accel_odr_bits;
 	last_gyro_odr = gyro_odr_bits;
+	fifo_shape.kind = kind;
+	fifo_shape.ratio = ratio;
+	fifo_shape.gyro_dominant = gyro_dominant;
 	*accel_actual_period_s = accel_period_s;
 	*gyro_actual_period_s = gyro_period_s;
 
@@ -273,9 +276,10 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 {
 	int err = 0;
 	uint16_t total_packets = 0;
-	/* Samples per FIFO pattern cycle; tags cycle in FIFO order and
-	 * fifo_process maps them to gyro/accel as before. */
-	const uint8_t cycle_samples = (uint8_t)(fifo_pattern_length + 1);
+	if (fifo_shape.kind == DSM_FIFO_NONE) {
+		return 0;
+	}
+	const uint8_t cycle_samples = fifo_shape.kind == DSM_FIFO_MIXED ? fifo_shape.ratio + 1 : 1;
 
 	while (capacity_bytes >= PACKET_SIZE) {
 		uint8_t status[4];
@@ -346,7 +350,11 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 				}
 			}
 			for (uint16_t i = 0; i < n; i++) {
-				data[i * PACKET_SIZE] = (uint8_t)((tag + i) % cycle_samples);
+				uint8_t position = (uint8_t)((tag + i) % cycle_samples);
+				bool gyro = fifo_shape.kind == DSM_FIFO_GYRO
+					|| (fifo_shape.kind == DSM_FIFO_MIXED
+						&& (position == 0 || (position > 1 && fifo_shape.gyro_dominant)));
+				data[i * PACKET_SIZE] = gyro ? DSM_SAMPLE_GYRO : DSM_SAMPLE_ACCEL;
 				memcpy(&data[i * PACKET_SIZE + 1], &raw[i * 6], PACKET_SIZE - 1);
 			}
 			samples -= n;
@@ -363,9 +371,11 @@ int lsm6dsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
 	const uint16_t packet_offset = index * PACKET_SIZE;
 	const uint8_t *packet = &data[packet_offset];
-	uint8_t pattern = packet[0]; // Software pattern index, not a hardware FIFO tag.
-	if ((pattern == 0 && (fifo_pattern_length != 1 || fifo_pattern_gyro_dominant))
-		|| (pattern > 1 && fifo_pattern_gyro_dominant)) {
+	uint8_t kind = packet[0];
+	if (kind != DSM_SAMPLE_GYRO && kind != DSM_SAMPLE_ACCEL) {
+		return 1;
+	}
+	if (kind == DSM_SAMPLE_GYRO) {
 		for (int i = 0; i < 3; i++) // x, y, z
 		{
 			g[i] = (int16_t)((((uint16_t)packet[2 + (i * 2)]) << 8) | packet[1 + (i * 2)]);
@@ -383,19 +393,16 @@ int lsm6dsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 	return 1;
 }
 
-/* LSM6DSM does not have COUNTER_BDR, FIFO threshold uses word count, or 3 words per sensor sample
- * ex. if gyro odr is higher, and pattern length is 3:
- * first timestamp will have both gyro and accel
- * second (and above) timestamp will contain only gyro for the rest of the pattern length
- * 0->(0+0)*3, 1->(1+1)*3, 2->(1+2)*3, 3->(1+3)*3, 4->(2+4)*3
- * this assumes pattern always begins at 0 on fifo read, which it will not.
- */
+/* Threshold is in fastest-stream samples. Mixed batches also include the slower stream. */
 uint8_t lsm6dsm_setup_DRDY(uint16_t threshold)
 {
-	threshold = ((threshold + fifo_pattern_length - 1) / fifo_pattern_length + threshold) * 3;
+	uint32_t words = fifo_shape.kind == DSM_FIFO_NONE ? 0
+		: (fifo_shape.kind == DSM_FIFO_MIXED
+			? ((uint32_t)threshold + fifo_shape.ratio - 1) / fifo_shape.ratio + threshold : threshold) * 3u;
+	words = MIN(words, 0x7ffu);
 	uint8_t buf[2];
-	buf[0] = threshold & 0xFF;
-	buf[1] = (threshold >> 8) & 0x07;
+	buf[0] = words & 0xFF;
+	buf[1] = (words >> 8) & 0x07;
 	ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_CTRL1, buf, 2);
 	/* LSM6DSM has no COUNTER_BDR (unlike LSM6DSV); use pulsed INT1_DRDY_G for
 	 * per-sample wakeup, with INT1_FTH as the burst/catch-up backup. */

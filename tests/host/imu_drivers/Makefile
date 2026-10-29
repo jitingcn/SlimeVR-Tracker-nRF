@@ -22,9 +22,10 @@ HOST_HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h hal/*.h)
 
 .PHONY: check clean
 
-check: test_imu_odr test_imu_io
+check: test_imu_odr test_imu_io test_lsm6dsm_fifo
 	./test_imu_odr
 	./test_imu_io
+	./test_lsm6dsm_fifo
 	python3 run_fifo_temperature.py
 
 test_imu_odr: test_imu_odr.c host_stubs.c $(IMU_SOURCES) $(IMU_HEADERS) $(COMMON_HEADERS) $(HOST_HEADERS) Makefile
@@ -33,5 +34,8 @@ test_imu_odr: test_imu_odr.c host_stubs.c $(IMU_SOURCES) $(IMU_HEADERS) $(COMMON
 test_imu_io: test_imu_io.c host_stubs.c $(IMU_SOURCES) $(IMU_HEADERS) $(COMMON_HEADERS) $(HOST_HEADERS) Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ test_imu_io.c host_stubs.c $(IMU_SOURCES) $(LDLIBS)
 
+test_lsm6dsm_fifo: test_lsm6dsm_fifo.c host_stubs.c $(IMU_SOURCES) ../../../src/sensor/imu/LSM6DSV.c ../../../src/sensor/imu/LSM6DSV.h $(IMU_HEADERS) $(COMMON_HEADERS) $(HOST_HEADERS) Makefile
+	$(CC) $(CFLAGS) -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all $(LDFLAGS) -o $@ test_lsm6dsm_fifo.c host_stubs.c $(IMU_SOURCES) ../../../src/sensor/imu/LSM6DSV.c $(LDLIBS)
+
 clean:
-	$(RM) test_imu_odr test_imu_io
+	$(RM) test_imu_odr test_imu_io test_lsm6dsm_fifo
