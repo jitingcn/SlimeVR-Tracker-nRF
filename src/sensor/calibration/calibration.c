@@ -819,7 +819,6 @@ static void calibration_thread(void)
 #endif
 
 	// TODO: be able to block the sensor while doing certain operations
-	// TODO: reset fusion on calibration finished
 	// TODO: start and run thread from request?
 	// TODO: replace wait_for_motion with isAccRest
 
