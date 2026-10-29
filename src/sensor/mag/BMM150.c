@@ -63,8 +63,8 @@ static int64_t oneshot_deadline_ms;
 LOG_MODULE_REGISTER(BMM150, LOG_LEVEL_DBG);
 
 static int read_trim_registers(void);
-static float compensate_x(int16_t mag_data_x, uint16_t data_rhall);
-static float compensate_y(int16_t mag_data_y, uint16_t data_rhall);
+static float compensate_x(int16_t mag_data_x, uint16_t data_rhall, float xy_term);
+static float compensate_y(int16_t mag_data_y, uint16_t data_rhall, float xy_term);
 static float compensate_z(int16_t mag_data_z, uint16_t data_rhall);
 
 int bmm1_init(float period_s, float *actual_period_s)
@@ -254,8 +254,15 @@ void bmm1_mag_process(uint8_t *raw_m, float m[3])
 		mag[i] = (int16_t)((((uint16_t)raw_m[(i * 2) + 1]) << 8) | (raw_m[i * 2] & 0xFE)) / (i < 2 ? 8 : 2);
 	}
 	uint16_t rhall = (uint16_t)((((uint16_t)raw_m[7]) << 6) | (raw_m[6] >> 2));
-	m[0] = compensate_x(mag[0], rhall) / 100; // uT to gauss
-	m[1] = compensate_y(mag[1], rhall) / 100;
+	float xy_term = 0;
+	if (rhall != 0 && dig_xyz1 != 0 && (mag[0] != -4096 || mag[1] != -4096)) {
+		float ratio = ((float)dig_xyz1) * 16384.0f / rhall;
+		float delta = ratio - 16384.0f;
+		float quadratic = ((float)dig_xy2) * (delta * delta / 268435456.0f);
+		xy_term = quadratic + delta * ((float)dig_xy1) / 16384.0f;
+	}
+	m[0] = compensate_x(mag[0], rhall, xy_term) / 100; // uT to gauss
+	m[1] = compensate_y(mag[1], rhall, xy_term) / 100;
 	m[2] = compensate_z(mag[2], rhall) / 100;
 }
 
@@ -299,38 +306,30 @@ error:
 
 // from boschsensortec BMM150_SensorAPI
 // returns value in microtesla
-static float compensate_x(int16_t mag_data_x, uint16_t data_rhall)
+static float compensate_x(int16_t mag_data_x, uint16_t data_rhall, float xy_term)
 {
 	float retval = 0;
 
 	/* Overflow condition check */
 	if ((mag_data_x != -4096) && (data_rhall != 0) && (dig_xyz1 != 0)) {
 		/* Processing compensation equations */
-		float x0 = (((float)dig_xyz1) * 16384.0f / data_rhall);
-		retval = (x0 - 16384.0f);
-		float x1 = ((float)dig_xy2) * (retval * retval / 268435456.0f);
-		float x2 = x1 + retval * ((float)dig_xy1) / 16384.0f;
 		float x3 = ((float)dig_x2) + 160.0f;
-		float x4 = mag_data_x * ((x2 + 256.0f) * x3);
+		float x4 = mag_data_x * ((xy_term + 256.0f) * x3);
 		retval = ((x4 / 8192.0f) + (((float)dig_x1) * 8.0f)) / 16.0f;
 	}
 
 	return retval;
 }
 
-static float compensate_y(int16_t mag_data_y, uint16_t data_rhall)
+static float compensate_y(int16_t mag_data_y, uint16_t data_rhall, float xy_term)
 {
 	float retval = 0;
 
 	/* Overflow condition check */
 	if ((mag_data_y != -4096) && (data_rhall != 0) && (dig_xyz1 != 0)) {
 		/* Processing compensation equations */
-		float y0 = ((float)dig_xyz1) * 16384.0f / data_rhall;
-		retval = y0 - 16384.0f;
-		float y1 = ((float)dig_xy2) * (retval * retval / 268435456.0f);
-		float y2 = y1 + retval * ((float)dig_xy1) / 16384.0f;
 		float y3 = ((float)dig_y2) + 160.0f;
-		float y4 = mag_data_y * (((y2) + 256.0f) * y3);
+		float y4 = mag_data_y * ((xy_term + 256.0f) * y3);
 		retval = ((y4 / 8192.0f) + (((float)dig_y1) * 8.0f)) / 16.0f;
 	}
 

@@ -1333,6 +1333,50 @@ static int test_rates_qmc5883_shot_standby(void)
 	return 0;
 }
 
+static int test_rates_bmm150_rhall_polynomial(void)
+{
+	fake_bus_reset();
+	bus.registers[BMM150_DIG_X1] = (uint8_t)-3;
+	bus.registers[BMM150_DIG_X1 + 1] = 5;
+	bus.registers[BMM150_DIG_Z4_LSB + 2] = 7;
+	bus.registers[BMM150_DIG_Z4_LSB + 3] = (uint8_t)-9;
+	bus.registers[BMM150_DIG_Z2_LSB + 1] = 0x20;
+	bus.registers[BMM150_DIG_Z2_LSB + 3] = 0x40;
+	bus.registers[BMM150_DIG_Z2_LSB + 5] = 0x20;
+	bus.registers[BMM150_DIG_Z2_LSB + 8] = (uint8_t)-8;
+	bus.registers[BMM150_DIG_Z2_LSB + 9] = 32;
+	float actual;
+	CHECK(bmm1_init(0.04f, &actual) == 0);
+	const uint16_t rhall[] = {4096, 8192, 12288, 0};
+	const float expected[][2] = {
+		{0.34175048828125f, -0.6201416015625f},
+		{0.311171875f, -0.56484375f},
+		{0.29644883897569446f, -0.5382188585069444f},
+		{0, 0},
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(rhall); i++) {
+		for (int invalid = -1; invalid < 2; invalid++) {
+			int16_t axes[] = {100, -200, 300};
+			if (invalid >= 0) axes[invalid] = -4096;
+			bmm150_frame(axes);
+			bus.registers[BMM150_RHALL_LSB] = (uint8_t)(rhall[i] << 2);
+			bus.registers[BMM150_RHALL_LSB + 1] = (uint8_t)(rhall[i] >> 6);
+			float m[3];
+			bmm1_mag_process(&bus.registers[BMM150_DATAX_LSB], m);
+			CHECK(fabsf(m[0] - (invalid == 0 ? 0 : expected[i][0])) < 0.000001f);
+			CHECK(fabsf(m[1] - (invalid == 1 ? 0 : expected[i][1])) < 0.000001f);
+		}
+	}
+	bus.registers[BMM150_DIG_Z2_LSB + 5] = 0;
+	CHECK(bmm1_init(0.04f, &actual) == 0);
+	const int16_t axes[] = {100, -200, 300};
+	bmm150_frame(axes);
+	float m[3];
+	bmm1_mag_process(&bus.registers[BMM150_DATAX_LSB], m);
+	CHECK(m[0] == 0 && m[1] == 0 && m[2] == 0);
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1383,6 +1427,7 @@ int main(void)
 		{"QMC confirmed identical samples", test_rates_qmc_fresh_identical_samples},
 		{"QMC ready poll wins deadline", test_rates_qmc_ready_after_deadline},
 		{"QMC5883 shot terminal standby", test_rates_qmc5883_shot_standby},
+		{"BMM150 shared RHALL polynomial", test_rates_bmm150_rhall_polynomial},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
 		{"LIS temperatures", test_lis_temperatures_fail_loudly_and_apply_offset},
