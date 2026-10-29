@@ -55,8 +55,6 @@ double sample_count;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 /* Owned here; declared in mag_common.h for online_mag / calibration glue. */
 uint8_t magneto_progress;
-static uint8_t last_magneto_progress;
-static int64_t magneto_progress_time;
 
 static int64_t mag_cal_last_status_log;
 static uint8_t mag_cal_coverage;
@@ -222,8 +220,6 @@ void magneto_reset(void)
 {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	magneto_progress = 0;
-	last_magneto_progress = 0;
-	magneto_progress_time = 0;
 	mag_cal_last_status_log = 0;
 	mag_cal_coverage = 0;
 #endif
