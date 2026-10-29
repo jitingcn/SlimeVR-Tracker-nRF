@@ -58,9 +58,9 @@ static uint32_t tdma_ping_startup;
 static uint32_t tdma_ping_deferred_frame;
 static uint32_t tdma_ping_missed_window;
 static uint32_t tdma_deferred_for_ping;
-static uint64_t tdma_last_admitted_frame = UINT64_MAX;
+static uint32_t tdma_last_admitted_frame = UINT32_MAX;
 static uint32_t tdma_last_admitted_pack;
-static uint64_t tdma_last_ping_frame = UINT64_MAX;
+static uint32_t tdma_last_ping_frame = UINT32_MAX;
 static uint32_t tdma_last_ping_pack;
 
 void tdma_init(uint8_t tracker_id)
@@ -69,9 +69,9 @@ void tdma_init(uint8_t tracker_id)
 	unsigned key = irq_lock();
 	atomic_set(&tdma_cfg_pack,
 		   (atomic_val_t)TDMA_PACK(tdma_slot_index_init, TDMA_SLOT_TICKS, TDMA_NUM_TRACKERS, 0));
-	tdma_last_admitted_frame = UINT64_MAX;
+	tdma_last_admitted_frame = UINT32_MAX;
 	tdma_last_admitted_pack = 0;
-	tdma_last_ping_frame = UINT64_MAX;
+	tdma_last_ping_frame = UINT32_MAX;
 	tdma_last_ping_pack = 0;
 	irq_unlock(key);
 #if CONFIG_CONNECTION_TDMA
@@ -333,6 +333,8 @@ static bool tdma_wait_for_data_admission(uint8_t reserve_ticks)
 			irq_unlock(key);
 			return true;
 		}
+		uint32_t admitted_pack = tdma_last_admitted_pack;
+		uint32_t admitted_frame = tdma_last_admitted_frame;
 		irq_unlock(key);
 
 		if (guarded && !counted_guard) {
@@ -359,7 +361,7 @@ static bool tdma_wait_for_data_admission(uint8_t reserve_ticks)
 			bool ignored;
 			if (tdma_frame_eligible(candidate, &config)
 				&& !tdma_data_frame_guarded(candidate, &config, &ignored)
-				&& (config.pack != tdma_last_admitted_pack || candidate != tdma_last_admitted_frame)) {
+				&& (config.pack != admitted_pack || candidate != admitted_frame)) {
 				target = candidate * config.frame_ticks + slot_start + TDMA_SLOT_TARGET_OFFSET;
 				found = true;
 				break;
@@ -395,7 +397,15 @@ bool tdma_ping_wake_delay_ms(uint32_t *delay_ms)
 {
 	struct tdma_config config;
 	struct esb_network_clock clock;
-	if (!delay_ms || !tdma_config_snapshot(&config) || !tdma_clock_snapshot(&config, &clock)) {
+	if (!delay_ms) {
+		return false;
+	}
+	unsigned key = irq_lock();
+	bool configured = tdma_config_snapshot(&config);
+	uint32_t ping_pack = tdma_last_ping_pack;
+	uint32_t ping_frame = tdma_last_ping_frame;
+	irq_unlock(key);
+	if (!configured || !tdma_clock_snapshot(&config, &clock)) {
 		return false;
 	}
 	uint32_t current_frame = clock.receiver_ticks / config.frame_ticks;
@@ -411,7 +421,7 @@ bool tdma_ping_wake_delay_ms(uint32_t *delay_ms)
 		*delay_ms = 1;
 		return true;
 	}
-	if (in_window && (config.pack != tdma_last_ping_pack || frame != tdma_last_ping_frame)) {
+	if (in_window && (config.pack != ping_pack || frame != ping_frame)) {
 		*delay_ms = 0;
 		return true;
 	}
@@ -514,11 +524,11 @@ void tdma_set_enabled(bool enabled)
 	atomic_set(&tdma_cfg_pack, (atomic_val_t)(enabled
 		? pack | TDMA_ENABLED_BIT : pack & ~TDMA_ENABLED_BIT));
 	if (!prev && enabled) {
-		tdma_last_admitted_frame = UINT64_MAX;
+		tdma_last_admitted_frame = UINT32_MAX;
 		tdma_last_admitted_pack = 0;
 	}
 	if ((prev != 0) != enabled) {
-		tdma_last_ping_frame = UINT64_MAX;
+		tdma_last_ping_frame = UINT32_MAX;
 		tdma_last_ping_pack = 0;
 	}
 	irq_unlock(key);
@@ -615,9 +625,9 @@ bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 	atomic_set(&tdma_cfg_pack, (atomic_val_t)(TDMA_PACK(slot_index, slot_ticks, total_slots, epoch)
 		| TDMA_ENABLED_BIT));
 
-	tdma_last_admitted_frame = UINT64_MAX;
+	tdma_last_admitted_frame = UINT32_MAX;
 	tdma_last_admitted_pack = 0;
-	tdma_last_ping_frame = UINT64_MAX;
+	tdma_last_ping_frame = UINT32_MAX;
 	tdma_last_ping_pack = 0;
 	irq_unlock(key);
 	if (newly_enabled) {

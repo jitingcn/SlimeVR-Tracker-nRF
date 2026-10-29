@@ -202,7 +202,7 @@ static void deadlines(void) {
 }
 static uint64_t set_ping_before(uint32_t excess) {
     tdma_cfg_pack = (TDMA_PACK(0, 16, 8, 0) | TDMA_ENABLED_BIT);
-    tdma_last_ping_frame = tdma_last_admitted_frame = UINT64_MAX;
+    tdma_last_ping_frame = tdma_last_admitted_frame = UINT32_MAX;
     tdma_last_ping_pack = tdma_last_admitted_pack = 0;
     sync_age = 0; sleep_calls = 0; first_sleep_us = 0; clock_offset = 0;
     invalidate_on_sleep = change_layout_on_sleep = disable_on_sleep = freeze_clock = false;
@@ -226,8 +226,8 @@ static void ping(void) {
             uint64_t remaining = target - receiver_tick();
             /* Full preparation frame minus at most three modeled kernel/network ticks. */
             assert(remaining <= 128 && remaining >= 125);
-            assert(tdma_last_ping_frame == UINT64_MAX);
-            assert(tdma_last_admitted_frame == UINT64_MAX);
+            assert(tdma_last_ping_frame == UINT32_MAX);
+            assert(tdma_last_admitted_frame == UINT32_MAX);
             assert(tdma_wait_for_ping_window() == TDMA_PING_ADMITTED);
             assert(tdma_last_ping_frame == target / 128);
             /* Retry cannot consume this frame twice. */
@@ -240,34 +240,34 @@ static void ping(void) {
             uint64_t before = virtual_us;
             assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
             assert(sleep_calls == 0 && virtual_us == before);
-            assert(tdma_last_ping_frame == UINT64_MAX);
+            assert(tdma_last_ping_frame == UINT32_MAX);
         }
         /* Config/sync can change while this thread yields; no old reservation survives. */
         set_ping_before(16);
         invalidate_on_sleep = true;
         assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
         assert(tdma_wait_for_ping_window() == TDMA_PING_UNAVAILABLE);
-        assert(tdma_last_ping_frame == UINT64_MAX);
+        assert(tdma_last_ping_frame == UINT32_MAX);
         set_ping_before(16);
         assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
         tdma_cfg_pack &= ~TDMA_ENABLED_BIT;
         assert(tdma_wait_for_ping_window() == TDMA_PING_UNAVAILABLE);
-        assert(tdma_last_admitted_frame == UINT64_MAX);
+        assert(tdma_last_admitted_frame == UINT32_MAX);
         /* Exactly one frame early enters existing precise wait, not early DEFERRED. */
         set_ping_before(0);
         assert(tdma_wait_for_ping_window() == TDMA_PING_ADMITTED);
         set_ping_before(0);
         change_layout_on_sleep = true;
         assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
-        assert(tdma_last_ping_frame == UINT64_MAX);
+        assert(tdma_last_ping_frame == UINT32_MAX);
         set_ping_before(0);
         disable_on_sleep = true;
         assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
-        assert(tdma_last_ping_frame == UINT64_MAX);
+        assert(tdma_last_ping_frame == UINT32_MAX);
         set_ping_before(0);
         invalidate_on_sleep = true;
         assert(tdma_wait_for_ping_window() == TDMA_PING_DEFERRED);
-        assert(tdma_last_ping_frame == UINT64_MAX);
+        assert(tdma_last_ping_frame == UINT32_MAX);
     }
     puts("PASS PING early yield, slot admission, duplicate and sync/config boundaries at both kernel rates");
 }
@@ -286,7 +286,7 @@ static void data_ping_boundary(void) {
                      * already inside the frame whose PING is still ahead. */
                     for (uint64_t tick = frame * frame_ticks; tick <= target; ++tick) {
                                             tdma_cfg_pack = (TDMA_PACK(slot, width, slots, 0) | TDMA_ENABLED_BIT);
-                        tdma_last_ping_frame = tdma_last_admitted_frame = UINT64_MAX;
+                        tdma_last_ping_frame = tdma_last_admitted_frame = UINT32_MAX;
                         tdma_last_ping_pack = tdma_last_admitted_pack = 0;
                         sync_age = 0; invalidate_on_sleep = false; clock_offset = 0;
                         virtual_us = (tick * 1000000 + 32767) / 32768;
@@ -313,9 +313,9 @@ static void admission_stall(void) {
     kernel_hz = 32768;
     for (int64_t age = -1; age <= PING_INTERVAL_MS * 10 + 1; age += 500) {
             tdma_cfg_pack = (TDMA_PACK(0, width, slots, 0) | TDMA_ENABLED_BIT);
-        tdma_last_admitted_frame = UINT64_MAX;
+        tdma_last_admitted_frame = UINT32_MAX;
         tdma_last_admitted_pack = 0;
-        tdma_last_ping_frame = UINT64_MAX;
+        tdma_last_ping_frame = UINT32_MAX;
         tdma_last_ping_pack = 0;
         sync_age = age; invalidate_on_sleep = false;
         virtual_us = 1100000;
@@ -348,7 +348,7 @@ static void set_receiver_tick(uint32_t tick) {
 }
 static void configure(uint8_t slots, uint8_t width, uint8_t slot) {
     tdma_cfg_pack = (TDMA_PACK(slot, width, slots, 1) | TDMA_ENABLED_BIT);
-    tdma_last_ping_frame = tdma_last_admitted_frame = UINT64_MAX;
+    tdma_last_ping_frame = tdma_last_admitted_frame = UINT32_MAX;
     tdma_last_ping_pack = tdma_last_admitted_pack = 0;
     sync_age = 0;
     invalidate_on_sleep = change_layout_on_sleep = disable_on_sleep = freeze_clock = false;
@@ -499,9 +499,9 @@ static void layout_lifecycle(void) {
     assert(tdma_last_admitted_frame == 42 && tdma_last_ping_frame == 43);
     tdma_set_enabled(false);
     assert(!tdma_is_enabled() && tdma_frame_ticks_get() == 220);
-    assert(tdma_last_admitted_frame == 42 && tdma_last_ping_frame == UINT64_MAX);
+    assert(tdma_last_admitted_frame == 42 && tdma_last_ping_frame == UINT32_MAX);
     tdma_set_enabled(true);
-    assert(tdma_last_admitted_frame == UINT64_MAX && tdma_last_ping_frame == UINT64_MAX);
+    assert(tdma_last_admitted_frame == UINT32_MAX && tdma_last_ping_frame == UINT32_MAX);
     assert(tdma_update_config(15, 16, 255, 255));
     assert(tdma_config_snapshot(&config) && config.epoch == 255 && config.frame_ticks == 4080);
     tdma_init(22);
