@@ -401,7 +401,7 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 	// long preemption would otherwise cost 2x350us of resync sleeps).
 	uint16_t packet_capacity = capacity_bytes / PACKET_SIZE;
 	if (packet_count > packet_capacity) {
-		LOG_WRN("FIFO read buffer limit reached, %u packets dropped", packet_count - packet_capacity);
+		LOG_WRN("FIFO read buffer limit reached, %u packets deferred", packet_count - packet_capacity);
 		packet_count = packet_capacity;
 	}
 
