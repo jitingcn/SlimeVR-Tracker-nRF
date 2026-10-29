@@ -34,22 +34,7 @@ static const float gyro_sensitivity = 4000.0f / 32768.0f;
 static const float accel_sensitivity_32 = 32.0f / ((uint32_t)2 << 30);  // 32G forced
 static const float gyro_sensitivity_32 = 4000.0f / ((uint32_t)2 << 30); // 4000dps forced
 
-static const float odr_hz[]
-	= {32000.0f, 16000.0f, 8000.0f, 4000.0f, 2000.0f, 1000.0f, 500.0f, 200.0f, 100.0f, 50.0f, 25.0f, 12.5f};
-
-static const uint8_t odrs[]
-	= {ICM42686_AODR_32kHz,
-	   ICM42686_AODR_16kHz,
-	   ICM42686_AODR_8kHz,
-	   ICM42686_AODR_4kHz,
-	   ICM42686_AODR_2kHz,
-	   ICM42686_AODR_1kHz,
-	   ICM42686_AODR_500Hz,
-	   ICM42686_AODR_200Hz,
-	   ICM42686_AODR_100Hz,
-	   ICM42686_AODR_50Hz,
-	   ICM42686_AODR_25Hz,
-	   ICM42686_AODR_12_5Hz};
+#include "icm426xx_odr.h"
 
 static uint8_t last_accel_odr = 0xff;
 static uint8_t last_gyro_odr = 0xff;
@@ -210,8 +195,6 @@ int icm42686_update_odr(
 	float *gyro_actual_period_s
 )
 {
-	float requested_odr_hz;
-
 	uint8_t accel_fs_bits = ICM42686_AFS_32G;
 	uint8_t gyro_fs_bits = ICM42686_GFS_4000DPS;
 
@@ -227,16 +210,7 @@ int icm42686_update_odr(
 		accel_period_s = 0;
 	} else {
 		accel_mode = ICM42686_aMode_LN;
-		requested_odr_hz = (1.0f / accel_period_s) / clock_scale;
-		size_t selected = 0;
-		for (size_t i = 1; i < ARRAY_SIZE(odr_hz); i++) {
-			if (requested_odr_hz > odr_hz[i]) {
-				break;
-			}
-			selected = i;
-		}
-		accel_odr_bits = odrs[selected];
-		accel_period_s = 1.0f / odr_hz[selected];
+		accel_odr_bits = icm426xx_select_odr((1.0f / accel_period_s) / clock_scale, &accel_period_s);
 	}
 
 	accel_period_s /= clock_scale;
@@ -250,16 +224,7 @@ int icm42686_update_odr(
 		gyro_period_s = 0;
 	} else {
 		gyro_mode = ICM42686_gMode_LN;
-		requested_odr_hz = (1.0f / gyro_period_s) / clock_scale;
-		size_t selected = 0;
-		for (size_t i = 1; i < ARRAY_SIZE(odr_hz); i++) {
-			if (requested_odr_hz > odr_hz[i]) {
-				break;
-			}
-			selected = i;
-		}
-		gyro_odr_bits = odrs[selected];
-		gyro_period_s = 1.0f / odr_hz[selected];
+		gyro_odr_bits = icm426xx_select_odr((1.0f / gyro_period_s) / clock_scale, &gyro_period_s);
 	}
 
 	gyro_period_s /= clock_scale;

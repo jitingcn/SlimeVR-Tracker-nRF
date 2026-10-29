@@ -29,21 +29,7 @@ static const float gyro_sensitivity = 2000.0f / 32768.0f; // Always 2000dps
 static const float accel_sensitivity_32 = 16.0f / ((uint32_t)2 << 30);  // 16G forced
 static const float gyro_sensitivity_32 = 2000.0f / ((uint32_t)2 << 30); // 2000dps forced
 
-static const float odr_hz[]
-	= {32000.0f, 16000.0f, 8000.0f, 4000.0f, 2000.0f, 1000.0f, 500.0f, 200.0f, 100.0f, 50.0f, 25.0f, 12.5f};
-static const uint8_t odrs[]
-	= {AODR_32kHz,
-	   AODR_16kHz,
-	   AODR_8kHz,
-	   AODR_4kHz,
-	   AODR_2kHz,
-	   AODR_1kHz,
-	   AODR_500Hz,
-	   AODR_200Hz,
-	   AODR_100Hz,
-	   AODR_50Hz,
-	   AODR_25Hz,
-	   AODR_12_5Hz};
+#include "icm426xx_odr.h"
 
 static uint8_t last_accel_odr = 0xff;
 static uint8_t last_gyro_odr = 0xff;
@@ -174,7 +160,6 @@ void icm_update_fs(float accel_range, float gyro_range, float *accel_actual_rang
 
 int icm_update_odr(float accel_period_s, float gyro_period_s, float *accel_actual_period_s, float *gyro_actual_period_s)
 {
-	float requested_odr_hz;
 	uint8_t accel_fs_bits = AFS_16G;    // set highest
 	uint8_t gyro_fs_bits = GFS_2000DPS; // set highest
 	uint8_t accel_mode;
@@ -189,16 +174,7 @@ int icm_update_odr(float accel_period_s, float gyro_period_s, float *accel_actua
 		accel_period_s = 0;
 	} else {
 		accel_mode = aMode_LN;
-		requested_odr_hz = (1.0f / accel_period_s) / clock_scale;
-		size_t selected = 0;
-		for (size_t i = 1; i < ARRAY_SIZE(odr_hz); i++) {
-			if (requested_odr_hz > odr_hz[i]) {
-				break;
-			}
-			selected = i;
-		}
-		accel_odr_bits = odrs[selected];
-		accel_period_s = 1.0f / odr_hz[selected];
+		accel_odr_bits = icm426xx_select_odr((1.0f / accel_period_s) / clock_scale, &accel_period_s);
 	}
 	accel_period_s /= clock_scale; // scale clock
 
@@ -213,16 +189,7 @@ int icm_update_odr(float accel_period_s, float gyro_period_s, float *accel_actua
 		gyro_period_s = 0;
 	} else {
 		gyro_mode = gMode_LN;
-		requested_odr_hz = (1.0f / gyro_period_s) / clock_scale;
-		size_t selected = 0;
-		for (size_t i = 1; i < ARRAY_SIZE(odr_hz); i++) {
-			if (requested_odr_hz > odr_hz[i]) {
-				break;
-			}
-			selected = i;
-		}
-		gyro_odr_bits = odrs[selected];
-		gyro_period_s = 1.0f / odr_hz[selected];
+		gyro_odr_bits = icm426xx_select_odr((1.0f / gyro_period_s) / clock_scale, &gyro_period_s);
 	}
 	gyro_period_s /= clock_scale; // scale clock
 

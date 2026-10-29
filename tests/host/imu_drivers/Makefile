@@ -14,6 +14,7 @@ IMU_SOURCES := \
 
 IMU_HEADERS := $(IMU_SOURCES:.c=.h) \
 	../../../src/sensor/imu/icm426xx_hires.h ../../../src/sensor/imu/icm426xx_io.h
+IMU_HEADERS += ../../../src/sensor/imu/icm426xx_odr.h
 COMMON_HEADERS := ../../../src/sensor/sensor.h ../../../src/sensor/sensor_none.h \
 	../../../src/sensor/interface.h ../../../src/sensor/interface_internal.h \
 	../../../src/sensor/diagnostics.h ../harness/include/device_types.h \
