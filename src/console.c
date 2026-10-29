@@ -1512,12 +1512,12 @@ static void console_reject(void)
 	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
 }
 
-static bool console_require_args(size_t argc, size_t minimum, size_t maximum)
+static bool console_require_args(size_t argc, size_t minimum, size_t maximum, const char *usage)
 {
 	if (argc >= minimum && argc <= maximum) {
 		return true;
 	}
-	printk("Invalid number of arguments\n");
+	printk("%s", usage ? usage : "Invalid number of arguments\n");
 	console_reject();
 	return false;
 }
@@ -1665,6 +1665,9 @@ struct console_cmd {
 	const char *name;
 	console_cmd_fn fn;
 	enum console_feedback_class feedback;
+	uint8_t argc_min;
+	uint8_t argc_max;
+	const char *usage;
 };
 
 static void console_cmd_help(size_t argc, char **argv)
@@ -1708,18 +1711,14 @@ static void console_cmd_uptime(size_t argc, char **argv)
 
 static void console_cmd_shutdown(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 1)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	cmd_shutdown();
 }
 
 static void console_cmd_reboot(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 1)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	int err = sys_user_reboot();
 	if (err) {
@@ -1736,9 +1735,7 @@ static void console_cmd_battery(size_t argc, char **argv)
 
 static void console_cmd_scan(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 1)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	int err = sensor_request_scan(true, true);
 	if (err) {
@@ -1771,17 +1768,12 @@ static void console_cmd_calibrate(size_t argc, char **argv)
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 static void console_cmd_sens(size_t argc, char **argv)
 {
-	char *arg = argc > 1 ? argv[1] : NULL;
+	char *arg = argv[1];
 	char *arg2 = argc > 2 ? argv[2] : NULL;
 	char *arg3 = argc > 3 ? argv[3] : NULL;
 
-	// check if there are any arguments at all.
-	if (arg == NULL) {
-		printk("Error: Missing arguments. Use 'sens <x>,<y>,<z>', 'sens auto <x|y|z> [rev]', or 'sens reset'.\n");
-		console_reject();
-	}
 	// check if this is the auto-calibration subcommand
-	else if (strcmp(arg, "auto") == 0) {
+	if (strcmp(arg, "auto") == 0) {
 		if (argc > 4) {
 			printk("Error: Too many arguments. Use: 'sens auto <x|y|z> [revolutions]'.\n");
 			console_reject();
@@ -1791,11 +1783,11 @@ static void console_cmd_sens(size_t argc, char **argv)
 	}
 	// check if the argument is "reset"
 	else if (strcmp(arg, "reset") == 0) {
-		if (console_require_args(argc, 2, 2)) {
+		if (console_require_args(argc, 2, 2, NULL)) {
 			cmd_sens_reset();
 		}
 	} else {
-		if (!console_require_args(argc, 2, 2)) {
+		if (!console_require_args(argc, 2, 2, NULL)) {
 			return;
 		}
 		float values[3];
@@ -1866,220 +1858,191 @@ static void console_cmd_tcal_heat(size_t argc, char **argv)
 
 static void console_cmd_tcal(size_t argc, char **argv)
 {
-	if (argc > 1 && (strcmp(argv[1], "export") == 0 || strcmp(argv[1], "import") == 0)) {
+	if (strcmp(argv[1], "export") == 0 || strcmp(argv[1], "import") == 0) {
 		sensor_tcal_backup_command(argc, argv, console_command_input_generation);
 		return;
 	}
 #if CONFIG_SENSOR_TCAL_HEATED
-	if (argc > 1 && strcmp(argv[1], "heat") == 0) {
+	if (strcmp(argv[1], "heat") == 0) {
 		console_cmd_tcal_heat(argc, argv);
 		return;
 	}
 #endif
-	char *arg = argc > 1 ? argv[1] : NULL;
+	char *subcmd = argv[1];
 	char *arg2 = argc > 2 ? argv[2] : NULL;
-	if (arg != NULL) {
-		bool query = strcmp(arg, "status") == 0 || strcmp(arg, "dump") == 0 ||
-			strcmp(arg, "check") == 0 || strcmp(arg, "test") == 0 ||
-			(strcmp(arg, "boot") == 0 && arg2 == NULL);
-		size_t minimum = (strcmp(arg, "auto") == 0 || strcmp(arg, "remove") == 0) ? 3 : 2;
-		size_t maximum = (strcmp(arg, "auto") == 0 || strcmp(arg, "remove") == 0 ||
-			strcmp(arg, "test") == 0 || strcmp(arg, "boot") == 0) ? 3 : 2;
-		if (argc < minimum || argc > maximum) {
-			printk("Invalid number of arguments\n");
-			if (!query) {
-				console_reject();
-			}
-			return;
-		}
+	size_t minimum = (strcmp(subcmd, "auto") == 0 || strcmp(subcmd, "remove") == 0) ? 3 : 2;
+	size_t maximum = (strcmp(subcmd, "auto") == 0 || strcmp(subcmd, "remove") == 0 ||
+		strcmp(subcmd, "test") == 0 || strcmp(subcmd, "boot") == 0) ? 3 : 2;
+	if (!console_require_args(argc, minimum, maximum, NULL)) {
+		return;
 	}
 
-	// check if there are any arguments
-	if (arg == NULL) {
-		printk("Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n");
-		console_reject();
-	} else {
-		char *subcmd = arg;
-
-		if (strcmp(subcmd, "on") == 0) {
-			sensor_tcal_set_enabled(true);
-			if (sensor_tcal_get_enabled()) {
-				printk("T-Cal compensation enabled\n");
+	if (strcmp(subcmd, "on") == 0) {
+		sensor_tcal_set_enabled(true);
+		if (sensor_tcal_get_enabled()) {
+			printk("T-Cal compensation enabled\n");
+		}
+	} else if (strcmp(subcmd, "off") == 0) {
+		sensor_tcal_set_enabled(false);
+		if (!sensor_tcal_get_enabled()) {
+			printk("T-Cal compensation disabled (using static gyro bias)\n");
+		}
+	} else if (strcmp(subcmd, "status") == 0) {
+		sensor_tcal_status();
+		printk(
+			"T-Cal compensation: %s | apply=%s\n",
+			sensor_tcal_get_enabled() ? "enabled" : "disabled",
+			sensor_tcal_get_apply_mode_name()
+		);
+		printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
+	} else if (strcmp(subcmd, "clear") == 0) {
+		cmd_reset_tcal();
+	} else if (strcmp(subcmd, "auto") == 0) {
+		char *auto_arg = arg2;
+		if (strcmp(auto_arg, "on") == 0) {
+			sensor_tcal_set_auto_calibration(true);
+			if (sensor_tcal_get_auto_calibration()) {
+				printk("T-Cal auto-calibration enabled. Device will auto-calibrate when resting.\n");
+				printk("Note: Sleep timeout will be prevented during auto-calibration mode.\n");
 			}
-		} else if (strcmp(subcmd, "off") == 0) {
-			sensor_tcal_set_enabled(false);
-			if (!sensor_tcal_get_enabled()) {
-				printk("T-Cal compensation disabled (using static gyro bias)\n");
-			}
-		} else if (strcmp(subcmd, "status") == 0) {
-			sensor_tcal_status();
-			printk(
-				"T-Cal compensation: %s | apply=%s\n",
-				sensor_tcal_get_enabled() ? "enabled" : "disabled",
-				sensor_tcal_get_apply_mode_name()
-			);
-			printk("Auto-calibration: %s\n", sensor_tcal_get_auto_calibration() ? "enabled" : "disabled");
-		} else if (strcmp(subcmd, "clear") == 0) {
-			cmd_reset_tcal();
-		} else if (strcmp(subcmd, "auto") == 0) {
-			char *auto_arg = arg2;
-			if (strcmp(auto_arg, "on") == 0) {
-				sensor_tcal_set_auto_calibration(true);
-				if (sensor_tcal_get_auto_calibration()) {
-					printk("T-Cal auto-calibration enabled. Device will auto-calibrate when resting.\n");
-					printk("Note: Sleep timeout will be prevented during auto-calibration mode.\n");
-				}
-			} else if (strcmp(auto_arg, "off") == 0) {
-				sensor_tcal_set_auto_calibration(false);
-				if (!sensor_tcal_get_auto_calibration()) {
-					printk("T-Cal auto-calibration disabled.\n");
-				}
-			} else {
-				printk("Error: Invalid argument '%s'. Use: tcal auto <on|off>\n", auto_arg);
-				console_reject();
-			}
-		} else if (strcmp(subcmd, "dump") == 0) {
-			if (retained->tempCalState.count == 0) {
-				printk("No temperature calibration points have been collected.\n");
-				return;
-			}
-
-			printk("Dumping %u collected temperature calibration points:\n", retained->tempCalState.count);
-			printk("--------------------------------------------------\n");
-			printk("Index | Temp (C) | Bias X   | Bias Y   | Bias Z   |\n");
-			printk("--------------------------------------------------\n");
-
-			uint16_t points_printed = 0;
-			// Iterate through the entire buffer to find the valid points
-			for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
-				// A point is valid if its temperature field is not 0.0
-				if (retained->tempCalPoints[i].temp != 0.0f) {
-					printk(
-						" %-4d | %-8.2f | %-8.5f | %-8.5f | %-8.5f\n",
-						i,
-						(double)retained->tempCalPoints[i].temp,
-						(double)retained->tempCalPoints[i].bias[0],
-						(double)retained->tempCalPoints[i].bias[1],
-						(double)retained->tempCalPoints[i].bias[2]
-					);
-					points_printed++;
-				}
-
-				// Small delay to prevent overwhelming the console output buffer
-				if (points_printed % 10 == 0 && points_printed > 0) {
-					k_msleep(20);
-				}
-			}
-			printk("--------------------------------------------------\n");
-			printk("End of dump. Total points printed: %u\n", points_printed);
-		} else if (strcmp(subcmd, "remove") == 0) {
-			char *idx_str = arg2;
-			char *endptr = NULL;
-			errno = 0;
-			long index = strtol(idx_str, &endptr, 10);
-
-			// Check if conversion was successful
-			if (endptr == NULL || endptr == idx_str || errno == ERANGE || index < INT_MIN || index > INT_MAX) {
-				printk("Error: Invalid index '%s'. Please provide a number.\n", idx_str);
-				console_reject();
-			} else {
-				// Skip trailing whitespace
-				while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
-					endptr++;
-				}
-
-				// Check for trailing non-whitespace characters
-				if (*endptr != '\0') {
-					printk("Error: Invalid characters after index '%s'.\n", idx_str);
-					console_reject();
-				} else {
-					sensor_tcal_remove_point((int)index);
-				}
-			}
-		} else if (strcmp(subcmd, "test") == 0) {
-			char *temp_str = arg2;
-			if (temp_str == NULL) {
-				// Use current temperature if no argument provided
-				float current_temp = sensor_get_current_imu_temperature();
-				if (isnan(current_temp)) {
-					printk("Error: Cannot read current temperature. Please specify temperature: tcal test <temp>\n");
-				} else {
-					sensor_tcal_test_methods(current_temp);
-				}
-			} else {
-				char *endptr = NULL;
-				float test_temp = strtof(temp_str, &endptr);
-
-				if (endptr == temp_str || *endptr != '\0') {
-					printk("Error: Invalid temperature '%s'. Use: tcal test <temp>\n", temp_str);
-					printk("Example: tcal test 25.5\n");
-				} else {
-					sensor_tcal_test_methods(test_temp);
-				}
-			}
-		} else if (strcmp(subcmd, "check") == 0) {
-			float current_temp = sensor_get_current_imu_temperature();
-			if (isnan(current_temp)) {
-				printk("Error: Cannot read current temperature.\n");
-			} else {
-				float closest_temp, distance_c;
-				bool needs_cal = sensor_tcal_needs_nearby_point(current_temp, &closest_temp, &distance_c);
-				printk("Current temperature: %.2fC\n", (double)current_temp);
-				if (!isnan(closest_temp)) {
-					printk("Closest calibration point: %.2fC (distance: %.2fC)\n",
-						(double)closest_temp, (double)distance_c);
-					float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
-					printk("Configured sampling interval: %.2fC\n", (double)sampling_interval);
-					if (needs_cal) {
-						printk("Status: NEEDS calibration (distance > interval, auto-cal may trigger)\n");
-					} else {
-						printk("Status: Calibration sufficient (within sampling interval)\n");
-					}
-				} else {
-					printk("Status: No calibration data available (auto-cal will trigger)\n");
-				}
-			}
-		} else if (strcmp(subcmd, "boot") == 0) {
-			char *boot_arg = arg2;
-			if (boot_arg == NULL) {
-				// Show current boot calibration status
-				printk("Boot Calibration Status:\n");
-				printk("  Enabled: %s\n", retained->bootCalState.enabled ? "yes" : "no");
-				printk("  Completed: %s\n", retained->bootCalState.completed ? "yes" : "no");
-				printk("  Attempts: %u\n", retained->bootCalState.attempt_count);
-				printk("  D_offset valid: %s\n", retained->bootCalState.doffset_valid ? "yes" : "no");
-				if (retained->bootCalState.doffset_valid) {
-					printk("  D_offset: [%.5f, %.5f, %.5f] dps\n",
-						(double)retained->bootCalState.doffset[0],
-						(double)retained->bootCalState.doffset[1],
-						(double)retained->bootCalState.doffset[2]);
-				}
-				printk("\nUsage: tcal boot <on|off>\n");
-			} else if (strcmp(boot_arg, "on") == 0) {
-				sensor_boot_cal_set_enabled(true);
-				printk("Boot calibration enabled. Will calibrate on next boot.\n");
-			} else if (strcmp(boot_arg, "off") == 0) {
-				sensor_boot_cal_set_enabled(false);
-				printk("Boot calibration disabled.\n");
-			} else {
-				printk("Error: Invalid argument '%s'. Use: tcal boot <on|off>\n", boot_arg);
-				console_reject();
+		} else if (strcmp(auto_arg, "off") == 0) {
+			sensor_tcal_set_auto_calibration(false);
+			if (!sensor_tcal_get_auto_calibration()) {
+				printk("T-Cal auto-calibration disabled.\n");
 			}
 		} else {
-			printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off|boot on|boot off>\n", subcmd);
+			printk("Error: Invalid argument '%s'. Use: tcal auto <on|off>\n", auto_arg);
 			console_reject();
 		}
+	} else if (strcmp(subcmd, "dump") == 0) {
+		if (retained->tempCalState.count == 0) {
+			printk("No temperature calibration points have been collected.\n");
+			return;
+		}
+
+		printk("Dumping %u collected temperature calibration points:\n", retained->tempCalState.count);
+		printk("--------------------------------------------------\n");
+		printk("Index | Temp (C) | Bias X   | Bias Y   | Bias Z   |\n");
+		printk("--------------------------------------------------\n");
+
+		uint16_t points_printed = 0;
+		for (int i = 0; i < TCAL_BUFFER_SIZE; i++) {
+			if (retained->tempCalPoints[i].temp != 0.0f) {
+				printk(
+					" %-4d | %-8.2f | %-8.5f | %-8.5f | %-8.5f\n",
+					i,
+					(double)retained->tempCalPoints[i].temp,
+					(double)retained->tempCalPoints[i].bias[0],
+					(double)retained->tempCalPoints[i].bias[1],
+					(double)retained->tempCalPoints[i].bias[2]
+				);
+				points_printed++;
+			}
+
+			if (points_printed % 10 == 0 && points_printed > 0) {
+				k_msleep(20);
+			}
+		}
+		printk("--------------------------------------------------\n");
+		printk("End of dump. Total points printed: %u\n", points_printed);
+	} else if (strcmp(subcmd, "remove") == 0) {
+		char *idx_str = arg2;
+		char *endptr = NULL;
+		errno = 0;
+		long index = strtol(idx_str, &endptr, 10);
+
+		if (endptr == NULL || endptr == idx_str || errno == ERANGE || index < INT_MIN || index > INT_MAX) {
+			printk("Error: Invalid index '%s'. Please provide a number.\n", idx_str);
+			console_reject();
+		} else {
+			while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+				endptr++;
+			}
+
+			if (*endptr != '\0') {
+				printk("Error: Invalid characters after index '%s'.\n", idx_str);
+				console_reject();
+			} else {
+				sensor_tcal_remove_point((int)index);
+			}
+		}
+	} else if (strcmp(subcmd, "test") == 0) {
+		char *temp_str = arg2;
+		if (temp_str == NULL) {
+			float current_temp = sensor_get_current_imu_temperature();
+			if (isnan(current_temp)) {
+				printk("Error: Cannot read current temperature. Please specify temperature: tcal test <temp>\n");
+			} else {
+				sensor_tcal_test_methods(current_temp);
+			}
+		} else {
+			char *endptr = NULL;
+			float test_temp = strtof(temp_str, &endptr);
+
+			if (endptr == temp_str || *endptr != '\0') {
+				printk("Error: Invalid temperature '%s'. Use: tcal test <temp>\n", temp_str);
+				printk("Example: tcal test 25.5\n");
+			} else {
+				sensor_tcal_test_methods(test_temp);
+			}
+		}
+	} else if (strcmp(subcmd, "check") == 0) {
+		float current_temp = sensor_get_current_imu_temperature();
+		if (isnan(current_temp)) {
+			printk("Error: Cannot read current temperature.\n");
+		} else {
+			float closest_temp, distance_c;
+			bool needs_cal = sensor_tcal_needs_nearby_point(current_temp, &closest_temp, &distance_c);
+			printk("Current temperature: %.2fC\n", (double)current_temp);
+			if (!isnan(closest_temp)) {
+				printk("Closest calibration point: %.2fC (distance: %.2fC)\n",
+					(double)closest_temp, (double)distance_c);
+				float sampling_interval = 1.0f / CONFIG_SENSOR_POLY_STEPS_PER_DEGREE;
+				printk("Configured sampling interval: %.2fC\n", (double)sampling_interval);
+				if (needs_cal) {
+					printk("Status: NEEDS calibration (distance > interval, auto-cal may trigger)\n");
+				} else {
+					printk("Status: Calibration sufficient (within sampling interval)\n");
+				}
+			} else {
+				printk("Status: No calibration data available (auto-cal will trigger)\n");
+			}
+		}
+	} else if (strcmp(subcmd, "boot") == 0) {
+		char *boot_arg = arg2;
+		if (boot_arg == NULL) {
+			printk("Boot Calibration Status:\n");
+			printk("  Enabled: %s\n", retained->bootCalState.enabled ? "yes" : "no");
+			printk("  Completed: %s\n", retained->bootCalState.completed ? "yes" : "no");
+			printk("  Attempts: %u\n", retained->bootCalState.attempt_count);
+			printk("  D_offset valid: %s\n", retained->bootCalState.doffset_valid ? "yes" : "no");
+			if (retained->bootCalState.doffset_valid) {
+				printk("  D_offset: [%.5f, %.5f, %.5f] dps\n",
+					(double)retained->bootCalState.doffset[0],
+					(double)retained->bootCalState.doffset[1],
+					(double)retained->bootCalState.doffset[2]);
+			}
+			printk("\nUsage: tcal boot <on|off>\n");
+		} else if (strcmp(boot_arg, "on") == 0) {
+			sensor_boot_cal_set_enabled(true);
+			printk("Boot calibration enabled. Will calibrate on next boot.\n");
+		} else if (strcmp(boot_arg, "off") == 0) {
+			sensor_boot_cal_set_enabled(false);
+			printk("Boot calibration disabled.\n");
+		} else {
+			printk("Error: Invalid argument '%s'. Use: tcal boot <on|off>\n", boot_arg);
+			console_reject();
+		}
+	} else {
+		printk("Error: Invalid argument '%s'. Use: <status|clear|dump|test temp|remove index|check|auto on|auto off|boot on|boot off>\n", subcmd);
+		console_reject();
 	}
 }
 #endif
 
 static void console_cmd_calibrate_acc_alias(size_t argc, char **argv)
 {
-	if (argc != 1) {
-		printk("Usage: calibrate acc (or 6-side without arguments)\n");
-		console_reject();
-		return;
-	}
+	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	printk("'6-side' is an alias; try 'calibrate acc' next time.\n");
 	console_calibrate_acc();
@@ -2093,7 +2056,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 	if (arg != NULL) {
 		size_t expected = (strcmp(arg, "auto") == 0 || strcmp(arg, "online") == 0 ||
 			strcmp(arg, "debug") == 0) ? 3 : 2;
-		if (!console_require_args(argc, expected, expected)) {
+		if (!console_require_args(argc, expected, expected, NULL)) {
 			return;
 		}
 	}
@@ -2169,11 +2132,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 
 static void console_cmd_set(size_t argc, char **argv)
 {
-	if (argc != 2) {
-		printk("Invalid number of arguments\n");
-		console_reject();
-		return;
-	}
+	ARG_UNUSED(argc);
 	char *arg = argv[1];
 	uint64_t addr = parse_u64(arg, 16);
 	char buf[17];
@@ -2188,29 +2147,22 @@ static void console_cmd_set(size_t argc, char **argv)
 
 static void console_cmd_pair(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 1)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	esb_user_pair();
 }
 
 static void console_cmd_clear(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 1)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	esb_clear_pair();
 }
 
 static void console_cmd_wom(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 2, 3)) {
-		return;
-	}
 	if (strcmp(argv[1], "enter") == 0) {
-		if (!console_require_args(argc, 2, 2)) {
+		if (!console_require_args(argc, 2, 2, NULL)) {
 			return;
 		}
 		int err = sys_request_WOM_now();
@@ -2271,9 +2223,7 @@ static void console_cmd_wom(size_t argc, char **argv)
 
 static void console_cmd_channel(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 2, 2)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	long channel;
 	if (!parse_long_bounded(argv[1], 0, 100, &channel)) {
 		printk("Invalid channel. Must be a number between 0 and 100.\n");
@@ -2291,9 +2241,7 @@ static void console_cmd_channel(size_t argc, char **argv)
 
 static void console_cmd_clearchannel(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 1)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	printk("Clearing RF channel setting (restore default)\n");
 	int err = channel_control_reset();
@@ -2306,9 +2254,7 @@ static void console_cmd_clearchannel(size_t argc, char **argv)
 
 static void console_cmd_radio(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 2, 2)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	char *arg = argv[1];
 
 	if (strcmp(arg, "off") == 0) {
@@ -2333,9 +2279,6 @@ static void console_cmd_radio(size_t argc, char **argv)
 #if DFU_EXISTS
 static void console_cmd_dfu(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 2)) {
-		return;
-	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 	bool ota = false;
 
@@ -2371,11 +2314,9 @@ static void console_cmd_dfu(size_t argc, char **argv)
 
 static void console_cmd_ping(size_t argc, char **argv)
 {
-	if (argc != 1 && !(argc == 2 && strcmp(argv[1], "stats") == 0)) {
+	if (argc == 2 && strcmp(argv[1], "stats") != 0) {
 		printk("Usage: ping [stats]\n");
-		if (argc < 2 || strcmp(argv[1], "stats") != 0) {
-			console_reject();
-		}
+		console_reject();
 		return;
 	}
 	if (argc > 1 && strcmp(argv[1], "stats") == 0) {
@@ -2412,9 +2353,6 @@ static void console_cmd_meow(size_t argc, char **argv)
 
 static void console_cmd_debug(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 2)) {
-		return;
-	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	uint32_t duration = 1; // Default 1 second
@@ -2437,9 +2375,6 @@ static void console_cmd_debug(size_t argc, char **argv)
 #if CONFIG_VQF_BENCH
 static void console_cmd_vqfbench(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 1, 2)) {
-		return;
-	}
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	uint32_t iterations = 1000;
@@ -2464,9 +2399,7 @@ static void console_cmd_vqfbench(size_t argc, char **argv)
 
 static void console_cmd_reset(size_t argc, char **argv)
 {
-	if (!console_require_args(argc, 2, 2)) {
-		return;
-	}
+	ARG_UNUSED(argc);
 	char *arg = argv[1];
 
 	if (strcmp(arg, "zro") == 0) {
@@ -2514,7 +2447,7 @@ static void console_cmd_tdma(size_t argc, char **argv)
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	if (arg && strcmp(arg, "on") == 0) {
-		if (!console_require_args(argc, 2, 2)) {
+		if (!console_require_args(argc, 2, 2, NULL)) {
 			return;
 		}
 		int err = tdma_user_set_enabled(true);
@@ -2524,7 +2457,7 @@ static void console_cmd_tdma(size_t argc, char **argv)
 			printk("TDMA enabled\n");
 		}
 	} else if (arg && strcmp(arg, "off") == 0) {
-		if (!console_require_args(argc, 2, 2)) {
+		if (!console_require_args(argc, 2, 2, NULL)) {
 			return;
 		}
 		int err = tdma_user_set_enabled(false);
@@ -2586,13 +2519,13 @@ static void console_cmd_test(size_t argc, char **argv)
 	char *arg = argc > 1 ? argv[1] : NULL;
 
 	if (arg && strcmp(arg, "on") == 0) {
-		if (!console_require_args(argc, 2, 2)) {
+		if (!console_require_args(argc, 2, 2, NULL)) {
 			return;
 		}
 		test_mode_user_set(true);
 		printk("Test mode enabled\n");
 	} else if (arg && strcmp(arg, "off") == 0) {
-		if (!console_require_args(argc, 2, 2)) {
+		if (!console_require_args(argc, 2, 2, NULL)) {
 			return;
 		}
 		test_mode_user_set(false);
@@ -2625,63 +2558,66 @@ static void console_cmd_led(size_t argc, char **argv)
 #endif
 
 static const struct console_cmd console_cmds[] = {
-	{"help", console_cmd_help, CONSOLE_QUERY},
-	{"info", console_cmd_info, CONSOLE_QUERY},
+	{"help", console_cmd_help, CONSOLE_QUERY, 1, 7, NULL},
+	{"info", console_cmd_info, CONSOLE_QUERY, 1, 7, NULL},
 #if CONFIG_CUSTOMER_INFO
-	{"customer", console_cmd_customer, CONSOLE_QUERY},
+	{"customer", console_cmd_customer, CONSOLE_QUERY, 1, 7, NULL},
 #endif
-	{"sensor", console_cmd_sensor, CONSOLE_QUERY},
-	{"uptime", console_cmd_uptime, CONSOLE_QUERY},
-	{"shutdown", console_cmd_shutdown, CONSOLE_MUTATION},
-	{"reboot", console_cmd_reboot, CONSOLE_MUTATION},
-	{"battery", console_cmd_battery, CONSOLE_QUERY},
-	{"scan", console_cmd_scan, CONSOLE_MUTATION},
-	{"calibrate", console_cmd_calibrate, CONSOLE_MUTATION},
+	{"sensor", console_cmd_sensor, CONSOLE_QUERY, 1, 7, NULL},
+	{"uptime", console_cmd_uptime, CONSOLE_QUERY, 1, 7, NULL},
+	{"shutdown", console_cmd_shutdown, CONSOLE_MUTATION, 1, 1, NULL},
+	{"reboot", console_cmd_reboot, CONSOLE_MUTATION, 1, 1, NULL},
+	{"battery", console_cmd_battery, CONSOLE_QUERY, 1, 7, NULL},
+	{"scan", console_cmd_scan, CONSOLE_MUTATION, 1, 1, NULL},
+	{"calibrate", console_cmd_calibrate, CONSOLE_MUTATION, 1, 2, "Usage: calibrate [acc]\n"},
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	{"sens", console_cmd_sens, CONSOLE_MUTATION},
+	{"sens", console_cmd_sens, CONSOLE_MUTATION, 2, 7,
+		"Error: Missing arguments. Use 'sens <x>,<y>,<z>', 'sens auto <x|y|z> [rev]', or 'sens reset'.\n"},
 #else
-	{"sens", console_cmd_unavailable, CONSOLE_MUTATION},
+	{"sens", console_cmd_unavailable, CONSOLE_MUTATION, 1, 7, NULL},
 #endif
 #if CONFIG_SENSOR_USE_TCAL
-	{"tcal", console_cmd_tcal, CONSOLE_MIXED},
+	{"tcal", console_cmd_tcal, CONSOLE_MIXED, 2, 7,
+		"Error: Missing argument. Use: tcal <on|off|status|clear|dump|test temp|remove index|check|auto on|auto off|boot [on|off]>\n"},
 #else
-	{"tcal", console_cmd_unavailable, CONSOLE_MIXED},
+	{"tcal", console_cmd_unavailable, CONSOLE_MIXED, 1, 7, NULL},
 #endif
-	{"6-side", console_cmd_calibrate_acc_alias, CONSOLE_MUTATION},
+	{"6-side", console_cmd_calibrate_acc_alias, CONSOLE_MUTATION, 1, 1,
+		"Usage: calibrate acc (or 6-side without arguments)\n"},
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	{"mag", console_cmd_mag, CONSOLE_MIXED},
+	{"mag", console_cmd_mag, CONSOLE_MIXED, 1, 3, NULL},
 #else
-	{"mag", console_cmd_unavailable, CONSOLE_MIXED},
+	{"mag", console_cmd_unavailable, CONSOLE_MIXED, 1, 7, NULL},
 #endif
-	{"set", console_cmd_set, CONSOLE_MUTATION},
-	{"pair", console_cmd_pair, CONSOLE_MUTATION},
-	{"clear", console_cmd_clear, CONSOLE_MUTATION},
-	{"channel", console_cmd_channel, CONSOLE_MUTATION},
-	{"clearchannel", console_cmd_clearchannel, CONSOLE_MUTATION},
-	{"wom", console_cmd_wom, CONSOLE_MIXED},
-	{"radio", console_cmd_radio, CONSOLE_MUTATION},
+	{"set", console_cmd_set, CONSOLE_MUTATION, 2, 2, NULL},
+	{"pair", console_cmd_pair, CONSOLE_MUTATION, 1, 1, NULL},
+	{"clear", console_cmd_clear, CONSOLE_MUTATION, 1, 1, NULL},
+	{"channel", console_cmd_channel, CONSOLE_MUTATION, 2, 2, NULL},
+	{"clearchannel", console_cmd_clearchannel, CONSOLE_MUTATION, 1, 1, NULL},
+	{"wom", console_cmd_wom, CONSOLE_MIXED, 2, 3, NULL},
+	{"radio", console_cmd_radio, CONSOLE_MUTATION, 2, 2, NULL},
 #if DFU_EXISTS
-	{"dfu", console_cmd_dfu, CONSOLE_MUTATION},
+	{"dfu", console_cmd_dfu, CONSOLE_MUTATION, 1, 2, NULL},
 #else
-	{"dfu", console_cmd_unavailable, CONSOLE_MUTATION},
+	{"dfu", console_cmd_unavailable, CONSOLE_MUTATION, 1, 7, NULL},
 #endif
-	{"ping", console_cmd_ping, CONSOLE_MIXED},
-	{"nvs", console_cmd_nvs, CONSOLE_QUERY},
-	{"meow", console_cmd_meow, CONSOLE_QUERY},
-	{"debug", console_cmd_debug, CONSOLE_MUTATION},
+	{"ping", console_cmd_ping, CONSOLE_MIXED, 1, 2, "Usage: ping [stats]\n"},
+	{"nvs", console_cmd_nvs, CONSOLE_QUERY, 1, 7, NULL},
+	{"meow", console_cmd_meow, CONSOLE_QUERY, 1, 7, NULL},
+	{"debug", console_cmd_debug, CONSOLE_MUTATION, 1, 2, NULL},
 #if CONFIG_THREAD_ANALYZER
-	{"stack", console_cmd_stack, CONSOLE_QUERY},
+	{"stack", console_cmd_stack, CONSOLE_QUERY, 1, 7, NULL},
 #endif
 #if CONFIG_VQF_BENCH
-	{"vqfbench", console_cmd_vqfbench, CONSOLE_MUTATION},
+	{"vqfbench", console_cmd_vqfbench, CONSOLE_MUTATION, 1, 2, NULL},
 #else
-	{"vqfbench", console_cmd_unavailable, CONSOLE_MUTATION},
+	{"vqfbench", console_cmd_unavailable, CONSOLE_MUTATION, 1, 7, NULL},
 #endif
-	{"reset", console_cmd_reset, CONSOLE_MUTATION},
-	{"tdma", console_cmd_tdma, CONSOLE_MIXED},
-	{"test", console_cmd_test, CONSOLE_MIXED},
+	{"reset", console_cmd_reset, CONSOLE_MUTATION, 2, 2, NULL},
+	{"tdma", console_cmd_tdma, CONSOLE_MIXED, 1, 7, NULL},
+	{"test", console_cmd_test, CONSOLE_MIXED, 1, 7, NULL},
 #if CONFIG_LED_DEBUG
-	{"led", console_cmd_led, CONSOLE_QUERY},
+	{"led", console_cmd_led, CONSOLE_QUERY, 1, 7, NULL},
 #endif
 };
 
@@ -2822,7 +2758,9 @@ static void console_thread(void)
 		const struct console_cmd *command = console_find_command(argv[0]);
 		if (command != NULL) {
 			console_feedback_enabled = console_command_mutates(command, argc, argv);
-			command->fn(argc, argv);
+			if (console_require_args(argc, command->argc_min, command->argc_max, command->usage)) {
+				command->fn(argc, argv);
+			}
 		} else {
 			printk("Unknown command\n");
 		}

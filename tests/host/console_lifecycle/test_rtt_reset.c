@@ -15,6 +15,9 @@
 #define CONFIG_SENSOR_USE_SENS_CALIBRATION 0
 #define CONFIG_LED_DEBUG 0
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+#define ARG_UNUSED(x) (void)(x)
+#define LED_OWNER_SYSTEM 0
+#define LED_REJECTED 1
 #define FW_STRING "test"
 #define FW_GIT_REPO_URL "test"
 #define FW_GIT_BRANCH "test"
@@ -44,21 +47,22 @@ static void strtolower(char *text)
 {
     for (; *text; text++) *text = (char)tolower((unsigned char)*text);
 }
-static void console_reject(void) {}
-static bool console_require_args(size_t argc, size_t min, size_t max)
-{ return argc >= min && argc <= max; }
+static bool console_feedback_enabled;
+static unsigned rejects;
+static unsigned led_request_id(void) { return 1; }
+static unsigned led_event_id(void) { return 1; }
+static void led_request_event(int owner, unsigned request, unsigned event, int semantic)
+{
+    (void)owner; (void)request; (void)event;
+    if (semantic == LED_REJECTED) rejects++;
+}
+static void console_unrelated_command(size_t argc, char **argv)
+{ (void)argc; (void)argv; }
 static void cmd_reset_zro(void) {}
 static void cmd_reset_bat(void) {}
 static void cmd_fusion_reset(void) {}
 static void sys_clear(void) { clears++; }
 static void console_cmd_reset(size_t argc, char **argv);
-struct console_cmd { const char *name; void (*fn)(size_t, char **); };
-static const struct console_cmd reset_command = {"reset", console_cmd_reset};
-static const struct console_cmd *console_find_command(const char *name)
-{ return strcmp(name, "reset") == 0 ? &reset_command : NULL; }
-static bool console_feedback_enabled;
-static bool console_command_mutates(const struct console_cmd *cmd, size_t argc, char **argv)
-{ (void)cmd; (void)argc; (void)argv; return true; }
 #include "production_rtt.inc"
 
 static void receive(const char *text)
@@ -95,6 +99,22 @@ int main(void)
     assert(clears == 2);
     receive("reset all\n");
     assert(clears == 3);
+    unsigned previous = rejects;
+    receive("ping stats extra\n");
+    assert(rejects == previous);
+    receive("ping typo extra\n");
+    assert(rejects == previous + 1);
+    receive("reset all\n");
+    receive("reset all extra\n");
+    assert(rejects == previous + 2 && clears == 3);
+    receive("reset all\n");
+    assert(clears == 3);
+    receive("reset all\n");
+    assert(clears == 4);
+    receive("reset all\nunknown\nreset all\n");
+    assert(clears == 4);
+    receive("reset all\n");
+    assert(clears == 5);
     puts("RTT reset confirmation and overflow passed");
     return 0;
 }

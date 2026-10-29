@@ -63,17 +63,40 @@ static void strtolower(char *p){for(;*p;p++)*p=(char)tolower((unsigned char)*p);
 static bool console_feedback_enabled;
 static uint32_t console_command_input_generation;
 static void console_reset_cancel(void){}
-static void console_reject(void){}
+#if !ACTUAL_OWNERSHIP
+#define LED_OWNER_SYSTEM 2
+static int led_request_id(void){return 1;}
+static int led_event_id(void){return 1;}
+static void led_request_event(int owner,int request,int event,int result){
+    (void)owner;(void)request;(void)event;if(result==LED_REJECTED)console_rejected++;
+}
+#endif
 static bool console_reset_armed;
 static void console_thread(void);
 static int console_serial_start(void);
 static void console_serial_close(void);
 static void console_serial_stop(void);
-struct console_cmd { const char *name; void (*fn)(size_t,char **); };
-static void backup_dispatch(size_t argc,char **argv){sensor_tcal_backup_command(argc,argv,console_command_input_generation);}
-static const struct console_cmd backup_command={"tcal",backup_dispatch};
-static const struct console_cmd *console_find_command(const char *name){return strcmp(name,"tcal")==0?&backup_command:NULL;}
-static bool console_command_mutates(const struct console_cmd *c,size_t n,char **a){(void)c;(void)n;(void)a;return false;}
+static void console_unrelated_command(size_t argc,char **argv){(void)argc;(void)argv;}
+static int sensor_tcal_set_enabled(bool enabled){tcal_compensation_enabled=enabled;return 0;}
+static bool sensor_tcal_get_enabled(void){return tcal_compensation_enabled;}
+static void sensor_tcal_status(void){}
+static bool sensor_tcal_get_auto_calibration(void){return false;}
+static void sensor_tcal_set_auto_calibration(bool enabled){(void)enabled;}
+static void cmd_reset_tcal(void){}
+#if !ACTUAL_OWNERSHIP
+static int sensor_tcal_remove_point(int index){(void)index;return 0;}
+#endif
+static void sensor_tcal_test_methods(float temperature){(void)temperature;}
+static bool sensor_tcal_needs_nearby_point(float temperature,float *closest,float *distance){
+    (void)temperature;*closest=0;*distance=0;return false;
+}
+static void sensor_boot_cal_set_enabled(bool enabled){retained->bootCalState.enabled=enabled;}
+#if CONFIG_SENSOR_TCAL_HEATED
+#define CONFIG_SENSOR_TCAL_HEATED_DEFAULT_TARGET_C 42.0f
+static int sensor_tcal_heated_start(float target){(void)target;return 0;}
+static int sensor_tcal_heated_stop(void){return 0;}
+static void sensor_tcal_heated_report(void){}
+#endif
 #include "console_production.inc"
 static void run_worker(void){assert(!in_irq);if(setjmp(worker_idle)==0)console_thread();}
 static void receive(const char *text){

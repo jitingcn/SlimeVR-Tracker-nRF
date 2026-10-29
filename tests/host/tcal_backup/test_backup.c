@@ -215,6 +215,28 @@ static void busy_and_storage(void) {
         cold_restore();assert(retained->tempCalState.count==4 && !retained->tcal_enabled);
     }
 }
+static void command_boundaries(void) {
+    seed(1,false);
+    struct retained_fixture before=*retained;
+    unsigned writes=persist_calls, alloc=allocations, rejected=console_rejected;
+    uint32_t generation=sensor_tcal_backup_input_generation();
+    command("tcal import extra");
+    command("tcal export a b c d e");
+    unchanged(&before,writes);
+    assert(allocations==alloc && !sensor_tcal_backup_active() && console_rejected==rejected);
+    assert(sensor_tcal_backup_input_generation()==generation);
+    command("tcal import a b c d e f");
+    unchanged(&before,writes);
+    assert(allocations==alloc && console_rejected==rejected+1);
+    assert(sensor_tcal_backup_input_generation()==generation+1);
+    command("tcal import");
+    assert(sensor_tcal_backup_active() && allocations==alloc+1);
+    sensor_tcal_backup_input_lost();
+    sensor_tcal_backup_process();
+    unchanged(&before,writes);
+    assert(!sensor_tcal_backup_active() && !live_allocations);
+}
+
 static void transport_loss(void) {
     seed(4,true);export_model();
     for(unsigned mode=0;mode<5;mode++) {
@@ -278,6 +300,6 @@ int main(int argc,char **argv) {
     assert(argc==1);
     for(unsigned n=0;n<=4;n++)for(unsigned enabled=0;enabled<2;enabled++)roundtrip(n,enabled);
     roundtrip(TCAL_BUFFER_SIZE,true);roundtrip(TCAL_BUFFER_SIZE,false);
-    invalid_cases();busy_and_storage();transport_loss();assert(allocations==frees);
+    invalid_cases();busy_and_storage();command_boundaries();transport_loss();assert(allocations==frees);
     puts("T-Cal compact backup production tests OK");return 0;
 }

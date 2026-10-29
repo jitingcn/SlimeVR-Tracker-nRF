@@ -8,9 +8,18 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdatomic.h>
+#include <setjmp.h>
 #include "system/wom_timeout.h"
 
 #define CONFIG_USE_ACTIVE_TIMEOUT 1
+#define USB_EXISTS 0
+#define UART_CONSOLE_EXISTS 0
+#define CONFIG_SENSOR_USE_TCAL 0
+#define CONFIG_LED_DEBUG 0
+#define FW_STRING "test"
+#define FW_GIT_REPO_URL "test"
+#define FW_GIT_BRANCH "test"
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define CONFIG_USE_IMU_WAKE_UP 1
 #define DEFAULT_MINUTES ((CONFIG_ACTIVE_TIMEOUT_DELAY % 60000 == 0 && \
     CONFIG_ACTIVE_TIMEOUT_DELAY >= 60000 && \
@@ -38,6 +47,7 @@ static void printk(const char *format, ...) {
 #define LED_OWNER_SYSTEM 0
 #define LED_FAILED 1
 #define LED_SUCCESS 2
+#define LED_REJECTED 3
 #define TRACKER_EVENT_KIND_POWER 0
 #define POWER_WOM_CANCELLED 0
 #define POWER_WOM_FORCED 1
@@ -119,9 +129,12 @@ static void retained_reset(void) {
 static void sensor_calibration_clear_begin(void) { assert(!power_plan_lock.depth); }
 static void sensor_calibration_clear_end(void) { assert(!power_plan_lock.depth); }
 static void sensor_calibration_online_mag_cancel_pending(void) {}
+static unsigned rejected;
 static unsigned led_request_id(void) { return 1; }
 static unsigned led_event_id(void) { return 1; }
-static void led_request_event(int owner, unsigned request, unsigned event, int state) {}
+static void led_request_event(int owner, unsigned request, unsigned event, int state) {
+    if (state == LED_REJECTED) rejected++;
+}
 #if CONFIG_DYNAMIC_ACTIVE_TIMEOUT
 static bool sensor_session_woke_from_wom, sensor_session_meaningful_motion;
 static int sensor_session_activity_score;
@@ -129,39 +142,57 @@ static bool sensor_activity_score_update(int *score, float speed, float accel, i
     return speed > 100;
 }
 #endif
-static unsigned rejected;
-static void console_reject(void) { rejected++; }
-static bool console_require_args(size_t argc, size_t low, size_t high) {
-    if (argc >= low && argc <= high) return true;
-    console_reject(); return false;
+static bool console_feedback_enabled;
+static const char *console_input_text = "";
+static jmp_buf worker_idle;
+static void console_reset_cancel(void) {}
+static void console_unrelated_command(size_t argc, char **argv) { (void)argc; (void)argv; }
+static void strtolower(char *text) {
+    for (; *text; text++) *text = (char)tolower((unsigned char)*text);
 }
+static int SEGGER_RTT_HasKey(void) { return *console_input_text != '\0'; }
+static int SEGGER_RTT_GetKey(void) {
+    return *console_input_text ? (unsigned char)*console_input_text++ : -1;
+}
+static void k_usleep(int delay) { (void)delay; longjmp(worker_idle, 1); }
 static unsigned enter_calls;
 static int enter_result;
 static int sys_request_WOM_now(void) { enter_calls++; return enter_result; }
+#include "system/rtt_console.h"
 #include "production.inc"
 
+static void command_line(const char *text) {
+    char line[128];
+    snprintf(line, sizeof(line), "%s\n", text);
+    console_input_text = line;
+    if (setjmp(worker_idle) == 0) console_thread();
+    assert(*console_input_text == '\0');
+}
 static void command(const char *value) {
-    char *args[] = {"wom", "timeout", (char *)value};
-    console_cmd_wom(value ? 3 : 2, args);
+    char line[128];
+    if (value) snprintf(line, sizeof(line), "wom timeout %s", value);
+    else snprintf(line, sizeof(line), "wom timeout");
+    command_line(line);
 }
 
 int main(void) {
     (void)wom_deadline;
     (void)wom_commit_at;
     {
-    char *enter[] = {"wom", "enter", "extra", "extra"};
     unsigned old_rejected = rejected;
-    console_cmd_wom(3, enter);
-    console_cmd_wom(4, enter);
+    command_line("wom enter extra");
+    command_line("wom enter extra extra");
     assert(enter_calls == 0 && rejected == old_rejected + 2);
-    console_cmd_wom(2, enter);
+    command_line("wom enter");
     assert(enter_calls == 1 && rejected == old_rejected + 2);
     enter_result = -EBUSY;
-    console_cmd_wom(2, enter);
+    command_line("wom enter");
     assert(enter_calls == 2 && rejected == old_rejected + 3);
     enter_result = -ENOTSUP;
-    console_cmd_wom(2, enter);
+    command_line("wom enter");
     assert(enter_calls == 3 && rejected == old_rejected + 4);
+    command_line("wom");
+    assert(enter_calls == 3 && rejected == old_rejected + 5);
     assert(writes == 0 && deletes == 0);
     rejected = old_rejected;
     }
@@ -171,6 +202,8 @@ int main(void) {
     assert(wom_timeout_get_minutes() == DEFAULT_MINUTES);
     command(NULL);
     assert(writes == 0 && deletes == 0 && wom_timeout_get_delay_ms() == CONFIG_ACTIVE_TIMEOUT_DELAY);
+    command_line("wom timeout   ");
+    assert(writes == 0 && deletes == 0 && rejected == 0);
     if (DEFAULT_MINUTES == 0) {
         char exact[32];
         snprintf(exact, sizeof(exact), "%d ms", CONFIG_ACTIVE_TIMEOUT_DELAY);
@@ -297,15 +330,14 @@ int main(void) {
 #endif
     assert(sensor_uses_normal_timeout());
     assert(sensor_get_active_timeout_delay() == CONFIG_ACTIVE_TIMEOUT_DELAY);
-    const char *bad[] = {"", "35792", "-1", "+1", "1.5", "2m", "off", "default", "999999999999999999999999"};
+    const char *bad[] = {"35792", "-1", "+1", "1.5", "2m", "off", "default", "999999999999999999999999"};
     for (unsigned i = 0; i < sizeof(bad)/sizeof(bad[0]); i++) {
         old_writes = writes; old_deletes = deletes; unsigned previous = rejected;
         command(bad[i]);
         assert(writes == old_writes && deletes == old_deletes && rejected == previous + 1);
     }
     command(NULL); old_writes = writes;
-    char *extra[] = {"wom", "timeout", "5", "extra"};
-    console_cmd_wom(4, extra); assert(writes == old_writes);
+    command_line("wom timeout 5 extra"); assert(writes == old_writes);
     command("5"); assert(wom_timeout_get_minutes() == 5);
     expected_delete_delay = 300000;
     old_writes = writes; old_deletes = deletes;

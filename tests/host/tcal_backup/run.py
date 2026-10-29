@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2])).resolve()
 sys.path.insert(0, str(HERE.parent / "harness/python"))
 from c_extract import extract_block
+from console_extract import console_table
 
 
 def function(source, name):
@@ -60,6 +61,10 @@ def main():
     console = (ROOT / "src/console.c").read_text()
     console_parts = [console[console.index("static const struct device *const console_uart_dev"):
                              console.index("\n#endif\n\n#if !USB_EXISTS")]]
+    console_parts += [function(console, name) for name in ("console_reject", "console_require_args")]
+    console_parts += ["#if CONFIG_SENSOR_TCAL_HEATED\n" + function(console, "console_cmd_tcal_heat") + "\n#endif",
+                      function(console, "console_cmd_tcal"),
+                      console_table(console, {"console_cmd_tcal"})]
     console_parts += [function(console, name) for name in (
         "console_serial_start", "console_serial_end", "console_serial_close",
         "console_serial_stop", "console_thread")]

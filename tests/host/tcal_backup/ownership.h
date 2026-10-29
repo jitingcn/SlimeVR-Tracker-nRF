@@ -57,7 +57,8 @@ static void retained_reset(void) {
 static int led_request_id(void) { return 1; }
 static int led_event_id(void) { return 1; }
 static void led_request_event(int owner, int request, int event, int result) {
-    (void)owner; (void)request; (void)event; (void)result;
+    (void)owner; (void)request; (void)event;
+    if (result == LED_REJECTED) console_rejected++;
 }
 static bool sys_nvs_init(void) { return true; }
 static int nvs_clear(int *store) {

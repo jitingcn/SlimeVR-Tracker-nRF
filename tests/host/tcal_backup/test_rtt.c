@@ -36,6 +36,18 @@ int main(void) {
     rtt_receive(full); assert(strstr(output,"saved successfully") && !live_allocations);
     compare_model(&expected); cold_restore(); compare_model(&expected);
     float bias[3]; finish_model(); assert(sensor_tcal_lut_lookup(25,bias) == 0);
+    seed(1,false);
+    struct retained_fixture boundary_before=*retained;
+    unsigned boundary_writes=persist_calls, boundary_alloc=allocations, boundary_rejected=console_rejected;
+    uint32_t boundary_generation=sensor_tcal_backup_input_generation();
+    rtt_receive("tcal export extra\n");
+    rtt_receive("tcal import extra\n");
+    unchanged(&boundary_before,boundary_writes);
+    assert(allocations==boundary_alloc && console_rejected==boundary_rejected && !sensor_tcal_backup_active());
+    rtt_receive("tcal import a b c d e f\n");
+    unchanged(&boundary_before,boundary_writes);
+    assert(allocations==boundary_alloc && console_rejected==boundary_rejected+1);
+    assert(sensor_tcal_backup_input_generation()==boundary_generation+1);
     /* A valid CRC prefix followed by extra data on that physical line is not a commit. */
     for(unsigned bad=0;bad<4;bad++) {
         seed(1,false); struct retained_fixture before=*retained; unsigned writes=persist_calls;

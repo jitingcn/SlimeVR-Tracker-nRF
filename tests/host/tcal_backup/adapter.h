@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <limits.h>
 #include <ctype.h>
 #include <math.h>
 #define CONFIG_SENSOR_USE_TCAL 1
@@ -31,6 +32,8 @@ static long atomic_get(const atomic_t *value) { return *value; }
 static void atomic_set(atomic_t *value, long next) { *value = next; }
 static long atomic_inc(atomic_t *value) { return (*value)++; }
 #define LED_OWNER_TCAL 1
+#define LED_REJECTED 3
+static unsigned console_rejected;
 static unsigned outcome_calls;
 static int outcome_result;
 static bool outcome_applied;
@@ -86,7 +89,7 @@ struct retained_fixture {
     float gyroBias[3], accelBias[3], magBias[4][3], gyroSensScale[3];
     unsigned fusion_id;
     unsigned build_timestamp;
-    struct { bool doffset_valid; float doffset[3]; } bootCalState;
+    struct { bool enabled, completed, doffset_valid; unsigned attempt_count; float doffset[3]; } bootCalState;
 };
 static struct retained_fixture retained_data, flash_data;
 static struct retained_fixture *retained = &retained_data;

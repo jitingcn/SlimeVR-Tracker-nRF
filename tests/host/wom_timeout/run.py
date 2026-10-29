@@ -12,10 +12,11 @@ HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("TRACKER_SOURCE_ROOT", HERE.parents[2]))
 sys.path.insert(0, str(HERE.parent / "harness/python"))
 from c_extract import extract_block
+from console_extract import console_table
 
 
 def function(text, name):
-    return extract_block(text, rf"^(?:static )?(?:void|bool|int|int64_t|uint16_t) {name}\([^;{{]*\)\s*\{{")
+    return extract_block(text, rf"^(?:static )?(?:void|bool|int|int64_t|uint16_t|size_t) {name}\([^;{{]*\)\s*\{{")
 
 
 system = (ROOT / "src/system/system.c").read_text()
@@ -33,11 +34,14 @@ parts.append("#if CONFIG_USE_ACTIVE_TIMEOUT && CONFIG_SLEEP_ON_ACTIVE_TIMEOUT &&
              function(sensor, "sensor_uses_normal_timeout") + "\n#endif")
 parts += [function(sensor, name) for name in
           ("sensor_get_active_timeout_delay", "sensor_update_session_motion")]
-parts += [function((ROOT / "src/parse_args.c").read_text(), "parse_long_bounded"),
-          function(console, "console_cmd_wom")]
+parts += [function((ROOT / "src/parse_args.c").read_text(), name)
+          for name in ("parse_args", "parse_long_bounded")]
+parts += [function(console, name) for name in ("console_reject", "console_require_args", "console_cmd_wom")]
+parts += [console_table(console, {"console_cmd_wom"}), function(console, "console_thread")]
 with tempfile.TemporaryDirectory(prefix="tracker-wom-timeout-") as directory:
     temporary = Path(directory)
     (temporary / "production.inc").write_text("\n\n".join(parts))
+    (temporary / "SEGGER_RTT.h").write_text("")
     for supported, dynamic, default_ms in ((1, 1, 600000), (1, 0, 600000), (0, 0, 600000),
                                            (1, 1, 5000), (1, 1, 90001), (1, 1, 2147483647)):
         binary = temporary / f"timeout-{supported}-{dynamic}-{default_ms}"

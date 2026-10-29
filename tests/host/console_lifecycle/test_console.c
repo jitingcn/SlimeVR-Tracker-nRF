@@ -16,6 +16,7 @@ static struct { uint32_t DEVICEADDR[2]; } ficr;
 #define NRF_FICR (&ficr)
 #define ESB_RF_CHANNEL_DEFAULT 255
 #define CONFIG_RADIO_RF_CHANNEL 40
+#define SENSOR_DEBUG_MAX_DURATION_SEC 60U
 static uint8_t esb_rf_channel_decode(uint8_t channel) { return channel; }
 static char printed[4096];
 static void test_printk(const char *format, ...)
@@ -41,6 +42,21 @@ static unsigned clear_calls, sensitivity_writes, channel_writes;
 static float saved_sensitivity[3];
 static int saved_channel;
 static unsigned radio_writes, pairing_writes;
+static unsigned shutdown_requests, reboot_requests, scan_requests, pair_requests;
+static unsigned clear_pair_requests, channel_resets, debug_requests;
+static uint32_t debug_duration;
+static int sys_command_shutdown(void) { shutdown_requests++; return 0; }
+static int sys_user_reboot(void) { reboot_requests++; return 0; }
+static int sensor_request_scan(bool reset, bool force)
+{
+    assert(reset && force);
+    scan_requests++;
+    return 0;
+}
+static void esb_user_pair(void) { pair_requests++; }
+static void esb_clear_pair(void) { clear_pair_requests++; }
+static int channel_control_reset(void) { channel_resets++; return 0; }
+static void sensor_debug_start(uint32_t duration) { debug_requests++; debug_duration = duration; }
 static bool radio_enabled;
 static uint64_t pairing_address;
 static int esb_user_set_enabled(bool enabled)
@@ -627,6 +643,35 @@ int main(void)
     receive("set 0011223344556677\n"); run_worker();
     assert(pairing_writes == 1 && pairing_address == UINT64_C(0x0011223344556677));
     receive("set bad\n"); run_worker(); assert(pairing_writes == 1);
+    const char *invalid_arity[] = {
+        "shutdown extra\n", "reboot extra\n", "scan extra\n", "pair extra\n",
+        "clear extra\n", "clearchannel extra\n", "debug 3 extra\n"
+    };
+    unsigned arity_rejects = rejects;
+    for (size_t i = 0; i < ARRAY_SIZE(invalid_arity); i++) {
+        receive(invalid_arity[i]); run_worker();
+    }
+    assert(rejects == arity_rejects + ARRAY_SIZE(invalid_arity));
+    assert(!shutdown_requests && !reboot_requests && !scan_requests && !pair_requests);
+    assert(!clear_pair_requests && !channel_resets && !debug_requests);
+    const char *valid_arity[] = {
+        "shutdown\n", "reboot\n", "scan\n", "pair\n", "clear\n", "clearchannel\n", "debug 3\n"
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(valid_arity); i++) {
+        receive(valid_arity[i]); run_worker();
+    }
+    assert(rejects == arity_rejects + ARRAY_SIZE(invalid_arity));
+    assert(shutdown_requests == 1 && reboot_requests == 1 && scan_requests == 1 && pair_requests == 1);
+    assert(clear_pair_requests == 1 && channel_resets == 1 && debug_requests == 1 && debug_duration == 3);
+    receive("dfu a b c d e f\nvqfbench a b c d e f\n"); run_worker();
+    assert(rejects == arity_rejects + ARRAY_SIZE(invalid_arity) + 2);
+    unsigned query_handlers = completed_handlers, query_rejects = rejects;
+    receive("info a b c d e f\n"); run_worker();
+    assert(completed_handlers == query_handlers + 1 && rejects == query_rejects);
+    receive("info a b c d e f g\n"); run_worker();
+    assert(completed_handlers == query_handlers + 1 && rejects == query_rejects);
+    receive("unknown a b\n"); run_worker();
+    assert(completed_handlers == query_handlers + 1 && rejects == query_rejects);
     float unchanged[3] = {4, 5, 6};
     assert(!parse_float_triplet("1,2,", unchanged));
     assert(unchanged[0] == 4 && unchanged[1] == 5 && unchanged[2] == 6);
