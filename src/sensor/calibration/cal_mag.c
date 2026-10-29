@@ -193,8 +193,7 @@ int sensor_calibrate_mag(void)
 								// fusion invalidation not necessary
 	}
 	int storage_err = sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(retained->magBAinv));
-	magneto_online_feedback_storage(feedback,
-		storage_err < 0 ? storage_err : sensor_calibration_current_storage_error());
+	magneto_online_feedback_storage(feedback, storage_err);
 	if (storage_err) {
 		cal_event_step(op, CAL_PHASE_STORAGE, CAL_REASON_STORAGE_ERROR);
 		tracker_events_notify();

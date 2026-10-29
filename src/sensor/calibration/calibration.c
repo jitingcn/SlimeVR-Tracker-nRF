@@ -68,7 +68,6 @@ K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
 static uint16_t requested_operation;
 static struct led_token requested_feedback;
-static int requested_storage_error;
 static atomic_t calibration_generation;
 static atomic_t calibration_kind;
 static uint32_t requested_generation;
@@ -632,7 +631,6 @@ int sensor_request_calibration_mag(void)
 	requested_feedback = calibration_led_accept(CAL_REQUEST_MAG);
 	atomic_set(&calibration_kind, CAL_REQUEST_MAG);
 	requested_generation = calibration_next_generation();
-	requested_storage_error = 0;
 	mag_cal_led_pending = true;
 	k_mutex_unlock(&calibration_request_lock);
 	tracker_events_notify();
@@ -698,14 +696,6 @@ void sensor_calibration_invalidate_requests(void)
 #endif
 }
 
-int sensor_calibration_current_storage_error(void)
-{
-	k_mutex_lock(&calibration_request_lock, K_FOREVER);
-	int err = requested_storage_error;
-	k_mutex_unlock(&calibration_request_lock);
-	return err;
-}
-
 int sensor_calibration_request(int id, enum cal_request_origin origin)
 {
 	int result;
@@ -758,7 +748,6 @@ int sensor_calibration_request(int id, enum cal_request_origin origin)
 			requested_feedback = origin == CAL_REQUEST_USER ? calibration_led_accept(id) : (struct led_token){0};
 			atomic_set(&calibration_kind, id);
 			requested_generation = calibration_next_generation();
-			requested_storage_error = 0;
 			result = 0;
 		}
 		break;

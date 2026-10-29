@@ -3,7 +3,7 @@
  * generations are compiled verbatim from production below. */
 #define TCAL_ACCUM_ROBUST_BLOCKS 5
 K_MUTEX_DEFINE(calibration_request_lock);
-static int requested_calibration, requested_storage_error;
+static int requested_calibration;
 static unsigned requested_operation, requested_generation;
 static uint8_t magneto_progress;
 static bool mag_cal_led_pending;

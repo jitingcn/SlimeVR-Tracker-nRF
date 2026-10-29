@@ -34,7 +34,6 @@ static int calibration_request_lock, requested_calibration;
 static uint16_t requested_operation;
 static struct led_token requested_feedback;
 static uint32_t requested_generation;
-static int requested_storage_error;
 typedef int atomic_t;
 static atomic_t calibration_generation, calibration_kind;
 static int atomic_inc(atomic_t *value) { return (*value)++; }

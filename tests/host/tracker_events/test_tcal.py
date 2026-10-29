@@ -200,7 +200,6 @@ static struct led_token user_feedback;
 struct led_token sensor_calibration_current_feedback(void) {
     return user_feedback;
 }
-int sensor_calibration_current_storage_error(void) { return 0; }
 static unsigned event_count, terminal_count, begin_count, request_count;
 static uint8_t last_outcome, last_phase, last_reason, last_kind;
 static int last_request;

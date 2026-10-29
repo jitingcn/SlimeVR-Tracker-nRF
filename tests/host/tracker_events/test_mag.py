@@ -73,7 +73,7 @@ static float last_manual_sample[3];
 static float live_matrix[4][3], durable_matrix[4][3], raw_queued[3];
 static bool raw_available, invalid_fit, mag_cal_led_pending;
 static unsigned online_resets, metadata_clears;
-static int requested_storage_error, feedback_storage_result;
+static int feedback_storage_result;
 static bool running, admission, inject_motion;
 static int mag_wait_error, solver_error;
 static int64_t now;
@@ -112,7 +112,6 @@ struct led_token sensor_calibration_current_feedback(void) {
     /* Admission captures the owner token once; a silent request carries none. */
     return current_operation ? (struct led_token){LED_OWNER_MAG, current_operation, 0} : (struct led_token){0};
 }
-int sensor_calibration_current_storage_error(void) { return requested_storage_error; }
 /* Request-generation guard: cal_imu captures before collection; the owner
  * validates it at commit. */
 static bool generation_valid_result = true;
@@ -309,7 +308,7 @@ static void reset_case(void) {
     memset(&storage,0,sizeof(storage)); magneto_reset();
     memset(live_matrix,0,sizeof(live_matrix)); memset(durable_matrix,0,sizeof(durable_matrix));
     raw_available=invalid_fit=mag_cal_led_pending=false;
-    online_resets=metadata_clears=0; requested_storage_error=feedback_storage_result=0;
+    online_resets=metadata_clears=0; feedback_storage_result=0;
     pose_number=accel_sequence=accel_drains=0;
     first_capture_ms=0;
     running=admission=inject_motion=false; now=0;

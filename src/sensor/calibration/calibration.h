@@ -152,7 +152,6 @@ int sensor_calibration_maintenance_begin(void);
 void sensor_calibration_maintenance_end(void);
 uint16_t sensor_calibration_current_operation(void);
 struct led_token sensor_calibration_current_feedback(void);
-int sensor_calibration_current_storage_error(void);
 /* Collection epochs are independent of LED/wire tokens. Zero denotes a direct
  * non-collector transaction; reset-all invalidates every accepted old collector. */
 uint32_t sensor_calibration_current_generation(void);
