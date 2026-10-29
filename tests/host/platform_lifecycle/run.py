@@ -28,6 +28,15 @@ globals_source = (SRC / "globals.h").read_text()
 parts = re.findall(r"^#define ADAFRUIT_(?:WDT_RETRY_[12]|FATAL_RECOVERY|DFU_MAGIC_UF2_RESET) .*$",
                    globals_source, re.MULTILINE)
 watchdog = (SRC / "system/watchdog.c").read_text()
+watchdog_header = (SRC / "system/watchdog.h").read_text()
+watchdog_config = [
+    re.search(r"typedef enum \{.*?\} wdt_channel_id_t;", watchdog_header, re.DOTALL).group(),
+]
+for name in ("default_timeouts", "channel_names"):
+    watchdog_config.append(re.search(
+        rf"^static const [^\n]*\b{name}\[\] = \{{.*?^\}};",
+        watchdog, re.MULTILINE | re.DOTALL,
+    ).group())
 parts += ["static bool boot_success_marked;"]
 for name in ("should_enter_dfu", "enter_dfu_mode"):
     parts.append(function(watchdog, name))
@@ -57,6 +66,7 @@ for path, names in (
 with tempfile.TemporaryDirectory(prefix="tracker-platform-") as directory:
     temp = Path(directory)
     (temp / "clock_config.inc").write_text("\n".join(clock_constants))
+    (temp / "watchdog_config.inc").write_text("\n\n".join(watchdog_config))
     (temp / "production.inc").write_text("\n\n".join(parts))
     for adafruit, external in ((0, 0), (1, 0), (0, 1), (1, 1)):
         binary = temp / f"test-{adafruit}-{external}"

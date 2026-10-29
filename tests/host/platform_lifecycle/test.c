@@ -262,12 +262,9 @@ static void reset_clock(bool watchdog, nrf_clock_lfclk_t source, bool lf_enabled
     caller = 0;
 }
 
-typedef int wdt_channel_id_t;
-#define WDT_CHANNEL_COUNT 9
+#include "watchdog_config.inc"
 static int channel_ids[WDT_CHANNEL_COUNT];
 static uint32_t channel_timeouts[WDT_CHANNEL_COUNT];
-static const uint32_t default_timeouts[WDT_CHANNEL_COUNT] = {10000,10000,10000};
-static const char *channel_names[WDT_CHANNEL_COUNT];
 static bool watchdog_initialized;
 static int add_result, adds, feeds, last_feed;
 static uint32_t added_timeout;
@@ -706,6 +703,13 @@ int main(void)
     watchdog_pause(0); add_result = -ENOMEM;
     watchdog_resume(0); assert(reboots == 1 && channel_ids[0] == -1);
     assert(watchdog_register_thread(-1, 0) == -EINVAL);
+    add_result = 4;
+    assert(watchdog_register_thread(WDT_CHANNEL_CALIBRATION, 0) == 4);
+    assert(added_timeout == 60000 && last_feed == 4);
+    add_result = 5;
+    assert(watchdog_register_thread(WDT_CHANNEL_SCAN, 0) == 5);
+    assert(added_timeout == 10000 && last_feed == 5);
+    assert(watchdog_register_thread(WDT_CHANNEL_COUNT, 0) == -EINVAL);
 
     pm_error[PM_DEVICE_ACTION_SUSPEND][2] = -EIO;
     assert(sys_interface_suspend() == -EIO);

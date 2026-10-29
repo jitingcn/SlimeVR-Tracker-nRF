@@ -30,8 +30,6 @@ typedef enum {
 	WDT_CHANNEL_BUTTON,         // Button handling
 
 	// Optional - auxiliary functions
-	WDT_CHANNEL_LED,            // LED control
-	WDT_CHANNEL_STATUS,         // Status display
 	WDT_CHANNEL_CALIBRATION,    // Calibration processing
 	WDT_CHANNEL_SCAN,           // Sensor discovery/init before loop starts
 

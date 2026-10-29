@@ -57,8 +57,6 @@ static const char *channel_names[] = {
 	"connection",
 	"power",
 	"button",
-	"led",
-	"status",
 	"calibration",
 	"scan"
 };
@@ -70,8 +68,6 @@ static const uint32_t default_timeouts[] = {
 	10000,    // connection - depends on esb
 	10000,    // power - increased for boot delay
 	10000,    // button - increased for boot delay
-	30000,   // led - can be suspended
-	15000,   // status - error display cycles
 	60000,   // calibration - long operations
 	10000    // scan - sensor bus discovery/init may need retries
 };
