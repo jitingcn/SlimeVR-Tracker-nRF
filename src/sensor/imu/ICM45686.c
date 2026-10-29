@@ -6,6 +6,7 @@
 #include <hal/nrf_gpio.h>
 
 #include "ICM45686.h"
+#include "icm426xx_hires.h"
 #include "../interface_internal.h"
 #include "sensor/sensor_none.h"
 
@@ -677,7 +678,6 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 	return packets;
 }
 
-static const uint8_t invalid_axes_be16[6] = {0x80, 0x00, 0x80, 0x00, 0x80, 0x00};
 static int64_t icm45_last_bad_header_ms = 0;
 
 int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
@@ -711,47 +711,9 @@ int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 		);
 		debug_count++;
 	}
-	// Layout: header[0], accel[1:6], gyro[7:12], temperature[13:14],
-	// timestamp[15:16], shared accel/gyro low nibbles[17:19].
-	// Header rejection also skips a 0x7F-filled frame; no separate empty marker test.
-	// Assemble signed 20-bit samples in bits [31:12], then scale in float.
-	// A channel is invalid only when all three upper 16-bit values are 0x8000.
-	// One invalid channel produces zeros; two invalid channels leave outputs untouched.
-	float accel_raw[3] = {0};
-	float gyro_raw[3] = {0};
-	if (memcmp(&packet[1], invalid_axes_be16, sizeof(invalid_axes_be16))) // valid accel data
-	{
-		for (int axis = 0; axis < 3; axis++) {
-			accel_raw[axis]
-				= (int32_t)((((uint32_t)packet[1 + (axis * 2)]) << 24) | (((uint32_t)packet[2 + (axis * 2)]) << 16)
-							| (((uint32_t)packet[17 + axis] & 0xF0) << 8));
-		}
-	}
-	if (memcmp(&packet[7], invalid_axes_be16, sizeof(invalid_axes_be16))) // valid gyro data
-	{
-		for (int axis = 0; axis < 3; axis++) {
-			gyro_raw[axis]
-				= (int32_t)((((uint32_t)packet[7 + (axis * 2)]) << 24) | (((uint32_t)packet[8 + (axis * 2)]) << 16)
-							| (((uint32_t)packet[17 + axis] & 0x0F) << 12));
-		}
-	} else {
-		static int gyro_invalid_count = 0;
-		if (gyro_invalid_count < 5) {
-			LOG_WRN("Gyro data marked as invalid (0x80 pattern)");
-			gyro_invalid_count++;
-		}
-		if (!memcmp(&packet[1], invalid_axes_be16, sizeof(invalid_axes_be16))) // both channels invalid
-		{
-			return 1;
-		}
-	}
-	for (int axis = 0; axis < 3; axis++) {
-		accel_raw[axis] *= accel_g_per_left_aligned_lsb;
-		gyro_raw[axis] *= gyro_dps_per_left_aligned_lsb;
-	}
-	memcpy(a, accel_raw, sizeof(accel_raw));
-	memcpy(g, gyro_raw, sizeof(gyro_raw));
-	return 0;
+	return icm426xx_hires_decode(
+		packet, accel_g_per_left_aligned_lsb, gyro_dps_per_left_aligned_lsb, a, g
+	);
 }
 
 void icm45_accel_read(float a[3])

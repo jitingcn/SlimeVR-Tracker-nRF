@@ -877,6 +877,28 @@ static void test_icm45686_header_flags(void)
 	}
 }
 
+static void test_icm45686_hires_vectors(void)
+{
+	uint8_t packet[40] = {0};
+	uint8_t *p = packet + 20;
+	p[0] = 0x7b;
+	put_be16(p + 1, -1);
+	put_be16(p + 7, -1);
+	p[17] = 0xff;
+	float a[3], g[3];
+	assert(icm45_fifo_process(1, packet, a, g) == 0);
+	assert(a[0] == -1.0f / 16384 && g[0] == -125.0f / 16384);
+	for (unsigned axis = 0; axis < 3; axis++)
+		put_be16(p + 7 + axis * 2, INT16_MIN);
+	assert(icm45_fifo_process(1, packet, a, g) == 0);
+	assert(a[0] == -1.0f / 16384 && g[0] == 0 && g[1] == 0 && g[2] == 0);
+	for (unsigned axis = 0; axis < 3; axis++)
+		put_be16(p + 1 + axis * 2, INT16_MIN);
+	a[0] = 77; g[0] = 88;
+	assert(icm45_fifo_process(1, packet, a, g) == 1);
+	assert(a[0] == 77 && g[0] == 88);
+}
+
 int main(void)
 {
 	test_icm45686_direct_units();
@@ -887,6 +909,7 @@ int main(void)
 	test_icm45686_watermark_progress();
 	test_icm45686_temperature_sentinel();
 	test_icm45686_header_flags();
+	test_icm45686_hires_vectors();
 	test_prefetch_snapshot();
 	test_disabled_prefetch_lifecycle();
 	test_error_completions();

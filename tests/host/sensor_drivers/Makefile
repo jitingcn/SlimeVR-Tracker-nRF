@@ -59,6 +59,7 @@ test_ict_identity: test_ict_identity.c ../../../src/sensor/mag/ICT153xx.c ../../
 		../../../src/sensor/interface.c $(HOST_LOG) $(LDLIBS)
 
 test_icm45686: test_icm45686.c ../../../src/sensor/imu/ICM45686.c ../../../src/sensor/imu/ICM45686.h \
+		../../../src/sensor/imu/icm426xx_hires.h \
 		$(COMMON_HEADERS) $(HOST_HEADERS) $(HOST_LOG) model_ssi_io.c Makefile
 	$(CC) $(CFLAGS) -o $@ test_icm45686.c ../../../src/sensor/imu/ICM45686.c model_ssi_io.c $(HOST_LOG) $(LDLIBS)
 
