@@ -42,7 +42,7 @@ void ak_shutdown(void)
 
 int ak_update_odr(float period_s, float *actual_period_s)
 {
-	int requested_odr_hz; // Truncate fractional Hz before selecting a supported rate.
+	float requested_odr_hz;
 	uint8_t mode_code;
 
 	if (period_s <= 0 || period_s == INFINITY) // power down mode or single measurement mode

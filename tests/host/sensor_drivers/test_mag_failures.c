@@ -1045,6 +1045,38 @@ static int test_modes_ak_conversion_deadline(void)
 	return 0;
 }
 
+static int test_modes_ak_fractional_rates(void)
+{
+	static const struct {
+		float hz;
+		float actual;
+		uint8_t mode;
+	} cases[] = {
+		{0.5f, 0.1f, MODE_CMM1_10Hz},
+		{10, 0.1f, MODE_CMM1_10Hz},
+		{10.5f, 0.05f, MODE_CMM2_20Hz},
+		{20, 0.05f, MODE_CMM2_20Hz},
+		{20.5f, 0.02f, MODE_CMM3_50Hz},
+		{50, 0.02f, MODE_CMM3_50Hz},
+		{50.5f, 0.01f, MODE_CMM4_100Hz},
+		{100, 0.01f, MODE_CMM4_100Hz},
+		{100.5f, 0.005f, MODE_CMM5_200Hz},
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		reset_driver(&odr_cases[0]);
+		float actual = -1;
+		CHECK(ak_update_odr(1.0f / cases[i].hz, &actual) == 0);
+		CHECK(float_equal(actual, cases[i].actual));
+		CHECK(bus.op_count == 2);
+		CHECK(bus.ops[1].value == ((MT_LND2 << 5) | cases[i].mode));
+	}
+	float actual = -1;
+	CHECK(ak_update_odr(0, &actual) == 0 && actual == 0);
+	CHECK(ak_update_odr(INFINITY, &actual) == 0 && actual == 0);
+	CHECK(bus.registers[AK09940_CNTL3] == ((MT_LND2 << 5) | MODE_PDM));
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1086,6 +1118,7 @@ int main(void)
 		{"BMM350 init and compensation", test_bmm350_init_and_compensation},
 		{"Modes AK powerdown transitions", test_modes_ak_powerdown_transitions},
 		{"Modes AK conversion deadline", test_modes_ak_conversion_deadline},
+		{"Modes AK fractional rates", test_modes_ak_fractional_rates},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
