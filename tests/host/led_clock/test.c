@@ -133,6 +133,15 @@ int main(void)
 	esb_clear_time_sync_state();
 	assert(g_min_rtt_age == 119 && g_min_rtt_ticks == 10);
 	assert(!sync_filter.initialized && !server_time_synced && sync_filter.update_count == 0);
+	assert(net_ticks_from_ms_near32(1) == 33);
+	assert(net_ticks_from_ms_near32(15) == 492);
+	assert(net_ticks_from_ms_near32(1000) == 32768);
+	assert(net_ticks_to_ms_floor32(1) == 0);
+	assert(net_ticks_to_ms_ceil32(1) == 1);
+	assert(net_ticks_to_ms_floor32(32768) == 1000);
+	assert(net_ticks_to_ms_ceil32(32768) == 1000);
+	assert(net_ticks_to_us_ceil64(31) == 947);
+	assert(net_ticks_to_us_ceil64(32768) == 1000000);
 	reset();
 	struct esb_network_clock clock;
 	reset(); now_ticks = 0; g_last_sync_timestamp = 0; sync_filter.offset = 0;

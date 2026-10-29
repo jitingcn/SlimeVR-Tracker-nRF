@@ -31,7 +31,11 @@ for source, names in ((tdma, ("TDMA_ENABLED_BIT", "TDMA_UNPACK_TOTAL", "TDMA_UNP
 config = extract_block(tdma, r"^struct tdma_config \{", True)
 clock = extract_block((SRC / "esb.h").read_text(), r"^struct esb_network_clock \{", True)
 production = "\n".join(macros + [config, clock, function(tdma, "tdma_config_snapshot"),
-    function(tdma, "tdma_status_clock_max_age_ms"), function(esb, "net_ticks_from_kernel64"),
+    function(tdma, "tdma_status_clock_max_age_ms"), function((SRC / "network_ticks.h").read_text(), "net_ticks_from_kernel64"),
+    function((SRC / "network_ticks.h").read_text(), "net_ticks_from_ms_near32"),
+    function((SRC / "network_ticks.h").read_text(), "net_ticks_to_ms_floor32"),
+    function((SRC / "network_ticks.h").read_text(), "net_ticks_to_ms_ceil32"),
+    function((SRC / "network_ticks.h").read_text(), "net_ticks_to_us_ceil64"),
     function(esb, "net_tick_difference"),
     extract_block(esb, r"^struct esb_sync_sample \{", True),
     function(esb, "esb_sync_filter_update"), function(esb, "esb_clear_time_sync_state"),

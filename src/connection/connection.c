@@ -29,6 +29,7 @@
 #include "connection.h"
 #include "util.h"
 #include "esb.h"
+#include "network_ticks.h"
 #include "sensor_data_snapshot.h"
 #include "tracker_events.h"
 #if CONFIG_CONNECTION_RAW_COLLECTION
@@ -109,13 +110,13 @@ static uint32_t ping_server_phase_delay_ms(uint32_t interval_ms)
 		return 0;
 	}
 
-	uint32_t interval_ticks = (uint32_t)(((uint64_t)interval_ms * 32768U + 500U) / 1000U);
+	uint32_t interval_ticks = net_ticks_from_ms_near32(interval_ms);
 	uint32_t phase_ticks
-		= (uint32_t)(((uint64_t)ping_phase_ms(interval_ms) * 32768U + 500U) / 1000U);
+		= net_ticks_from_ms_near32(ping_phase_ms(interval_ms));
 	uint32_t server_phase_ticks = clock.receiver_ticks % interval_ticks;
 	uint32_t delay_ticks = phase_ticks >= server_phase_ticks ? phase_ticks - server_phase_ticks
 											  : interval_ticks - server_phase_ticks + phase_ticks;
-	uint32_t delay_ms = (uint32_t)(((uint64_t)delay_ticks * 1000U + 32767U) / 32768U);
+	uint32_t delay_ms = net_ticks_to_ms_ceil32(delay_ticks);
 	if (delay_ms <= PING_SERVER_PHASE_TOLERANCE_MS) {
 		delay_ms += interval_ms;
 	}

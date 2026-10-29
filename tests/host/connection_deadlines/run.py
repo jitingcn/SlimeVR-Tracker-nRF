@@ -21,7 +21,7 @@ esb_header = (root / "src/connection/esb.h").read_text()
 
 
 def function(source, name):
-    return extract_block(source, rf"^(?:static )?(?:enum tdma_ping_admission|void|bool|int64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
+    return extract_block(source, rf"^(?:static )?(?:inline )?(?:enum tdma_ping_admission|void|bool|int64_t|uint64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
 
 prefix = r'''
 #include <assert.h>
@@ -110,7 +110,10 @@ static uint64_t k_ticks_to_us_near64(uint64_t ticks) { return ticks; }
 static uint64_t test_rate_delay_us(uint64_t now) { (void)now; return test_delay_us; }
 static int k_sem_take(int *sem, uint64_t us) { (void)sem; observed_wait_us = us; return 0; }
 '''
-parts = [prefix, extract_block(esb_header, r"^struct esb_network_clock \{", True),
+network_ticks = (root / "src/connection/network_ticks.h").read_text()
+parts = [prefix, function(network_ticks, "net_ticks_to_us_ceil64"),
+         function(network_ticks, "net_ticks_to_ms_ceil32"),
+         function(network_ticks, "net_ticks_to_ms_floor32"), extract_block(esb_header, r"^struct esb_network_clock \{", True),
          function(esb, "esb_project_network_ticks"),
          function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms"),
          tdma[tdma.index("#define TDMA_ENABLED_BIT"):tdma.index("\nvoid tdma_init(")],

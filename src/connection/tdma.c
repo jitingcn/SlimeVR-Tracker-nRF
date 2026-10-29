@@ -21,6 +21,7 @@
 	THE SOFTWARE.
 */
 #include "tdma.h"
+#include "network_ticks.h"
 #include "esb.h"
 #include "system/led.h"
 #include <errno.h>
@@ -215,7 +216,7 @@ static uint32_t tdma_next_frame(uint32_t frame, const struct tdma_config *config
 
 static void tdma_sleep_network_ticks(uint32_t ticks)
 {
-	uint64_t us = ((uint64_t)ticks * 1000000U + 32767U) / 32768U;
+	uint64_t us = net_ticks_to_us_ceil64(ticks);
 	if (us > 0) {
 		k_sleep(K_USEC(us));
 	}
@@ -230,8 +231,8 @@ static bool tdma_wait_until_network_tick(
 		return false;
 	}
 	uint64_t start_local = clock.local_kernel_ticks;
-	uint64_t budget_us = ((uint64_t)(distance + config->slot_ticks + TDMA_COARSE_WAKE_LEAD_TICKS)
-		* 1000000U + 32767U) / 32768U;
+	uint64_t budget_us = net_ticks_to_us_ceil64(
+		distance + config->slot_ticks + TDMA_COARSE_WAKE_LEAD_TICKS);
 	unsigned spins = 0, sleeps = 0;
 	for (;;) {
 		if (!tdma_clock_snapshot(config, &clock) || clock.local_kernel_ticks < start_local
@@ -412,7 +413,7 @@ bool tdma_ping_wake_delay_ms(uint32_t *delay_ms)
 	if (!tdma_frame_eligible(current_frame, &config)) {
 		uint32_t ticks = current_frame == 0 ? config.frame_ticks - clock.receiver_ticks
 			: 0U - clock.receiver_ticks + config.frame_ticks;
-		*delay_ms = (uint32_t)(((uint64_t)ticks * 1000U + 32767U) / 32768U);
+		*delay_ms = net_ticks_to_ms_ceil32(ticks);
 		return true;
 	}
 	uint32_t frame, target;
@@ -432,7 +433,7 @@ bool tdma_ping_wake_delay_ms(uint32_t *delay_ms)
 	}
 	uint32_t ticks = target - clock.receiver_ticks;
 	uint32_t wake_ticks = ticks > config.frame_ticks ? ticks - config.frame_ticks : 0;
-	*delay_ms = (uint32_t)(((uint64_t)wake_ticks * 1000U) / 32768U);
+	*delay_ms = net_ticks_to_ms_floor32(wake_ticks);
 	return true;
 }
 

@@ -45,6 +45,7 @@
 
 #include <stdlib.h>
 #include "esb.h"
+#include "network_ticks.h"
 #include "tdma.h"
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 #include "radio_capture.h"
@@ -852,34 +853,6 @@ static volatile uint8_t ota_rx_tail;
 
 // Server time synchronization for TDMA scheduling (using ticks)
 static bool server_time_synced = false;
-
-// Server time synchronization
-/*
- * Network (TDMA) tick domain conversion. The TDMA network runs at 32768 Hz
- * on all nodes. On nRF52 the kernel tick is also 32768 Hz, so kernel and
- * network ticks are the same domain. On nRF54L the kernel runs at 31250 Hz
- * (GRTC 1 MHz / 32): kernel ticks advance 4.88% slower than network ticks,
- * so any sync-path stamp kept in kernel ticks injects a 4.63% rate error
- * into the server-time extrapolation.
- *
- * Conversion takes the full 64-bit monotonic kernel time and yields 64-bit
- * network ticks. Truncating a 32-bit kernel stamp BEFORE converting makes
- * the network value jump at every kernel-tick wrap (the two 32-bit domains
- * wrap at different points, corrupting wrap-safe differences); converting
- * the 64-bit timeline first keeps truncated (wire) stamps and 32-bit
- * wrap-safe differences exact. RTT math (t1/t4 differences) stays in kernel
- * ticks where both stamps share the domain and k_ticks_to_us is
- * kernel-aware. Network ticks convert back to us/ms explicitly (32768 Hz),
- * never via kernel-tick macros.
- */
-static inline uint64_t net_ticks_from_kernel64(uint64_t kernel_ticks)
-{
-#if defined(CONFIG_SOC_SERIES_NRF54L) || defined(CONFIG_SOC_COMPATIBLE_NRF54L)
-	return (k_ticks_to_us_near64(kernel_ticks) * 32768ULL) / 1000000ULL;
-#else
-	return kernel_ticks;
-#endif
-}
 
 static int64_t net_tick_difference(uint32_t a, uint32_t b)
 {
