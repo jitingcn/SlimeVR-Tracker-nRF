@@ -84,11 +84,9 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
 	unsigned int key = irq_lock();
 
 	/* Save fault information to retained memory (outside CRC, no update needed) */
-	if (retained) {
-		retained->watchdog_state.last_failed_channel = channel;
-		retained->watchdog_state.last_reset_uptime = k_uptime_get_32();
-		retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
-	}
+	retained->watchdog_state.last_failed_channel = channel;
+	retained->watchdog_state.last_reset_uptime = k_uptime_get_32();
+	retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
 
 	LOG_PANIC();
 
@@ -143,10 +141,6 @@ static bool should_enter_dfu(void)
 		return false;
 	}
 
-	if (!retained) {
-		return false;
-	}
-
 	uint8_t count = retained->watchdog_state.reset_count;
 	return count >= WATCHDOG_RESET_THRESHOLD;
 }
@@ -166,16 +160,14 @@ static void enter_dfu_mode(void)
 	/* Clear reset counter BEFORE entering DFU to prevent looping back into DFU
 	 * when bootloader times out and returns to firmware.
 	 */
-	if (retained) {
-		retained->watchdog_state.reset_count = 0;
+	retained->watchdog_state.reset_count = 0;
 
-		/* Update retained data to persist the cleared counter.
-		 * Note: retained_update() updates CRC and uptime tracking.
-		 * The watchdog_state is outside CRC but this ensures
-		 * proper state management.
-		 */
-		retained_update();
-	}
+	/* Update retained data to persist the cleared counter.
+	 * Note: retained_update() updates CRC and uptime tracking.
+	 * The watchdog_state is outside CRC but this ensures
+	 * proper state management.
+	 */
+	retained_update();
 
 #if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
 	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
@@ -224,7 +216,7 @@ int watchdog_init(void)
 	}
 
 	/* Process WDT reset state */
-	if (watchdog_caused_reset() && retained) {
+	if (watchdog_caused_reset()) {
 		LOG_WRN("System was reset by watchdog!");
 
 		/* Check if watchdog_state is valid (magic number matches) */
@@ -260,7 +252,7 @@ int watchdog_init(void)
 			retained->watchdog_state.total_wdt_resets = 1;
 			retained->watchdog_state.magic = WATCHDOG_STATE_MAGIC;
 		}
-	} else if (retained) {
+	} else {
 		if (!sys_bootloader_supports_recovery()) {
 			/* Non-WDT reset ends a legacy consecutive-reset streak. */
 			retained->watchdog_state.reset_count = 0;
@@ -399,11 +391,10 @@ uint8_t watchdog_get_reset_count(void)
 	}
 #endif
 #if defined(CONFIG_TASK_WDT)
-	if (retained) {
-		return retained->watchdog_state.reset_count;
-	}
-#endif
+	return retained->watchdog_state.reset_count;
+#else
 	return 0;
+#endif
 }
 
 void watchdog_clear_reset_count(void)
@@ -420,10 +411,8 @@ void watchdog_clear_reset_count(void)
 	}
 #endif
 #if defined(CONFIG_TASK_WDT)
-	if (retained) {
-		retained->watchdog_state.reset_count = 0;
-		retained_update();
-	}
+	retained->watchdog_state.reset_count = 0;
+	retained_update();
 	LOG_INF("WDT reset count cleared");
 #endif
 }

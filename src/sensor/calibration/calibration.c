@@ -389,10 +389,6 @@ bool sensor_calibration_sensitivity_valid(float scale)
 
 void sensor_calibration_read(void)
 {
-	if (!retained) {
-		LOG_ERR("Calibration: retained data unavailable");
-		return;
-	}
 	/* Heal invalid coefficients persisted by older builds before any copies
 	 * or fusion use. Sensitivity axes are independent: preserve valid gains. */
 	bool healed = false;
@@ -770,9 +766,6 @@ static void calibration_thread(void)
 	}
 
 	sensor_calibration_read();
-	if (!retained) {
-		return;
-	}
 
 	// Startup validation and T-Cal LUT build require live sensor state.
 	// If no IMU was detected, keep the retained values as-is and avoid
