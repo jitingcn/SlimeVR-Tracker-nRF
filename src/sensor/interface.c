@@ -35,14 +35,21 @@ static int ssi_report_error(enum sensor_interface_dev dev, const char *operation
 	const char *device = dev == SENSOR_INTERFACE_DEV_IMU ? "IMU" : "unknown";
 	const char *bus = "unknown";
 	const char *controller = "unknown";
-	unsigned int address = 0;
-	bool have_address = false;
+	int address = -1;
+	int spec_type = dev < 0 || dev >= SENSOR_INTERFACE_DEV_COUNT ?
+		-1 : (int)sensor_interface_dev_spec[dev];
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (dev == SENSOR_INTERFACE_DEV_MAG)
 		device = "MAG";
+	bool external = spec_type == SENSOR_INTERFACE_SPEC_EXT;
+	if (external)
+	{
+		dev = SENSOR_INTERFACE_DEV_IMU;
+		spec_type = sensor_interface_dev_spec[dev];
+	}
 #endif
-	switch (dev < 0 || dev >= SENSOR_INTERFACE_DEV_COUNT ? -1 : (int)sensor_interface_dev_spec[dev])
+	switch (spec_type)
 	{
 	case SENSOR_INTERFACE_SPEC_SPI:
 		bus = "SPI";
@@ -52,7 +59,6 @@ static int ssi_report_error(enum sensor_interface_dev dev, const char *operation
 			if (spec->bus != NULL)
 				controller = spec->bus->name;
 			address = spec->config.slave;
-			have_address = true;
 		}
 		break;
 	case SENSOR_INTERFACE_SPEC_I2C:
@@ -63,40 +69,21 @@ static int ssi_report_error(enum sensor_interface_dev dev, const char *operation
 			if (spec->bus != NULL)
 				controller = spec->bus->name;
 			address = spec->addr;
-			have_address = true;
 		}
 		break;
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-	case SENSOR_INTERFACE_SPEC_EXT:
-		bus = "EXT";
-		address = ext_addr;
-		have_address = true;
-		if (sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU] == SENSOR_INTERFACE_SPEC_SPI &&
-		    sensor_interface_dev_spi[SENSOR_INTERFACE_DEV_IMU] != NULL &&
-		    sensor_interface_dev_spi[SENSOR_INTERFACE_DEV_IMU]->bus != NULL)
-			controller = sensor_interface_dev_spi[SENSOR_INTERFACE_DEV_IMU]->bus->name;
-		else if (sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU] == SENSOR_INTERFACE_SPEC_I2C &&
-			 sensor_interface_dev_i2c[SENSOR_INTERFACE_DEV_IMU] != NULL &&
-			 sensor_interface_dev_i2c[SENSOR_INTERFACE_DEV_IMU]->bus != NULL)
-			controller = sensor_interface_dev_i2c[SENSOR_INTERFACE_DEV_IMU]->bus->name;
-		break;
-#endif
 	default:
 		break;
 	}
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	if (external)
+	{
+		bus = "EXT";
+		address = ext_addr;
+	}
+#endif
 
-	if (have_address && reg >= 0)
-		LOG_ERR("SSI %s dev=%s bus=%s controller=%s addr=0x%x reg=0x%02x err=%d",
-			operation, device, bus, controller, address, (unsigned int)reg, err);
-	else if (have_address)
-		LOG_ERR("SSI %s dev=%s bus=%s controller=%s addr=0x%x reg=unknown err=%d",
-			operation, device, bus, controller, address, err);
-	else if (reg >= 0)
-		LOG_ERR("SSI %s dev=%s bus=%s controller=%s addr=unknown reg=0x%02x err=%d",
-			operation, device, bus, controller, (unsigned int)reg, err);
-	else
-		LOG_ERR("SSI %s dev=%s bus=%s controller=%s addr=unknown reg=unknown err=%d",
-			operation, device, bus, controller, err);
+	LOG_ERR("SSI %s dev=%s bus=%s controller=%s addr=%d reg=%d err=%d",
+		operation, device, bus, controller, address, reg, err);
 	return err;
 }
 

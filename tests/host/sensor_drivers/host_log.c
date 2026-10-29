@@ -45,22 +45,36 @@ const struct host_log_entry *host_log_error(size_t index)
 	return NULL;
 }
 
+static bool host_log_has_field(const char *message, const char *field)
+{
+	size_t length = strlen(field);
+	const char *match = message;
+	while ((match = strstr(match, field)) != NULL) {
+		if ((match == message || match[-1] == ' ') &&
+		    (match[length] == ' ' || match[length] == '\0'))
+			return true;
+		match += length;
+	}
+	return false;
+}
+
 bool host_log_matches_error(const char *operation, const char *dev, const char *bus,
-	const char *controller, const char *address, const char *reg, int error)
+	const char *controller, int address, int reg, int error)
 {
 	if (error_count != 1)
 		return false;
 	const struct host_log_entry *entry = host_log_error(0);
 	if (!entry || entry->level != HOST_LOG_ERROR)
 		return false;
-	char expected_operation[64], expected_error[32];
-	snprintf(expected_operation, sizeof(expected_operation), "SSI %s dev=", operation ? operation : "");
+	char expected_operation[64], expected_address[32], expected_reg[32], expected_error[32];
+	snprintf(expected_operation, sizeof(expected_operation), "SSI %s", operation);
+	snprintf(expected_address, sizeof(expected_address), "addr=%d", address);
+	snprintf(expected_reg, sizeof(expected_reg), "reg=%d", reg);
 	snprintf(expected_error, sizeof(expected_error), "err=%d", error);
-	const char *error_field = strstr(entry->message, expected_error);
-	return strstr(entry->message, "SSI ") &&
-		(!operation || strstr(entry->message, expected_operation)) &&
-		strstr(entry->message, dev) && strstr(entry->message, bus) &&
-		strstr(entry->message, controller) && strstr(entry->message, address) &&
-		strstr(entry->message, reg) && error_field &&
-		error_field[strlen(expected_error)] == '\0';
+	size_t operation_length = strlen(expected_operation);
+	return strncmp(entry->message, expected_operation, operation_length) == 0 &&
+		entry->message[operation_length] == ' ' &&
+		host_log_has_field(entry->message, dev) && host_log_has_field(entry->message, bus) &&
+		host_log_has_field(entry->message, controller) && host_log_has_field(entry->message, expected_address) &&
+		host_log_has_field(entry->message, expected_reg) && host_log_has_field(entry->message, expected_error);
 }

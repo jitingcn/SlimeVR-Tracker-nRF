@@ -108,7 +108,7 @@ static int test_identity(unsigned failures)
 		CHECK(result == -EIO && actual == -123.0f);
 		CHECK(hw.writes == 0 && hw.reset_writes == 0);
 		CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=I2C",
-			"controller=mag-i2c", "addr=0x1e", "reg=0x00", -EIO));
+			"controller=mag-i2c", 0x1e, 0, -EIO));
 	} else {
 		CHECK(result == 0 && fabsf(actual - 1.0f / 200) < 1e-7f);
 		CHECK(hw.first_write_identity_reads == hw.identity_reads && hw.writes == 5);

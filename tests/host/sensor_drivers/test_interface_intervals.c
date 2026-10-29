@@ -274,8 +274,8 @@ static int test_seven_byte_frame_and_prefetch(void)
 	CHECK(result[0] == frame[0]);
 	ext_prefetch_error = -EBUSY;
 	CHECK(sensor_interface_ext_set_prefetch(false) == -EBUSY);
-	CHECK(host_log_matches_error(NULL, "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x14", "reg=unknown", -EBUSY));
+	CHECK(host_log_matches_error("prefetch", "dev=MAG", "bus=EXT", "controller=imu-spi",
+		0x14, -1, -EBUSY));
 	host_log_reset();
 	CHECK(ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, 0x08, result, 3) == 0);
 	CHECK(result[0] == frame[0]);
@@ -344,7 +344,7 @@ static int test_i2c_diagnostics(void)
 	CHECK(ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x10, &value) == -EIO);
 	CHECK(value == 0x7e && transfer_count == 1 && transfers[0].reg == 0x10);
 	CHECK(host_log_matches_error("reg_read", "dev=IMU", "bus=I2C", "controller=imu-i2c",
-		"addr=0x28", "reg=0x10", -EIO));
+		0x28, 0x10, -EIO));
 
 	reset_counts();
 	fail_i2c_write_call = 1;
@@ -352,7 +352,7 @@ static int test_i2c_diagnostics(void)
 	CHECK(transfer_count == 1 && transfers[0].kind == I2C_WRITE &&
 		transfers[0].reg == 0x11 && transfers[0].value == 0x42);
 	CHECK(host_log_matches_error("reg_write", "dev=IMU", "bus=I2C", "controller=imu-i2c",
-		"addr=0x28", "reg=0x11", -EIO));
+		0x28, 0x11, -EIO));
 
 	reset_counts();
 	fail_i2c_write_read_call = 1;
@@ -360,7 +360,7 @@ static int test_i2c_diagnostics(void)
 	CHECK(transfer_count == 1 && transfers[0].kind == I2C_WRITE_READ &&
 		transfers[0].reg == 0x12 && i2c_write_calls == 0);
 	CHECK(host_log_matches_error("reg_update", "dev=IMU", "bus=I2C", "controller=imu-i2c",
-		"addr=0x28", "reg=0x12", -EIO));
+		0x28, 0x12, -EIO));
 
 	reset_counts();
 	i2c_read_value = 0xa0;
@@ -370,7 +370,7 @@ static int test_i2c_diagnostics(void)
 		transfers[0].reg == 0x13 && transfers[1].kind == I2C_WRITE &&
 		transfers[1].reg == 0x13 && transfers[1].value == 0xa5);
 	CHECK(host_log_matches_error("reg_update", "dev=IMU", "bus=I2C", "controller=imu-i2c",
-		"addr=0x28", "reg=0x13", -EIO));
+		0x28, 0x13, -EIO));
 
 	reset_counts();
 	const uint8_t bytes[] = {0x42, 0x43};
@@ -379,7 +379,7 @@ static int test_i2c_diagnostics(void)
 	CHECK(transfer_count == 1 && transfers[0].kind == I2C_BURST_WRITE &&
 		transfers[0].reg == 0x15 && transfers[0].value == 0x42 && transfers[0].length == 2);
 	CHECK(host_log_matches_error("burst_write", "dev=IMU", "bus=I2C", "controller=imu-i2c",
-		"addr=0x28", "reg=0x15", -EIO));
+		0x28, 0x15, -EIO));
 
 	reset_counts();
 	fail_i2c_read_call = 1;
@@ -387,7 +387,7 @@ static int test_i2c_diagnostics(void)
 	CHECK(ssi_read(SENSOR_INTERFACE_DEV_IMU, &value, 1) == -EIO);
 	CHECK(value == 0x7e && transfer_count == 1 && transfers[0].kind == I2C_READ);
 	CHECK(host_log_matches_error("read", "dev=IMU", "bus=I2C", "controller=imu-i2c",
-		"addr=0x28", "reg=unknown", -EIO));
+		0x28, -1, -EIO));
 
 	reset_counts();
 	fail_i2c_write_read_call = 1;
@@ -423,7 +423,91 @@ static int test_i2c_diagnostics(void)
 	CHECK(ssi_reg_read_byte_io(SENSOR_INTERFACE_DEV_IMU, 0x24, &value, SSI_REPORT) == -EIO);
 	CHECK(transfer_count == 1 && transfers[0].reg == 0x24);
 	CHECK(host_log_matches_error("reg_read", "dev=IMU", "bus=I2C", "controller=imu-i2c",
-		"addr=0x28", "reg=0x24", -EIO));
+		0x28, 0x24, -EIO));
+	return EXIT_SUCCESS;
+}
+
+static int test_diagnostic_addresses(void)
+{
+	const struct device i2c_controller = {.name = "physical-i2c"};
+	const struct device spi_controller = {.name = "physical-spi"};
+	struct i2c_dt_spec i2c = {.bus = &i2c_controller, .addr = 0};
+	struct spi_dt_spec spi = {.bus = NULL, .config = {.slave = UINT16_MAX}};
+	const sensor_ext_ssi_t ext = {.ext_burst = 8};
+	uint8_t value = 0xa5;
+
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_COUNT, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=unknown", "bus=unknown",
+		"controller=unknown", -1, 0, -EINVAL));
+
+	sensor_interface_register_sensor_imu_i2c(&i2c);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_IMU, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=I2C",
+		"controller=physical-i2c", 0, 0, -EINVAL));
+
+	i2c.addr = UINT16_MAX;
+	i2c.bus = NULL;
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_IMU, 0xff, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=I2C",
+		"controller=unknown", UINT16_MAX, 0xff, -EINVAL));
+
+	sensor_interface_register_sensor_imu_i2c(NULL);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_IMU, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=I2C",
+		"controller=unknown", -1, 0, -EINVAL));
+
+	sensor_interface_register_sensor_imu_spi(&spi);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_IMU, 0xff, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=SPI",
+		"controller=unknown", UINT16_MAX, 0xff, -EINVAL));
+
+	sensor_interface_register_sensor_imu_spi(NULL);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_IMU, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=SPI",
+		"controller=unknown", -1, 0, -EINVAL));
+
+	spi.bus = &spi_controller;
+	sensor_interface_register_sensor_imu_spi(&spi);
+	sensor_interface_ext_configure(&ext);
+	CHECK(sensor_interface_register_sensor_mag_ext(0, 1, 8) == 0);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_MAG, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=MAG", "bus=EXT",
+		"controller=physical-spi", 0, 0, -EINVAL));
+
+	i2c.bus = &i2c_controller;
+	sensor_interface_register_sensor_imu_i2c(&i2c);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_MAG, 0xff, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=MAG", "bus=EXT",
+		"controller=physical-i2c", 0, 0xff, -EINVAL));
+
+	i2c.bus = NULL;
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_MAG, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=MAG", "bus=EXT",
+		"controller=unknown", 0, 0, -EINVAL));
+
+	sensor_interface_register_sensor_imu_i2c(NULL);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_MAG, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=MAG", "bus=EXT",
+		"controller=unknown", 0, 0, -EINVAL));
+
+	sensor_interface_register_sensor_imu_spi(NULL);
+	reset_counts();
+	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_MAG, 0, &value, 1, 0) == -EINVAL);
+	CHECK(host_log_matches_error("reg_read_interval", "dev=MAG", "bus=EXT",
+		"controller=unknown", 0, 0, -EINVAL));
+
+	sensor_interface_register_sensor_mag_i2c(NULL);
+	sensor_interface_ext_configure(NULL);
 	return EXIT_SUCCESS;
 }
 
@@ -433,6 +517,7 @@ int main(void)
 	const struct device spi_controller = {.name = "imu-spi"};
 	struct i2c_dt_spec dev = {.bus = &i2c_controller, .addr = 0x28};
 	struct spi_dt_spec spi = {.bus = &spi_controller, .config = {.slave = 5}};
+	CHECK(test_diagnostic_addresses() == EXIT_SUCCESS);
 	sensor_interface_register_sensor_imu_i2c(&dev);
 	uint8_t buffer[4096];
 	CHECK(test_i2c_diagnostics() == EXIT_SUCCESS);
@@ -441,13 +526,13 @@ int main(void)
 	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_IMU, 0x10, buffer, 16, 0) == -EINVAL);
 	CHECK(i2c_write_calls == 0 && i2c_read_calls == 0);
 	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=I2C",
-		"controller=imu-i2c", "addr=0x28", "reg=0x10", -EINVAL));
+		"controller=imu-i2c", 0x28, 0x10, -EINVAL));
 
 	reset_counts();
 	CHECK(ssi_reg_read_interval(SENSOR_INTERFACE_DEV_IMU, 0x10, buffer, 16, 4096) == -EINVAL);
 	CHECK(i2c_write_calls == 0 && i2c_read_calls == 0);
 	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=I2C",
-		"controller=imu-i2c", "addr=0x28", "reg=0x10", -EINVAL));
+		"controller=imu-i2c", 0x28, 0x10, -EINVAL));
 
 	reset_counts();
 	fail_i2c_read_call = 2;
@@ -459,7 +544,7 @@ int main(void)
 		transfers[1].length == 2048 && transfers[2].kind == I2C_READ &&
 		transfers[2].length == 2048);
 	CHECK(host_log_matches_error("reg_read_interval", "dev=IMU", "bus=I2C",
-		"controller=imu-i2c", "addr=0x28", "reg=0x10", -EIO));
+		"controller=imu-i2c", 0x28, 0x10, -EIO));
 
 	reset_counts();
 	fail_i2c_write_read_call = 2;
@@ -470,7 +555,7 @@ int main(void)
 		transfers[1].kind == I2C_WRITE_READ && transfers[1].reg == 0x10 &&
 		transfers[1].length == 1020);
 	CHECK(host_log_matches_error("burst_read_interval", "dev=IMU", "bus=I2C",
-		"controller=imu-i2c", "addr=0x28", "reg=0x10", -EIO));
+		"controller=imu-i2c", 0x28, 0x10, -EIO));
 
 
 	sensor_interface_register_sensor_imu_spi(&spi);
@@ -510,7 +595,7 @@ int main(void)
 	for (size_t i = 6; i < sizeof(dummy_data); i++)
 		CHECK(dummy_data[i] == 0xa5);
 	CHECK(host_log_matches_error("burst_read_dummy", "dev=MAG", "bus=EXT",
-		"controller=imu-spi", "addr=0x14", "reg=0x31", -EIO));
+		"controller=imu-spi", 0x14, 0x31, -EIO));
 
 	/* Plain register burst read longer than one I2CM transaction: segmented
 	 * by register-data length with the sub-register advanced per data chunk. */
@@ -535,7 +620,7 @@ int main(void)
 	for (size_t i = 8; i < sizeof(long_data); i++)
 		CHECK(long_data[i] == 0xa5);
 	CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x14", "reg=0x10", -EIO));
+		0x14, 0x10, -EIO));
 
 	reset_counts();
 	memset(long_data, 0xa5, sizeof(long_data));
@@ -549,7 +634,7 @@ int main(void)
 	for (size_t i = 8; i < sizeof(long_data); i++)
 		CHECK(long_data[i] == 0xa5);
 	CHECK(host_log_matches_error("write_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x14", "reg=0x10", -EIO));
+		0x14, 0x10, -EIO));
 
 	reset_counts();
 	fail_ext_write = 1;
@@ -557,7 +642,7 @@ int main(void)
 	CHECK(ext_write_calls == 1 && ext_write_addr == 0x14 && ext_write_length == 2 &&
 		ext_write_reg == 0x22 && ext_write_value == 0x59);
 	CHECK(host_log_matches_error("reg_write", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x14", "reg=0x22", -EIO));
+		0x14, 0x22, -EIO));
 
 	/* A read within one transaction must not be segmented. */
 	reset_counts();
@@ -573,7 +658,7 @@ int main(void)
 	CHECK(ssi_burst_read_dummy(SENSOR_INTERFACE_DEV_MAG, 0x40, 8, tiny, sizeof(tiny)) != 0);
 	CHECK(ext_read_calls == 0);
 	CHECK(host_log_matches_error("burst_read_dummy", "dev=MAG", "bus=EXT",
-		"controller=imu-spi", "addr=0x14", "reg=0x40", -1));
+		"controller=imu-spi", 0x14, 0x40, -1));
 
 	CHECK(test_seven_byte_frame_and_prefetch() == EXIT_SUCCESS);
 

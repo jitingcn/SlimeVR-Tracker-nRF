@@ -308,7 +308,7 @@ static bool test_nack_write(unsigned unused)
 	CHECK(ssi_write(SENSOR_INTERFACE_DEV_MAG, command, sizeof(command)) == -1);
 	CHECK(hw.external[0x50] == 0 && hw.starts == 1);
 	CHECK(host_log_matches_error("write", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", "reg=unknown", -1));
+		0x7c, -1, -1));
 	return clean_transaction();
 }
 
@@ -355,7 +355,7 @@ static bool test_runtime_read_failure(unsigned fault)
 	CHECK(hw.starts == 1 && hw.transactions[0].reading &&
 		hw.transactions[0].addr == 0x7c && hw.transactions[0].sub == 0x30);
 	CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", "reg=0x30", expected));
+		0x7c, 0x30, expected));
 	return clean_transaction();
 }
 
@@ -377,7 +377,7 @@ static bool test_write_failure(unsigned fault)
 		CHECK(host_log_error_count() == 0);
 	else
 		CHECK(host_log_matches_error("reg_write", "dev=MAG", "bus=EXT", "controller=imu-spi",
-			"addr=0x7c", "reg=0x50", expected));
+			0x7c, 0x50, expected));
 	return clean_transaction();
 }
 
@@ -392,7 +392,7 @@ static bool test_imu_spi_failure(unsigned unused)
 	CHECK(value == 0xa5 && hw.calls[hw.fail_call - 1].reading &&
 		hw.calls[hw.fail_call - 1].reg == 0x20);
 	CHECK(host_log_matches_error("reg_read", "dev=IMU", "bus=SPI", "controller=imu-spi",
-		"addr=0x5", "reg=0x20", -ENXIO));
+		5, 0x20, -ENXIO));
 	return true;
 }
 
@@ -413,7 +413,7 @@ static bool test_imu_spi_update(unsigned unused)
 	CHECK(ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, 0x20, 0x0f, 0x05) == -EIO);
 	CHECK(hw.bus_calls == first + 1 && hw.calls[first].reading && hw.calls[first].reg == 0x20);
 	CHECK(host_log_matches_error("reg_update", "dev=IMU", "bus=SPI", "controller=imu-spi",
-		"addr=0x5", "reg=0x20", -EIO));
+		5, 0x20, -EIO));
 
 	CHECK(reset_model());
 	hw.registers[0x20] = 0xa0;
@@ -424,7 +424,7 @@ static bool test_imu_spi_update(unsigned unused)
 		hw.calls[first].reg == 0x20 && !hw.calls[first + 1].reading &&
 		hw.calls[first + 1].reg == 0x20 && hw.registers[0x20] == 0xa0);
 	CHECK(host_log_matches_error("reg_update", "dev=IMU", "bus=SPI", "controller=imu-spi",
-		"addr=0x5", "reg=0x20", -EIO));
+		5, 0x20, -EIO));
 	return true;
 }
 
@@ -459,7 +459,7 @@ static bool test_cleanup_error_precedence(unsigned unused)
 		hw.calls[hw.fail_call - 1].reg == LSM6DSO_MASTER_CONFIG);
 	CHECK(hw.calls[hw.bus_calls - 1].reg == LSM6DSO_FUNC_CFG_ACCESS && !hw.bank);
 	CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", "reg=0x30", -ETIMEDOUT));
+		0x7c, 0x30, -ETIMEDOUT));
 	CHECK(clean_transaction());
 
 	CHECK(reset_model());
@@ -479,7 +479,7 @@ static bool test_cleanup_error_precedence(unsigned unused)
 	CHECK(hw.bus_calls == hw.fail_second_call + 1 &&
 		hw.calls[hw.bus_calls - 1].reg == LSM6DSO_FUNC_CFG_ACCESS);
 	CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", "reg=0x30", -ENXIO));
+		0x7c, 0x30, -ENXIO));
 	return clean_transaction();
 }
 
@@ -492,7 +492,7 @@ static bool test_write_timeout(unsigned unused)
 	CHECK(ssi_write(SENSOR_INTERFACE_DEV_MAG, command, sizeof(command)) == -1);
 	CHECK(hw.external[0x50] == 0 && hw.banked_status_reads != 0);
 	CHECK(host_log_matches_error("write", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", "reg=unknown", -1));
+		0x7c, -1, -1));
 	return clean_transaction();
 }
 
@@ -533,7 +533,7 @@ static bool test_second_chunk_failure(unsigned unused)
 	const uint8_t empty[7] = {0};
 	CHECK(memcmp(out + 7, empty, sizeof(empty)) == 0 && out[14] == 0xa5);
 	CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", "reg=0x30", -1));
+		0x7c, 0x30, -1));
 	return clean_transaction();
 }
 
@@ -546,7 +546,7 @@ static bool test_qmc_configuration_nack(unsigned failed_write)
 	CHECK(qmc_init(0.02f, &actual) == -1);
 	CHECK(actual == -123.0f && hw.starts == failed_write);
 	CHECK(host_log_matches_error("reg_write", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", failed_write == 1 ? "reg=0x0b" : "reg=0x0a", -1));
+		0x7c, failed_write == 1 ? 0x0b : 0x0a, -1));
 	host_log_reset();
 	hw.nack_start = 0;
 	unsigned before = hw.starts;
@@ -579,7 +579,7 @@ static bool test_qmc_failed_sample(unsigned status_io_error)
 	CHECK(m[0] == 11.0f && m[1] == 22.0f && m[2] == 33.0f);
 	CHECK(hw.payload_reads == 0 && !hw.fail_status_once);
 	CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
-		"addr=0x7c", "reg=0x01", status_io_error ? -EIO : -1));
+		0x7c, 0x01, status_io_error ? -EIO : -1));
 	host_log_reset();
 	hw.nack_start = 0;
 	CHECK(qmc_mag_read(m));
@@ -685,7 +685,7 @@ static bool test_xlda_timeout(unsigned writing)
 	CHECK(hw.starts == 1);
 	if (writing)
 		CHECK(host_log_matches_error("write", "dev=MAG", "bus=EXT", "controller=imu-spi",
-			"addr=0x7c", "reg=unknown", -1));
+			0x7c, -1, -1));
 	else
 		CHECK(host_log_error_count() == 0);
 	return clean_transaction();

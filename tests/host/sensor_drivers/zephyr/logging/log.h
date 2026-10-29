@@ -21,7 +21,7 @@ void host_log(enum host_log_level level, const char *format, ...);
 size_t host_log_error_count(void);
 const struct host_log_entry *host_log_error(size_t index);
 bool host_log_matches_error(const char *operation, const char *dev, const char *bus,
-	const char *controller, const char *address, const char *reg, int error);
+	const char *controller, int address, int reg, int error);
 
 #define LOG_LEVEL_DBG 0
 #define LOG_LEVEL_INF 0

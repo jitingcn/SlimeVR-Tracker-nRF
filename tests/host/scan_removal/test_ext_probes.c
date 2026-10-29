@@ -289,12 +289,8 @@ static int timeout_error(void)
 
 static void expect_one_runtime_error(int err)
 {
-	char expected[256];
-	snprintf(expected, sizeof(expected),
-		"SSI reg_read dev=MAG bus=EXT controller=spi-test addr=0x1e reg=0x00 err=%d", err);
-	assert(host_log_error_count() == 1);
-	const struct host_log_entry *entry = host_log_error(0);
-	assert(entry && strcmp(entry->message, expected) == 0);
+	assert(host_log_matches_error("reg_read", "dev=MAG", "bus=EXT",
+		"controller=spi-test", 0x1e, 0, err));
 }
 
 static void test_absent_and_nested_scan(void)
