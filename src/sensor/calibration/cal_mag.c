@@ -72,7 +72,7 @@ static float manual_last_accel_dir[3];
 
 static void magneto_update_dir_range(const float v[3]);
 static float magneto_min_dir_range(void);
-static void sensor_sample_mag_magneto_sample(const float m[3]);
+static void sensor_sample_mag_magneto_sample(const float m[3], float m_inv[4][3]);
 
 static void manual_finish(uint16_t op, struct led_token feedback, uint8_t phase, uint8_t reason)
 {
@@ -111,11 +111,12 @@ int sensor_calibrate_mag(void)
 	}
 
 	float m[3];
+	float m_inv[4][3];
 	if (sensor_wait_mag(m, K_MSEC(1000))) {
 		manual_finish(op, feedback, CAL_PHASE_COLLECT, CAL_REASON_SAMPLE_TIMEOUT);
 		return -1; // Timeout
 	}
-	sensor_sample_mag_magneto_sample(m); // 400us
+	sensor_sample_mag_magneto_sample(m, m_inv); // 400us
 	uint8_t coverage = (uint8_t)(fmaxf(0.0f, fminf(magneto_min_dir_range() / 2.0f, 1.0f)) * 10.0f) * 10;
 	if (coverage > mag_cal_coverage) {
 		mag_cal_coverage = coverage;
@@ -134,7 +135,6 @@ int sensor_calibrate_mag(void)
 		return 1; // Still collecting - signal caller to use short sleep
 	}
 
-	float m_inv[4][3];
 	LOG_INF("Calibrating magnetometer hard/soft iron offset");
 	cal_event_step(op, CAL_PHASE_FIT, 0);
 	sensor_calibration_stage(feedback, LED_PROCESSING);
@@ -152,23 +152,15 @@ int sensor_calibrate_mag(void)
 	printk("norm_sum: %.2f, sample_count: %.0f\n", norm_sum, sample_count);
 #endif
 	wait_for_threads();
-	int err = magneto_current_calibration(m_inv, mag_cal_workspace.ata, norm_sum, sample_count);
-	if (!err) {
-		/* Generic Magneto uses mean raw norm as its fitted target. Normalize
-		 * only the magnetic correction matrix, leaving hard-iron bias intact. */
-		const float scale = (float)(.5 * sample_count / norm_sum);
-		for (unsigned i = 1; i < 4; i++) {
-			for (unsigned j = 0; j < 3; j++) {
-				m_inv[i][j] *= scale;
-			}
+	/* Generic Magneto uses mean raw norm as its fitted target. Normalize
+	 * only the magnetic correction matrix, leaving hard-iron bias intact. */
+	const float scale = (float)(.5 * sample_count / norm_sum);
+	for (unsigned i = 1; i < 4; i++) {
+		for (unsigned j = 0; j < 3; j++) {
+			m_inv[i][j] *= scale;
 		}
 	}
 	magneto_reset();
-	if (err) {
-		LOG_WRN("Magnetometer calibration failed: %d; previous calibration unchanged", err);
-		manual_finish(op, feedback, CAL_PHASE_FIT, CAL_REASON_FIT_ERROR);
-		return err;
-	}
 
 	LOG_INF("Magnetometer matrix:");
 	for (int i = 0; i < 3; i++) {
@@ -495,7 +487,7 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 // Collect magnetometer sample for manual calibration.
 // Accumulates into ATA and periodically runs trial calibration for quality check.
-static void sensor_sample_mag_magneto_sample(const float m[3])
+static void sensor_sample_mag_magneto_sample(const float m[3], float m_inv[4][3])
 {
 	// Manual collection accepts magnetic or trustworthy gravity direction changes.
 	//
@@ -585,7 +577,7 @@ static void sensor_sample_mag_magneto_sample(const float m[3])
 			return;
 		}
 
-		if (magneto_quality_check(mag_cal_workspace.ata, norm_sum, sample_count, NULL)) {
+		if (magneto_quality_check(mag_cal_workspace.ata, norm_sum, sample_count, m_inv)) {
 			magneto_progress |= 0b01111111;
 			LOG_INF("Mag cal ready: %d samples, min_range=%.2f", (int)sample_count, (double)min_range);
 			struct led_token feedback = sensor_calibration_current_feedback();

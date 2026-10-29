@@ -23,6 +23,8 @@ PRELUDE = r'''
 #include <assert.h>
 #include <errno.h>
 #include <math.h>
+#include <float.h>
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -198,7 +200,8 @@ static int sensor_wait_accel_observation(struct sensor_accel_observation *observ
     return err;
 }
 static void sensor_discard_pending_accel(void) { accel_drains++; }
-void magneto_center_reset(mag_center_estimator_t *value) { memset(value,0,sizeof(*value)); }
+static bool sensor_peek_accel(float a[3]) { (void)a; return false; }
+static float magneto_online_min_dir_change_threshold(void) { return .01f; }
 static void magneto_online_snapshot_BAinv(float out[4][3]) { memcpy(out,live_matrix,sizeof(live_matrix)); }
 static void magneto_online_reset(void) { online_resets++; }
 void sensor_calibration_online_mag_retained_clear(void) {
@@ -255,7 +258,8 @@ int sensor_calibration_commit_accel(const float matrix[4][3], uint16_t op,
     memcpy(pending_matrix,matrix,sizeof(pending_matrix)); return 0;
 }
 static void magneto_sample(double x,double y,double z,double *ata,double *norm,double *count) {
-    (void)x;(void)y;(void)z;(void)ata; *norm += 1; *count += 1;
+    memcpy(last_manual_sample, (float[3]){x,y,z}, sizeof(last_manual_sample));
+    (void)ata; *norm += sqrt(x*x+y*y+z*z); *count += 1;
 }
 static int magneto_current_calibration(float matrix[4][3],double *ata,double norm,double count) {
     (void)ata;(void)norm; assert(count > 0); solver_calls++;
@@ -301,9 +305,6 @@ int sensor_calibration_commit_bias(const float a[3], const float g[3], bool pers
 '''
 
 HELPERS = r'''
-static void sensor_sample_mag_magneto_sample(const float m[3]) {
-    memcpy(last_manual_sample,m,sizeof(last_manual_sample)); sample_count++; norm_sum += .5;
-}
 static void reset_case(void) {
     memset(&storage,0,sizeof(storage)); magneto_reset();
     memset(live_matrix,0,sizeof(live_matrix)); memset(durable_matrix,0,sizeof(durable_matrix));
@@ -385,6 +386,16 @@ static void expect_old_mag(void) {
     assert(retained->onlineMagState.update_count==8 && retained->onlineMagState.last_buf_avg_norm==.52f);
     assert(sys_writes==0 && metadata_clears==0);
 }
+static void prepare_mag_trial(void) {
+    sample_count=MAG_CAL_MIN_SAMPLES-1;
+    norm_sum=.5*sample_count;
+    for (unsigned i=0; i<3; i++) {
+        dir_min[i]=-1; dir_max[i]=1;
+        manual_center_estimator.min[i]=-.5f;
+        manual_center_estimator.max[i]=.5f;
+    }
+    manual_center_estimator.initialized=true;
+}
 static void test_manual_replacement(void) {
     seed_confirmed_mag();
     float raw[3]={.7f,.3f,-.1f};
@@ -403,20 +414,26 @@ static void test_manual_replacement(void) {
     assert(sensor_calibrate_mag()==-ECANCELED && outcome==CAL_OUTCOME_CANCELLED);
     expect_old_mag();
 
-    seed_confirmed_mag(); magneto_progress=0xff; solver_error=-EDOM;
-    assert(sensor_calibrate_mag()==-EDOM && reason==CAL_REASON_FIT_ERROR);
+    seed_confirmed_mag(); prepare_mag_trial(); solver_error=-EDOM;
+    assert(sensor_calibrate_mag()==1 && ends==0 && admission && running);
+    assert(solver_calls==1 && sample_count==MAG_CAL_MIN_SAMPLES && magneto_progress==0x80);
     expect_old_mag();
 
-    seed_confirmed_mag(); magneto_progress=0xff; invalid_fit=true;
+    seed_confirmed_mag(); prepare_mag_trial(); invalid_fit=true;
     assert(sensor_calibrate_mag()==-1 && reason==CAL_REASON_INVALID_MODEL);
     expect_old_mag();
 
     for (int failure=0; failure<2; failure++) {
-        seed_confirmed_mag(); magneto_progress=0xff;
+        seed_confirmed_mag(); prepare_mag_trial();
+        /* The final .5-norm sample makes the mean exactly 1: scale must be .5, once. */
+        norm_sum=sample_count+.5;
         sys_write_error=failure ? -EIO : 0;
         assert(sensor_calibrate_mag()==0);
         assert(metadata_clears==1 && retained->onlineMagState.update_count==0);
         assert(pending_operation==current_operation && sys_writes==1);
+        assert(solver_calls==1); /* Publish the successful trial, never solve again. */
+        const float expected[4][3]={{.125f,0,0},{.5f,0,0},{0,.5f,0},{0,0,.5f}};
+        for (unsigned row=0; row<4; row++) expect_vector(pending_matrix[row],expected[row]);
         assert(!memcmp(retained->magBAinv,pending_matrix,sizeof(pending_matrix)));
         assert(feedback_storage_result==(failure ? -EIO : 0));
         if (failure) assert(memcmp(durable_matrix,pending_matrix,sizeof(pending_matrix))!=0);
@@ -547,6 +564,7 @@ def main():
     bias = (cal / "bias_collect.c").read_text()
     util = (ROOT / "src/util.c").read_text()
     runtime = (cal / "tcal_runtime.c").read_text()
+    magneto = (cal / "magneto.c").read_text()
     runtime_header = (cal / "tcal_runtime.h").read_text()
     tcal_constants = "\n".join(line for line in runtime_header.splitlines()
                               if line.startswith(("#define TEMP_TO_IDX", "#define BOOT_CAL_MIN_CURVE_POINTS",
@@ -560,8 +578,16 @@ def main():
         PRELUDE, tcal_constants, tcal_direction, IMU_LEAVES,
         state, constants, "typedef struct { float x,y,z; } Vector3;",
         function(util,"v_finite"), function(util,"v_diff_mag"), function(util,"v_epsilon"), function(util,"apply_BAinv"),
+        function(util,"v_avg"),
+        *(function(magneto,name) for name in (
+            "magneto_center_reset", "magneto_center_update", "magneto_center_get",
+            "magneto_center_min_range", "magneto_center_has_coverage", "magneto_centered_sample",
+            "magneto_coverage_sample", "magneto_norm_sq", "magneto_normalize_direction",
+            "magneto_centered_direction", "mag_bainv_structurally_ok", "magneto_quality_check")),
+        function(mag,"magneto_min_dir_range"),
+        function(mag,"magneto_update_dir_range"), function(mag,"sensor_sample_mag_magneto_sample"),
         function(calibration,"sensor_calibration_process_mag"),
-        function(mag,"magneto_reset"), function(mag,"magneto_min_dir_range"), HELPERS,
+        function(mag,"magneto_reset"), HELPERS,
         function(mag,"manual_finish"), function(mag,"manual_cancelled"),
         function(mag,"sensor_calibrate_mag"),
         worker,
