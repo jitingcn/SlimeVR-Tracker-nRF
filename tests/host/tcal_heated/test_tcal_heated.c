@@ -16,6 +16,7 @@ static int64_t accel_age;
 static float accel[3] = {0, 0, 1};
 static float gyro_odr = 1000.0f;
 static int sample_error, arm_error, write_error, off_error;
+static bool off_error_once;
 static unsigned gate_depth, model_depth, storage_depth;
 static bool imu_reserved, reset_requested;
 static uint32_t model_generation = 17, armed_epoch;
@@ -182,8 +183,10 @@ int heater_hw_force_off(void)
 {
 	assert(gate_depth == 1 && !model_depth);
 	offs++;
-	if (!off_error) output_duty = 0;
-	return off_error;
+	int err = off_error;
+	if (off_error_once) off_error = 0;
+	if (!err) output_duty = 0;
+	return err;
 }
 
 void heater_hw_get_status(struct heater_hw_status *out)
@@ -1123,7 +1126,9 @@ int main(int argc, char **argv)
 		tick(true);
 		assert(output_duty > 0);
 		unsigned before = resets;
+		unsigned before_off = offs;
 		stop_hook();
+		assert(offs == before_off + 1);
 		assert(!output_duty && heat.state == HEAT_FINALIZING && !heat.applied);
 		assert(heat.reason == TCAL_HEATED_STOP_USER && imu_reserved);
 		assert(reset_requested && resets == before && !partial_finishes);
@@ -1299,7 +1304,10 @@ int main(int argc, char **argv)
 		tick(true);
 		assert(output_duty > 0);
 		off_error = -EIO;
+		off_error_once = true;
+		unsigned before_off = offs;
 		assert(sensor_tcal_heated_stop() == -EIO);
+		assert(offs == before_off + 1);
 		assert(heat.state == HEAT_OFF_FAILED && !heat.sampling && !heat.applied);
 		assert(sensor_tcal_heated_busy() && imu_reserved && output_duty > 0);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
@@ -1307,7 +1315,9 @@ int main(int argc, char **argv)
 		sensor_tcal_heated_finalize();
 		unchanged();
 		off_error = 0;
+		before_off = offs;
 		stop_hook();
+		assert(offs == before_off + 1);
 		stopped(TCAL_HEATED_STOP_USER);
 		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 	} else if (!strcmp(which, "accum_minimum")) {
@@ -1560,7 +1570,9 @@ int main(int argc, char **argv)
 			sample.sampled_at_ms = now_ms;
 			assert(sensor_tcal_heated_start(44) == 0);
 		} else resting();
+		unsigned before_off = offs;
 		stop_hook();
+		assert(offs == before_off + 1);
 		sensor_tcal_heated_finalize();
 		stopped(TCAL_HEATED_STOP_USER);
 		assert(!partial_finishes);

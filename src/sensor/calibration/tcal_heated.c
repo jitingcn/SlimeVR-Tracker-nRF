@@ -148,9 +148,8 @@ static void heat_safety_refresh_locked(void)
 }
 
 /* Gate held; hardware off precedes any release/publication/storage operation. */
-static int finish_locked(enum tcal_heated_stop_reason reason)
+static int finish_after_off_locked(enum tcal_heated_stop_reason reason, int err)
 {
-	int err = heater_hw_force_off();
 	if (err) {
 		LOG_ERR("Heater off failed: %d; hardware unavailable", err);
 		reason = TCAL_HEATED_STOP_HEATER_ERROR;
@@ -182,6 +181,11 @@ static int finish_locked(enum tcal_heated_stop_reason reason)
 	return err;
 }
 
+static int finish_locked(enum tcal_heated_stop_reason reason)
+{
+	return finish_after_off_locked(reason, heater_hw_force_off());
+}
+
 int sensor_tcal_heated_abort(enum tcal_heated_stop_reason reason)
 {
 	sensor_tcal_heated_lock();
@@ -210,7 +214,7 @@ int sensor_tcal_heated_stop(void)
 	}
 	int err = heater_hw_force_off();
 	if (err) {
-		(void)finish_locked(TCAL_HEATED_STOP_HEATER_ERROR);
+		(void)finish_after_off_locked(TCAL_HEATED_STOP_HEATER_ERROR, err);
 	} else if (heat.state == HEAT_RESERVED || heat.state == HEAT_RUNNING ||
 	           heat.state == HEAT_FINALIZING) {
 		/* Freeze accepted RAM slots without waiting for the sensor owner.
@@ -222,10 +226,10 @@ int sensor_tcal_heated_stop(void)
 			heat.state = HEAT_FINALIZING;
 			heat.reason = TCAL_HEATED_STOP_USER;
 		} else {
-			(void)finish_locked(TCAL_HEATED_STOP_USER);
+			(void)finish_after_off_locked(TCAL_HEATED_STOP_USER, 0);
 		}
 	} else if (heat.state == HEAT_OFF_FAILED) {
-		(void)finish_locked(TCAL_HEATED_STOP_USER);
+		(void)finish_after_off_locked(TCAL_HEATED_STOP_USER, 0);
 	} else if (!heat.feedback.session) {
 		led_request_event(LED_OWNER_TCAL, led_request_id(), led_event_id(), LED_CANCELLED);
 	}
