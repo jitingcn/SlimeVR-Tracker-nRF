@@ -112,11 +112,7 @@ int lis2_update_odr(float period_s, float *actual_period_s)
 	} else if (requested_odr_hz > 10) {
 		odr_code = ODR_20Hz;
 		period_s = 1.0 / 20;
-	} else if (requested_odr_hz > 0) {
-		odr_code = ODR_10Hz;
-		period_s = 1.0 / 10;
 	} else {
-		/* INFINITY path: continuous at lowest fixed ODR */
 		odr_code = ODR_10Hz;
 		period_s = 1.0 / 10;
 	}
