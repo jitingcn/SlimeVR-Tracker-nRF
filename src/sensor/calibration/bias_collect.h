@@ -41,10 +41,6 @@
 #define BIAS_COLLECT_MIN_SAMPLE_TIME_MS 3000 // 3 seconds min
 #endif
 
-#ifndef BIAS_COLLECT_TEMP_CHECK_TIME_MS
-#define BIAS_COLLECT_TEMP_CHECK_TIME_MS 3000 // 3 seconds - prioritize sampling time over temp stability
-#endif
-
 #ifndef BIAS_COLLECT_GYRO_MOTION_THRESHOLD
 #define BIAS_COLLECT_GYRO_MOTION_THRESHOLD 10.0f // dps (windowed-mean range method)
 #endif

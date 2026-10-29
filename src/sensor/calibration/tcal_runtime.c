@@ -220,9 +220,6 @@ static struct {
  * Only the sensor owner advances seen; publishers compare the saved epoch. */
 static atomic_t tcal_accum_reset_generation;
 static uint32_t tcal_accum_seen_reset_generation;
-#if !CONFIG_SENSOR_TCAL_HEATED
-static int64_t tcal_accum_last_commit_time = 0;
-#endif
 
 static void tcal_accum_flush(bool heated);
 static void tcal_save_point(int idx, const float bias[3], float measured_temp, uint32_t reset_generation);
@@ -847,7 +844,6 @@ static void tcal_accum_flush(bool heated)
 	tcal_save_point(idx, avg_bias, avg_temp, tcal_accum.reset_generation);
 #else
 	tcal_save_point(idx, avg_bias, avg_temp, tcal_accum.reset_generation);
-	tcal_accum_last_commit_time = k_uptime_get();
 #endif
 
 	tcal_accum_reset();
