@@ -31,11 +31,6 @@
 #define QMC5883L_ODR_100HZ 0x02
 #define QMC5883L_ODR_200HZ 0x03
 
-#define QMC5883L_ODR_10Hz QMC5883L_ODR_10HZ
-#define QMC5883L_ODR_50Hz QMC5883L_ODR_50HZ
-#define QMC5883L_ODR_100Hz QMC5883L_ODR_100HZ
-#define QMC5883L_ODR_200Hz QMC5883L_ODR_200HZ
-
 #define QMC5883L_RNG_2G 0x00
 #define QMC5883L_RNG_8G 0x01
 
@@ -110,19 +105,19 @@ int qmc5883l_update_odr(float period_s, float *actual_period_s)
 	}
 
 	if (mode_code == QMC5883L_MODE_STANDBY) {
-		odr_code = QMC5883L_ODR_200Hz;
+		odr_code = QMC5883L_ODR_200HZ;
 		period_s = INFINITY;
 	} else if (requested_odr_hz > 100) {
-		odr_code = QMC5883L_ODR_200Hz;
+		odr_code = QMC5883L_ODR_200HZ;
 		period_s = 1.0f / 200;
 	} else if (requested_odr_hz > 50) {
-		odr_code = QMC5883L_ODR_100Hz;
+		odr_code = QMC5883L_ODR_100HZ;
 		period_s = 1.0f / 100;
 	} else if (requested_odr_hz > 10) {
-		odr_code = QMC5883L_ODR_50Hz;
+		odr_code = QMC5883L_ODR_50HZ;
 		period_s = 1.0f / 50;
 	} else {
-		odr_code = QMC5883L_ODR_10Hz;
+		odr_code = QMC5883L_ODR_10HZ;
 		period_s = 1.0f / 10;
 	}
 
@@ -162,7 +157,7 @@ void qmc5883l_mag_oneshot(void)
 	int err = ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_MAG,
 		QMC5883L_CTRL_1,
-		(QMC5883L_OSR_512 << 6) | (QMC5883L_RNG_8G << 4) | (QMC5883L_ODR_200Hz << 2) | QMC5883L_MODE_CONTINUOUS
+		(QMC5883L_OSR_512 << 6) | (QMC5883L_RNG_8G << 4) | (QMC5883L_ODR_200HZ << 2) | QMC5883L_MODE_CONTINUOUS
 	);
 	last_config_code = 0xff;
 	oneshot_failed = err != 0;
