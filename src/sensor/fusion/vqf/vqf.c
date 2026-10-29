@@ -701,7 +701,7 @@ static void vqf_predictive_finish_block(void)
 					lm += predictive_bias_policy.trial_weight[j] * predictive_bias_policy.trial_model[j];
 				}
 				double skill = (lc - lm) / (lc + predictive_bias_policy.trial_tests * floor * floor);
-				if (skill >= 0 && skill > 0) {
+				if (skill > 0) {
 					memcpy(predictive_bias_policy.beta, predictive_bias_policy.trial_beta,
 					       sizeof(predictive_bias_policy.beta));
 					predictive_bias_policy.gain = 8.0 * fmin(1, skill);
