@@ -1377,6 +1377,34 @@ static int test_rates_bmm150_rhall_polynomial(void)
 	return 0;
 }
 
+static int test_rates_ist_models_remain_independent(void)
+{
+	fake_bus_reset();
+	float actual;
+	CHECK(sensor_mag_ist8306.init(0.02f, &actual) == 0);
+	CHECK(sensor_mag_ist8308.init(0.1f, &actual) == 0);
+	fake_bus_clear_transactions();
+	CHECK(sensor_mag_ist8306.update_odr(0.02f, &actual) == 0);
+	CHECK(float_equal(actual, 0.02f));
+	CHECK(bus.op_count == 0);
+	uint8_t raw[] = {100, 0, 0x38, 0xff, 0x2c, 1};
+	float m[3];
+	sensor_mag_ist8306.mag_process(raw, m);
+	CHECK(float_equal(m[0], 0.3f) && float_equal(m[1], -0.6f) && float_equal(m[2], 0.9f));
+	sensor_mag_ist8308.mag_process(raw, m);
+	CHECK(float_equal(m[0], 0.075f) && float_equal(m[1], -0.15f) && float_equal(m[2], 0.225f));
+	sensor_mag_ist8306.mag_oneshot();
+	fake_bus_clear_transactions();
+	CHECK(sensor_mag_ist8308.update_odr(0.1f, &actual) == 0);
+	CHECK(bus.op_count == 0);
+	fake_bus_clear_transactions();
+	bus.fail_transaction = 1;
+	actual = -123;
+	CHECK(sensor_mag_ist8308.init(0.02f, &actual) == -EIO);
+	CHECK(bus.op_count == 1 && actual == -123);
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1414,6 +1442,29 @@ static int run_isolated(const struct test_case *test)
 
 int main(void)
 {
+#if defined(TEST_IST8306_ONLY) || defined(TEST_IST8308_ONLY)
+#if defined(TEST_IST8306_ONLY)
+	const sensor_mag_t *driver = &sensor_mag_ist8306;
+	const float scale = 0.3f;
+#else
+	const sensor_mag_t *driver = &sensor_mag_ist8308;
+	const float scale = 0.075f;
+#endif
+	fake_bus_reset();
+	float actual;
+	CHECK(driver->init(1.0f / 10.5f, &actual) == 0);
+	CHECK(float_equal(actual, 0.05f));
+	bus.registers[IST8306_STAT] = 1;
+	bus.registers[IST8306_DATAXL] = 100;
+	float m[3] = {123, 456, 789};
+	CHECK(driver->mag_read(m));
+	CHECK(float_equal(m[0], scale) && m[1] == 0 && m[2] == 0);
+	driver->mag_oneshot();
+	bus.now_ms += 10;
+	CHECK(driver->mag_read(m));
+	CHECK(float_equal(m[0], scale));
+	return EXIT_SUCCESS;
+#else
 	static const struct test_case tests[] = {
 		{"BMM350 init and compensation", test_bmm350_init_and_compensation},
 		{"Modes AK powerdown transitions", test_modes_ak_powerdown_transitions},
@@ -1429,6 +1480,7 @@ int main(void)
 		{"QMC5883 shot terminal standby", test_rates_qmc5883_shot_standby},
 		{"BMM150 shared RHALL polynomial", test_rates_bmm150_rhall_polynomial},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
+		{"IST independent model state and scaling", test_rates_ist_models_remain_independent},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
 		{"LIS temperatures", test_lis_temperatures_fail_loudly_and_apply_offset},
 		{"AK09940 frame validity", test_ak09940_rejects_invalid_frames},
@@ -1456,4 +1508,5 @@ int main(void)
 	}
 	printf("All %zu sensor driver tests passed\n", ARRAY_SIZE(tests));
 	return EXIT_SUCCESS;
+#endif
 }
