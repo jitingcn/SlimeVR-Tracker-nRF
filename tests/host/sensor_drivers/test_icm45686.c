@@ -855,6 +855,28 @@ static void test_icm45686_temperature_sentinel(void)
 	assert(icm45_temp_read() == 27.5f);
 }
 
+static void test_icm45686_header_flags(void)
+{
+	for (unsigned header = 0; header < 256; header++) {
+		reset_model(false);
+		append_frame(2);
+		hw.fifo[0][0] = header;
+		put_be16(hw.host + ICM45686_TEMP_DATA1_UI, 1280);
+		uint8_t data[20];
+		assert(icm45_fifo_read(data, sizeof(data)) == 1);
+		float a[3] = {77, 77, 77}, g[3] = {88, 88, 88};
+		if (header >= 0x78 && header <= 0x7b) {
+			assert(icm45_fifo_process(0, data, a, g) == 0);
+			assert(a[0] == 2 && g[0] == 0);
+			assert(icm45_temp_read() == 27);
+		} else {
+			assert(icm45_fifo_process(0, data, a, g) == 1);
+			assert(a[0] == 77 && g[0] == 88);
+			assert(icm45_temp_read() == 35);
+		}
+	}
+}
+
 int main(void)
 {
 	test_icm45686_direct_units();
@@ -864,6 +886,7 @@ int main(void)
 	test_icm45686_fifo_failures();
 	test_icm45686_watermark_progress();
 	test_icm45686_temperature_sentinel();
+	test_icm45686_header_flags();
 	test_prefetch_snapshot();
 	test_disabled_prefetch_lifecycle();
 	test_error_completions();

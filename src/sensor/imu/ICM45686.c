@@ -57,6 +57,11 @@ static int icm45_ext_drain_read_ahead(enum ssi_reporting reporting);
 static float fifo_temp_c = 25.0f;
 static bool fifo_temp_valid = false;
 
+static bool icm45_hires_header(uint8_t header)
+{
+	return (header & 0xFC) == 0x78;
+}
+
 static void icm45_cache_fifo_temp(const uint8_t *data, uint16_t packets)
 {
 	fifo_temp_valid = false;
@@ -65,7 +70,7 @@ static void icm45_cache_fifo_temp(const uint8_t *data, uint16_t packets)
 
 	for (uint16_t i = 0; i < packets; i++) {
 		const uint8_t *packet = &data[i * ICM45686_FIFO_PACKET_SIZE];
-		if (packet[0] != 0x78 && packet[0] != 0x7A) {
+		if (!icm45_hires_header(packet[0])) {
 			continue;
 		}
 
@@ -680,11 +685,11 @@ int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 	// Preserve the existing 16-bit byte-offset arithmetic.
 	uint16_t packet_offset = index * ICM45686_FIFO_PACKET_SIZE;
 	const uint8_t *packet = &data[packet_offset];
-	// 0x78 includes timestamp; 0x7A additionally sets accel_odr_different (bit 1).
-	if (packet[0] != 0x78 && packet[0] != 0x7A) {
+	// The low two bits flag gyro/accel ODR changes in the same hires format.
+	if (!icm45_hires_header(packet[0])) {
 		// Rate-limit: a corrupted FIFO_COUNT can otherwise spam one warning per packet
 		if (k_uptime_get() - icm45_last_bad_header_ms >= 1000) {
-			LOG_WRN("Invalid FIFO header: 0x%02X (expected 0x78 or 0x7A)", packet[0]);
+			LOG_WRN("Invalid FIFO header: 0x%02X (expected 0x78..0x7B)", packet[0]);
 			icm45_last_bad_header_ms = k_uptime_get();
 		}
 		return 1; // Skip invalid header
