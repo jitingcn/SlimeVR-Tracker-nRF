@@ -93,13 +93,13 @@ int lis3_update_odr(float period_s, float *actual_period_s)
 	} else if (requested_odr_hz > 5) {
 		odr_code = DO_10Hz;
 		period_s = 1.0 / 10;
-	} else if (requested_odr_hz > 2.5) {
+	} else if (requested_odr_hz > 2.5f) {
 		odr_code = DO_5Hz;
 		period_s = 1.0 / 5;
-	} else if (requested_odr_hz > 1.25) {
+	} else if (requested_odr_hz > 1.25f) {
 		odr_code = DO_2_5Hz;
 		period_s = 1.0 / 2.5;
-	} else if (requested_odr_hz > 0.625) {
+	} else if (requested_odr_hz > 0.625f) {
 		odr_code = DO_1_25Hz;
 		period_s = 1.0 / 1.25;
 	} else if (requested_odr_hz > 0) {
