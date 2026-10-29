@@ -501,7 +501,7 @@ void tdma_note_radio_busy(void)
 void tdma_print_stats(void)
 {
 	printk(
-		"TDMA ADMIT mode=ping_guard_v1 ok=%u defer_late=%u defer_frame=%u defer_ping=%u guard_own=%u guard_prev=%u radio_busy=%u ping_window=%u ping_startup=%u ping_defer=%u ping_missed=%u\n",
+		"TDMA ADMIT mode=ping_guard_v2 ok=%u defer_late=%u defer_frame=%u defer_ping=%u guard_own=%u guard_prev=%u radio_busy=%u ping_window=%u ping_startup=%u ping_defer=%u ping_missed=%u\n",
 		tdma_admitted,
 		tdma_deferred_late,
 		tdma_deferred_frame_used,
@@ -635,7 +635,7 @@ bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 		LOG_INF("TDMA auto-enabled by receiver config");
 	}
 
-	LOG_INF("TDMA config: mode=ping_guard_v1 slot=%u/%u base_slot=%u frame=%u opportunity=%u TPS epoch=%u",
+	LOG_INF("TDMA config: mode=ping_guard_v2 slot=%u/%u base_slot=%u frame=%u opportunity=%u TPS epoch=%u",
 		slot_index, total_slots, slot_ticks, frame_ticks,
 		frame_ticks > 0 ? 32768 / frame_ticks : 0,
 		epoch);

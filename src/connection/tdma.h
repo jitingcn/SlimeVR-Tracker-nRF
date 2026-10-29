@@ -37,17 +37,19 @@
  * Frame structure (repeats every frame_ticks):
  *   [Slot 0][Slot 1][Slot 2]...[Slot N-1]   (N = total_slots, dynamic)
  *
- * Every slot is 22 network ticks. Normal NoACK traffic may use the owner's
- * slot once per frame. Approximately once per second, each tracker has a
+ * Slot widths are dynamically assigned in network ticks. Normal NoACK traffic
+ * may use the owner's slot once per frame. Approximately once per second, each tracker has a
  * deterministic guarded PING window spanning its slot and the following slot;
  * the following owner remains silent for that frame. Empty opportunities do
  * not cause transmissions.
  *
  * Parameters are dynamically assigned by NORMAL PONG bytes 8-11:
  *   byte 8:  assigned slot_index (0-15), or 0xFF when unassigned
- *   byte 9:  total_slots (0-16); a usable slot must be below total
- *   byte 10: slot_ticks (22 for the measured-safe nRF52 guarded mode)
+ *   byte 9:  total_slots (1-16 for a usable layout); slot_index must be below total
+ *   byte 10: slot_ticks (16-255 accepted by the tracker)
  *   byte 11: config_epoch (wrapping uint8_t)
+ * The receiver uses 16-64 ticks at level 0 and may widen through 254 ticks
+ * on its loss ladder.
  * This legacy layout is unchanged. The separately requested CHANNEL_CONFIRM
  * PONG (0x37) carries channel proof, not TDMA parameters.
  * PONG remains 13 bytes with CRC at byte 12; other command layouts are unchanged.
@@ -130,7 +132,8 @@ int64_t tdma_status_clock_max_age_ms(void);
 bool tdma_admission_stalled(void);
 
 /**
- * Current TDMA frame width in 32768 Hz server ticks (0 = no dynamic config yet).
+ * Retained TDMA frame width in 32768 Hz network ticks, including while disabled.
+ * Zero means uninitialized; tdma_init() installs the fallback geometry.
  */
 uint16_t tdma_frame_ticks_get(void);
 
@@ -139,11 +142,12 @@ bool tdma_config_get(uint8_t *slot_index, uint8_t *slot_ticks, uint16_t *frame_t
 
 /**
  * Update TDMA parameters from receiver's dynamic config (PONG bytes 8-11).
- * Automatically enables TDMA when valid config is received.
+ * Rejects invalid wire geometry without changing state. Valid geometry returns
+ * true even when TDMA is compiled out; otherwise it publishes and enables TDMA.
  *
  * @param slot_index   Assigned slot index for this tracker (0-15)
  * @param total_slots  Total number of active slots in the frame (1-16)
- * @param slot_ticks   Width of each slot in ticks (14-163)
+ * @param slot_ticks   Width of each slot in network ticks (16-255)
  * @param epoch        Config epoch counter (for change detection)
  */
 bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch);
