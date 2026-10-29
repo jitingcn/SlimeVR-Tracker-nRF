@@ -105,6 +105,8 @@ static int ssi_ext_read_segmented(uint8_t start_addr, uint8_t dummy_bytes, uint8
 		return -1;
 
 	uint8_t data_cap = ext_ssi->ext_burst;
+	if (dummy_bytes && ext_ssi->ext_single_burst)
+		data_cap = ext_ssi->ext_single_burst;
 	if (data_cap == 0)
 		return -1;
 	/* A per-chunk dummy prefix is consumed by the IMU driver before the data,

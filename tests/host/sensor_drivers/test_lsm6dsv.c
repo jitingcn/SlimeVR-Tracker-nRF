@@ -19,6 +19,9 @@ static struct {
 	uint8_t registers[256], hub[256], external[256], status;
 	bool bank, master, stalled, no_xlda, clear_status, wrote, reset_stuck;
 	bool late_nack;
+	bool dummy_prefix, partial_read_error;
+	unsigned slot_reads;
+	uint8_t slot_sub[32], slot_len[32], last_master;
 	uint8_t error;
 	uint64_t now, next_op;
 	uint32_t latency;
@@ -48,9 +51,23 @@ static void advance(uint64_t us)
 	if (!hw.error) {
 		uint8_t sub = hw.hub[LSM6DSV_SLV0_SUBADD];
 		if (reading) {
-			unsigned len = hw.hub[LSM6DSV_SLV0_CONFIG] & 7;
-			for (unsigned i = 0; i < len; i++)
-				hw.hub[LSM6DSV_SENSOR_HUB_1 + i] = hw.external[(uint8_t)(sub + i)];
+			unsigned offset = 0;
+			unsigned slots = (hw.hub[LSM6DSV_MASTER_CONFIG] & 3) + 1;
+			for (unsigned slot = 0; slot < slots; slot++) {
+				unsigned base = LSM6DSV_SLV0_ADD + 3 * slot;
+				unsigned len = hw.hub[base + 2] & 7;
+				sub = hw.hub[base + 1];
+				assert(len && offset + len <= 18);
+				assert(hw.slot_reads < ARRAY_SIZE(hw.slot_sub));
+				hw.slot_sub[hw.slot_reads] = sub;
+				hw.slot_len[hw.slot_reads++] = len;
+				for (unsigned i = 0; i < len; i++) {
+					uint8_t value = hw.dummy_prefix
+						? (i < 2 ? 0xee : hw.external[(uint8_t)(sub + i - 2)])
+						: hw.external[(uint8_t)(sub + i)];
+					hw.hub[LSM6DSV_SENSOR_HUB_1 + offset++] = value;
+				}
+			}
 		} else {
 			hw.external[sub] = hw.hub[LSM6DSV_DATAWRITE_SLV0];
 			hw.writes++;
@@ -108,6 +125,7 @@ int ssi_burst_write(enum sensor_interface_dev dev, uint8_t reg, const uint8_t *b
 			hw.status |= NACK;
 		hw.master = (buf[0] & MASTER_ON) != 0;
 		if (hw.master) {
+			hw.last_master = buf[0];
 			hw.starts++;
 			hw.wrote = false;
 			hw.next_op = hw.now + 4200;
@@ -131,8 +149,11 @@ int ssi_burst_read(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uin
 {
 	assert(dev == SENSOR_INTERFACE_DEV_IMU && len && (unsigned)reg + len <= 256);
 	int err = transfer(READ, reg, -1);
-	if (err)
+	if (err) {
+		if (hw.partial_read_error && hw.bank && reg == LSM6DSV_SENSOR_HUB_1)
+			buf[0] = hw.hub[reg];
 		return err;
+	}
 	if ((hw.bank && reg == LSM6DSV_STATUS_MASTER) ||
 		(!hw.bank && reg == LSM6DSV_STATUS_MASTER_MAINPAGE)) {
 		assert(len == 1);
@@ -185,7 +206,7 @@ static void reset_model(bool prefetch, bool clear_status)
 	assert(hw.ext->ext_set_prefetch(prefetch) == 0);
 	initialize();
 	gyro_discontinuities = 0;
-	for (unsigned i = 0; i < 7; i++)
+	for (unsigned i = 0; i < 18; i++)
 		hw.external[0x08 + i] = 0x50 + i;
 }
 static int sample(uint8_t *out)
@@ -473,8 +494,72 @@ static void test_consecutive_unknown_tags(void)
 	}
 }
 
+static void test_adaptive_group(void)
+{
+	static const uint8_t lengths[] = {1, 7, 8, 14, 15, 18};
+	uint8_t sub = 8, out[19];
+	for (unsigned n = 0; n < ARRAY_SIZE(lengths); n++) {
+		unsigned len = lengths[n], slots = (len + 6) / 7;
+		reset_model(true, true);
+		assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, len) == 0);
+		assert(memcmp(out, hw.external + sub, len) == 0);
+		assert(hw.last_master == (0x44 | (slots - 1)));
+		for (unsigned slot = 0, offset = 0; slot < slots; slot++) {
+			unsigned take = len - offset > 7 ? 7 : len - offset;
+			unsigned base = LSM6DSV_SLV0_ADD + slot * 3;
+			assert(hw.hub[base] == 0x3d);
+			assert(hw.hub[base + 1] == sub + offset);
+			assert(hw.hub[base + 2] == ((slot == 0 ? 0xa0 : slot == 1 ? 0x10 : 0) | take));
+			offset += take;
+		}
+		advance(150000);
+		assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, len) == 0);
+		assert(memcmp(out, hw.external + sub, len) == 0);
+		for (unsigned slot = 0; slot < slots; slot++) {
+			reset_model(false, true);
+			hw.error = 8u << slot;
+			memset(out, 0xa5, sizeof(out));
+			assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, len) == -EIO);
+			for (unsigned i = 0; i < sizeof(out); i++)
+				assert(out[i] == 0xa5);
+		}
+	}
+	reset_model(true, true);
+	unsigned transactions = hw.transactions;
+	assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, 19) == -EINVAL);
+	assert(hw.transactions == transactions);
+	assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, 18) == 0);
+	assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, 1) == 0);
+	assert(hw.last_master == 0x44);
+	uint8_t command[] = {0x20, 0x73};
+	assert(hw.ext->ext_write(0x1e, command, sizeof(command)) == 0);
+	assert(hw.last_master == 0x44 && hw.writes == 1);
+}
+
+static void test_group_failure_output(void)
+{
+	uint8_t sub = 8, out[18];
+	reset_model(true, false);
+	hw.transactions = 0;
+	assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, sizeof(out)) == 0);
+	unsigned total = hw.transactions;
+	for (unsigned failure = 1; failure <= total; failure++) {
+		reset_model(true, false);
+		hw.transactions = 0;
+		hw.fail_transaction = failure;
+		hw.partial_read_error = true;
+		memset(out, 0xa5, sizeof(out));
+		assert(hw.ext->ext_write_read(0x1e, &sub, 1, out, sizeof(out)) != 0);
+		for (unsigned i = 0; i < sizeof(out); i++)
+			assert(out[i] == 0xa5);
+		assert(!hw.master && !hw.bank);
+	}
+}
+
 int main(void)
 {
+	test_adaptive_group();
+	test_group_failure_output();
 	test_consecutive_unknown_tags();
 	test_hp_minimum_rate();
 	test_nack(false);

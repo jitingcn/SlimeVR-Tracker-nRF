@@ -47,15 +47,14 @@ enum sensor_interface_spec
 typedef struct sensor_ext_ssi {
 	/* Transfers are unreported. The caller owns any operation-level diagnostic. */
 	int (*ext_write)(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes);
-	/* Single I2CM transaction: write num_write bytes (a register address), then
-	 * read num_read register-data bytes. num_read counts register data only;
-	 * any device-internal dummy bytes are an IMU-driver concern, not part of
-	 * this budget. */
+	/* One logical register read, possibly using several physical I2CM
+	 * transactions. num_read includes any device dummy prefixes. */
 	int (*ext_write_read)(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read);
-	/* Max register-data bytes readable in one I2CM transaction. Requests longer
-	 * than this are segmented by the interface layer (sub-register advanced by
-	 * the number of data bytes already read). */
+	/* Aggregate read capacity. Longer requests advance by register-data bytes. */
 	uint8_t ext_burst;
+	/* Physical transaction capacity for per-transaction dummy prefixes.
+	 * Zero uses ext_burst. */
+	uint8_t ext_single_burst;
 	/* Optional unreported policy hook. Disabling must quiesce pending
 	 * background reads before success. NULL means a synchronous-only backend. */
 	int (*ext_set_prefetch)(bool enabled);

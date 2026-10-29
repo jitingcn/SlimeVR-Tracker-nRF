@@ -74,6 +74,7 @@ static uint8_t ext_cont_addr = 0;
 static uint8_t ext_cont_sub = 0;
 static uint8_t ext_cont_len = 0;
 static bool ext_prefetch_enabled = true;
+static uint8_t ext_active_nack_mask = LSM6DSV_SLAVE0_NACK;
 static int lsm_ext_stop_continuous(enum ssi_reporting reporting);
 
 // Scanning mode: when true, synchronous reads never start continuous mode.
@@ -701,14 +702,14 @@ static int lsm_ext_wait(uint8_t reg, uint8_t mask, int timeout_ms, uint8_t *stat
 		if (err) {
 			return err;
 		}
-		if (k_uptime_get() >= deadline) {
-			return -ETIMEDOUT;
-		}
-		if (reg == LSM6DSV_STATUS_MASTER && (*status & LSM6DSV_SLAVE0_NACK)) {
+		if (reg == LSM6DSV_STATUS_MASTER && (*status & ext_active_nack_mask)) {
 			return -EIO;
 		}
 		if (*status & mask) {
 			return 0;
+		}
+		if (k_uptime_get() >= deadline) {
+			return -ETIMEDOUT;
 		}
 	}
 	return -ETIMEDOUT;
@@ -741,6 +742,8 @@ static int lsm_ext_wait_xlda(void)
  */
 static int lsm_ext_arm_quiesced(uint8_t addr, uint8_t sub_addr, uint8_t num_read, const uint8_t *write_data)
 {
+	uint8_t slots = write_data ? 1 : (num_read + 6) / 7;
+	ext_active_nack_mask = ((1u << slots) - 1) << 3;
 	int err = ssi_reg_write_byte_io(
 		SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, LSM6DSV_RST_MASTER_REGS, SSI_UNREPORTED
 	);
@@ -751,12 +754,19 @@ static int lsm_ext_arm_quiesced(uint8_t addr, uint8_t sub_addr, uint8_t num_read
 	if (!err) {
 		err = ssi_reg_read_byte_io(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &status, SSI_UNREPORTED);
 	}
-	if (!err && (status & (LSM6DSV_SENS_HUB_ENDOP | LSM6DSV_WR_ONCE_DONE | LSM6DSV_SLAVE0_NACK))) {
+	if (!err && (status & (LSM6DSV_SENS_HUB_ENDOP | LSM6DSV_WR_ONCE_DONE | ext_active_nack_mask))) {
 		err = -EIO;
 	}
-	uint8_t slv0[3] = {(addr << 1) | (write_data ? 0 : 1), sub_addr, LSM6DSV_SHUB_ODR_240HZ | num_read};
-	if (!err) {
-		err = ssi_burst_write_io(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, sizeof(slv0), SSI_UNREPORTED);
+	for (uint8_t slot = 0, offset = 0; !err && slot < slots; slot++) {
+		uint8_t len = num_read - offset;
+		if (len > 7)
+			len = 7;
+		uint8_t config = slot == 0 ? LSM6DSV_SHUB_ODR_240HZ : (slot == 1 ? 0x10 : 0);
+		uint8_t slave[3] = {(addr << 1) | (write_data ? 0 : 1), sub_addr + offset, config | len};
+		err = ssi_burst_write_io(
+			SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD + 3 * slot, slave, sizeof(slave), SSI_UNREPORTED
+		);
+		offset += len;
 	}
 	if (!err && write_data) {
 		err = ssi_reg_write_byte_io(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_DATAWRITE_SLV0, *write_data, SSI_UNREPORTED);
@@ -765,7 +775,7 @@ static int lsm_ext_arm_quiesced(uint8_t addr, uint8_t sub_addr, uint8_t num_read
 		err = ssi_reg_write_byte_io(
 			SENSOR_INTERFACE_DEV_IMU,
 			LSM6DSV_MASTER_CONFIG,
-			LSM6DSV_MASTER_ON | (write_data ? LSM6DSV_WRITE_ONCE : 0),
+			LSM6DSV_MASTER_ON | LSM6DSV_WRITE_ONCE | (slots - 1),
 			SSI_UNREPORTED
 		);
 	}
@@ -788,7 +798,7 @@ static int lsm_ext_begin(uint8_t addr, uint8_t sub_addr, uint8_t num_read, const
 static int lsm_ext_start_continuous(uint8_t addr, uint8_t sub_addr, uint8_t num_bytes)
 {
 	// NUMOP is three bits; bit 3 is FIFO batching, not length 8.
-	if (!ext_prefetch_enabled || addr > 0x7f || num_bytes < 1 || num_bytes > 7) {
+	if (!ext_prefetch_enabled || addr > 0x7f || num_bytes < 1 || num_bytes > 18) {
 		return -EINVAL;
 	}
 	int err = lsm_ext_arm_quiesced(addr, sub_addr, num_bytes, NULL);
@@ -826,7 +836,7 @@ int lsm_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 
 int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
 {
-	if (!write_buf || !read_buf || addr > 0x7f || num_write != 1 || num_read < 1 || num_read > 7) {
+	if (!write_buf || !read_buf || addr > 0x7f || num_write != 1 || num_read < 1 || num_read > 18) {
 		return -EINVAL;
 	}
 	uint8_t sub_addr = ((const uint8_t *)write_buf)[0];
@@ -871,12 +881,13 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	// above remains authoritative even if reading STATUS clears it.
 	uint8_t stopped_status;
 	err = ssi_reg_read_byte_io(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &stopped_status, SSI_UNREPORTED);
-	if (!err && ((status | stopped_status) & LSM6DSV_SLAVE0_NACK)) {
+	if (!err && ((status | stopped_status) & ext_active_nack_mask)) {
 		err = -EIO;
 	}
+	uint8_t staged[18];
 	if (!err) {
 		err = ssi_burst_read_io(
-			SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, read_buf, num_read, SSI_UNREPORTED
+			SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, staged, num_read, SSI_UNREPORTED
 		);
 	}
 	if (err) {
@@ -886,10 +897,15 @@ int lsm_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_wri
 	// Reset/rearm gives the next request a provably separate completion epoch.
 	// Scanning and destructive-read sensors must not deliberately rearm.
 	if (!ext_scanning_mode && ext_prefetch_enabled) {
-		return lsm_ext_start_continuous(addr, sub_addr, num_read);
+		err = lsm_ext_start_continuous(addr, sub_addr, num_read);
+	} else {
+		err = ssi_reg_write_byte_io(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00, SSI_UNREPORTED);
+		if (err)
+			return lsm_ext_fail(err);
 	}
-	err = ssi_reg_write_byte_io(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00, SSI_UNREPORTED);
-	return err ? lsm_ext_fail(err) : 0;
+	if (!err)
+		memcpy(read_buf, staged, num_read);
+	return err;
 }
 #endif
 
@@ -918,7 +934,8 @@ const sensor_imu_t sensor_imu_lsm6dsv = {
 const sensor_ext_ssi_t sensor_ext_lsm6dsv = {
 	.ext_write = lsm_ext_write,
 	.ext_write_read = lsm_ext_write_read,
-	.ext_burst = 7,
+	.ext_burst = 18,
+	.ext_single_burst = 7,
 	.ext_set_prefetch = lsm_ext_set_prefetch,
 };
 #endif
