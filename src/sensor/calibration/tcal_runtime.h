@@ -40,12 +40,7 @@
 #define BOOT_CAL_MAX_ATTEMPTS 2
 #define BOOT_CAL_MIN_CURVE_POINTS 4
 
-#define RUNTIME_CAL_REST_TIME_MS 8000
-#define RUNTIME_CAL_COOLDOWN_MS 60000
-#define RUNTIME_CAL_MIN_UPTIME_MS 60000
-#define RUNTIME_CAL_TEMP_CHANGE_MIN 1.0f
 #define RUNTIME_CAL_SAMPLE_TIME_MS 3000
-#define RUNTIME_CAL_FAILURE_COOLDOWN_MS 30000
 
 /* Rising preferred; falling still accepted but weakly updates the shared slot. */
 #define TCAL_HYSTERESIS_EMA_RISING 0.7f

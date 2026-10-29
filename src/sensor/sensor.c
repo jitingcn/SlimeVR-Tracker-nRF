@@ -3410,7 +3410,6 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	if (!valid_q || !sensor_motion_frame_current(frame->sensor_epoch)) {
 		atomic_clear(&output_ready);
 #if CONFIG_SENSOR_USE_TCAL
-		sensor_runtime_calibration_check(false);
 		sensor_tcal_continuous_motion_detected();
 #endif
 		return;
@@ -3458,10 +3457,6 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	resting = resting && sensor_motion_frame_current(frame->sensor_epoch);
 	// Check for boot calibration (higher priority than auto calibration)
 	sensor_tcal_boot_calibration_check();
-
-	// Check for runtime periodic calibration (when device is resting for extended period)
-	// This helps maintain accuracy during long usage sessions by updating D_offset
-	sensor_runtime_calibration_check(resting);
 
 	// Notify continuous bucket sampling of motion state changes
 	if (!resting) {

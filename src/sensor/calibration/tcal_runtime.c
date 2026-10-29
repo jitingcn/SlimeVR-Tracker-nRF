@@ -68,10 +68,7 @@ LOG_MODULE_REGISTER(cal_tcal_runtime, LOG_LEVEL_INF);
 
 #define TCAL_SAVE_SIGNIFICANCE_THRESHOLD 0.002f
 
-static bool runtime_cal_enabled = false;
 static int64_t runtime_cal_last_time = 0;
-static int64_t runtime_cal_rest_start = 0;
-static bool runtime_cal_rest_tracking = false;
 float runtime_cal_last_temp = NAN;
 
 static atomic_t tcal_auto_calibration_enabled;
@@ -1737,8 +1734,6 @@ int sensor_perform_runtime_calibration(void)
 	float current_temp = sensor_get_current_imu_temperature();
 	if (isnan(current_temp) || current_temp < -20.0f || current_temp > 60.0f) {
 		LOG_ERR("Runtime Cal: Invalid temperature");
-		// Apply failure cooldown to prevent immediate retry
-		runtime_cal_last_time = k_uptime_get() - RUNTIME_CAL_COOLDOWN_MS + RUNTIME_CAL_FAILURE_COOLDOWN_MS;
 		cal_event_end(operation, CAL_OUTCOME_FAILED, CAL_PHASE_WAIT_STILL, CAL_REASON_TEMPERATURE);
 		tcal_result(feedback, generation, LED_FAILED);
 		tracker_events_notify();
@@ -1757,8 +1752,6 @@ int sensor_perform_runtime_calibration(void)
 
 	if (err) {
 		LOG_WRN("Runtime Cal: Bias collection failed (err: %d)", err);
-		// Apply failure cooldown to prevent immediate retry
-		runtime_cal_last_time = k_uptime_get() - RUNTIME_CAL_COOLDOWN_MS + RUNTIME_CAL_FAILURE_COOLDOWN_MS;
 		uint8_t reason = err == -1 ? CAL_REASON_MOTION :
 			err == -3 ? CAL_REASON_TEMPERATURE :
 			err == BIAS_COLLECT_INSUFFICIENT_SAMPLES ? CAL_REASON_INSUFFICIENT_SAMPLES : CAL_REASON_SAMPLE_TIMEOUT;
@@ -1801,113 +1794,9 @@ int sensor_perform_runtime_calibration(void)
 	return 0;
 }
 
-/**
- * Check if runtime calibration should be triggered
- * Called from sensor loop when device is at rest
- *
- * @param is_resting true if device is currently at rest
- */
-void sensor_runtime_calibration_check(bool is_resting)
+int64_t sensor_runtime_cal_last_time(void)
 {
-	// Skip if runtime calibration is disabled
-	if (!runtime_cal_enabled) {
-		return;
-	}
-
-	// Skip if boot calibration hasn't completed yet
-	if (!retained->bootCalState.completed) {
-		return;
-	}
-
-	int64_t now = k_uptime_get();
-
-	// Enforce minimum uptime before runtime calibration
-	if (now < RUNTIME_CAL_MIN_UPTIME_MS) {
-		return;
-	}
-
-	// Check cooldown period
-	if (runtime_cal_last_time != 0 && (now - runtime_cal_last_time) < RUNTIME_CAL_COOLDOWN_MS) {
-		return;
-	}
-
-	// Check if another calibration is running
-	if (sensor_calibration_request(CAL_REQUEST_QUERY, CAL_REQUEST_USER) != 0) {
-		runtime_cal_rest_tracking = false;
-		runtime_cal_rest_start = 0;
-		return;
-	}
-
-	// Get current temperature for comparison
-	float current_temp = sensor_get_current_imu_temperature();
-
-	if (is_resting) {
-		// Start or continue tracking rest period
-		if (!runtime_cal_rest_tracking) {
-			runtime_cal_rest_tracking = true;
-			runtime_cal_rest_start = now;
-			LOG_DBG("Runtime Cal: Started tracking rest period");
-		} else {
-			// Check if we've been resting long enough
-			int64_t rest_duration = now - runtime_cal_rest_start;
-			if (rest_duration >= RUNTIME_CAL_REST_TIME_MS) {
-				// Check temperature change since last calibration
-				// Skip if temperature hasn't changed enough
-				if (!isnan(runtime_cal_last_temp) && !isnan(current_temp)) {
-					float temp_change = fabsf(current_temp - runtime_cal_last_temp);
-					if (temp_change < RUNTIME_CAL_TEMP_CHANGE_MIN) {
-						LOG_DBG(
-							"Runtime Cal: Skipping - temp change %.2fC < %.2fC threshold",
-							(double)temp_change,
-							(double)RUNTIME_CAL_TEMP_CHANGE_MIN
-						);
-						// Reset tracking but don't request calibration
-						runtime_cal_rest_tracking = false;
-						runtime_cal_rest_start = 0;
-						return;
-					}
-				}
-
-				LOG_INF(
-					"Runtime Cal: Device at rest for %lld ms, temp %.2fC (last: %.2fC), requesting calibration",
-					rest_duration,
-					(double)current_temp,
-					isnan(runtime_cal_last_temp) ? 0.0 : (double)runtime_cal_last_temp
-				);
-
-				int request_result = sensor_calibration_request(CAL_REQUEST_TCAL_RUNTIME, CAL_REQUEST_AUTO);
-				if (request_result == 0) {
-					LOG_INF("Runtime Cal: Calibration requested");
-					runtime_cal_rest_tracking = false;
-					runtime_cal_rest_start = 0;
-				}
-			}
-		}
-	} else {
-		// Device moved, reset rest tracking
-		if (runtime_cal_rest_tracking) {
-			LOG_DBG("Runtime Cal: Rest tracking reset due to motion");
-			runtime_cal_rest_tracking = false;
-			runtime_cal_rest_start = 0;
-		}
-	}
-}
-
-/**
- * Get runtime calibration status information
- */
-void sensor_runtime_cal_get_status(int64_t *last_cal_time, int64_t *rest_duration)
-{
-	if (last_cal_time) {
-		*last_cal_time = runtime_cal_last_time;
-	}
-	if (rest_duration) {
-		if (runtime_cal_rest_tracking) {
-			*rest_duration = k_uptime_get() - runtime_cal_rest_start;
-		} else {
-			*rest_duration = 0;
-		}
-	}
+	return runtime_cal_last_time;
 }
 
 // =============================================================================

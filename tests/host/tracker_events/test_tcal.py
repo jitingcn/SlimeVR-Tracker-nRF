@@ -25,7 +25,7 @@ def function(name, text=None):
 runtime_header = (ROOT / "src/sensor/calibration/tcal_runtime.h").read_text()
 constants = "\n".join(line for line in runtime_header.splitlines()
                       if line.startswith(("#define BOOT_CAL_", "#define RUNTIME_CAL_")))
-state = source[source.index("static bool runtime_cal_enabled"):source.index("static void tcal_feedback_finish_locked")]
+state = source[source.index("static int64_t runtime_cal_last_time"):source.index("static void tcal_feedback_finish_locked")]
 state = "\n".join(line for line in state.splitlines()
                   if not line.startswith("static int tcal_compensation_storage_error"))
 calibration = (ROOT / "src/sensor/calibration/calibration.c").read_text()
@@ -715,10 +715,6 @@ int main(int argc, char **argv) {
         request_slot = 0;
         sensor_tcal_check_auto_calibration(temperature);
         assert(request_slot == CAL_REQUEST_IMU && last_origin == CAL_REQUEST_AUTO_SILENT);
-    } else if (!strcmp(scenario, "runtime_disabled")) {
-        retained->bootCalState.completed = true;
-        for (unsigned i = 0; i < 1000; ++i) { clock_ms += 1000; sensor_runtime_calibration_check(true); }
-        assert(request_count == 0 && event_count == 0);
     } else if (!strcmp(scenario, "apply_fallback")) {
         assert(user && sensor_perform_runtime_calibration() == 0);
         assert(led_results[LED_SUCCESS] == 0);
@@ -820,13 +816,13 @@ parts.extend(function(name) for name in (
     "sensor_tcal_assess_quality", "sensor_tcal_calculate_doffset_locked",
     "sensor_tcal_calculate_doffset", "sensor_boot_cal_abandon",
     "sensor_tcal_boot_calibration_check", "sensor_perform_boot_calibration",
-    "sensor_perform_runtime_calibration", "sensor_runtime_calibration_check",
+    "sensor_perform_runtime_calibration",
     "sensor_tcal_check_auto_calibration",
 ))
 scenarios = (
     "boot_skip", "runtime_skip", "boot_applied", "runtime_applied", "fit_error", "motion",
     "temperature", "fallback_busy", "gate_coverage", "gate_expired", "gate_active",
-    "auto_busy", "supplement_busy", "runtime_disabled", "collection_reasons",
+    "auto_busy", "supplement_busy", "collection_reasons",
     "boot_disabled", "boot_disabled_during_collect",
     "boot_stale_generation", "runtime_stale_generation",
     "comp_toggle_continuity", "comp_natural_temperature", "comp_disabled_model",

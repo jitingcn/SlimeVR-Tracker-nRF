@@ -113,7 +113,7 @@ static void sensor_rotate_sensor_vector_to_device_frame(float *src,float *out) {
 static void connection_update_sensor_data(float *pose,float *lin) {
     (void)lin;memcpy(transmitted_q,pose,sizeof(transmitted_q));transmissions++;
 }
-static bool local_rest,cal_rest;
+static bool local_rest;
 static unsigned auto_calibrations;
 static float temp=20;
 static int64_t last_data_time;
@@ -145,8 +145,7 @@ static void watchdog_pause(int x) {(void)x; suspended++;}
 static void watchdog_resume(int x) {(void)x; resumed++;}
 static int64_t k_uptime_ticks(void) {return now_ms;}
 static void sensor_update_sensor_state(bool resting);
-static void sensor_runtime_calibration_check(bool resting) {cal_rest=resting;}
-static void sensor_tcal_continuous_motion_detected(void) {cal_rest=false;}
+static void sensor_tcal_continuous_motion_detected(void) {}
 static void sensor_tcal_boot_calibration_check(void) {}
 static void sensor_tcal_check_auto_calibration(float t) {(void)t;auto_calibrations++;}
 static bool sensor_tcal_get_auto_calibration(void) {return false;}
@@ -246,7 +245,7 @@ static void reset_motion(void) {
     sensor_loop_avg_a[0]=sensor_loop_avg_a[1]=0;sensor_loop_avg_a[2]=1;
     memcpy(pose6,pose,sizeof(pose6));memcpy(last_q,pose,sizeof(last_q));
     memset(last_lin_a,0,sizeof(last_lin_a));
-    local_rest=cal_rest=false;
+    local_rest=false;
 }
 static void yaw(float degrees) {
     float half=degrees*(3.14159265358979323846f/360.0f);
@@ -277,9 +276,9 @@ static void rest_motion_contracts(void) {
     const float exit_yaw=active_yaw_fixture();
     reset_motion();
     for(unsigned t=0;t<1000;t+=10) assert(!sample(t,1,1,0));
-    assert(sample(1000,1,1,0));assert(cal_rest);
+    assert(sample(1000,1,1,0));
     for(unsigned t=1010;t<1260;t+=10) assert(sample(t,1,1,exit_yaw+.05f));
-    assert(!sample(1260,1,1,exit_yaw+.05f));assert(!cal_rest);
+    assert(!sample(1260,1,1,exit_yaw+.05f));
     reset_motion();
     assert(!sample(0,1,1,0));
     for(unsigned t=10;t<1000;t+=10) assert(!sample(t,1,1,.10f));
@@ -382,7 +381,7 @@ static void magnetic_heading_sleep_contracts(void) {
     unsigned before=transmissions;
     for(unsigned t=0;t<=602000;t+=10) {
         bool resting=sample(t,1,1,.75f*t/1000);
-        if(t>=1000) assert(resting && cal_rest);
+        if(t>=1000) assert(resting);
     }
     assert(wom_planned && wom_announced && wom_force);
     assert(power_requests.request==SYS_POWER_REQ_WOM_FORCE);
@@ -424,7 +423,7 @@ static void magnetic_heading_sleep_contracts(void) {
                 if(fault==2) pose6[0]=INFINITY;
             }
             sample(t,!(t>=2000 && fault==3),!(t>=2000 && fault==4),.75f*t/1000);
-            if(t>=2100) assert(!local_rest && !cal_rest && !wom_planned);
+            if(t>=2100) assert(!local_rest && !wom_planned);
         }
         assert(output_ready && !wom_planned);
     }
@@ -448,17 +447,17 @@ int main(void) {
     assert(sensor_window_ints==2 && sensor_int_sem.count==1);
     interrupt_acquire=true;frame_once();
     assert(suspended==1 && resumed==1);
-    assert(!detector_pending && !local_rest && !cal_rest);
+    assert(!detector_pending && !local_rest);
     drain(700);assert(known==0 && unknown>0);
     interrupt_acquire=false;frame_once();drain(300);assert(known>=2);
     unsigned before=known;
     assert(main_imu_suspend()==0);
     sensor_loop_frame_t stale={.sensor_epoch=tracker_events_sensor_epoch(),.g_count=1,.a_count=1};
     detector_pending=true;publish_observation(&stale);
-    assert(!detector_pending && !local_rest && !cal_rest);
+    assert(!detector_pending && !local_rest);
     drain(700);assert(known==before);
     main_imu_resume();detector_pending=true;publish_observation(&stale);
-    drain(700);assert(known==before && !local_rest && !cal_rest);
+    drain(700);assert(known==before && !local_rest);
     backend.take_rest_observation=NULL;frame_once();drain(300);
     assert(unavailable>0 && known>before);
     backend.take_rest_observation=take_observation;

@@ -1087,10 +1087,7 @@ void sensor_tcal_status(void)
 		printk("  - Boot Cal completed: %s\n", retained->bootCalState.completed ? "Failed/Skipped" : "Not yet");
 	}
 
-	// Display runtime calibration status
-	int64_t last_runtime_cal_time = 0;
-	int64_t current_rest_duration = 0;
-	sensor_runtime_cal_get_status(&last_runtime_cal_time, &current_rest_duration);
+	int64_t last_runtime_cal_time = sensor_runtime_cal_last_time();
 
 	printk("  - Last calibration temp: ");
 	if (!isnan(runtime_cal_last_temp)) {
@@ -1102,7 +1099,7 @@ void sensor_tcal_status(void)
 	printk("  - Current temp: %.2fC", (double)current_temp);
 	if (!isnan(runtime_cal_last_temp)) {
 		float temp_diff = fabsf(current_temp - runtime_cal_last_temp);
-		printk(" (diff: %.2fC, threshold: %.1fC)", (double)temp_diff, (double)RUNTIME_CAL_TEMP_CHANGE_MIN);
+		printk(" (diff: %.2fC)", (double)temp_diff);
 	}
 	printk("\n");
 
@@ -1114,13 +1111,6 @@ void sensor_tcal_status(void)
 		printk("Not yet performed\n");
 	}
 
-	if (current_rest_duration > 0) {
-		printk(
-			"  - Current rest duration: %lld ms (trigger at %d ms)\n",
-			current_rest_duration,
-			RUNTIME_CAL_REST_TIME_MS
-		);
-	}
 
 	// Display mode info
 	if (quality.point_count > 0) {
