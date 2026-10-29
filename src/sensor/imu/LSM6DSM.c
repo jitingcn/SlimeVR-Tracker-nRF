@@ -32,6 +32,7 @@ int lsm6dsm_init(
 	float *gyro_actual_period_s
 )
 {
+	ARG_UNUSED(clock_rate);
 	// setup interface for SPI
 	sensor_interface_spi_configure(SENSOR_INTERFACE_DEV_IMU, MHZ(10), 0);
 	int err = ssi_reg_write_byte(
@@ -393,7 +394,6 @@ int lsm6dsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 		}
 		return 0;
 	}
-	return 1;
 }
 
 /* Threshold is in fastest-stream samples. Mixed batches also include the slower stream. */
