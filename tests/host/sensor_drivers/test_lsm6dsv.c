@@ -453,8 +453,29 @@ static void test_hp_minimum_rate(void)
 	assert((hw.registers[LSM6DSV_CTRL2] & 0x0f) == ODR_OFF);
 }
 
+static void test_consecutive_unknown_tags(void)
+{
+	reset_model(false, false);
+	uint8_t unknown[7] = {0xf8}, valid[7] = {LSM6DSV_TAG_ACCEL_NC << 3};
+	float accel[3], gyro[3];
+	for (unsigned i = 0; i < 6; i++) {
+		assert(lsm_fifo_process(0, unknown, accel, gyro) == 1);
+		assert(lsm_fifo_process(0, valid, accel, gyro) == 0);
+	}
+	assert(gyro_discontinuities == 0);
+	for (unsigned i = 0; i < 4; i++) {
+		hw.registers[LSM6DSV_FIFO_STATUS1] = 1;
+		memcpy(hw.registers + LSM6DSV_FIFO_DATA_OUT_TAG, unknown, sizeof(unknown));
+		uint8_t batch[7];
+		assert(lsm_fifo_read(batch, sizeof(batch)) == 1);
+		assert(lsm_fifo_process(0, batch, accel, gyro) == 1);
+		assert(gyro_discontinuities == (i == 3 ? 1u : 0u));
+	}
+}
+
 int main(void)
 {
+	test_consecutive_unknown_tags();
 	test_hp_minimum_rate();
 	test_nack(false);
 	test_nack(true);

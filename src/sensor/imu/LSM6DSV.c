@@ -413,7 +413,6 @@ uint16_t lsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 		return 0;
 	}
 
-	lsm_unknown_tag_count = 0;
 	return packet_count;
 }
 
@@ -451,10 +450,12 @@ int lsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 
 	switch (tag) {
 	case LSM6DSV_TAG_ACCEL_NC:
+		lsm_unknown_tag_count = 0;
 		lsm_decode_accel(&packet[1], chip_who_am_i, accel_sensitivity, a);
 		return 0;
 
 	case LSM6DSV_TAG_GYRO_NC:
+		lsm_unknown_tag_count = 0;
 		lsm_decode_gyro(&packet[1], gyro_sensitivity, g);
 		return 0;
 
