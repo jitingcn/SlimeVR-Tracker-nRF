@@ -1132,6 +1132,69 @@ static int test_modes_bmm350_normal_forced(void)
 	return 0;
 }
 
+static int test_modes_mmc_completion_wins(void)
+{
+	static const struct {
+		size_t driver;
+		void (*trigger)(void);
+		bool (*read)(float *);
+		uint8_t status;
+		uint8_t done;
+		int deadline_ms;
+		uint32_t length;
+		float zero_raw;
+	} cases[] = {
+		{7, mmc5603_mag_oneshot, mmc5603_mag_read, MMC5603NJ_STATUS, 0x40, 4, 9, -32},
+		{8, mmc_mag_oneshot, mmc_mag_read, MMC5983MA_STATUS, 0x01, 2, 7, -8},
+	};
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		for (int scenario = 0; scenario < 7; scenario++) {
+			reset_driver(&odr_cases[cases[i].driver]);
+			float actual;
+			CHECK(odr_cases[cases[i].driver].update_odr(INFINITY, &actual) == 0);
+			bus.precise_clock = true;
+			if (scenario == 6) {
+				fake_bus_clear_transactions();
+				bus.fail_transaction = 1;
+			}
+			cases[i].trigger();
+			fake_bus_clear_transactions();
+			float m[3] = {1, 2, 3};
+			bus.now_us = (cases[i].deadline_ms + 1) * 1000;
+			bus.registers[cases[i].status] = cases[i].done;
+			if (scenario == 1)
+				bus.registers[cases[i].status] = 0;
+			if (scenario == 2) {
+				bus.now_us = 0;
+				bus.transaction_us = 100;
+				bus.registers[cases[i].status] = 0;
+				bus.ready_reg = cases[i].status;
+				bus.ready_mask = cases[i].done;
+				bus.ready_at_us = cases[i].deadline_ms * 1000;
+			}
+			if (scenario == 3)
+				bus.fail_transaction = 1;
+			if (scenario == 4)
+				bus.fail_transaction = 2;
+			if (scenario == 5)
+				bus.now_us = cases[i].deadline_ms * 1000;
+			bool success = scenario == 0 || scenario == 2 || scenario == 5;
+			CHECK(cases[i].read(m) == success);
+			if (success) {
+				CHECK(m[0] == cases[i].zero_raw && m[1] == cases[i].zero_raw && m[2] == cases[i].zero_raw);
+				CHECK(count_ops(FAKE_BURST_READ) == 1);
+				CHECK(bus.ops[bus.op_count - 1].length == cases[i].length);
+				if (scenario != 2)
+					CHECK(bus.transaction_count == 2);
+			} else {
+				CHECK(m[0] == 1 && m[1] == 2 && m[2] == 3);
+				CHECK(count_ops(FAKE_BURST_READ) == (scenario == 4 ? 1U : 0U));
+			}
+		}
+	}
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1175,6 +1238,7 @@ int main(void)
 		{"Modes AK conversion deadline", test_modes_ak_conversion_deadline},
 		{"Modes AK fractional rates", test_modes_ak_fractional_rates},
 		{"Modes BMM350 normal forced", test_modes_bmm350_normal_forced},
+		{"Modes MMC completion wins", test_modes_mmc_completion_wins},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},

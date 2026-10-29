@@ -192,6 +192,9 @@ bool mmc5603_mag_read(float m[3])
 				oneshot_pending = false;
 				return false;
 			}
+			if (status & MSTAT_MEAS_M_DONE) {
+				break;
+			}
 			if (k_uptime_get() >= deadline_ms) {
 				LOG_ERR("Read timeout");
 				oneshot_pending = false;
