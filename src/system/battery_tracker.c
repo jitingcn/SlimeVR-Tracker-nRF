@@ -739,8 +739,6 @@ uint64_t sys_get_last_cycle_runtime(void)
 {
 	struct battery_tracker tracker = {0};
 	sys_read(BATT_STATS_LAST_RUN_ID, &tracker, sizeof(tracker));
-	if (tracker.last_battery_runtime < 0)
-		return 0;
 	return tracker.last_battery_runtime;
 }
 
