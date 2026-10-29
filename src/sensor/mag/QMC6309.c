@@ -110,7 +110,7 @@ void qmc_shutdown(void)
 
 int qmc_update_odr(float period_s, float *actual_period_s)
 {
-	int requested_odr_hz; // Truncate fractional Hz before selecting a supported rate.
+	float requested_odr_hz;
 	uint8_t odr_code;
 	uint8_t mode_code;
 

@@ -1195,6 +1195,40 @@ static int test_modes_mmc_completion_wins(void)
 	return 0;
 }
 
+static int test_rates_fractional_selection(void)
+{
+	const struct {
+		const sensor_mag_t *driver;
+		float requested_hz;
+		float actual_hz;
+		uint8_t reg;
+		uint8_t value;
+	} cases[] = {
+		{&sensor_mag_bmm150, 10.5f, 15, BMM150_OP_CTRL, 0x20},
+		{&sensor_mag_bmm150, 0.5f, 2, BMM150_OP_CTRL, 0x08},
+		{&sensor_mag_ist8306, 10.5f, 20, IST8306_CNTL2, MODE_CMM_20Hz},
+		{&sensor_mag_ist8306, 0.5f, 10, IST8306_CNTL2, MODE_CMM_10Hz},
+		{&sensor_mag_ist8308, 10.5f, 20, IST8306_CNTL2, MODE_CMM_20Hz},
+		{&sensor_mag_ist8308, 0.5f, 10, IST8306_CNTL2, MODE_CMM_10Hz},
+		{&sensor_mag_lis3mdl, 0.7f, 1.25f, LIS3MDL_CTRL_REG1, 0xe4},
+		{&sensor_mag_lis3mdl, 1.3f, 2.5f, LIS3MDL_CTRL_REG1, 0xe8},
+		{&sensor_mag_lis3mdl, 2.6f, 5, LIS3MDL_CTRL_REG1, 0xec},
+		{&sensor_mag_qmc5883l, 10.5f, 50, 0x09, 0x15},
+		{&sensor_mag_qmc6309, 1.5f, 10, 0x0b, 0x18},
+	};
+	qmc_set_variant(false);
+	for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+		fake_bus_reset();
+		cases[i].driver->shutdown();
+		fake_bus_reset();
+		float actual = -1;
+		CHECK(cases[i].driver->update_odr(1.0f / cases[i].requested_hz, &actual) == 0);
+		CHECK(float_equal(actual, 1.0f / cases[i].actual_hz));
+		CHECK(bus.registers[cases[i].reg] == cases[i].value);
+	}
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1240,6 +1274,7 @@ int main(void)
 		{"Modes BMM350 normal forced", test_modes_bmm350_normal_forced},
 		{"Modes MMC completion wins", test_modes_mmc_completion_wins},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
+		{"Fractional magnetometer rates", test_rates_fractional_selection},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
 		{"LIS temperatures", test_lis_temperatures_fail_loudly_and_apply_offset},

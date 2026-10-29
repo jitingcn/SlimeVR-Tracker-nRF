@@ -45,7 +45,7 @@ void lis3_shutdown(void)
 
 int lis3_update_odr(float period_s, float *actual_period_s)
 {
-	int requested_odr_hz = 0; // Preserve integer-Hz truncation, including sub-Hz requests.
+	float requested_odr_hz = 0;
 	uint8_t performance_code = OM_UHP;
 	uint8_t odr_code = DO_0_625Hz;
 	uint8_t fast_odr_enabled = 0;

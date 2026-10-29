@@ -38,7 +38,7 @@ void ist8308_shutdown(void)
 
 int ist8308_update_odr(float period_s, float *actual_period_s)
 {
-	int requested_odr_hz; // Truncate fractional Hz before selecting a supported rate.
+	float requested_odr_hz;
 	uint8_t noise_filter_code;
 	uint8_t mode_code;
 	uint8_t oversampling_code;
