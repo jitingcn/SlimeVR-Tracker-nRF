@@ -96,10 +96,8 @@ parts.append("static void connection_no_transport_iteration(void) {\n" +
              loop.replace("while (1)", "for (int step = 0; step < 1; step++)", 1) +
              "\nassert(!\"no-transport fixture unexpectedly admitted transport\");\n}\n}")
 # Exercise the actual power-loop dispatch, including its completion semantics.
-start = power.index("\t\tuint32_t generation = 0;")
-end = power.index("power_request_finish(&power_requests, requested, generation, consumed);", start)
-end += len("power_request_finish(&power_requests, requested, generation, consumed);")
-parts.append("static void power_iteration(void) {\n" + power[start:end] + "\n}")
+parts.append(function(power, "power_service_requests"))
+parts.append("static void power_iteration(void) { power_service_requests(); }")
 for name in ("esb_remote_cmd_tcal_auto_on", "esb_remote_cmd_tcal_auto_off"):
     parts.append(function(radio, name))
 start = radio.index("\t\t// Check for shutdown timeout if connection errors persist")

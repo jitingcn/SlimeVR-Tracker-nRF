@@ -335,6 +335,18 @@ static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key)
     lock->held = false;
 }
 static bool sys_system_off(void) { ++shutdowns; return true; }
+static bool sys_WOM(bool force, uint32_t generation)
+{
+    (void)force;
+    (void)generation;
+    assert(!"battery fixture must not submit WOM requests");
+    return false;
+}
+static bool sys_system_reboot(void)
+{
+    assert(!"battery fixture must not submit reboot requests");
+    return false;
+}
 /* The live serializer, not a battery-flag echo, supplies these wire bytes. */
 static uint8_t batt, batt_v;
 #define MAX(a, b) ((a) > (b) ? (a) : (b))

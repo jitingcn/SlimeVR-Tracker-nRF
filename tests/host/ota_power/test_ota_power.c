@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "system/power.h"
 #include "system/power_request.h"
@@ -409,6 +410,149 @@ static void fixture(void)
 	assert(esb_ota_handle_verify() == 0);
 	assert(esb_ota_get_status() == OTA_STATUS_VERIFY_OK);
 	assert(led_test_events[LED_SUCCESS] == 0 && ota_feedback_state == LED_OTA_ACTIVE);
+}
+
+static void owner_trace(const char *step)
+{
+	if (getenv("POWER_SPLIT_TRACE")) {
+		printf("POWER-SPLIT %s req=%d state=%d gen=%u ota=%d gate=%d off=%d reboot=%d attempts=%u notices=%u\n",
+		       step, power_requests.request, power_requests.state, power_requests.generation,
+		       power_requests.ota_reboot, power_requests.physical_started, physical_offs,
+		       physical_reboots, shutdown_prepare_attempts, notices);
+	}
+}
+
+static void reserve_ota_during_request(void)
+{
+	assert(sys_ota_reboot_reserve() == 0);
+}
+
+static void prepare_ota_during_request(void)
+{
+	assert(sys_ota_reboot_reserve() == 0);
+	sys_ota_reboot_resolve(true);
+}
+
+#if IMU_INT_EXISTS
+static void replace_before_commit(void);
+#endif
+
+static void owner_request_dispatch(void)
+{
+	fixture(); memset(&ota, 0, sizeof(ota));
+	power_iteration();
+	assert(power_requests.state == POWER_REQUEST_EMPTY && power_requests.generation == 0);
+	assert(physical_offs == 0 && physical_reboots == 0 && notices == 0);
+	owner_trace("empty");
+
+	for (int reboot = 0; reboot < 2; reboot++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		assert((reboot ? sys_request_system_reboot() : sys_request_system_off()) == 0);
+		shutdown_allowed = false;
+		power_iteration();
+		assert(power_requests.request == (reboot ? SYS_POWER_REQ_REBOOT : SYS_POWER_REQ_SYSTEM_OFF));
+		assert(power_requests.state == POWER_REQUEST_RETRY && power_requests.generation == 1);
+		assert(!power_requests.physical_started && shutdown_prepare_attempts == 1);
+		assert(physical_offs == 0 && physical_reboots == 0 && notices == 1);
+		owner_trace(reboot ? "reboot-quiescence-failed" : "off-quiescence-failed");
+		shutdown_allowed = true;
+		power_iteration();
+		assert(power_requests.request == SYS_POWER_REQ_NONE && power_requests.state == POWER_REQUEST_EMPTY);
+		assert(power_requests.generation == 1 && !power_requests.physical_started);
+		assert(shutdown_prepare_attempts == 2 && notices == 2);
+		assert(physical_offs == !reboot && physical_reboots == reboot);
+		owner_trace(reboot ? "reboot-retried" : "off-retried");
+	}
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_request_system_off() == 0);
+	before_mutex_lock = reserve_ota_during_request;
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_SYSTEM_OFF && power_requests.generation == 1);
+	assert(power_requests.state == POWER_REQUEST_RETRY && power_requests.ota_reboot == POWER_OTA_REBOOT_RESERVED);
+	assert(!power_requests.physical_started && physical_offs == 0 && notices == 0);
+	owner_trace("ota-reserved-after-claim");
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_SYSTEM_OFF && power_requests.generation == 1);
+	assert(power_requests.state == POWER_REQUEST_RETRY && power_requests.ota_reboot == POWER_OTA_REBOOT_RESERVED);
+	owner_trace("ota-deferred");
+	sys_ota_reboot_resolve(false);
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_NONE && power_requests.state == POWER_REQUEST_EMPTY);
+	assert(power_requests.generation == 1 && power_requests.ota_reboot == POWER_OTA_REBOOT_NONE);
+	assert(physical_offs == 1 && physical_reboots == 0);
+	owner_trace("ota-failure-preserves-off");
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_request_system_off() == 0);
+	before_mutex_lock = prepare_ota_during_request;
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_SYSTEM_OFF && power_requests.generation == 1);
+	assert(power_requests.state == POWER_REQUEST_RETRY && power_requests.ota_reboot == POWER_OTA_REBOOT_READY);
+	assert(physical_offs == 0 && physical_reboots == 0);
+	owner_trace("ota-ready-after-claim");
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_NONE && power_requests.state == POWER_REQUEST_EMPTY);
+	assert(power_requests.generation == 2 && power_requests.ota_reboot == POWER_OTA_REBOOT_NONE);
+	assert(physical_offs == 0 && physical_reboots == 1);
+	owner_trace("ota-supersedes-off");
+
+#if IMU_INT_EXISTS
+	for (int force = 0; force < 2; force++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		int64_t deadline = now_ms + 5000;
+		assert(sys_plan_WOM(force, deadline, false) == 0);
+		for (int i = 0; i < 10; i++) {
+			now_ms += 500;
+			assert(sys_plan_WOM(force, deadline, false) == 0);
+		}
+		power_iteration();
+		assert(power_requests.request == SYS_POWER_REQ_NONE && power_requests.state == POWER_REQUEST_EMPTY);
+		assert(power_requests.generation == 1 && physical_offs == 1 && physical_reboots == 0);
+		assert(notices == 1 && notice_phase == POWER_WILL_WOM);
+		assert(notice_detail == (force ? POWER_WOM_FORCED : POWER_WOM_NORMAL));
+		owner_trace(force ? "wom-forced" : "wom-normal");
+	}
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	assert(sys_plan_WOM(false, now_ms + 5000, false) == 0);
+	before_mutex_lock = replace_before_commit;
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_WOM && power_requests.state == POWER_REQUEST_QUEUED);
+	assert(power_requests.generation == 3 && notices == 3 && physical_offs == 0);
+	owner_trace("wom-replaced-after-claim");
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_WOM && power_requests.state == POWER_REQUEST_RETRY);
+	assert(power_requests.generation == 3 && physical_offs == 0);
+	owner_trace("wom-replacement-deferred");
+	int64_t deadline = now_ms + 5000;
+	for (int i = 0; i < 10; i++) {
+		now_ms += 500;
+		assert(sys_plan_WOM(false, deadline, false) == 0);
+		power_iteration();
+	}
+	assert(power_requests.request == SYS_POWER_REQ_NONE && power_requests.state == POWER_REQUEST_EMPTY);
+	assert(power_requests.generation == 3 && physical_offs == 1 && notices == 3);
+	owner_trace("wom-replacement-consumed");
+
+	fixture(); memset(&ota, 0, sizeof(ota));
+	deadline = now_ms + 5000;
+	assert(sys_plan_WOM(true, deadline, false) == 0);
+	for (int i = 0; i < 10; i++) {
+		now_ms += 500;
+		assert(sys_plan_WOM(true, deadline, false) == 0);
+	}
+	shutdown_allowed = false;
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_WOM_FORCE && power_requests.state == POWER_REQUEST_RETRY);
+	assert(power_requests.generation == 1 && !power_requests.physical_started && physical_offs == 0);
+	assert(shutdown_prepare_attempts == 1);
+	owner_trace("wom-quiescence-failed");
+	power_iteration();
+	assert(power_requests.request == SYS_POWER_REQ_NONE && power_requests.state == POWER_REQUEST_EMPTY);
+	assert(power_requests.generation == 2 && physical_offs == 0 && shutdown_prepare_attempts == 1);
+	owner_trace("wom-failure-consumed");
+#endif
 }
 
 static void activation_with_competitor(enum sys_power_request request, int phase)
@@ -1523,6 +1667,7 @@ static void manual_wom_entry(void)
 int main(void)
 {
 	manual_wom_entry();
+	owner_request_dispatch();
 #if HOST_MANUAL_ONLY
 	puts("PASS manual WOM capability/custom automatic-shutdown policy");
 	return 0;

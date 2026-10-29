@@ -879,6 +879,31 @@ bool heater_external_power_present(void)
 	return present;
 }
 #endif
+static void power_service_requests(void)
+{
+	uint32_t generation = 0;
+	enum sys_power_request requested = power_request_begin(&power_requests, &generation);
+	bool consumed = true;
+	switch (requested) {
+	case SYS_POWER_REQ_WOM:
+		consumed = sys_WOM(false, generation);
+		break;
+	case SYS_POWER_REQ_WOM_FORCE:
+		consumed = sys_WOM(true, generation);
+		break;
+	case SYS_POWER_REQ_SYSTEM_OFF:
+		consumed = sys_system_off();
+		break;
+	case SYS_POWER_REQ_REBOOT:
+		consumed = sys_system_reboot();
+		break;
+	case SYS_POWER_REQ_NONE:
+	default:
+		break;
+	}
+	power_request_finish(&power_requests, requested, generation, consumed);
+}
+
 /* Private battery/dock attempts have no mailbox completion token. */
 static void sys_battery_dock_system_off(void)
 {
@@ -961,27 +986,7 @@ static void power_thread(void)
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
 		pm_device_action_run(uart, PM_DEVICE_ACTION_SUSPEND);
 #endif
-		uint32_t generation = 0;
-		enum sys_power_request requested = power_request_begin(&power_requests, &generation);
-		bool consumed = true;
-		switch (requested) {
-		case SYS_POWER_REQ_WOM:
-			consumed = sys_WOM(false, generation);
-			break;
-		case SYS_POWER_REQ_WOM_FORCE:
-			consumed = sys_WOM(true, generation);
-			break;
-		case SYS_POWER_REQ_SYSTEM_OFF:
-			consumed = sys_system_off();
-			break;
-		case SYS_POWER_REQ_REBOOT:
-			consumed = sys_system_reboot();
-			break;
-		case SYS_POWER_REQ_NONE:
-		default:
-			break;
-		}
-		power_request_finish(&power_requests, requested, generation, consumed);
+		power_service_requests();
 
 		bool docked = dock_read();
 		bool charging = false, charged = false;

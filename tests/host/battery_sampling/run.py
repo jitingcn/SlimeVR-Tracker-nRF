@@ -86,15 +86,18 @@ filter_source = re.sub(r'^#include[^\n]*\n', '', filter_source, flags=re.MULTILI
 start = power.index('\tint battery_mV =')
 end = power.index('\n#if CONFIG_SENSOR_TCAL_HEATED', start)
 locals_source = power[start:end]
-start = power.index('\t\tbool docked = dock_read();')
+start = power.index('\t\tpower_service_requests();')
 end = power.index('\n\t}', power.index('(void)k_sem_take(&power_wake_sem, K_MSEC(100));', start))
 private_off = "\n".join(
     extract_block(power_request, rf"^(?:enum|struct) {name} \{{", semicolon=True)
     for name in ("sys_power_request", "power_request_state", "power_ota_reboot_state", "power_request_mailbox")
 )
 private_off += "\nstatic struct power_request_mailbox power_requests;\n"
-private_off += extract_block(power_request, r"^static inline void power_request_finish_private\([^;{]*\)\s*\{")
+for name in ("power_request_begin", "power_request_finish", "power_request_finish_private"):
+    private_off += "\n" + extract_block(
+        power_request, rf"^static inline (?:enum sys_power_request|void) {name}\([^;{{]*\)\s*\{{")
 private_off += "\n" + function(power, "sys_battery_dock_system_off")
+private_off += "\n" + function(power, "power_service_requests")
 iteration = 'static void power_iteration(void) {\n' + power[start:end] + '\n}'
 main_source = (ROOT / "src/main.c").read_text()
 boot_start = main_source.index("\n#if USER_SHUTDOWN_ENABLED\n")
