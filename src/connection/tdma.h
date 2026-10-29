@@ -146,7 +146,7 @@ bool tdma_config_get(uint8_t *slot_index, uint8_t *slot_ticks, uint16_t *frame_t
  * @param slot_ticks   Width of each slot in ticks (14-163)
  * @param epoch        Config epoch counter (for change detection)
  */
-void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch);
+bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch);
 
 /**
  * Get the current config epoch (for change detection in PONG processing).

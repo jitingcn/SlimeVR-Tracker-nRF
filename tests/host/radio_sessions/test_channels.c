@@ -243,9 +243,11 @@ static int sys_write(unsigned id, void *dst, const void *src, size_t len) {
 }
 static void esb_disable(void) { ++disables; }
 static uint8_t tdma_get_config_epoch(void) { return epoch; }
-static void tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8_t new_epoch) {
-    assert(slot < total && ticks >= 16); epoch = new_epoch;
+static bool tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8_t new_epoch) {
+    if (!total || total > 16 || slot >= total || ticks < 16) return false;
+    epoch = new_epoch;
     ++schedule_updates; scheduled_slot = slot; scheduled_total = total;
+    return true;
 }
 static void connection_request_ping_resync(void) {}
 void set_status(enum sys_status status, bool value) {

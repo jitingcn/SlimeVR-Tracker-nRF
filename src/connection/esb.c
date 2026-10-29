@@ -1701,14 +1701,13 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			uint8_t tdma_sticks = payload->data[10];
 			uint8_t tdma_epoch  = payload->data[11];
 
-			bool valid_schedule = tdma_total > 0 && tdma_total <= 16
-				&& tdma_slot < tdma_total && tdma_sticks >= 16;
-			if (valid_schedule &&
-			    (channel_wait_normal || tdma_epoch != tdma_get_config_epoch())) {
-				tdma_update_config(tdma_slot, tdma_total, tdma_sticks, tdma_epoch);
-			}
-			if (valid_schedule && server_time_synced && channel_wait_normal) {
-				channel_found = true;
+			if (channel_wait_normal || tdma_epoch != tdma_get_config_epoch()) {
+				bool valid_schedule = tdma_update_config(
+					tdma_slot, tdma_total, tdma_sticks, tdma_epoch
+				);
+				if (valid_schedule && server_time_synced && channel_wait_normal) {
+					channel_found = true;
+				}
 			}
 		}
 

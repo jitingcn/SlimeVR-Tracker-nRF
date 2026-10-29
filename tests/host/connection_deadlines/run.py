@@ -34,6 +34,8 @@ prefix = r'''
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define CLAMP(x,lo,hi) MIN(MAX(x,lo),hi)
 #define LOG_WRN(...) ((void)0)
+#define LOG_INF(...) ((void)0)
+#define ARG_UNUSED(x) ((void)(x))
 #define PING_INTERVAL_MS 1000
 #define TIME_SYNC_TIMEOUT_MS 15000
 #define TDMA_MAX_TRACKERS 16
@@ -107,7 +109,7 @@ parts = [prefix, extract_block(esb_header, r"^struct esb_network_clock \{", True
          function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms"),
          tdma[tdma.index("#define TDMA_PACK("):tdma.index("\nvoid tdma_init(")],
          tdma[tdma.index("#define TDMA_LEN17_RESERVE_TICKS"):tdma.index("\nvoid tdma_note_radio_busy")],
-         function(tdma, "tdma_admission_stalled")]
+         function(tdma, "tdma_admission_stalled"), function(tdma, "tdma_update_config")]
 parts += [capture[capture.index("#define CAPTURE_METRICS"):capture.index("BUILD_ASSERT")],
           capture[capture.index("struct capture_metric {"):capture.index("static struct capture_record capture_queue")]]
 parts += [r'''
@@ -478,7 +480,21 @@ static void capture_phases(void) {
     assert(metrics[0].samples == 3 && metrics[0].phase_samples == 2);
     puts("PASS capture receiver32 phases, frame crossing and wrap classification");
 }
+static void validate_layout(void) {
+    const uint8_t widths[] = {16, 64, 182, 254, 255};
+    for (unsigned i = 0; i < sizeof(widths); ++i) {
+        assert(tdma_update_config(15, 16, widths[i], 255));
+    }
+    atomic_t old_pack = tdma_cfg_pack, old_epoch = tdma_epoch_at;
+    assert(!tdma_update_config(0, 0, 16, 1));
+    assert(!tdma_update_config(0, 17, 16, 1));
+    assert(!tdma_update_config(1, 1, 16, 1));
+    assert(!tdma_update_config(0, 1, 15, 1));
+    assert(tdma_cfg_pack == old_pack && tdma_epoch_at == old_epoch);
+    assert(tdma_update_config(0, 1, 16, 0));
+}
 int main(int argc, char **argv) {
+    validate_layout();
     assert(argc == 2);
     if (strcmp(argv[1], "deadlines") == 0) deadlines();
     else if (strcmp(argv[1], "ping") == 0) ping();

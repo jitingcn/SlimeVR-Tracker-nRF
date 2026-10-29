@@ -595,20 +595,21 @@ bool tdma_admission_stalled(void)
 	return sync_age < 0 || sync_age > TDMA_SYNC_STALE_MS;
 }
 
-void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch)
+bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch)
 {
-#if CONFIG_CONNECTION_TDMA
-	if (total_slots == 0 || slot_ticks < TDMA_MIN_SAFE_SLOT_TICKS) {
+	if (total_slots == 0 || total_slots > TDMA_MAX_TRACKERS
+		|| slot_ticks < TDMA_MIN_SAFE_SLOT_TICKS) {
 		LOG_WRN("TDMA: Invalid config total=%u slot_ticks=%u", total_slots, slot_ticks);
-		return;
+		return false;
 	}
 
 	if (slot_index >= total_slots) {
 		LOG_WRN("TDMA: Invalid slot_index=%u (>= total_slots=%u), ignoring config update",
 			slot_index, total_slots);
-		return;
+		return false;
 	}
 
+#if CONFIG_CONNECTION_TDMA
 	uint16_t frame_ticks = (uint16_t)slot_ticks * total_slots;
 	atomic_set(&tdma_cfg_pack, (atomic_val_t)TDMA_PACK(slot_index, slot_ticks, frame_ticks));
 	atomic_set(&tdma_epoch_at, epoch);
@@ -632,6 +633,7 @@ void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 	ARG_UNUSED(slot_ticks);
 	ARG_UNUSED(epoch);
 #endif
+	return true;
 }
 
 uint8_t tdma_get_config_epoch(void)
