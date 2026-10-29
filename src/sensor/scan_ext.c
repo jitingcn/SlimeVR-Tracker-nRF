@@ -25,10 +25,10 @@
 #include <string.h>
 
 #include "interface.h"
+#include "sensors_enum.h"
 
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
 #include "mag/ICT153xx.h"
-#include "sensors_enum.h"
 #endif
 
 #define SCAN_ADDR_START 8
@@ -131,17 +131,20 @@ scan_loop:;
 								// the same value. Real devices return different values on
 								// different registers; stale/ghost data returns the same.
 								uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
+								// QMC6309/H register 1 is arbitrary X data, not identity evidence.
+								// Validate two ID epochs without imposing undocumented status bits.
+								bool qmc6309_probe = reg == 0x00 && dev_ids[fnd_id + l] == MAG_QMC6309;
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
 								if (ict_probe)
 									cross_reg = ICT153XX_CHIP_ID;
 #endif
 								uint8_t cross_val = 0;
-								int c_err = sensor_scan_ext_read_byte(ext_ssi, addr, cross_reg, &cross_val);
+								int c_err = qmc6309_probe ? 0 : sensor_scan_ext_read_byte(ext_ssi, addr, cross_reg, &cross_val);
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
 								if (ict_probe && (c_err || cross_val != ICT153XX_CHIP_ID_VALUE))
 									break;
 #endif
-								if (!c_err && cross_val == id)
+								if (!qmc6309_probe && !c_err && cross_val == id)
 								{
 									LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data", addr, reg, cross_reg, id);
 									break;

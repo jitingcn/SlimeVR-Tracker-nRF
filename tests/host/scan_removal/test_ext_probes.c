@@ -131,6 +131,8 @@ static struct probe_call calls[8];
 static unsigned call_count;
 static const sensor_ext_ssi_t *real_ext;
 static bool nack_first_probe;
+static uint8_t fail_probe_reg;
+static unsigned fail_probe_call;
 
 static void set_nack(void);
 static void clear_nack(void);
@@ -143,6 +145,10 @@ static int trace_read(uint8_t addr, const void *write_buf, size_t num_write,
 	struct probe_call *call = &calls[call_count++];
 	call->addr = addr;
 	call->reg = *(const uint8_t *)write_buf;
+	if ((fail_probe_reg && call->reg == fail_probe_reg) || call_count == fail_probe_call) {
+		call->result = -EIO;
+		return -EIO;
+	}
 	bool first_nack = nack_first_probe && call_count == 1;
 	if (first_nack)
 		set_nack();
@@ -187,6 +193,8 @@ static void prepare(void)
 	host_log_reset();
 	call_count = 0;
 	nack_first_probe = false;
+	fail_probe_reg = 0;
+	fail_probe_call = 0;
 }
 
 static int scan(uint8_t reg, uint8_t expected, int identity, uint16_t *addr, uint8_t *selected_reg)
@@ -388,6 +396,27 @@ static void test_runtime_failures(void)
 	expect_quiescent();
 }
 
+static void test_qmc6309_identity(void)
+{
+	uint16_t addr;
+	uint8_t reg;
+	static const uint8_t ids[] = {0x90, 0x0c};
+	for (unsigned i = 0; i < ARRAY_SIZE(ids); i++) {
+		prepare();
+		hw.external[0] = ids[i];
+		hw.external[1] = ids[i];
+		hw.external[9] = 0xff;
+		assert(scan(0, ids[i], MAG_QMC6309, &addr, &reg) == MAG_QMC6309);
+		assert(call_count == 2 && calls[0].reg == 0 && calls[1].reg == 0);
+		prepare();
+		hw.external[0] = ids[i];
+		fail_probe_call = 2;
+		assert(scan(0, ids[i], MAG_QMC6309, &addr, &reg) == -1);
+		assert(call_count == 2 && calls[1].result == -EIO);
+	}
+	assert(host_log_error_count() == 0);
+}
+
 #if defined(PROBE_DSV)
 static void test_ssi_group_and_dummy_boundaries(void)
 {
@@ -425,6 +454,7 @@ static void test_ssi_group_and_dummy_boundaries(void)
 
 int main(void)
 {
+	test_qmc6309_identity();
 #if defined(PROBE_DSV)
 	test_ssi_group_and_dummy_boundaries();
 #endif
