@@ -32,7 +32,8 @@ config = extract_block(tdma, r"^struct tdma_config \{", True)
 clock = extract_block((SRC / "esb.h").read_text(), r"^struct esb_network_clock \{", True)
 production = "\n".join(macros + [config, clock, function(tdma, "tdma_config_snapshot"),
     function(tdma, "tdma_status_clock_max_age_ms"), function(esb, "net_ticks_from_kernel64"),
-    function(esb, "net_tick_difference"), function(esb, "esb_get_status_clock"),
+    function(esb, "net_tick_difference"), function(esb, "esb_project_network_ticks"),
+    function(esb, "esb_get_status_clock"),
     function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms")])
 with tempfile.TemporaryDirectory(prefix="tracker-led-clock-") as directory:
     temporary = Path(directory)

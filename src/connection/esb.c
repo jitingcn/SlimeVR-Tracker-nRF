@@ -3084,6 +3084,16 @@ void esb_get_ping_request_data(uint8_t out[4])
 	irq_unlock(key);
 }
 
+static uint32_t esb_project_network_ticks(
+	uint32_t local, uint32_t reference, uint32_t offset, int32_t skew_ppb
+)
+{
+	uint32_t elapsed = local - reference;
+	int64_t correction = (int64_t)skew_ppb * elapsed / 1000000000LL;
+	/* Keep the receiver's low32 epoch; zero is a valid synchronized tick. */
+	return local + offset + (uint32_t)correction;
+}
+
 bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks)
 {
 	/* ESB RX publishes these fields in interrupt context. Capture the kernel
@@ -3109,11 +3119,7 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks)
 		return false;
 	}
 
-	uint32_t elapsed = local - reference_ticks;
-	int64_t correction = (int64_t)skew_ppb * elapsed / 1000000000LL;
-	/* Unsigned additions deliberately retain the receiver's low32 epoch;
-	 * zero is a valid synchronized timestamp, not an unavailable sentinel. */
-	*network_ticks = local + offset + (uint32_t)correction;
+	*network_ticks = esb_project_network_ticks(local, reference_ticks, offset, skew_ppb);
 	return true;
 }
 
@@ -3146,9 +3152,7 @@ bool esb_get_network_clock(struct esb_network_clock *clock)
 		return false;
 	}
 	uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks);
-	uint32_t elapsed = local - reference_ticks;
-	int64_t correction = (int64_t)skew_ppb * elapsed / 1000000000LL;
-	clock->receiver_ticks = local + offset + (uint32_t)correction;
+	clock->receiver_ticks = esb_project_network_ticks(local, reference_ticks, offset, skew_ppb);
 	clock->local_kernel_ticks = kernel_ticks;
 	clock->sync_age_ms = age_ms;
 	return true;

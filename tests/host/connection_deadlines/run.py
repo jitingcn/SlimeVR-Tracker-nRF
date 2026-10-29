@@ -94,6 +94,7 @@ static uint64_t test_rate_delay_us(uint64_t now) { (void)now; return test_delay_
 static int k_sem_take(int *sem, uint64_t us) { (void)sem; observed_wait_us = us; return 0; }
 '''
 parts = [prefix, extract_block(esb_header, r"^struct esb_network_clock \{", True),
+         function(esb, "esb_project_network_ticks"),
          function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms"),
          tdma[tdma.index("#define TDMA_PACK("):tdma.index("\nvoid tdma_init(")],
          tdma[tdma.index("#define TDMA_LEN17_RESERVE_TICKS"):tdma.index("\nvoid tdma_note_radio_busy")],
