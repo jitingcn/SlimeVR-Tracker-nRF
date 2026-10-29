@@ -176,6 +176,7 @@ static void prepare(void)
 	hw.registers[LSM6DSV_WHO_AM_I] = 0x70;
 	assert(lsm_ext_setup(SENSOR_EXT_MODE_I2CM_PROXY) == 0);
 #else
+	hw.external_address = ICT153XX_I2C_ADDR;
 	hw.now = 100000;
 	hw.latency = 1;
 	hw.duration = 80;
@@ -199,7 +200,11 @@ static void prepare(void)
 
 static int scan(uint8_t reg, uint8_t expected, int identity, uint16_t *addr, uint8_t *selected_reg)
 {
-	const uint8_t addresses[] = {1, ICT153XX_I2C_ADDR};
+	const uint8_t addresses[] = {1, identity == MAG_QMC5883L ? 0x0d : identity == MAG_QMC6309 ? 0x7c : ICT153XX_I2C_ADDR};
+#if defined(PROBE_ICM)
+	/* Select the modeled peripheral independently of the driver's programmed address. */
+	hw.external_address = addresses[1];
+#endif
 	const uint8_t registers[] = {1, reg};
 	const uint8_t identities[] = {1, expected};
 	const int result_ids[] = {identity};
@@ -452,8 +457,34 @@ static void test_ssi_group_and_dummy_boundaries(void)
 }
 #endif
 
+static void test_qmc5883l_ff_identity(void)
+{
+	uint16_t addr;
+	uint8_t reg;
+	static const uint8_t controls[] = {0, 0x1d, 0xc1};
+	for (unsigned i = 0; i < ARRAY_SIZE(controls); i++) {
+		prepare();
+		hw.external[0x0d] = 0xff;
+		hw.external[9] = controls[i];
+		assert(scan(0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == MAG_QMC5883L);
+		assert(call_count == 3 && calls[1].reg == 9);
+	}
+	prepare();
+	memset(hw.external, 0xff, sizeof(hw.external));
+	assert(scan(0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == -1);
+	prepare();
+	hw.external[0x0d] = 0xff;
+	fail_probe_reg = 9;
+	assert(scan(0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == -1);
+	prepare();
+	hw.external[0x0d] = 0xff;
+	assert(scan(0x0d, 0xff, MAG_LIS3MDL, &addr, &reg) == -1);
+	assert(call_count == 1 && host_log_error_count() == 0);
+}
+
 int main(void)
 {
+	test_qmc5883l_ff_identity();
 	test_qmc6309_identity();
 #if defined(PROBE_DSV)
 	test_ssi_group_and_dummy_boundaries();

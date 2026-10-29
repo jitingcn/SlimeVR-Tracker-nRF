@@ -25,6 +25,7 @@ struct bus_record {
 };
 static struct {
 	uint8_t host[256], ireg[65536], external[256];
+	uint8_t external_address; /* Address of the modeled external peripheral. */
 	uint8_t fifo[8][20];
 	unsigned fifo_count, fifo_capacity, fifo_reads, fifo_events, count_reads;
 	bool fifo_corrupt, stale_count;
@@ -116,7 +117,7 @@ static void write_ireg(uint16_t address, uint8_t value)
 	if (address != TOP(ICM45686_I2CM_CONTROL) || !(value & ICM45686_I2CM_CONTROL_GO))
 		return;
 	assert(!hw.busy); /* Reprogramming/GO while an old transaction runs is unsafe. */
-	assert(hw.ireg[TOP(ICM45686_DEV_PROFILE_1)] == 0x1e);
+	assert(hw.ireg[TOP(ICM45686_DEV_PROFILE_1)] == hw.external_address);
 	hw.go_count++;
 	hw.go_at = hw.now;
 	hw.busy = true;
@@ -278,6 +279,7 @@ static void initialize(void)
 static void reset_model(bool prefetch)
 {
 	memset(&hw, 0, sizeof(hw));
+	hw.external_address = 0x1e;
 	hw.now = 100000;
 	hw.latency = 1;
 	hw.duration = 80;

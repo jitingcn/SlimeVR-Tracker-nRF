@@ -85,6 +85,8 @@ scan_loop:;
 			for (int k = 0; k < reg_count; k++)
 			{
 				uint8_t reg = dev_reg[reg_index + k];
+				bool qmc5883l_probe = addr == 0x0d && reg == 0x0d && id_cnt == 1
+					&& dev_id[id_ind] == 0xff && dev_ids[fnd_id] == MAG_QMC5883L;
 				bool ict_probe = false;
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
 				ict_probe = addr == ICT153XX_I2C_ADDR && reg == ICT153XX_MANU_ID && id_cnt == 1
@@ -112,7 +114,7 @@ scan_loop:;
 					LOG_DBG("Read value: 0x%02X", id);
 					if (err)
 						break;
-					if (id == 0xFF || id == 0x00)
+					if ((id == 0xFF && !qmc5883l_probe) || id == 0x00)
 					{
 						LOG_DBG("Skipping bus idle value 0x%02X at address 0x%02X", id, addr);
 					}
@@ -134,12 +136,17 @@ scan_loop:;
 								// QMC6309/H register 1 is arbitrary X data, not identity evidence.
 								// Validate two ID epochs without imposing undocumented status bits.
 								bool qmc6309_probe = reg == 0x00 && dev_ids[fnd_id + l] == MAG_QMC6309;
+								if (qmc5883l_probe)
+									cross_reg = 0x09;
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
 								if (ict_probe)
 									cross_reg = ICT153XX_CHIP_ID;
 #endif
 								uint8_t cross_val = 0;
 								int c_err = qmc6309_probe ? 0 : sensor_scan_ext_read_byte(ext_ssi, addr, cross_reg, &cross_val);
+								// QST Table 18 permits MODE and RNG only 00/01.
+								if (qmc5883l_probe && (c_err || (cross_val & 0x22)))
+									break;
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
 								if (ict_probe && (c_err || cross_val != ICT153XX_CHIP_ID_VALUE))
 									break;
