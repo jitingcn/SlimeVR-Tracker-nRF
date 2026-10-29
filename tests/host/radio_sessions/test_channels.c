@@ -76,7 +76,7 @@ static int esb_conn_state = 1, status_state;
 static uint32_t ping_failures, ping_success_streak;
 static unsigned ota_rx_head, ota_rx_tail;
 static bool ping_pending, shutdown_requested;
-static int64_t connection_error_start_time, now;
+static int64_t connection_error_start_time, now, pair_ack_at;
 static uint8_t tracker_id = 3, ping_counter, epoch;
 static uint32_t ping_ctr_sent;
 static int64_t ping_send_time;
@@ -229,6 +229,7 @@ static int esb_start_tx(void) {
         rx_payload.data[0] = tx_payload_pair.data[0];
         rx_payload.data[1] = 3;
         memset(&rx_payload.data[2], 0x77, 6);
+        pair_ack_at = k_uptime_get();
         receive_pair();
     }
     return 0;
@@ -327,6 +328,7 @@ static void reset(uint8_t home) {
     channel_confirm_capable = channel_legacy_peer = channel_confirmed = false;
     ping_channel_confirm_sent = false; abort_requests = 0;
     cancel_pair_after_ack = false;
+    pair_ack_at = -1;
     pair_probe_count = pair_probe_limit = 0;
     channel_error = persistence_error = clock_start_error = 0;
     clock_start_calls = clock_cold_starts = pair_payload_writes = 0;
@@ -568,15 +570,24 @@ static void visit(uint8_t target) {
     assert(radio_channel == target && writes == 0);
 }
 static void confirm_channel(uint8_t target) {
+    unsigned successes = led_test_events[LED_SUCCESS];
     record_ping_admission(ping_counter);
     dedicated_packet(target);
     assert(accept_pong());
-    assert(!channel_found);
+    assert(!channel_found && !writes && !address_writes);
+    assert(led_test_events[LED_SUCCESS] == successes);
+    server_time_synced = true;
+    record_ping_admission(ping_counter);
+    normal_packet(0xff, 0); assert(accept_pong());
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    assert(!channel_found && !writes && !address_writes);
+    assert(led_test_events[LED_SUCCESS] == successes);
     server_time_synced = false;
     record_ping_admission(ping_counter);
     normal_packet(0, 1); assert(accept_pong());
     receive_schedule(ESB_PONG_FLAG_NORMAL);
     assert(!channel_found && !writes && !address_writes);
+    assert(led_test_events[LED_SUCCESS] == successes);
     record_ping_admission(ping_counter);
     normal_packet(0, 1);
     assert(accept_pong());
@@ -818,20 +829,31 @@ static void provisional_pairing(void) {
         pair_target = 85; registered_at = -1;
         unsigned successes = led_test_events[LED_SUCCESS];
         esb_pair();
+        assert(pair_ack_at >= 0 && now >= pair_ack_at && now - pair_ack_at < 200);
         assert(pair_provisional && pairing_search_active);
         assert(paired_addr[1] == 3 && esb_conn_state == ESB_ST_PAIRED);
         assert(!writes && !address_writes && led_test_events[LED_SUCCESS] == successes);
+        struct led_connection_facts facts = {0};
+        esb_led_connection_facts(&facts);
+        assert(facts.pairing && !facts.paired);
+        for (unsigned j = 2; j < 8; ++j) assert(paired_addr[j] == 0x77);
         for (unsigned j = 0; j < 8; ++j) assert(storage.paired_addr[j] == 0x5a);
         esb_initialize(true); /* Connection owner starts the paired pipes. */
         visit(85); dedicated_packet(targets[i]);
         assert(!accept_pong() && channel_redirect_pending);
         assert(esb_channel_search_poll(false));
         assert(radio_channel == targets[i] && !writes && !address_writes);
+        record_ping_admission(ping_counter); normal_packet(0, 1);
+        assert(!accept_pong());
+        assert(esb_channel_search_poll(false));
+        assert(!writes && !address_writes && led_test_events[LED_SUCCESS] == successes);
         confirm_channel(targets[i]);
         assert(!pair_provisional && !pairing_search_active);
         assert(address_writes == 1 && writes == 1);
         assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
         assert(led_test_events[LED_SUCCESS] == successes + 1);
+        esb_led_connection_facts(&facts);
+        assert(facts.paired && !facts.pairing);
     }
     for (unsigned timeout = 0; timeout < 2; ++timeout) {
         reset(85); memset(paired_addr, 0, sizeof(paired_addr));

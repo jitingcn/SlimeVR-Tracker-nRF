@@ -2384,7 +2384,6 @@ void esb_pair(void)
 		pairing_search_active = false;
 		tracker_events_session_changed();
 		esb_deinitialize();
-		k_msleep(1600); /* Preserve the receiver's post-pairing settle window. */
 		pair_feedback = pairing;
 		pair_provisional = true;
 		pairing_search_active = true;
