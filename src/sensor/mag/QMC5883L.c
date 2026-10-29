@@ -74,13 +74,11 @@ int qmc5883l_init(float period_s, float *actual_period_s)
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_SET_RST, 0x01);
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_2, QMC5883L_ROL_PNT | QMC5883L_INT_ENB);
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 
@@ -94,10 +92,7 @@ void qmc5883l_shutdown(void)
 	oneshot_pending = false;
 	oneshot_failed = false;
 	last_raw_sample_valid = false;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, QMC5883L_MODE_STANDBY);
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, QMC5883L_MODE_STANDBY);
 }
 
 int qmc5883l_update_odr(float period_s, float *actual_period_s)
@@ -144,7 +139,6 @@ int qmc5883l_update_odr(float period_s, float *actual_period_s)
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, config_code);
 	}
 	if (err) {
-		LOG_ERR("Communication error");
 		last_config_code = 0xff;
 		return err;
 	}
@@ -174,9 +168,6 @@ void qmc5883l_mag_oneshot(void)
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_trigger_ms = k_uptime_get();
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool qmc5883l_mag_read(float m[3])
@@ -194,7 +185,6 @@ bool qmc5883l_mag_read(float m[3])
 		while ((status & QMC5883L_STATUS_DRDY) == 0) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_STATUS, &status);
 			if (err) {
-				LOG_ERR("Communication error");
 				oneshot_pending = false;
 				return false;
 			}
@@ -219,7 +209,6 @@ bool qmc5883l_mag_read(float m[3])
 		uint8_t status = 0;
 		int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_STATUS, &status);
 		if (err) {
-			LOG_ERR("Communication error");
 			return false;
 		}
 		if (!(status & QMC5883L_STATUS_DRDY) || (status & QMC5883L_STATUS_OVL)) {
@@ -229,7 +218,6 @@ bool qmc5883l_mag_read(float m[3])
 	uint8_t rawData[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, rawData, 6);
 	if (err) {
-		LOG_ERR("Communication error");
 		return false;
 	}
 

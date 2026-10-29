@@ -104,11 +104,8 @@ void qmc_shutdown(void)
 	oneshot_pending = false;
 	oneshot_failed = false;
 	last_raw_sample_valid = false;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_MASK);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_CLEAR);
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_MASK);
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_CTRL_REG_2, SOFT_RESET_CLEAR);
 }
 
 int qmc_update_odr(float period_s, float *actual_period_s)
@@ -166,7 +163,6 @@ int qmc_update_odr(float period_s, float *actual_period_s)
 		);
 	}
 	if (err) {
-		LOG_ERR("Communication error");
 		last_state = 0xff;
 		return err;
 	}
@@ -196,9 +192,6 @@ void qmc_mag_oneshot(void)
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_trigger_ms = k_uptime_get();
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool qmc_mag_read(float m[3])
@@ -217,7 +210,6 @@ bool qmc_mag_read(float m[3])
 		while ((status & STAT_DATA_RDY_MASK) == 0) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
 			if (err) {
-				LOG_ERR("Communication error");
 				oneshot_pending = false;
 				return false;
 			}
@@ -242,7 +234,6 @@ bool qmc_mag_read(float m[3])
 		uint8_t status = 0;
 		int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC6309_STAT_REG, &status);
 		if (err) {
-			LOG_ERR("Communication error");
 			return false;
 		}
 		if (!(status & STAT_DATA_RDY_MASK) || (status & STAT_OVERFLOW_MASK)) {
@@ -252,7 +243,6 @@ bool qmc_mag_read(float m[3])
 	uint8_t rawData[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
 	if (err) {
-		LOG_ERR("Communication error");
 		return false;
 	}
 	// Reject byte-identical readings until the cached period plus its integer

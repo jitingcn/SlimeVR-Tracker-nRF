@@ -47,7 +47,7 @@ static int lis2_soft_reset(void)
 		k_busy_wait(10);
 	}
 
-	LOG_WRN("SOFT_RST did not clear");
+	LOG_ERR("SOFT_RST did not clear");
 	return -1;
 }
 
@@ -57,20 +57,17 @@ int lis2_init(float period_s, float *actual_period_s)
 
 	int err = lis2_soft_reset();
 	if (err) {
-		LOG_ERR("Soft reset failed");
 		return err;
 	}
 
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_C, lis2_cfg_c());
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 
 	// CFG_REG_B: LPF (ODR/4 bandwidth) + OFF_CANC (internal bias cancellation)
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_CFG_REG_B, CFG_B_LPF | CFG_B_OFF_CANC);
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 
@@ -81,10 +78,7 @@ int lis2_init(float period_s, float *actual_period_s)
 void lis2_shutdown(void)
 {
 	last_cfg_a = 0xff;
-	int err = lis2_soft_reset();
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	lis2_soft_reset();
 }
 
 int lis2_update_odr(float period_s, float *actual_period_s)
@@ -164,7 +158,6 @@ int lis2_update_odr(float period_s, float *actual_period_s)
 	return 0;
 error:
 	last_cfg_a = 0xff;
-	LOG_ERR("Communication error");
 	return err;
 }
 
@@ -178,7 +171,6 @@ bool lis2_mag_read(float m[3])
 	uint8_t frame[7];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_STATUS_REG, frame, sizeof(frame));
 	if (err) {
-		LOG_ERR("Communication error");
 		return false;
 	}
 	if (!(frame[0] & STATUS_ZYXDA)) {
@@ -194,7 +186,6 @@ float lis2_temp_read(float bias[3])
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_TEMP_OUT_L_REG, &rawTemp[0], 2);
 	if (err) {
-		LOG_ERR("Communication error");
 		return NAN;
 	}
 	// The output value is a signed 16-bit word in two's complement.

@@ -16,7 +16,7 @@
 enum { ENDOP = 0x01, NACK = 0x08, WRITE_DONE = 0x80, MASTER_ON = 0x04 };
 enum operation { READ, WRITE };
 static struct {
-	uint8_t main[256], hub[256], external[256], status;
+	uint8_t registers[256], hub[256], external[256], status;
 	bool bank, master, stalled, no_xlda, clear_status, wrote, reset_stuck;
 	bool late_nack;
 	uint8_t error;
@@ -95,7 +95,7 @@ int ssi_burst_write(enum sensor_interface_dev dev, uint8_t reg, const uint8_t *b
 	}
 	/* SENSOR_HUB output registers are read-only, including CTRL3's alias. */
 	assert(!hw.bank || reg < LSM6DSV_SENSOR_HUB_1 || reg >= LSM6DSV_MASTER_CONFIG);
-	memcpy((hw.bank ? hw.hub : hw.main) + reg, buf, len);
+	memcpy((hw.bank ? hw.hub : hw.registers) + reg, buf, len);
 	if (hw.bank && reg == LSM6DSV_MASTER_CONFIG) {
 		if (buf[0] & 0x80) {
 			if (!hw.reset_stuck)
@@ -113,9 +113,9 @@ int ssi_burst_write(enum sensor_interface_dev dev, uint8_t reg, const uint8_t *b
 			hw.next_op = hw.now + 4200;
 		}
 	} else if (!hw.bank && reg == LSM6DSV_CTRL3 && (buf[0] & 1)) {
-		memset(hw.main, 0, sizeof(hw.main));
+		memset(hw.registers, 0, sizeof(hw.registers));
 		memset(hw.hub, 0, sizeof(hw.hub));
-		hw.main[LSM6DSV_WHO_AM_I] = 0x70;
+		hw.registers[LSM6DSV_WHO_AM_I] = 0x70;
 		hw.master = false;
 		hw.status = 0;
 	}
@@ -146,7 +146,7 @@ int ssi_burst_read(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uin
 	} else {
 		if (hw.bank && reg == LSM6DSV_SENSOR_HUB_1)
 			hw.data_reads++;
-		memcpy(buf, (hw.bank ? hw.hub : hw.main) + reg, len);
+		memcpy(buf, (hw.bank ? hw.hub : hw.registers) + reg, len);
 	}
 	return 0;
 }
@@ -180,7 +180,7 @@ static void reset_model(bool prefetch, bool clear_status)
 	memset(&hw, 0, sizeof(hw));
 	hw.latency = 100;
 	hw.clear_status = clear_status;
-	hw.main[LSM6DSV_WHO_AM_I] = 0x70;
+	hw.registers[LSM6DSV_WHO_AM_I] = 0x70;
 	assert(lsm_ext_setup(SENSOR_EXT_MODE_I2CM_PROXY) == 0);
 	assert(hw.ext->ext_set_prefetch(prefetch) == 0);
 	initialize();
@@ -228,12 +228,12 @@ static void test_configuration_failfast(void)
 	for (unsigned writing = 0; writing < 2; writing++) {
 		reset_model(false, false);
 		uint8_t controls[3];
-		memcpy(controls, hw.main + LSM6DSV_CTRL6, sizeof(controls));
+		memcpy(controls, hw.registers + LSM6DSV_CTRL6, sizeof(controls));
 		/* First select belongs to stop, second to profile configuration. */
 		fail_on(WRITE, false, LSM6DSV_FUNC_CFG_ACCESS, 0x40, 1);
 		int err = writing ? hw.ext->ext_write(0x1e, command, 2) : sample(out);
 		assert(err == -ENXIO && !hw.fault.armed);
-		assert(memcmp(controls, hw.main + LSM6DSV_CTRL6, sizeof(controls)) == 0);
+		assert(memcmp(controls, hw.registers + LSM6DSV_CTRL6, sizeof(controls)) == 0);
 		assert(hw.starts == 0 && !hw.master && !hw.bank);
 
 		reset_model(false, false);
@@ -403,23 +403,23 @@ static void test_fifo_destructive_loss_notification(void)
 {
 	reset_model(false, false);
 	uint8_t record[7];
-	hw.main[LSM6DSV_FIFO_STATUS1] = 1;
-	hw.main[LSM6DSV_FIFO_STATUS2] = LSM6DSV_FIFO_OVR_LATCHED;
+	hw.registers[LSM6DSV_FIFO_STATUS1] = 1;
+	hw.registers[LSM6DSV_FIFO_STATUS2] = LSM6DSV_FIFO_OVR_LATCHED;
 	assert(lsm_fifo_read(record, sizeof(record)) == 0);
 	assert(gyro_discontinuities == 1);
 	/* A latched overrun is still loss if the current FIFO count is zero. */
-	hw.main[LSM6DSV_FIFO_STATUS1] = 0;
+	hw.registers[LSM6DSV_FIFO_STATUS1] = 0;
 	assert(lsm_fifo_read(record, sizeof(record)) == 0);
 	assert(gyro_discontinuities == 2);
-	hw.main[LSM6DSV_FIFO_STATUS1] = 1;
-	hw.main[LSM6DSV_FIFO_STATUS2] = 0;
+	hw.registers[LSM6DSV_FIFO_STATUS1] = 1;
+	hw.registers[LSM6DSV_FIFO_STATUS2] = 0;
 	fail_on(READ, false, LSM6DSV_FIFO_DATA_OUT_TAG, -1, 0);
 	assert(lsm_fifo_read(record, sizeof(record)) == 0);
 	assert(gyro_discontinuities == 3);
 	fail_on(READ, false, LSM6DSV_FIFO_STATUS1, -1, 0);
 	assert(lsm_fifo_read(record, sizeof(record)) == 0);
 	assert(gyro_discontinuities == 3); /* Failed status alone has consumed nothing. */
-	hw.main[LSM6DSV_FIFO_STATUS2] = LSM6DSV_FIFO_FULL_IA;
+	hw.registers[LSM6DSV_FIFO_STATUS2] = LSM6DSV_FIFO_FULL_IA;
 	assert(lsm_fifo_read(record, sizeof(record)) == 1);
 	assert(gyro_discontinuities == 3);
 }

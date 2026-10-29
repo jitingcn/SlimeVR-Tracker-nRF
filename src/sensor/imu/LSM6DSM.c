@@ -35,15 +35,9 @@ int lsm6dsm_init(
 		0x74
 	); // freeze register until done reading, increment register address during multi-byte access (BDU, IF_INC), INT
 	   // H_LACTIVE active low, PP_OD open-drain
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff;  // reset last odr
 	err |= lsm6dsm_update_odr(accel_period_s, gyro_period_s, accel_actual_period_s, gyro_actual_period_s);
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 	return (err < 0 ? err : 0);
 }
 
@@ -262,7 +256,6 @@ int lsm6dsm_update_odr(
 		(fifo_odr_bits >> 1) | 0x06
 	); // set FIFO ODR, FIFO Continuous mode
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 
@@ -295,7 +288,6 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 			}
 		}
 		if (err) {
-			LOG_ERR("Communication error");
 			break;
 		}
 
@@ -345,7 +337,6 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 			int64_t d0 = k_uptime_ticks();
 			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_DATA_OUT_L, raw, n * 6);
 			if (err) {
-				LOG_ERR("Communication error");
 				return total_packets;
 			}
 			{
@@ -405,14 +396,11 @@ uint8_t lsm6dsm_setup_DRDY(uint16_t threshold)
 	uint8_t buf[2];
 	buf[0] = threshold & 0xFF;
 	buf[1] = (threshold >> 8) & 0x07;
-	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_CTRL1, buf, 2);
+	ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_FIFO_CTRL1, buf, 2);
 	/* LSM6DSM has no COUNTER_BDR (unlike LSM6DSV); use pulsed INT1_DRDY_G for
 	 * per-sample wakeup, with INT1_FTH as the burst/catch-up backup. */
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_INT1_CTRL, 0x0A);      // INT1_FTH | INT1_DRDY_G
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_DRDY_PULSE_CFG, 0x80); // pulsed DRDY (75 us)
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_INT1_CTRL, 0x0A);      // INT1_FTH | INT1_DRDY_G
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSM_DRDY_PULSE_CFG, 0x80); // pulsed DRDY (75 us)
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
@@ -446,7 +434,6 @@ uint8_t lsm6dsm_setup_WOM(void)
 		0x30
 	); // INT H_LACTIVE active low, PP_OD open-drain
 	if (err) {
-		LOG_ERR("Communication error");
 		return 0xFF;
 	}
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
@@ -467,9 +454,6 @@ static int lsm6dsm_ext_setup(enum sensor_ext_mode mode)
 		0x05,
 		mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH ? 0x04 : 0x00
 	);
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 	return err;
 }
 #endif

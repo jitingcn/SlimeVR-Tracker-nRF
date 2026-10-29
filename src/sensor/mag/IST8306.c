@@ -28,10 +28,7 @@ void ist8306_shutdown(void)
 	last_mode_code = 0xff; // invalidate mode cache
 	oneshot_pending = false;
 	oneshot_failed = false;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL3, 0x01); // soft reset
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, IST8306_CNTL3, 0x01); // soft reset
 }
 
 int ist8306_update_odr(float period_s, float *actual_period_s)
@@ -115,7 +112,6 @@ int ist8306_update_odr(float period_s, float *actual_period_s)
 	return 0;
 error:
 	last_mode_code = 0xff;
-	LOG_ERR("Communication error");
 	return err;
 }
 
@@ -126,9 +122,6 @@ void ist8306_mag_oneshot(void)
 	oneshot_trigger_ms = k_uptime_get();
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool ist8306_mag_read(float m[3])
@@ -145,7 +138,6 @@ bool ist8306_mag_read(float m[3])
 		while (true) {
 			int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, frame, sizeof(frame));
 			if (err) {
-				LOG_ERR("Communication error");
 				oneshot_pending = false;
 				return false;
 			}
@@ -162,7 +154,6 @@ bool ist8306_mag_read(float m[3])
 	} else {
 		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, frame, sizeof(frame));
 		if (err) {
-			LOG_ERR("Communication error");
 			return false;
 		}
 		if (!(frame[0] & 0x01)) {

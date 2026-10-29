@@ -95,12 +95,21 @@ static int bmm3_wait_pmu(uint8_t command, int32_t timeout_ms)
 			return err;
 		}
 		if (status & 0x10) {
+			LOG_ERR("PMU command 0x%02x failed, status 0x%02x", (unsigned int)command,
+				(unsigned int)status);
 			return -EIO;
 		}
 		if (!(status & 0x01)) {
-			return ((status >> 5) & 0x07) == command ? 0 : -EIO;
+			if (((status >> 5) & 0x07) != command) {
+				LOG_ERR("PMU command 0x%02x returned status 0x%02x", (unsigned int)command,
+					(unsigned int)status);
+				return -EIO;
+			}
+			return 0;
 		}
 		if (k_uptime_get() >= deadline) {
+			LOG_ERR("PMU command 0x%02x timeout, status 0x%02x", (unsigned int)command,
+				(unsigned int)status);
 			return -ETIMEDOUT;
 		}
 		k_msleep(1);
@@ -133,6 +142,8 @@ static int bmm3_read_otp_word(uint8_t index, uint16_t *word)
 			return err;
 		}
 		if (status & BMM350_OTP_STATUS_ERROR) {
+			LOG_ERR("OTP word %u failed, status 0x%02x", (unsigned int)index,
+				(unsigned int)status);
 			return -EIO;
 		}
 		if (status & BMM350_OTP_STATUS_CMD_DONE) {
@@ -141,6 +152,7 @@ static int bmm3_read_otp_word(uint8_t index, uint16_t *word)
 		}
 	}
 	if (!ready) {
+		LOG_ERR("OTP word %u timeout", (unsigned int)index);
 		return -ETIMEDOUT;
 	}
 
@@ -255,6 +267,7 @@ int bmm3_init(float time, float *actual_time)
 		goto error;
 	}
 	if (chip_id != BMM350_CHIP_ID) {
+		LOG_ERR("Unexpected chip ID 0x%02x", (unsigned int)chip_id);
 		err = -ENODEV;
 		goto error;
 	}
@@ -295,7 +308,6 @@ int bmm3_init(float time, float *actual_time)
 error:
 	last_state = UINT16_MAX;
 	compensation_valid = false;
-	LOG_ERR("Initialization failed: %d", err);
 	return err;
 }
 
@@ -307,10 +319,7 @@ void bmm3_shutdown(void)
 	compensation_valid = false;
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM350_OTP_CMD_REG, BMM350_OTP_CMD_PWR_OFF);
 	if (!err) {
-		err = bmm3_set_power_mode(PMU_CMD_SUS);
-	}
-	if (err) {
-		LOG_ERR("Communication error");
+		bmm3_set_power_mode(PMU_CMD_SUS);
 	}
 }
 
@@ -411,7 +420,6 @@ int bmm3_update_odr(float time, float *actual_time)
 
 error:
 	last_state = UINT16_MAX;
-	LOG_ERR("Communication error");
 	return err;
 }
 
@@ -421,9 +429,6 @@ void bmm3_mag_oneshot(void)
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM350_PMU_CMD, PMU_CMD_FM_FAST);
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool bmm3_mag_read(float m[3])
@@ -442,7 +447,6 @@ bool bmm3_mag_read(float m[3])
 	while (true) {
 		int err = bmm3_read(BMM350_INT_STATUS, frame, sizeof(frame));
 		if (err) {
-			LOG_ERR("Communication error");
 			oneshot_pending = false;
 			return false;
 		}
@@ -482,7 +486,6 @@ float bmm3_temp_read(float bias[3])
 	uint8_t raw[3];
 	int err = bmm3_read(BMM350_TEMP_XLSB, raw, sizeof(raw));
 	if (err) {
-		LOG_ERR("Communication error");
 		return NAN;
 	}
 	last_temperature_c = bmm3_compensate_temperature(decode_s24(raw));

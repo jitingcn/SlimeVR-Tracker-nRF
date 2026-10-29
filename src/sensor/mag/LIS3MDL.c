@@ -32,7 +32,6 @@ int lis3_init(float period_s, float *actual_period_s)
 
 error:
 	last_state = 0xffff;
-	LOG_ERR("Communication error");
 	return (err < 0 ? err : 0);
 }
 
@@ -41,10 +40,7 @@ void lis3_shutdown(void)
 	last_state = 0xffff;
 	oneshot_pending = false;
 	oneshot_failed = false;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG2, 0x04);
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG2, 0x04);
 }
 
 int lis3_update_odr(float period_s, float *actual_period_s)
@@ -153,7 +149,6 @@ int lis3_update_odr(float period_s, float *actual_period_s)
 	return 0;
 error:
 	last_state = 0xffff;
-	LOG_ERR("Communication error");
 	return err;
 }
 
@@ -165,9 +160,6 @@ void lis3_mag_oneshot(void)
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_deadline_ms = k_uptime_get() + 20;
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool lis3_mag_read(float m[3])
@@ -183,7 +175,6 @@ bool lis3_mag_read(float m[3])
 		while ((mode & 0x03) == MD_SINGLE_CONV) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_CTRL_REG3, &mode);
 			if (err) {
-				LOG_ERR("Communication error");
 				oneshot_pending = false;
 				return false;
 			}
@@ -201,7 +192,6 @@ bool lis3_mag_read(float m[3])
 	uint8_t frame[7];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_STATUS_REG, frame, sizeof(frame));
 	if (err) {
-		LOG_ERR("Communication error");
 		return false;
 	}
 	if (!(frame[0] & LIS3MDL_STATUS_ZYXDA)) {
@@ -217,7 +207,6 @@ float lis3_temp_read(float bias[3])
 	uint8_t rawTemp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_TEMP_OUT_L, &rawTemp[0], 2);
 	if (err) {
-		LOG_ERR("Communication error");
 		return NAN;
 	}
 	// The output value is a signed 16-bit word in two's complement.

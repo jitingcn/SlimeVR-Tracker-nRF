@@ -15,7 +15,9 @@ IMU_SOURCES := \
 IMU_HEADERS := $(IMU_SOURCES:.c=.h) \
 	../../../src/sensor/imu/icm426xx_hires.h ../../../src/sensor/imu/icm426xx_io.h
 COMMON_HEADERS := ../../../src/sensor/sensor.h ../../../src/sensor/sensor_none.h \
-	../../../src/sensor/interface.h ../../../src/sensor/diagnostics.h
+	../../../src/sensor/interface.h ../../../src/sensor/interface_internal.h \
+	../../../src/sensor/diagnostics.h ../harness/include/device_types.h \
+	../harness/include/i2c_types.h ../harness/include/spi_types.h
 HOST_HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h hal/*.h)
 
 .PHONY: check clean

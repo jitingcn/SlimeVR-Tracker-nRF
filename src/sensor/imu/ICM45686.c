@@ -6,6 +6,7 @@
 #include <hal/nrf_gpio.h>
 
 #include "ICM45686.h"
+#include "../interface_internal.h"
 #include "sensor/sensor_none.h"
 
 #define ICM45686_FIFO_PACKET_SIZE 20
@@ -48,7 +49,7 @@ static uint8_t ext_read_ahead_reg = 0;
 static uint8_t ext_read_ahead_len = 0;
 static bool ext_scanning_mode = true;
 static bool ext_prefetch_enabled = true;
-static int icm45_ext_drain_read_ahead(void);
+static int icm45_ext_drain_read_ahead(enum ssi_reporting reporting);
 #endif
 
 // Cache the mean temperature of accepted-header packets in the latest FIFO read.
@@ -84,7 +85,9 @@ static void icm45_cache_fifo_temp(const uint8_t *data, uint16_t packets)
 LOG_MODULE_REGISTER(ICM45686, LOG_LEVEL_DBG);
 
 // All IREG accesses use the bank helpers below, including runtime verification.
-static int icm45_bank_write(uint8_t bank, uint8_t reg, const uint8_t *buf, uint32_t num_bytes)
+static int icm45_bank_write(
+	uint8_t bank, uint8_t reg, const uint8_t *buf, uint32_t num_bytes, enum ssi_reporting reporting
+)
 {
 	if (num_bytes == 0 || buf == NULL) {
 		return -EINVAL;
@@ -92,13 +95,13 @@ static int icm45_bank_write(uint8_t bank, uint8_t reg, const uint8_t *buf, uint3
 
 	// Address and first DATA must share one burst to avoid unintended prefetch.
 	uint8_t ireg_buf[3] = {bank, reg, buf[0]};
-	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3);
+	int err = ssi_burst_write_io(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 3, reporting);
 	k_busy_wait(4);
 	if (err) {
 		return err;
 	}
 	for (uint32_t i = 1; i < num_bytes; i++) {
-		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, buf[i]);
+		err = ssi_reg_write_byte_io(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, buf[i], reporting);
 		k_busy_wait(4);
 		if (err) {
 			return err;
@@ -107,25 +110,25 @@ static int icm45_bank_write(uint8_t bank, uint8_t reg, const uint8_t *buf, uint3
 	return 0;
 }
 
-static int icm45_bank_write_byte(uint8_t bank, uint8_t reg, uint8_t value)
+static int icm45_bank_write_byte(uint8_t bank, uint8_t reg, uint8_t value, enum ssi_reporting reporting)
 {
-	return icm45_bank_write(bank, reg, &value, 1);
+	return icm45_bank_write(bank, reg, &value, 1, reporting);
 }
 
-static int icm45_bank_read(uint8_t bank, uint8_t reg, uint8_t *buf, uint32_t num_bytes)
+static int icm45_bank_read(uint8_t bank, uint8_t reg, uint8_t *buf, uint32_t num_bytes, enum ssi_reporting reporting)
 {
 	if (num_bytes == 0 || buf == NULL) {
 		return -EINVAL;
 	}
 
 	uint8_t ireg_buf[2] = {bank, reg};
-	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 2);
+	int err = ssi_burst_write_io(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_ADDR_15_8, ireg_buf, 2, reporting);
 	k_busy_wait(4);
 	if (err) {
 		return err;
 	}
 	for (uint32_t i = 0; i < num_bytes; i++) {
-		err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, &buf[i]);
+		err = ssi_reg_read_byte_io(SENSOR_INTERFACE_DEV_IMU, ICM45686_IREG_DATA, &buf[i], reporting);
 		k_busy_wait(4);
 		if (err) {
 			return err;
@@ -134,19 +137,19 @@ static int icm45_bank_read(uint8_t bank, uint8_t reg, uint8_t *buf, uint32_t num
 	return 0;
 }
 
-static int icm45_bank_read_byte(uint8_t bank, uint8_t reg, uint8_t *value)
+static int icm45_bank_read_byte(uint8_t bank, uint8_t reg, uint8_t *value, enum ssi_reporting reporting)
 {
-	return icm45_bank_read(bank, reg, value, 1);
+	return icm45_bank_read(bank, reg, value, 1, reporting);
 }
 
 static int icm45686_ireg_read8(uint16_t ireg_addr, uint8_t *out)
 {
-	return icm45_bank_read_byte(ireg_addr >> 8, ireg_addr & 0xFF, out);
+	return icm45_bank_read_byte(ireg_addr >> 8, ireg_addr & 0xFF, out, SSI_REPORT);
 }
 
 static int icm45686_ireg_write8(uint16_t ireg_addr, uint8_t value)
 {
-	return icm45_bank_write_byte(ireg_addr >> 8, ireg_addr & 0xFF, value);
+	return icm45_bank_write_byte(ireg_addr >> 8, ireg_addr & 0xFF, value, SSI_REPORT);
 }
 
 static int icm45686_set_src_ctrl(uint8_t gyro_sel, uint8_t accel_sel)
@@ -172,7 +175,6 @@ static int icm45686_set_src_ctrl(uint8_t gyro_sel, uint8_t accel_sel)
 	}
 	err = icm45686_ireg_read8(accel_src_ctrl_addr, &accel_reg);
 	if (err) {
-		LOG_WRN("SRC_CTRL pre-read failed (err=%d)", err);
 		return err;
 	}
 
@@ -195,7 +197,6 @@ static int icm45686_set_src_ctrl(uint8_t gyro_sel, uint8_t accel_sel)
 	}
 	err = icm45686_ireg_write8(accel_src_ctrl_addr, accel_new);
 	if (err) {
-		LOG_WRN("SRC_CTRL write failed (err=%d)", err);
 		return err;
 	}
 
@@ -214,8 +215,6 @@ static int icm45686_set_src_ctrl(uint8_t gyro_sel, uint8_t accel_sel)
 			accel_readback,
 			accel_readback & 0x03
 		);
-	} else {
-		LOG_WRN("SRC_CTRL post-read failed (err=%d)", readback_err);
 	}
 	return readback_err;
 }
@@ -240,7 +239,6 @@ static int icm45686_set_ui_lpfbw_sel(uint8_t gyro_sel, uint8_t accel_sel)
 	}
 	err = icm45686_ireg_read8(accel_ui_lpfbw_addr, &accel_reg);
 	if (err) {
-		LOG_WRN("UI_LPFBW pre-read failed (err=%d)", err);
 		return err;
 	}
 
@@ -263,7 +261,6 @@ static int icm45686_set_ui_lpfbw_sel(uint8_t gyro_sel, uint8_t accel_sel)
 	}
 	err = icm45686_ireg_write8(accel_ui_lpfbw_addr, accel_new);
 	if (err) {
-		LOG_WRN("UI_LPFBW write failed (err=%d)", err);
 		return err;
 	}
 
@@ -282,8 +279,6 @@ static int icm45686_set_ui_lpfbw_sel(uint8_t gyro_sel, uint8_t accel_sel)
 			accel_readback,
 			accel_readback & 0x07
 		);
-	} else {
-		LOG_WRN("UI_LPFBW post-read failed (err=%d)", readback_err);
 	}
 	return readback_err;
 }
@@ -341,15 +336,17 @@ static int icm45_configure_clock_and_pads(float clock_rate_hz)
 		}
 	}
 	// Disable internal pull resistors for AP pins, preserving AUX1 I2CM mode.
-	err = icm45_bank_write_byte(ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_58, 0xD9 & ~0x48);
+	err = icm45_bank_write_byte(ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_58, 0xD9 & ~0x48, SSI_REPORT);
 	if (err) {
 		return err;
 	}
-	err = icm45_bank_write_byte(ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_59, 0xB6 & ~0x92);
+	err = icm45_bank_write_byte(ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_59, 0xB6 & ~0x92, SSI_REPORT);
 	if (err) {
 		return err;
 	}
-	err = icm45_bank_write_byte(ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_60, ICM45686_BIT_AUX1_I2CM_MODE);
+	err = icm45_bank_write_byte(
+		ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_60, ICM45686_BIT_AUX1_I2CM_MODE, SSI_REPORT
+	);
 	if (err) {
 		return err;
 	}
@@ -362,7 +359,7 @@ static int icm45_configure_clock_and_pads(float clock_rate_hz)
 	if (err) {
 		return err;
 	}
-	err = icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_SREG_CTRL, 0x02); // big endian
+	err = icm45_bank_write_byte(ICM45686_IPREG_TOP1, ICM45686_SREG_CTRL, 0x02, SSI_REPORT); // big endian
 	if (err) {
 		return err;
 	}
@@ -383,7 +380,7 @@ int icm45_init(
 
 	int err = 0;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	err = icm45_ext_drain_read_ahead();
+	err = icm45_ext_drain_read_ahead(SSI_REPORT);
 	if (err) {
 		return err;
 	}
@@ -480,25 +477,16 @@ int icm45_init(
 
 void icm45_shutdown(void)
 {
-	int err = 0;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	err = icm45_ext_drain_read_ahead();
+	icm45_ext_drain_read_ahead(SSI_REPORT);
 #endif
 	icm45_invalidate_odr_cache();
 	fifo_temp_c = 25.0f;
 	fifo_temp_valid = false;
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-	if (err) {
-		LOG_ERR("Failed to stop I2CM: %d", err);
-	}
-#endif
 	// Global reset terminates even a stuck/uncertain GO; unlike command changes,
 	// reset recovery must remain available when the bounded idle drain fails.
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
 	k_msleep(2); // Retain the reset settling delay; its 2 ms margin is not verified here.
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
@@ -640,7 +628,6 @@ int icm45_update_odr(
 
 fail:
 	icm45_invalidate_odr_cache();
-	LOG_ERR("Communication error");
 	return err;
 }
 
@@ -654,7 +641,6 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 	err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &raw_count[0], 2);
 	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_COUNT_0, &raw_count[0], 2);
 	if (err) {
-		LOG_ERR("Failed to read FIFO count");
 		return 0;
 	}
 	uint16_t packets = (uint16_t)(raw_count[0] << 8 | raw_count[1]); // Big-endian frame count.
@@ -676,7 +662,6 @@ uint16_t icm45_fifo_read(uint8_t *data, uint16_t len)
 	uint16_t count = packets * ICM45686_FIFO_PACKET_SIZE;
 	err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_DATA, data, count, ICM45686_FIFO_PACKET_SIZE);
 	if (err) {
-		LOG_ERR("Communication error");
 		return 0;
 	}
 	icm45_cache_fifo_temp(data, packets);
@@ -766,7 +751,6 @@ void icm45_accel_read(float a[3])
 	uint8_t raw_accel[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_ACCEL_DATA_X1_UI, &raw_accel[0], 6);
 	if (err) {
-		LOG_ERR("Communication error");
 		memset(a, 0, 3 * sizeof(*a));
 		return;
 	}
@@ -782,7 +766,6 @@ void icm45_gyro_read(float g[3])
 	uint8_t raw_gyro[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_GYRO_DATA_X1_UI, &raw_gyro[0], 6);
 	if (err) {
-		LOG_ERR("Communication error");
 		memset(g, 0, 3 * sizeof(*g));
 		return;
 	}
@@ -802,7 +785,6 @@ float icm45_temp_read(void)
 	uint8_t raw_temp[2];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM45686_TEMP_DATA1_UI, &raw_temp[0], 2);
 	if (err) {
-		LOG_ERR("Communication error");
 		return NAN;
 	}
 	// Temperature in Degrees Centigrade = (TEMP_DATA / 128) + 25
@@ -819,11 +801,8 @@ uint8_t icm45_setup_DRDY(uint16_t threshold)
 	uint8_t buf[2];
 	buf[0] = threshold & 0xFF;
 	buf[1] = threshold >> 8;
-	int err = ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG1_0, buf, 2);
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG0, 0x02); // FIFO threshold interrupt
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, ICM45686_FIFO_CONFIG1_0, buf, 2);
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_INT1_CONFIG0, 0x02); // FIFO threshold interrupt
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 }
 
@@ -831,7 +810,7 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 {
 	int err = 0;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	err = icm45_ext_drain_read_ahead();
+	err = icm45_ext_drain_read_ahead(SSI_REPORT);
 	if (err) {
 		goto fail;
 	}
@@ -869,13 +848,13 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 		goto fail;
 	}
 	// ACCEL_LP_AVG_SEL=1x; leave the default AULP clock unchanged.
-	err = icm45_bank_write_byte(ICM45686_IPREG_SYS2, ICM45686_IPREG_SYS2_REG_129, 0x00);
+	err = icm45_bank_write_byte(ICM45686_IPREG_SYS2, ICM45686_IPREG_SYS2_REG_129, 0x00, SSI_REPORT);
 	if (err) {
 		goto fail;
 	}
 	// Three individually spaced DATA writes: 7 x 3.9 mg is ~27.3 mg.
 	const uint8_t thresholds[3] = {0x07, 0x07, 0x07};
-	err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_ACCEL_WOM_X_THR, thresholds, sizeof(thresholds));
+	err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_ACCEL_WOM_X_THR, thresholds, sizeof(thresholds), SSI_REPORT);
 	if (err) {
 		goto fail;
 	}
@@ -890,17 +869,16 @@ uint8_t icm45_setup_WOM(void) // TODO: check if working
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW;
 
 fail:
-	LOG_ERR("WOM setup failed: %d", err);
 	return 0xFF;
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 /** Capture the terminal STATUS once: DONE is cleared by a STATUS read. */
-static int icm45_i2cm_wait_done(uint8_t *status)
+static int icm45_i2cm_wait_done(uint8_t *status, enum ssi_reporting reporting)
 {
 	int64_t deadline = k_uptime_get() + 10;
 	for (;;) {
-		int err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, status);
+		int err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, status, reporting);
 		if (err) {
 			return err;
 		}
@@ -908,6 +886,9 @@ static int icm45_i2cm_wait_done(uint8_t *status)
 			return 0;
 		}
 		if (k_uptime_get() >= deadline) {
+			if (reporting == SSI_REPORT) {
+				LOG_ERR("I2CM busy timeout");
+			}
 			return -ETIMEDOUT;
 		}
 	}
@@ -917,7 +898,7 @@ static int icm45_i2cm_wait_done(uint8_t *status)
 static int icm45_i2cm_complete(void)
 {
 	uint8_t status;
-	int err = icm45_i2cm_wait_done(&status);
+	int err = icm45_i2cm_wait_done(&status, SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
@@ -932,7 +913,7 @@ static int icm45_i2cm_complete(void)
 	}
 
 	uint8_t dev_status;
-	err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status);
+	err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status, SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
@@ -940,16 +921,16 @@ static int icm45_i2cm_complete(void)
 }
 
 /** Drain even an uncertain GO before changing its command; discarded data is never reused. */
-static int icm45_ext_drain_read_ahead(void)
+static int icm45_ext_drain_read_ahead(enum ssi_reporting reporting)
 {
 	ext_read_ahead_active = false;
 	uint8_t status;
-	return icm45_i2cm_wait_done(&status);
+	return icm45_i2cm_wait_done(&status, reporting);
 }
 
 static int icm45_ext_set_prefetch(bool enabled)
 {
-	int err = icm45_ext_drain_read_ahead();
+	int err = icm45_ext_drain_read_ahead(SSI_UNREPORTED);
 	if (!err) {
 		ext_prefetch_enabled = enabled;
 	}
@@ -967,24 +948,25 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	uint8_t saved_reg = ext_read_ahead_reg;
 	uint8_t saved_len = ext_read_ahead_len;
 
-	int err = icm45_ext_drain_read_ahead();
+	int err = icm45_ext_drain_read_ahead(SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
 
 	uint8_t dev_profile[2] = {0x00, addr};
-	err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2);
+	err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2, SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
-	err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_I2CM_WR_DATA_0, buf, num_bytes);
+	err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_I2CM_WR_DATA_0, buf, num_bytes, SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
 	err = icm45_bank_write_byte(
 		ICM45686_IPREG_TOP1,
 		ICM45686_I2CM_COMMAND_0,
-		ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_WRITE | num_bytes
+		ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_WRITE | num_bytes,
+		SSI_UNREPORTED
 	);
 	if (err) {
 		return err;
@@ -992,7 +974,8 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	err = icm45_bank_write_byte(
 		ICM45686_IPREG_TOP1,
 		ICM45686_I2CM_CONTROL,
-		ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
+		ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
+		SSI_UNREPORTED
 	);
 	if (err) {
 		return err;
@@ -1005,14 +988,15 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	// Restore one-ahead reads only for sensors that permit background acquisition.
 	if (had_read_ahead && ext_prefetch_enabled) {
 		uint8_t rd_profile[2] = {saved_reg, saved_addr};
-		err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2);
+		err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2, SSI_UNREPORTED);
 		if (err) {
 			return err;
 		}
 		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_COMMAND_0,
-			ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | saved_len
+			ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | saved_len,
+			SSI_UNREPORTED
 		);
 		if (err) {
 			return err;
@@ -1020,7 +1004,8 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_CONTROL,
-			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
+			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
+			SSI_UNREPORTED
 		);
 		if (err) {
 			return err;
@@ -1046,19 +1031,20 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 	ext_read_ahead_active = false;
 	int err;
 	if (!matching) {
-		err = icm45_ext_drain_read_ahead();
+		err = icm45_ext_drain_read_ahead(SSI_UNREPORTED);
 		if (err) {
 			return err;
 		}
 		uint8_t dev_profile[2] = {reg_addr, addr};
-		err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2);
+		err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2, SSI_UNREPORTED);
 		if (err) {
 			return err;
 		}
 		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_COMMAND_0,
-			ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | num_read
+			ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | num_read,
+			SSI_UNREPORTED
 		);
 		if (err) {
 			return err;
@@ -1066,7 +1052,8 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_CONTROL,
-			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
+			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
+			SSI_UNREPORTED
 		);
 		if (err) {
 			return err;
@@ -1077,7 +1064,7 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 	if (err) {
 		return err;
 	}
-	err = icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read);
+	err = icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read, SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
@@ -1086,7 +1073,8 @@ int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_w
 		err = icm45_bank_write_byte(
 			ICM45686_IPREG_TOP1,
 			ICM45686_I2CM_CONTROL,
-			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO
+			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
+			SSI_UNREPORTED
 		);
 		// A failed GO may have reached hardware. Report it and drain on the next call.
 		if (err) {
@@ -1109,7 +1097,7 @@ const sensor_ext_ssi_t sensor_ext_icm45686 = {
 
 int icm45_ext_setup(enum sensor_ext_mode mode)
 {
-	int err = icm45_ext_drain_read_ahead();
+	int err = icm45_ext_drain_read_ahead(SSI_REPORT);
 	if (err) {
 		return err;
 	}
@@ -1120,9 +1108,6 @@ int icm45_ext_setup(enum sensor_ext_mode mode)
 			ICM45686_IOC_PAD_SCENARIO_AUX_OVRD,
 			mode == SENSOR_EXT_MODE_I2C_PASSTHROUGH ? 0x18 : 0x00
 		);
-		if (err) {
-			LOG_ERR("Communication error");
-		}
 		return err;
 	}
 
@@ -1149,7 +1134,9 @@ int icm45_ext_setup(enum sensor_ext_mode mode)
 		k_msleep(1);
 	}
 
-	err = icm45_bank_write_byte(ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_60, ICM45686_BIT_AUX1_I2CM_MODE);
+	err = icm45_bank_write_byte(
+		ICM45686_IPREG_BAR, ICM45686_IPREG_BAR_REG_60, ICM45686_BIT_AUX1_I2CM_MODE, SSI_REPORT
+	);
 	if (err) {
 		return err;
 	}
@@ -1159,7 +1146,6 @@ int icm45_ext_setup(enum sensor_ext_mode mode)
 	}
 	err = ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC1, 0x0F, 0x02);
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 

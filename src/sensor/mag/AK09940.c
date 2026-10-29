@@ -27,10 +27,7 @@ void ak_shutdown(void)
 	last_mode_code = 0xff; // invalidate mode cache
 	oneshot_pending = false;
 	oneshot_failed = false;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL4, 0x01);
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL4, 0x01);
 }
 
 int ak_update_odr(float period_s, float *actual_period_s)
@@ -82,7 +79,6 @@ int ak_update_odr(float period_s, float *actual_period_s)
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL3, MT_LND2 << 5 | mode_code);
 	if (err) {
 		last_mode_code = 0xff;
-		LOG_ERR("Communication error");
 		return err;
 	}
 
@@ -104,9 +100,6 @@ void ak_mag_oneshot(void)
 	oneshot_trigger_ms = k_uptime_get();
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool ak_mag_read(float m[3])
@@ -123,7 +116,6 @@ bool ak_mag_read(float m[3])
 		while (true) {
 			int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, AK09940_ST1, frame, sizeof(frame));
 			if (err) {
-				LOG_ERR("Communication error");
 				oneshot_pending = false;
 				return false;
 			}
@@ -140,7 +132,6 @@ bool ak_mag_read(float m[3])
 	} else {
 		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, AK09940_ST1, frame, sizeof(frame));
 		if (err) {
-			LOG_ERR("Communication error");
 			return false;
 		}
 		if (!(frame[0] & AK09940_ST1_DRDY)) {
@@ -168,7 +159,6 @@ float ak_temp_read(float bias[3])
 	uint8_t rawTemp;
 	int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_TMPS, &rawTemp);
 	if (err) {
-		LOG_ERR("Communication error");
 		return NAN;
 	}
 	// Temperature [˚C] = 30 – (TMPS) / 1.7

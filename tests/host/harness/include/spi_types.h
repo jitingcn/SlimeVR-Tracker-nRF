@@ -3,13 +3,16 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "device_types.h"
 
 struct spi_config {
 	uint32_t frequency;
+	uint16_t slave;
 };
 
 struct spi_dt_spec {
 	struct spi_config config;
+	const struct device *bus;
 };
 
 struct spi_buf {

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "sensor/mag/ICT153xx.h"
+#include "sensor/interface_internal.h"
 
 /* DS000548 register model, not an SSI call transcript. No analogue offsets,
  * electrical bus timing, or real IMU proxy implementation are simulated. */
@@ -212,6 +213,12 @@ int ssi_burst_read(enum sensor_interface_dev dev, uint8_t reg, uint8_t *data, ui
 		return -EIO;
 	}
 	return read_registers(reg, data, len);
+}
+int ssi_burst_read_io(enum sensor_interface_dev dev, uint8_t reg, uint8_t *data,
+	uint32_t len, enum ssi_reporting reporting)
+{
+	assert(reporting == SSI_UNREPORTED);
+	return ssi_burst_read(dev, reg, data, len);
 }
 int ssi_reg_read_byte(enum sensor_interface_dev dev, uint8_t reg, uint8_t *value)
 {

@@ -31,7 +31,6 @@ int mmc5603_init(float period_s, float *actual_period_s)
 
 	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_CONTROL_0, MCTRL0_AUTO_SR_EN);
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 
@@ -52,14 +51,11 @@ void mmc5603_shutdown(void)
 	oneshot_trigger_ms = 0;
 	oneshot_pending = false;
 	oneshot_failed = false;
-	int err = ssi_reg_write_byte(
+	ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_MAG,
 		MMC5603NJ_CONTROL_1,
 		MCTRL1_SW_RESET
 	); // Reset completion is not polled here.
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 int mmc5603_update_odr(float period_s, float *actual_period_s)
@@ -160,7 +156,6 @@ int mmc5603_update_odr(float period_s, float *actual_period_s)
 
 error:
 	last_state = 0xffff;
-	LOG_ERR("Communication error");
 	return err;
 }
 
@@ -178,9 +173,6 @@ void mmc5603_mag_oneshot(void)
 	oneshot_failed = err != 0;
 	oneshot_pending = true;
 	oneshot_trigger_ms = k_uptime_get();
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool mmc5603_mag_read(float m[3])
@@ -197,7 +189,6 @@ bool mmc5603_mag_read(float m[3])
 		while (!(status & MSTAT_MEAS_M_DONE)) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_STATUS, &status);
 			if (err) {
-				LOG_ERR("Communication error");
 				oneshot_pending = false;
 				return false;
 			}
@@ -218,7 +209,6 @@ bool mmc5603_mag_read(float m[3])
 		9
 	); // Read the 9 raw data registers into data array
 	if (err) {
-		LOG_ERR("Communication error");
 		return false;
 	}
 	mmc5603_mag_process(rawData, m);
@@ -232,7 +222,6 @@ float mmc5603_temp_read(float bias[3])
 	uint8_t rawTemp;
 	int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_TOUT, &rawTemp);
 	if (err) {
-		LOG_ERR("Communication error");
 		return NAN;
 	}
 	// Temperature output, unsigned format. The range is -75~125°C, about 0.8°C/LSB, 00000000 stands for -75°C
@@ -273,7 +262,6 @@ float mmc5603_temp_read(float bias[3])
 		auto_set_reset = true;
 		int restore_err = mmc5603_update_odr(restore_period_s, &actual_period_s);
 		if (err || restore_err) {
-			LOG_ERR("Communication error");
 			return NAN;
 		}
 		memcpy(bias, new_bias, sizeof(new_bias));
@@ -283,7 +271,6 @@ float mmc5603_temp_read(float bias[3])
 	// enable auto set/reset and trigger measurement
 	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_CONTROL_0, MCTRL0_AUTO_SR_EN | MCTRL0_TAKE_MEAS_T);
 	if (err) {
-		LOG_ERR("Communication error");
 		return NAN;
 	}
 	return temp;
@@ -307,7 +294,6 @@ static int mmc5603_SET(void)
 {
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_CONTROL_0, MCTRL0_DO_SET);
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 	k_busy_wait(1000); // Rev. B, p. 15: t_SR >= 1 ms; the SET pulse itself is 375 ns
@@ -318,7 +304,6 @@ static int mmc5603_RESET(void)
 {
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_CONTROL_0, MCTRL0_DO_RESET);
 	if (err) {
-		LOG_ERR("Communication error");
 		return err;
 	}
 	k_busy_wait(1000); // Rev. B, p. 15: t_SR >= 1 ms; the RESET pulse itself is 375 ns

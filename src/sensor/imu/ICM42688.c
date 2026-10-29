@@ -125,7 +125,6 @@ int icm_init(
 		uint8_t raw_count[2];
 		int probe_err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, ICM42688_FIFO_COUNTH, raw_count, 2);
 		if (probe_err) {
-			LOG_ERR("Failed to read CLKIN probe");
 			return probe_err;
 		}
 		uint16_t fifo_count = (uint16_t)(raw_count[0] << 8 | raw_count[1]);
@@ -148,9 +147,6 @@ int icm_init(
 		}
 	}
 
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 	return (err < 0 ? err : 0);
 }
 
@@ -161,14 +157,11 @@ void icm_shutdown(void)
 	last_gyro_odr = 0xff;  // reset last odr
 	last_accel_mode = 0xff;
 	last_gyro_mode = 0xff;
-	int err = ssi_reg_write_byte(
+	ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		ICM42688_DEVICE_CONFIG,
 		0x01
 	); // Don't need to wait for ICM to finish reset
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 void icm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
@@ -266,7 +259,6 @@ int icm_update_odr(float accel_period_s, float gyro_period_s, float *accel_actua
 		last_gyro_odr = 0xff;
 		last_accel_mode = 0xff;
 		last_gyro_mode = 0xff;
-		LOG_ERR("Communication error");
 		return err;
 	}
 
@@ -373,7 +365,6 @@ restore_bank:
 	return NRF_GPIO_PIN_PULLUP << 4 | NRF_GPIO_PIN_SENSE_LOW; // active low
 
 fail:
-	LOG_ERR("Communication error");
 	return 0xFF;
 }
 

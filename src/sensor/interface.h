@@ -45,6 +45,7 @@ enum sensor_interface_spec
 };
 
 typedef struct sensor_ext_ssi {
+	/* Transfers are unreported. The caller owns any operation-level diagnostic. */
 	int (*ext_write)(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes);
 	/* Single I2CM transaction: write num_write bytes (a register address), then
 	 * read num_read register-data bytes. num_read counts register data only;
@@ -55,8 +56,8 @@ typedef struct sensor_ext_ssi {
 	 * than this are segmented by the interface layer (sub-register advanced by
 	 * the number of data bytes already read). */
 	uint8_t ext_burst;
-	/* Optional policy hook. Disabling must quiesce pending background reads
-	 * before returning success. NULL means a synchronous-only backend. */
+	/* Optional unreported policy hook. Disabling must quiesce pending
+	 * background reads before success. NULL means a synchronous-only backend. */
 	int (*ext_set_prefetch)(bool enabled);
 } sensor_ext_ssi_t;
 

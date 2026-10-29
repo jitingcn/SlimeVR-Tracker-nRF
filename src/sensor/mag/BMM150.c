@@ -75,7 +75,6 @@ int bmm1_init(float period_s, float *actual_period_s)
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_POWER_CTRL, 0x01);
 	if (err) {
-		LOG_ERR("Communication error");
 		return (err < 0 ? err : 0);
 	}
 	k_msleep(2); // BMM150 start-up
@@ -94,10 +93,7 @@ void bmm1_shutdown(void)
 	last_config_code = 0xff; // invalidate configuration cache
 	oneshot_pending = false;
 	oneshot_failed = false;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_POWER_CTRL, 0x00);
-	if (err) {
-		LOG_ERR("Communication error");
-	}
+	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_POWER_CTRL, 0x00);
 }
 
 int bmm1_update_odr(float period_s, float *actual_period_s)
@@ -185,7 +181,6 @@ int bmm1_update_odr(float period_s, float *actual_period_s)
 	return 0;
 error:
 	last_config_code = 0xff;
-	LOG_ERR("Communication error");
 	return err;
 }
 
@@ -197,9 +192,6 @@ void bmm1_mag_oneshot(void)
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
 	oneshot_deadline_ms = k_uptime_get() + (measurement_us + 999U) / 1000U + 1;
-	if (err) {
-		LOG_ERR("Communication error");
-	}
 }
 
 bool bmm1_mag_read(float m[3])
@@ -216,7 +208,6 @@ bool bmm1_mag_read(float m[3])
 		while (true) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_OP_CTRL, &status);
 			if (err) {
-				LOG_ERR("Communication error");
 				oneshot_pending = false;
 				return false;
 			}
@@ -236,7 +227,6 @@ bool bmm1_mag_read(float m[3])
 		uint8_t status = 0;
 		int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, BMM150_DATA_READY_STATUS, &status);
 		if (err) {
-			LOG_ERR("Communication error");
 			return false;
 		}
 		if (!(status & BMM150_DATA_READY_MASK)) {
@@ -246,7 +236,6 @@ bool bmm1_mag_read(float m[3])
 	uint8_t rawData[8];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, BMM150_DATAX_LSB, &rawData[0], 8);
 	if (err) {
-		LOG_ERR("Communication error");
 		return false;
 	}
 	if ((rawData[1] == 0x80 && (rawData[0] & 0xF8) == 0) ||
@@ -305,7 +294,6 @@ static int read_trim_registers(void)
 	return 0;
 
 error:
-	LOG_ERR("Communication error");
 	return err;
 }
 

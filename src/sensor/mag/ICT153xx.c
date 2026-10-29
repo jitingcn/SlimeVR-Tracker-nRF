@@ -5,6 +5,7 @@
 #include <zephyr/logging/log.h>
 
 #include "ICT153xx.h"
+#include "sensor/interface_internal.h"
 
 /* TDK DS-000548 rev. 1.0, sections 5, 7 and 10:
  * https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/9004/ICT-153xx.pdf
@@ -56,8 +57,11 @@ static int ict153xx_set_mode(uint8_t ctrl)
 			return err;
 		if ((status & ICT153XX_MODE_MASK) == (ctrl & ICT153XX_MODE_MASK))
 			return 0;
-		if (k_uptime_get() >= deadline)
+		if (k_uptime_get() >= deadline) {
+			LOG_ERR("Mode change timeout: requested 0x%02x, status 0x%02x",
+				(unsigned int)ctrl, (unsigned int)status);
 			return -ETIMEDOUT;
+		}
 	}
 }
 
@@ -119,7 +123,6 @@ static int ict153xx_update_odr(float time, float *actual_time)
 			configured_ctrl = ICT153XX_CONFIG_INVALID;
 			mode_dirty = true;
 			last_temperature = NAN;
-			LOG_ERR("Mode configuration failed: %d", err);
 			return err;
 		}
 		configured_ctrl = ctrl;
@@ -147,7 +150,7 @@ static int ict153xx_init(float time, float *actual_time)
 
 	k_msleep(2); // Table 5: maximum power-on boot time, including OTP download
 	uint8_t id[2];
-	err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, ICT153XX_MANU_ID, id, sizeof(id));
+	err = ssi_burst_read_io(SENSOR_INTERFACE_DEV_MAG, ICT153XX_MANU_ID, id, sizeof(id), SSI_UNREPORTED);
 	if (err) // Section 10.4.1.1 permits NACK on the very first I2C transaction
 		err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, ICT153XX_MANU_ID, id, sizeof(id));
 	if (err)
@@ -182,9 +185,7 @@ static void ict153xx_shutdown(void)
 	last_temperature = NAN;
 	int err = sensor_interface_ext_set_prefetch(false);
 	if (!err)
-		err = ict153xx_set_mode(ctrl & ICT153XX_ODR_MASK);
-	if (err)
-		LOG_ERR("Sleep failed: %d", err);
+		ict153xx_set_mode(ctrl & ICT153XX_ODR_MASK);
 }
 
 static void ict153xx_mag_oneshot(void)
@@ -204,7 +205,6 @@ static void ict153xx_mag_oneshot(void)
 	mode_dirty = err != 0;
 	if (err) {
 		last_temperature = NAN;
-		LOG_ERR("Single-shot trigger failed: %d", err);
 	}
 }
 
@@ -291,7 +291,6 @@ static bool ict153xx_mag_read(float m[3])
 			reset_needed = err != 0;
 			if (err) {
 				last_temperature = NAN;
-				LOG_ERR("Magnetic reset failed: %d", err);
 			}
 		}
 		return false;
