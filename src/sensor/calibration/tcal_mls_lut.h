@@ -51,8 +51,9 @@ typedef enum {
 void sensor_tcal_lock(void);
 void sensor_tcal_unlock(void);
 uint32_t sensor_tcal_model_generation(void);
-/* Call after a model mutation, before releasing its lock. Does not clear D. */
-void sensor_tcal_model_changed(void);
+/* Model owner publishes one mutation; finite current temperature takes priority
+ * over the last remembered temperature. Does not clear D. */
+void sensor_tcal_model_changed(float current_temp);
 
 int sensor_tcal_mls_lookup(float temp, float bias_out[3]);
 /*

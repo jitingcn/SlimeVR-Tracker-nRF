@@ -280,7 +280,7 @@ static void quality_points(void) {
     retained->tempCalState.valid = true;
     for (unsigned i = 0; i < 5; ++i) retained->tempCalPoints[i].temp = 23.0f + i;
     update_curve_points();
-    sensor_tcal_model_changed();
+    sensor_tcal_model_changed(temperature);
 }
 static void expect_terminal(uint8_t outcome, uint8_t phase, uint8_t reason) {
     assert(terminal_count == 1);

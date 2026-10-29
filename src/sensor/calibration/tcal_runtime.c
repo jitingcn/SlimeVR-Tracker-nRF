@@ -164,17 +164,13 @@ void sensor_tcal_clear_doffset(void)
 void sensor_tcal_refresh_model(void)
 {
 	sensor_tcal_clear_doffset();
-	sensor_tcal_model_changed();
+	sensor_tcal_model_changed(sensor_get_current_imu_temperature());
 	if (tcal_compensation_enabled &&
 	    (tcal_curve_apply_ready || retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT)) {
 		reference_generation++;
 		retained->fusion_id = 0;
 	}
 	sensor_tcal_refresh_apply_cache();
-	float temp = sensor_get_current_imu_temperature();
-	if (v_finite(&temp, 1)) {
-		sensor_tcal_build_lut_priority(temp);
-	}
 }
 
 tcal_temp_direction_t tcal_current_direction = TCAL_DIR_UNKNOWN;
@@ -340,14 +336,6 @@ void update_tcal_state(void)
 	if (retained->tempCalState.valid) {
 		LOG_INF("T-Cal: MLS state refreshed with %u points", retained->tempCalState.count);
 		printk("T-Cal: MLS data refreshed successfully.\n");
-
-		// Start incremental LUT build for O(1) runtime lookup
-		// Priority zone (current temp ±3°C) is built immediately
-		// Remaining entries are built in background by calibration_thread
-		float current_temp = sensor_get_current_imu_temperature();
-		if (!isnan(current_temp)) {
-			sensor_tcal_build_lut_priority(current_temp);
-		}
 	} else {
 		LOG_INF("T-Cal: No points available");
 		printk("T-Cal: No points available.\n");

@@ -94,7 +94,7 @@ static void seed(void) {
         for (int axis = 0; axis < 3; axis++)
             retained->tempCalPoints[i].bias[axis] = temp * (axis + 1);
     }
-    sensor_tcal_model_changed();
+    sensor_tcal_model_changed(NAN);
     sensor_tcal_unlock();
 }
 static void finish(void) {
@@ -124,7 +124,7 @@ static void replace_between_entries(void) {
     for (int i = 0; i < 4; i++)
         for (int axis = 0; axis < 3; axis++)
             retained->tempCalPoints[i].bias[axis] = 77.0f + axis;
-    sensor_tcal_model_changed();
+    sensor_tcal_model_changed(NAN);
     sensor_tcal_unlock();
 }
 /* Nonlinear, nonuniform fixture from the confirmed production-path audit.
@@ -148,7 +148,7 @@ static void seed_nonlinear(void) {
                 base[axis] + u * linear[axis] + u * u * quadratic[axis]
                 + u * u * u * cubic[axis]);
     }
-    sensor_tcal_model_changed();
+    sensor_tcal_model_changed(NAN);
     sensor_tcal_unlock();
 }
 static void expect_exact(const float actual[3], const float expected[3]) {
@@ -190,7 +190,7 @@ static void literal_curve(void) {
         retained->tempCalPoints[i].bias[1] = t * t * .00001f;
         retained->tempCalPoints[i].bias[2] = t * -.0007f;
     }
-    sensor_tcal_model_changed();
+    sensor_tcal_model_changed(NAN);
     sensor_tcal_unlock();
     uint32_t generation = sensor_tcal_model_generation();
     float actual[3];
@@ -334,7 +334,7 @@ static void curve_generation(void) {
     for (int i = 0; i < TCAL_BUFFER_SIZE; i++)
         for (int axis = 0; axis < 3; axis++)
             retained->tempCalPoints[i].bias[axis] += 7.0f;
-    sensor_tcal_model_changed();
+    sensor_tcal_model_changed(NAN);
     sensor_tcal_unlock();
     assert(retained->tempCalState.count == TCAL_BUFFER_SIZE);
     assert(sensor_tcal_model_generation() == generation + 1);
@@ -375,7 +375,7 @@ int main(int argc, char **argv) {
             for (int axis = 0; axis < 3; axis++)
                 retained->tempCalPoints[i].bias[axis] += 7.0f;
         }
-        sensor_tcal_model_changed();
+        sensor_tcal_model_changed(NAN);
         sensor_tcal_unlock();
         assert(sensor_tcal_model_generation() == generation + 1);
         expect(25.0f, 23.0f, 7, false);
@@ -404,7 +404,7 @@ int main(int argc, char **argv) {
         sensor_tcal_lock();
         for (int axis = 0; axis < 3; axis++)
             retained->tempCalPoints[0].bias[axis] += 0.01f;
-        sensor_tcal_model_changed();
+        sensor_tcal_model_changed(NAN);
         sensor_tcal_unlock();
         assert(sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_PRIORITY);
         finish();

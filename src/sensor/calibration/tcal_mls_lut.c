@@ -209,13 +209,17 @@ void sensor_tcal_cache_invalidate(void)
 	sensor_tcal_unlock();
 }
 
-void sensor_tcal_model_changed(void)
+static void sensor_tcal_schedule_lut_locked(float current_temp);
+
+void sensor_tcal_model_changed(float current_temp)
 {
 	sensor_tcal_lock();
 	model_generation++;
 	sensor_tcal_cache_invalidate();
-	if (build_temperature_valid) {
-		sensor_tcal_build_lut_priority(build_temperature);
+	if (v_finite(&current_temp, 1)) {
+		sensor_tcal_schedule_lut_locked(current_temp);
+	} else if (build_temperature_valid) {
+		sensor_tcal_schedule_lut_locked(build_temperature);
 	}
 	sensor_tcal_unlock();
 }
@@ -532,22 +536,13 @@ static bool sensor_tcal_lut_compute_entry(int idx)
 	return false;
 }
 
-/**
- * Schedule priority entries, then the rest of the LUT. No fitting here:
- * callers may request a rebuild directly from the gyro collector.
- */
-void sensor_tcal_build_lut_priority(float current_temp)
+/* Model lock held. Schedule the current ±2C priority zone without fitting.
+ * The caller has already invalidated this generation's cache. */
+static void sensor_tcal_schedule_lut_locked(float current_temp)
 {
-	if (!v_finite(&current_temp, 1)) {
-		return;
-	}
-
-	sensor_tcal_lock();
 	build_temperature = current_temp;
 	build_temperature_valid = true;
-	sensor_tcal_cache_invalidate();
 	if (retained->tempCalState.count < MLS_MIN_POINTS_FOR_FIT) {
-		sensor_tcal_unlock();
 		return;
 	}
 
@@ -563,6 +558,20 @@ void sensor_tcal_build_lut_priority(float current_temp)
 	}
 	mls_lut.build_next_idx = mls_lut.priority_idx_min;
 	mls_lut.build_state = MLS_LUT_BUILD_PRIORITY;
+}
+
+/**
+ * Explicitly rebuild priority entries, then the rest of the LUT. No fitting
+ * here; callers may request a rebuild directly from the gyro collector.
+ */
+void sensor_tcal_build_lut_priority(float current_temp)
+{
+	if (!v_finite(&current_temp, 1)) {
+		return;
+	}
+	sensor_tcal_lock();
+	sensor_tcal_cache_invalidate();
+	sensor_tcal_schedule_lut_locked(current_temp);
 	sensor_tcal_unlock();
 }
 
