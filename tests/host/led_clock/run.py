@@ -25,14 +25,17 @@ macros = []
 for source, names in ((tdma, ("TDMA_UNPACK_SLOT", "TDMA_UNPACK_STICKS", "TDMA_UNPACK_FRAME", "TDMA_MIN_SAFE_SLOT_TICKS", "TDMA_SYNC_STALE_MS")),
                       ((SRC / "esb.h").read_text(), ("PING_INTERVAL_MS",)),
                       ((SRC / "tdma.h").read_text(), ("TDMA_MAX_TRACKERS",)),
-                      (esb, ("TIME_SYNC_TIMEOUT_MS",))):
+                      (esb, ("TIME_SYNC_TIMEOUT_MS", "SKEW_REF_REFRESH_TICKS", "SYNC_WARM_UP_COUNT"))):
     for name in names:
         macros.append(re.search(r"^#define " + name + r"\b[^\n]*", source, re.M).group())
 config = extract_block(tdma, r"^struct tdma_config \{", True)
 clock = extract_block((SRC / "esb.h").read_text(), r"^struct esb_network_clock \{", True)
 production = "\n".join(macros + [config, clock, function(tdma, "tdma_config_snapshot"),
     function(tdma, "tdma_status_clock_max_age_ms"), function(esb, "net_ticks_from_kernel64"),
-    function(esb, "net_tick_difference"), function(esb, "esb_project_network_ticks"),
+    function(esb, "net_tick_difference"),
+    extract_block(esb, r"^struct esb_sync_sample \{", True),
+    function(esb, "esb_sync_filter_update"), function(esb, "esb_clear_time_sync_state"),
+    function(esb, "esb_project_network_ticks"),
     function(esb, "esb_get_status_clock"),
     function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms")])
 with tempfile.TemporaryDirectory(prefix="tracker-led-clock-") as directory:

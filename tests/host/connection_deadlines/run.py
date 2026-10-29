@@ -53,13 +53,22 @@ static unsigned irq_lock(void) { return 0; }
 static void irq_unlock(unsigned key) { (void)key; }
 static bool server_time_synced;
 static int64_t g_last_sync_timestamp;
-static uint32_t g_server_ticks_offset, g_last_sync_local_ticks;
-static int32_t g_clock_skew_ppb;
+struct esb_sync_filter {
+	uint32_t offset;
+	uint32_t last_local_ticks;
+	uint32_t reference_offset;
+	uint32_t reference_local_ticks;
+	int32_t skew_ppb;
+	uint32_t update_count;
+	bool initialized;
+};
+static struct esb_sync_filter sync_filter;
+
 static uint32_t receiver_tick(void) { return (uint32_t)(virtual_us * 32768 / 1000000) + clock_offset; }
 static uint64_t k_uptime_ticks(void) {
     server_time_synced = sync_age >= 0;
     g_last_sync_timestamp = (int64_t)(virtual_us / 1000) - sync_age;
-    g_server_ticks_offset = clock_offset;
+    sync_filter.offset = clock_offset;
     return virtual_us;
 }
 static uint64_t k_ticks_to_ms_floor64(uint64_t ticks) { return ticks / 1000; }

@@ -905,23 +905,22 @@ static inline uint64_t kernel_ticks_extend32(uint32_t short_ticks)
 }
 
 
-/* 32768 Hz network ticks -> milliseconds (floor), platform-independent. */
-static inline uint32_t net_ticks_to_ms_32(uint32_t net_ticks)
-{
-	return (uint32_t)(((uint64_t)net_ticks * 1000ULL) / 32768ULL);
-}
+struct esb_sync_filter {
+	uint32_t offset;
+	uint32_t last_local_ticks;
+	uint32_t reference_offset;
+	uint32_t reference_local_ticks;
+	int32_t skew_ppb;
+	uint32_t update_count;
+	bool initialized;
+};
+static struct esb_sync_filter sync_filter;
 
-static uint32_t g_server_ticks_offset = 0;
 static uint32_t g_last_rx_raw_ticks = 0;
-static uint32_t g_last_sync_local_ticks = 0;
-static bool g_time_initialized = false;
 static int64_t g_last_sync_timestamp = 0;
 #define TIME_SYNC_TIMEOUT_MS 15000
 
 // Clock skew compensation (tracker vs receiver crystal frequency difference)
-static int32_t g_clock_skew_ppb = 0;         // Estimated clock skew in parts per billion
-static uint32_t g_skew_ref_offset = 0;       // Offset bits at skew reference point
-static uint32_t g_skew_ref_local_ticks = 0;  // Local ticks at skew reference point (updated infrequently)
 #define SKEW_REF_REFRESH_TICKS (60 * 32768)  // Refresh skew reference every ~60s
 
 // Minimum RTT tracking for PONG acceptance threshold and diagnostics.
@@ -934,7 +933,6 @@ static uint32_t g_min_rtt_age = 0; // PONGs since last min_rtt update
 #define RECEIVER_RESTART_BACKWARD_TICKS (32768U * 2U)
 static uint32_t receiver_restart_detections;
 // Warm-up counter: first few PONGs use faster EMA for quick convergence
-static uint32_t g_sync_update_count = 0;
 #define SYNC_WARM_UP_COUNT 5
 
 // Track last sent packet for TX_FAILED diagnostics
@@ -1110,19 +1108,77 @@ static void esb_start_queued_tx(void)
 	}
 }
 
+struct esb_sync_sample {
+	uint32_t local_ticks;
+	uint32_t offset;
+};
+
+static int64_t esb_sync_filter_update(
+	struct esb_sync_filter *state, const struct esb_sync_sample *sample
+)
+{
+	int64_t innovation = 0;
+	uint32_t prev_sync_local_ticks = state->last_local_ticks;
+	state->last_local_ticks = sample->local_ticks;
+
+	if (!state->initialized) {
+		state->offset = sample->offset;
+		state->reference_offset = sample->offset;
+		state->reference_local_ticks = sample->local_ticks;
+		state->update_count = 0;
+		state->initialized = true;
+	} else {
+		uint32_t delta_from_ref = sample->local_ticks - state->reference_local_ticks;
+		int64_t predicted_drift = (int64_t)state->skew_ppb
+			* delta_from_ref / 1000000000LL;
+		uint32_t predicted_offset = state->reference_offset + (uint32_t)predicted_drift;
+		innovation = net_tick_difference(sample->offset, predicted_offset);
+		if (innovation > 32000 || innovation < -32000) {
+			state->offset = sample->offset;
+			state->reference_offset = sample->offset;
+			state->reference_local_ticks = sample->local_ticks;
+			state->skew_ppb = 0;
+		} else {
+			if (delta_from_ref >= 32768) {
+				int64_t total_drift = net_tick_difference(sample->offset, state->reference_offset);
+				int64_t raw_skew_ppb = total_drift * 1000000000LL / delta_from_ref;
+				int64_t filtered_skew = (int64_t)state->skew_ppb
+					+ (raw_skew_ppb - state->skew_ppb) / 4;
+				state->skew_ppb = (int32_t)CLAMP(filtered_skew, INT32_MIN, INT32_MAX);
+			}
+			state->update_count++;
+			uint32_t delta_since_sync = sample->local_ticks - prev_sync_local_ticks;
+			uint32_t predicted_current = state->offset
+				+ (uint32_t)((int64_t)state->skew_ppb * delta_since_sync / 1000000000LL);
+			int64_t offset_innovation = net_tick_difference(sample->offset, predicted_current);
+			if (state->update_count <= SYNC_WARM_UP_COUNT) {
+				state->offset = predicted_current + (uint32_t)((offset_innovation * 3 + 2) / 4);
+			} else {
+				state->offset = predicted_current + (uint32_t)((offset_innovation + 2) / 4);
+			}
+			if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
+				state->reference_offset = sample->offset;
+				state->reference_local_ticks = sample->local_ticks;
+			}
+		}
+	}
+	return innovation;
+}
+
+
 static void esb_clear_time_sync_state(void)
 {
 	server_time_synced = false;
-	g_time_initialized = false;
+	sync_filter.initialized = false;
 	g_last_sync_timestamp = 0;
 	g_last_rx_raw_ticks = 0;
-	g_last_sync_local_ticks = 0;
-	g_server_ticks_offset = 0;
-	g_clock_skew_ppb = 0;
-	g_skew_ref_offset = 0;
-	g_skew_ref_local_ticks = 0;
+	sync_filter.last_local_ticks = 0;
+	sync_filter.offset = 0;
+	sync_filter.skew_ppb = 0;
+	sync_filter.reference_offset = 0;
+	sync_filter.reference_local_ticks = 0;
 	g_min_rtt_ticks = 10;
-	g_sync_update_count = 0;
+	sync_filter.update_count = 0;
 }
 
 
@@ -1505,7 +1561,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			}
 		} else if (ping_history_valid) {
 			uint32_t rx_difference = ping_rx_ticks - g_last_rx_raw_ticks;
-			receiver_clock_restarted = g_time_initialized
+			receiver_clock_restarted = sync_filter.initialized
 				&& rx_difference > 0x80000000U
 				&& 0U - rx_difference > RECEIVER_RESTART_BACKWARD_TICKS;
 			if (receiver_clock_restarted) {
@@ -1603,88 +1659,32 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				// min_rtt ages/updates.
 				uint32_t server_offset_ticks = ping_rx_ticks - t4_net_ticks;
 
-				/* Save prior sync stamp before overwrite — EMA predict
-				 * needs elapsed since last accepted PONG, not zero. */
-				uint32_t prev_sync_local_ticks = g_last_sync_local_ticks;
 				g_last_rx_raw_ticks = ping_rx_ticks;
-				g_last_sync_local_ticks = ping_ticks_for_this_ctr;
 				g_last_sync_timestamp = k_uptime_get();
-
-				if (!g_time_initialized) {
-					g_server_ticks_offset = server_offset_ticks;
-					g_skew_ref_offset = server_offset_ticks;
-					g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-					g_sync_update_count = 0;
-					g_time_initialized = true;
-					server_time_synced = true;
-					LOG_DBG("Server offset initialized: %u ticks", server_offset_ticks);
+				struct esb_sync_sample sample = {
+					.local_ticks = ping_ticks_for_this_ctr,
+					.offset = server_offset_ticks,
+				};
+				bool initialized = sync_filter.initialized;
+				uint32_t old_offset = sync_filter.offset;
+				int64_t innovation = esb_sync_filter_update(&sync_filter, &sample);
+				if (!initialized) {
+					LOG_DBG("Server offset initialized: %u ticks", sample.offset);
+				} else if (innovation > 32000 || innovation < -32000) {
+					LOG_WRN(
+						"Large offset jump detected (%lld ticks), resetting (old=%u new=%u)",
+						(long long)innovation, old_offset, sample.offset
+					);
 				} else {
-					uint32_t delta_from_ref = ping_ticks_for_this_ctr - g_skew_ref_local_ticks;
-					int64_t predicted_drift = (int64_t)g_clock_skew_ppb
-						* delta_from_ref / 1000000000LL;
-					uint32_t predicted_offset = g_skew_ref_offset + (uint32_t)predicted_drift;
-					int64_t innovation = net_tick_difference(server_offset_ticks, predicted_offset);
-					if (innovation > 32000 || innovation < -32000) {
-						LOG_WRN(
-							"Large offset jump detected (%lld ticks), resetting (old=%u new=%u)",
-							(long long)innovation,
-							g_server_ticks_offset,
-							server_offset_ticks
-						);
-						g_server_ticks_offset = server_offset_ticks;
-						g_skew_ref_offset = server_offset_ticks;
-						g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-						g_clock_skew_ppb = 0;
-					} else {
-						if (delta_from_ref >= 32768) {
-							int64_t total_drift = net_tick_difference(server_offset_ticks, g_skew_ref_offset);
-							int64_t raw_skew_ppb = total_drift * 1000000000LL / delta_from_ref;
-							int64_t filtered_skew = (int64_t)g_clock_skew_ppb
-								+ (raw_skew_ppb - g_clock_skew_ppb) / 4;
-							g_clock_skew_ppb = (int32_t)CLAMP(filtered_skew, INT32_MIN, INT32_MAX);
-						}
-						g_sync_update_count++;
-						uint32_t delta_since_sync = ping_ticks_for_this_ctr - prev_sync_local_ticks;
-						uint32_t predicted_current = g_server_ticks_offset
-							+ (uint32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
-						int64_t offset_innovation = net_tick_difference(server_offset_ticks, predicted_current);
-						if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
-							g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation * 3 + 2) / 4);
-						} else {
-							g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation + 2) / 4);
-						}
-						if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
-							g_skew_ref_offset = server_offset_ticks;
-							g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-						}
-						LOG_DBG(
-							"Offset update: innovation=%lld offset=%u skew=%d ppb (rtt=%u min=%u)",
-							(long long)innovation, g_server_ticks_offset, g_clock_skew_ppb,
-							rtt_ticks, g_min_rtt_ticks
-						);
-					}
+					LOG_DBG(
+						"Offset update: innovation=%lld offset=%u skew=%d ppb (rtt=%u min=%u)",
+						(long long)innovation, sync_filter.offset, sync_filter.skew_ppb,
+						rtt_ticks, g_min_rtt_ticks
+					);
 				}
 
 				server_time_synced = true;
 
-				// Display skew-compensated estimated server time
-				uint32_t local_now = (uint32_t)net_ticks_from_kernel64(k_uptime_ticks());
-				uint32_t elapsed_since_meas = local_now - ping_ticks_for_this_ctr;
-				int32_t skew_corr = (int32_t)((int64_t)g_clock_skew_ppb * elapsed_since_meas / 1000000000LL);
-				uint32_t est_ticks = g_server_ticks_offset + local_now + (uint32_t)skew_corr;
-				uint32_t server_time_ms = net_ticks_to_ms_32(est_ticks);
-				uint32_t server_ms = server_time_ms % 1000;
-				uint32_t server_s = (server_time_ms / 1000) % 60;
-				uint32_t server_m = (server_time_ms / 60000) % 60;
-				uint32_t server_h = (server_time_ms / 3600000) % 24;
-				LOG_DBG(
-					"estimated server time: %02u:%02u:%02u.%03u (ticks=%u)",
-					server_h,
-					server_m,
-					server_s,
-					server_ms,
-					est_ticks
-				);
 			}
 		} else {
 			// No history found - likely too old or buffer wrapped
@@ -3106,9 +3106,9 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks)
 		&& get_status(SYS_STATUS_CONNECTION_ERROR) == 0;
 	int64_t max_age_ms = tdma_status_clock_max_age_ms();
 	int64_t last_sync_ms = g_last_sync_timestamp;
-	uint32_t offset = g_server_ticks_offset;
-	uint32_t reference_ticks = g_last_sync_local_ticks;
-	int32_t skew_ppb = g_clock_skew_ppb;
+	uint32_t offset = sync_filter.offset;
+	uint32_t reference_ticks = sync_filter.last_local_ticks;
+	int32_t skew_ppb = sync_filter.skew_ppb;
 	irq_unlock(key);
 
 	uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks);
@@ -3129,9 +3129,9 @@ bool esb_get_network_clock(struct esb_network_clock *clock)
 	uint64_t kernel_ticks = k_uptime_ticks();
 	bool synced = server_time_synced;
 	int64_t last_sync_ms = g_last_sync_timestamp;
-	uint32_t offset = g_server_ticks_offset;
-	uint32_t reference_ticks = g_last_sync_local_ticks;
-	int32_t skew_ppb = g_clock_skew_ppb;
+	uint32_t offset = sync_filter.offset;
+	uint32_t reference_ticks = sync_filter.last_local_ticks;
+	int32_t skew_ppb = sync_filter.skew_ppb;
 	irq_unlock(key);
 
 	int64_t age_ms = (int64_t)k_ticks_to_ms_floor64(kernel_ticks) - last_sync_ms;
