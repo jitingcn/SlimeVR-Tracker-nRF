@@ -678,6 +678,7 @@ static void vqf_predictive_predict(void)
 
 static void vqf_predictive_finish_block(void)
 {
+	const double radians_per_degree = 0.017453292519943295;
 	float t = (float)(predictive_bias_policy.block_t / predictive_bias_policy.block_n), g[3];
 	for (int j = 0; j < 3; j++) {
 		g[j] = (float)(predictive_bias_policy.block_g[j] / predictive_bias_policy.block_n);
@@ -695,7 +696,7 @@ static void vqf_predictive_finish_block(void)
 			}
 			predictive_bias_policy.trial_tests++;
 			if (predictive_bias_policy.trial_tests >= 2) {
-				double floor = (double).0002f * .017453292519943295, lc = 0, lm = 0;
+				double floor = (double)0.0002f * radians_per_degree, lc = 0, lm = 0;
 				for (int j = 0; j < 3; j++) {
 					lc += predictive_bias_policy.trial_weight[j] * predictive_bias_policy.trial_const[j];
 					lm += predictive_bias_policy.trial_weight[j] * predictive_bias_policy.trial_model[j];
@@ -753,7 +754,7 @@ static void vqf_predictive_finish_block(void)
 		/* Freeze noise weights with the slope, before any heldout block. */
 		memset(predictive_bias_policy.trial_const, 0, sizeof(predictive_bias_policy.trial_const));
 		memset(predictive_bias_policy.trial_model, 0, sizeof(predictive_bias_policy.trial_model));
-		double floor = (double).0006f * .017453292519943295, sum = 0;
+		double floor = (double)0.0006f * radians_per_degree, sum = 0;
 		for (int j = 0; j < 3; j++) {
 			predictive_bias_policy.trial_weight[j] = 1 / fmax(predictive_bias_policy.noise[j], floor * floor);
 			sum += predictive_bias_policy.trial_weight[j];
