@@ -118,7 +118,8 @@ bool ak_mag_read(float m[3])
 
 	uint8_t frame[12];
 	if (oneshot_pending) {
-		int64_t deadline_ms = oneshot_trigger_ms + 2;
+		/* LND2 takes up to 3.1 ms; allow for the millisecond trigger quantization. */
+		int64_t deadline_ms = oneshot_trigger_ms + 5;
 		while (true) {
 			int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, AK09940_ST1, frame, sizeof(frame));
 			if (err) {

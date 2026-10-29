@@ -1010,6 +1010,41 @@ static int test_modes_ak_powerdown_transitions(void)
 	return 0;
 }
 
+static int test_modes_ak_conversion_deadline(void)
+{
+	reset_driver(&odr_cases[0]);
+	bus.precise_clock = true;
+	bus.now_us = 890;
+	float actual;
+	CHECK(ak_update_odr(INFINITY, &actual) == 0);
+	ak_mag_oneshot();
+	int64_t trigger_us = bus.now_us;
+	CHECK(trigger_us == 990);
+	/* 50 us polls see incomplete at 4040 us, then ready at 4090 us. */
+	bus.transaction_us = 50;
+	bus.ready_at_us = trigger_us + 3100;
+	bus.ready_reg = AK09940_ST1;
+	bus.ready_mask = AK09940_ST1_DRDY;
+	bus.registers[AK09940_HXL] = 10;
+	float m[3] = {1, 2, 3};
+	CHECK(ak_mag_read(m));
+	CHECK(bus.now_us == trigger_us + 3100);
+	CHECK(fabsf(m[0] - 0.001f) < 0.000001f && m[1] == 0 && m[2] == 0);
+	bus.ready_at_us = 0;
+	bus.registers[AK09940_ST1] = 0;
+	ak_mag_oneshot();
+	m[0] = 1; m[1] = 2; m[2] = 3;
+	CHECK(!ak_mag_read(m));
+	CHECK(m[0] == 1 && m[1] == 2 && m[2] == 3);
+	ak_mag_oneshot();
+	fake_bus_clear_transactions();
+	bus.fail_transaction = 1;
+	CHECK(!ak_mag_read(m));
+	CHECK(bus.transaction_count == 1);
+	CHECK(m[0] == 1 && m[1] == 2 && m[2] == 3);
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1050,6 +1085,7 @@ int main(void)
 	static const struct test_case tests[] = {
 		{"BMM350 init and compensation", test_bmm350_init_and_compensation},
 		{"Modes AK powerdown transitions", test_modes_ak_powerdown_transitions},
+		{"Modes AK conversion deadline", test_modes_ak_conversion_deadline},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
