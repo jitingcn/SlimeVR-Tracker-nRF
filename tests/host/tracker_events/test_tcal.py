@@ -342,9 +342,7 @@ static void compensation(const char *scenario) {
         expect_vector(after, before);
         expect_vector(delta, zero);
     } else if (!strcmp(scenario, "write_failure_repeat")) {
-        /* Applying RAM does not make a failed flash write durable. Even after
-         * storage recovers, identical confirmation must report the old failure,
-         * not silently retry. A successful opposite change resets that receipt. */
+        /* Retrying a failed durable write must not repeat the RAM transition. */
         assert(sensor_tcal_get_enabled() && retained->tcal_enabled && durable_tcal_enabled);
         sys_write_error = -EIO;
         unsigned before_first = sys_write_count;
@@ -356,19 +354,27 @@ static void compensation(const char *scenario) {
         const float fallback[3] = {9, 22, 29.5f};
         expect_vector(after, fallback);
         assert(led_requests[LED_APPLIED_NOT_SAVED] == 1 && led_requests[LED_SUCCESS] == 0);
-        sys_write_error = 0;
+        unsigned retry_generation = reference_generation;
+        retained->fusion_id = 1;
         assert(sensor_tcal_set_enabled(false) == -EIO);
-        assert(sys_write_count == before_first + 1 && durable_tcal_enabled);
-        assert(!sensor_tcal_get_enabled() && !retained->tcal_enabled);
-        assert(led_requests[LED_APPLIED_NOT_SAVED] == 2 && led_requests[LED_SUCCESS] == 0);
-        assert(sensor_tcal_set_enabled(true) == 0);
-        assert(sys_write_count == before_first + 2);
-        assert(sensor_tcal_get_enabled() && retained->tcal_enabled && durable_tcal_enabled);
-        assert(led_requests[LED_APPLIED_NOT_SAVED] == 2 && led_requests[LED_SUCCESS] == 1);
-        /* Cached durable success remains true without another storage attempt. */
-        sys_write_error = -ENOSPC;
-        assert(sensor_tcal_set_enabled(true) == 0);
         assert(sys_write_count == before_first + 2 && durable_tcal_enabled);
+        assert(reference_generation == retry_generation && retained->fusion_id == 1);
+        assert(!sensor_calibration_gyro_reference_pending());
+        assert(!sample(after, delta));
+        expect_vector(after, fallback);
+        expect_vector(delta, zero);
+        sys_write_error = 0;
+        assert(sensor_tcal_set_enabled(false) == 0);
+        assert(sys_write_count == before_first + 3 && !durable_tcal_enabled);
+        assert(reference_generation == retry_generation && retained->fusion_id == 1);
+        assert(!sensor_calibration_gyro_reference_pending());
+        assert(!sensor_tcal_get_enabled() && !retained->tcal_enabled);
+        assert(led_requests[LED_APPLIED_NOT_SAVED] == 2 && led_requests[LED_SUCCESS] == 1);
+        /* Durable success does not issue another write. */
+        sys_write_error = -ENOSPC;
+        assert(sensor_tcal_set_enabled(false) == 0);
+        assert(sys_write_count == before_first + 3 && !durable_tcal_enabled);
+        assert(reference_generation == retry_generation && retained->fusion_id == 1);
         assert(led_requests[LED_APPLIED_NOT_SAVED] == 2 && led_requests[LED_SUCCESS] == 2);
         assert(led_requests[LED_PARTIAL] == 0 && led_results[LED_SUCCESS] == 0);
         assert(warm_tx == 0 && lock_depth == 0);

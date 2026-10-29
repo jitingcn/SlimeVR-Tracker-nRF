@@ -1642,8 +1642,8 @@ int sensor_tcal_set_enabled(bool enabled)
 #endif
 	sys_warm_transaction_begin();
 	sensor_tcal_lock();
-	if (tcal_compensation_enabled == enabled) {
-		int storage_error = tcal_compensation_storage_error;
+	if (tcal_compensation_enabled == enabled && tcal_compensation_storage_error == 0) {
+		int storage_error = 0;
 		sensor_tcal_unlock();
 		sys_warm_transaction_end(false);
 #if CONFIG_SENSOR_TCAL_HEATED
@@ -1652,15 +1652,17 @@ int sensor_tcal_set_enabled(bool enabled)
 		LOG_INF("T-Cal compensation already %s", enabled ? "enabled" : "disabled");
 		return sensor_operation_result(LED_OWNER_TCAL, storage_error, true);
 	}
-	tcal_compensation_enabled = enabled;
-	retained->tcal_enabled = enabled;
-	reference_generation++;
-	retained->fusion_id = 0;
-	if (!enabled && measured_bias_reset_pending) {
-		/* A later enable must not reinterpret an unconsumed measurement. */
-		sensor_tcal_clear_doffset();
+	if (tcal_compensation_enabled != enabled) {
+		tcal_compensation_enabled = enabled;
+		retained->tcal_enabled = enabled;
+		reference_generation++;
+		retained->fusion_id = 0;
+		if (!enabled && measured_bias_reset_pending) {
+			/* A later enable must not reinterpret an unconsumed measurement. */
+			sensor_tcal_clear_doffset();
+		}
+		sensor_tcal_refresh_apply_cache();
 	}
-	sensor_tcal_refresh_apply_cache();
 	sensor_tcal_unlock();
 	int err = sys_write(TCAL_ENABLED_ID, &retained->tcal_enabled, &retained->tcal_enabled,
 	          sizeof(retained->tcal_enabled));
