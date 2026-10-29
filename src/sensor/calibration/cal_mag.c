@@ -66,7 +66,7 @@ static float dir_max[3];
 
 static mag_center_estimator_t manual_center_estimator;
 
-/* Manual calibration direction tracking (same cross-validation logic as online path) */
+/* Manual collection accepts changes in magnetic or trustworthy gravity direction. */
 static float manual_last_dir[3];
 static float manual_last_accel_dir[3];
 
@@ -497,10 +497,7 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 // Accumulates into ATA and periodically runs trial calibration for quality check.
 static void sensor_sample_mag_magneto_sample(const float m[3])
 {
-	// Direction diversity gate: accept sample if either mag direction OR
-	// accelerometer (gravity) direction has changed since last accepted.
-	// Identical logic to the online path — breaks direction lock-in during
-	// magnetic interference by cross-validating with physical orientation.
+	// Manual collection accepts magnetic or trustworthy gravity direction changes.
 	//
 	// Gate accelerometer by magnitude as well: skip the direction check
 	// entirely when the device is under strong linear acceleration, falling
