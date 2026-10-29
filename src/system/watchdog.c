@@ -81,6 +81,7 @@ static const uint32_t default_timeouts[] = {
  */
 static void watchdog_timeout_callback(int channel_id, void *user_data)
 {
+	(void)channel_id;
 	wdt_channel_id_t channel = (wdt_channel_id_t)(intptr_t)user_data;
 
 	/* Disable interrupts to prevent being interrupted */
@@ -97,7 +98,7 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
 
 	/* Log critical failure information */
 	LOG_ERR("=== WATCHDOG TIMEOUT ===");
-	LOG_ERR("Failed channel: %d (%s)", channel_id, channel_names[channel]);
+	LOG_ERR("Failed channel: %d (%s)", channel, channel_names[channel]);
 	LOG_ERR("System uptime: %u ms", k_uptime_get_32());
 
 	/* Important: When a callback is provided to task_wdt_add(), the task_wdt
