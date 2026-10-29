@@ -215,7 +215,7 @@ bool esb_ota_is_active(void)
 	return atomic_get(&ota_reboot_pending) || ota.session_started;
 }
 
-uint8_t esb_ota_get_status(void)
+static uint8_t esb_ota_get_status(void)
 {
 	switch (ota.state) {
 	case OTA_STATE_IDLE:      return OTA_STATUS_IDLE;

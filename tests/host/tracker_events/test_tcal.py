@@ -210,7 +210,6 @@ static int64_t system_uptime_since_boot_ms(void) { return clock_ms; }
 static void k_msleep(int ms) { assert(lock_depth == 0); clock_ms += ms; }
 static float sensor_get_current_imu_temperature(void) { return temperature; }
 bool wait_for_motion(bool motion, int count) { (void)motion; (void)count; return stationary; }
-void sensor_request_fusion_bias_reset(void) {}
 uint16_t sensor_calibration_current_operation(void) { return current_operation; }
 int sensor_calibration_request(int id, enum cal_request_origin origin) {
     if (id == CAL_REQUEST_QUERY) return request_slot;

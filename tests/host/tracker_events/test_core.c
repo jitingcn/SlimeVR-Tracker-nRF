@@ -118,10 +118,14 @@ static void test_states(void)
     uint32_t epoch=tracker_events_sensor_epoch();
     tracker_events_observe_sensor(epoch,true,true,true,true,FUSION_BACKEND_VQF,0);
     drain(499);
-    tracker_event_set_state(TRACKER_EVENT_KIND_TRACKER_REST,TRACKER_REST_NOT_REST,TRACKER_REST_OBSERVED);
-    tracker_event_set_state(TRACKER_EVENT_KIND_TRACKER_REST,TRACKER_REST_REST,TRACKER_REST_OBSERVED);
+    assert(decode(0).kind==TRACKER_EVENT_KIND_TRACKER_REST && decode(0).phase==TRACKER_REST_REST);
+    tracker_events_observe_sensor(epoch,true,false,false,false,FUSION_BACKEND_VQF,now_ms);
+    tracker_events_observe_sensor(epoch,true,true,false,false,FUSION_BACKEND_VQF,now_ms);
     unsigned before=nsent; drain(599);
-    for(unsigned i=before;i<nsent;i++)assert(decode(i).phase!=TRACKER_REST_NOT_REST);
+    for(unsigned i=before;i<nsent;i++){
+        struct tracker_event e=decode(i);
+        assert(e.kind!=TRACKER_EVENT_KIND_TRACKER_REST || e.phase!=TRACKER_REST_NOT_REST);
+    }
     now_ms=900;
     tracker_events_observe_sensor(epoch,true,true,false,false,FUSION_BACKEND_VQF,now_ms);
     drain(1200);
@@ -145,20 +149,31 @@ static void test_states(void)
 }
 static void receipts(void)
 {
-    tracker_event_set_state(0x20,1,0);
+    uint32_t epoch=tracker_events_sensor_epoch();
+    tracker_events_observe_sensor(epoch,true,true,false,false,FUSION_BACKEND_VQF,now_ms);
     struct tracker_event_tx old;
     assert(tracker_events_select(0,2,&old));
-    tracker_event_set_state(0x20,0,0);
+    struct tracker_event selected;
+    assert(tracker_event_decode(old.packet,sizeof(old.packet),&selected));
+    assert(selected.kind==TRACKER_EVENT_KIND_TRACKER_REST && selected.phase==TRACKER_REST_REST);
+    tracker_events_observe_sensor(epoch,true,false,false,false,FUSION_BACKEND_VQF,now_ms);
     tracker_events_complete(old.token,true,0);
     drain(900);
-    assert(nsent>0);
-    for(unsigned i=0;i<nsent;i++)assert(decode(i).phase==0);
+    assert(nsent==3);
+    for(unsigned i=0;i<nsent;i++){
+        struct tracker_event e=decode(i);
+        assert(e.kind==TRACKER_EVENT_KIND_TRACKER_REST && e.phase==TRACKER_REST_NOT_REST);
+    }
     /* Saturation must not erase the newest action or allocate unbounded history. */
     for(unsigned i=1;i<=40;i++)tracker_event_notice(0x31,1,(uint8_t)i);
     nsent=0; drain(14000);
     bool newest=false;
-    for(unsigned i=0;i<nsent;i++){struct tracker_event e=decode(i);newest|=e.kind==0x31&&e.detail==40;}
-    assert(newest && nsent<=96);
+    unsigned notices=0;
+    for(unsigned i=0;i<nsent;i++){
+        struct tracker_event e=decode(i);
+        if(e.kind==TRACKER_EVENT_KIND_BUTTON){notices++;newest|=e.detail==40;}
+    }
+    assert(newest && notices<=96);
     now_ms=15000;tracker_event_notice(0x31,1,255);
     now_ms=31000;nsent=0;drain(32000);assert(nsent==0);
     puts("PASS stale copy receipt isolation, bounded overflow and TTL expiration");

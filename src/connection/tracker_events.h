@@ -25,8 +25,6 @@ void cal_event_end(uint16_t op, uint8_t outcome, uint8_t phase, uint8_t reason);
 void cal_event_reject(uint8_t kind, uint8_t reason);
 /* Latch a success reason before submitting the owner's pending candidate. */
 void cal_event_set_completion_reason(uint16_t op, uint8_t reason);
-/* Latest value per rest kind, not a history of all observed edges. */
-void tracker_event_set_state(uint8_t kind, uint8_t phase, uint8_t detail);
 /* Independent action/intent; never merged with another notice. */
 void tracker_event_notice(uint8_t kind, uint8_t phase, uint8_t detail);
 /* One physical-boot observation, scheduled once after reset classification.

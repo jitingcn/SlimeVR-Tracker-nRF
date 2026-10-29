@@ -175,7 +175,7 @@ static void emit(unsigned int samples, float value)
 
 static void reset_observations(void)
 {
-	sensor_debug_stop();
+	assert(!sensor_debug_is_active());
 	stopped_count = 0;
 	reports = 0;
 }
@@ -219,14 +219,15 @@ static void test_restart_discards_old_frame_and_sample_credit(void)
 	assert(reports == 0);
 	emit(3, 2);
 	assert(reports == 1 && last_raw_accel == 2);
-	sensor_debug_stop();
+	now_ms = 7000;
+	assert(!sensor_debug_is_active());
 	assert(stopped_count == 1 && stopped_counts[0] == 1);
 }
 
 static void test_restart_during_output_admission(void)
 {
 	reset_observations();
-	now_ms = 6000;
+	now_ms = 8000;
 	sensor_debug_start(2);
 	sensor_diagnostics_reset_frame();
 	collect(4, 9);
@@ -236,57 +237,63 @@ static void test_restart_during_output_admission(void)
 	assert(reports == 0);
 	emit(4, 2);
 	assert(reports == 1 && last_raw_accel == 2);
-	sensor_debug_stop();
+	now_ms = 10000;
+	assert(!sensor_debug_is_active());
 	assert(stopped_count == 1 && stopped_counts[0] == 1);
 }
 
 static void test_reserved_output_keeps_its_session(void)
 {
 	reset_observations();
-	now_ms = 7000;
+	now_ms = 11000;
 	sensor_debug_start(2);
 	sensor_diagnostics_reset_frame();
 	collect(4, 3);
-	now_ms = 7500;
+	now_ms = 11500;
 	/* First clock is the active check; second is the output reservation. */
 	clock_calls_until_restart = 2;
 	output();
 	assert(reports == 1 && last_elapsed == 0.5f && last_raw_accel == 3);
-	sensor_debug_stop();
+	now_ms = 13500;
+	assert(!sensor_debug_is_active());
 	assert(stopped_count == 1 && stopped_counts[0] == 0);
 
-	/* Also allow stop/restart from the slow printk leaf, never under lock. */
+	/* A restart from the slow printk leaf cannot alter a reserved output. */
 	sensor_debug_start(2);
 	print_hook = restart_session;
 	emit(4, 5);
-	sensor_debug_stop();
+	assert(reports == 2 && last_elapsed == 0.0f && last_raw_accel == 5);
+	now_ms = 15500;
+	assert(!sensor_debug_is_active());
 	assert(stopped_count == 2 && stopped_counts[1] == 0);
 }
 
-static void test_stop_report_snapshot(void)
+static void test_expiry_report_snapshot(void)
 {
 	reset_observations();
-	now_ms = 8000;
+	now_ms = 16000;
 	sensor_debug_start(2);
 	emit(4, 1);
 	log_hook = restart_session;
-	sensor_debug_stop();
+	now_ms = 18000;
+	assert(!sensor_debug_is_active());
 	assert(sensor_debug_is_active());
 	assert(stopped_count == 1 && stopped_counts[0] == 1);
-	sensor_debug_stop();
+	now_ms = 20000;
+	assert(!sensor_debug_is_active());
 	assert(stopped_count == 2 && stopped_counts[1] == 0);
 }
 
 static void test_deadline_rejects_unreserved_output(void)
 {
 	reset_observations();
-	now_ms = 9000;
+	now_ms = 24000;
 	sensor_debug_start(1);
 	sensor_diagnostics_reset_frame();
 	collect(4, 1);
-	now_ms = 9999;
+	now_ms = 24999;
 	assert(sensor_debug_is_active());
-	now_ms = 10000;
+	now_ms = 25000;
 	output();
 	assert(reports == 0);
 	assert(stopped_count == 1 && stopped_counts[0] == 0);
@@ -305,15 +312,19 @@ static void test_maintenance_notifies_connection_and_led(void)
 	reset_observations();
 	led_requests[LED_SUCCESS] = 0;
 	unsigned int before = maintenance_updates;
-	now_ms = 1000;
+	now_ms = 21000;
 	sensor_debug_start(2);
 	/* Applying a maintenance/raw session re-announces facts to the connection
 	 * owner and submits the owner's own semantic receipt. */
 	assert(maintenance_updates == before + 1);
 	assert(led_requests[LED_SUCCESS] == 1);
-	sensor_debug_stop();
-	assert(maintenance_updates == before + 2);
-	assert(led_requests[LED_SUCCESS] == 2);
+	now_ms = 22999;
+	assert(sensor_diagnostics_maintenance_active());
+	now_ms = 23000;
+	assert(!sensor_diagnostics_maintenance_active());
+	/* Deadline expiry does not emit the explicit-stop feedback or receipt. */
+	assert(maintenance_updates == before + 1);
+	assert(led_requests[LED_SUCCESS] == 1);
 }
 
 int main(void)
@@ -322,9 +333,9 @@ int main(void)
 	test_restart_discards_old_frame_and_sample_credit();
 	test_restart_during_output_admission();
 	test_reserved_output_keeps_its_session();
-	test_stop_report_snapshot();
-	test_deadline_rejects_unreserved_output();
+	test_expiry_report_snapshot();
 	test_maintenance_notifies_connection_and_led();
+	test_deadline_rejects_unreserved_output();
 	puts("diagnostics sessions: PASS");
 	return 0;
 }

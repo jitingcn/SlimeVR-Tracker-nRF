@@ -255,7 +255,6 @@ static atomic_t output_ready;
 static struct k_spinlock fusion_feedback_lock;
 static struct led_token fusion_feedback;
 static struct led_token initialization_feedback;
-#define FUSION_REQUEST_BIAS BIT(0)
 #define FUSION_REQUEST_RESET BIT(1)
 
 #if CONFIG_CONNECTION_RAW_COLLECTION
@@ -1884,11 +1883,6 @@ int sensor_request_fusion_reset(bool user_feedback)
 	return 0;
 }
 
-void sensor_request_fusion_bias_reset(void)
-{
-	atomic_or(&fusion_requests, FUSION_REQUEST_BIAS);
-}
-
 static void sensor_discard_gyro_window(void)
 {
 #if CONFIG_SENSOR_GYRO_OVERSAMPLING > 1
@@ -1938,7 +1932,7 @@ static void sensor_apply_calibration_frame(void)
 			return;
 		}
 	}
-	if (reset || requests || effect == SENSOR_CALIBRATION_BIAS_CHANGED) {
+	if (reset || effect == SENSOR_CALIBRATION_BIAS_CHANGED) {
 		sensor_calibration_reset_gyro_reference();
 		if (sensor_fusion_init) {
 			float zero[3] = {0};

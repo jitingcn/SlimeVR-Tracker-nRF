@@ -1353,34 +1353,6 @@ void clocks_request_start(uint32_t delay_us)
 	clocks_request_start_internal(delay_us, false);
 }
 
-static struct k_thread clocks_stop_thread_id;
-static K_THREAD_STACK_DEFINE(clocks_stop_thread_id_stack, 512);
-
-// Wrapper function with correct signature for k_thread_entry_t
-static void clocks_stop_wrapper(void *arg1, void *arg2, void *arg3)
-{
-	ARG_UNUSED(arg1);
-	ARG_UNUSED(arg2);
-	ARG_UNUSED(arg3);
-	clocks_stop();
-}
-
-void clocks_request_stop(uint32_t delay_us)
-{
-	k_thread_create(
-		&clocks_stop_thread_id,
-		clocks_stop_thread_id_stack,
-		K_THREAD_STACK_SIZEOF(clocks_stop_thread_id_stack),
-		clocks_stop_wrapper,
-		NULL,
-		NULL,
-		NULL,
-		CLOCKS_STOP_THREAD_PRIORITY,
-		0,
-		K_USEC(delay_us)
-	);
-}
-
 static void esb_ping_timeout(int64_t now)
 {
 	bool threshold_reached = false;

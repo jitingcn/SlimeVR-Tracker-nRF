@@ -346,19 +346,6 @@ static void set_state(unsigned i, uint8_t phase, uint8_t detail, uint32_t now)
 	/* A changed value must immediately stop all repetition of the old value. */
 	s->published.copies = s->published.limit;
 }
-void tracker_event_set_state(uint8_t kind, uint8_t phase, uint8_t detail)
-{
-	if (kind != 0x20 && kind != 0x21) {
-		return;
-	}
-	uint32_t now = k_uptime_get_32();
-	k_spinlock_key_t key = k_spin_lock(&event_lock);
-	struct tracker_event e = {.nonce = nonce, .kind = kind, .event = CAL_EVENT_STATE, .phase = phase, .detail = detail};
-	if (tracker_event_valid(&e)) {
-		set_state(kind - 0x20, phase, detail, now);
-	}
-	k_spin_unlock(&event_lock, key);
-}
 void tracker_event_notice(uint8_t kind, uint8_t phase, uint8_t detail)
 {
 #if !defined(CONFIG_TRACKER_EVENT_POWER)

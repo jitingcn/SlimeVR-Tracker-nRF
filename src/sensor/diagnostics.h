@@ -34,9 +34,8 @@
 #define SENSOR_DEBUG_MAX_DURATION_SEC 60U
 
 /* Console-safe session transitions. Expiry and output accounting are atomic;
- * already reserved output can finish printing after a stop/restart. */
+ * already reserved output can finish printing after expiry or restart. */
 int sensor_debug_start(uint32_t duration_sec);
-int sensor_debug_stop(void);
 bool sensor_debug_is_active(void);
 bool sensor_diagnostics_maintenance_active(void);
 #if CONFIG_VQF_BENCH

@@ -28,7 +28,7 @@ static unsigned reads, fail_read, reserve_calls, preparations, copies, reboots;
 static int read_error;
 static int64_t now_ms;
 static uint8_t reported_status;
-uint8_t esb_ota_get_status(void);
+static uint8_t esb_ota_get_status(void);
 static int64_t k_uptime_get(void) { return now_ms; }
 static void k_msleep(int ms) { now_ms += ms; }
 static void ota_update_led(void);

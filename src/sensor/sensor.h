@@ -72,7 +72,6 @@ bool sensor_fusion_get_mag_ref(float *norm, float *dip);
 
 /* Nonblocking requests consumed by the sensor at the next frame boundary. */
 int sensor_request_fusion_reset(bool user_feedback);
-void sensor_request_fusion_bias_reset(void);
 
 void wait_for_threads(void);
 /* Failure means the caller must not reconfigure hardware or stop clocks.

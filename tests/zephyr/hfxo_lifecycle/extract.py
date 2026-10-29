@@ -27,11 +27,11 @@ def function(source, name):
 
 
 start = re.search(r'^bool\s+clock_status\s*=\s*false\s*;', esb, re.MULTILINE)
-clock_stop = function(esb, 'clocks_request_stop').rstrip('\n')
-end = esb.find(clock_stop, start.end()) if start else -1
+clock_start = function(esb, 'clocks_request_start').rstrip('\n')
+end = esb.find(clock_start, start.end()) if start else -1
 if not start or end < 0:
     raise RuntimeError('tracker clock section boundaries not found')
-clock = esb[start.start():end] + clock_stop + '\n\n'
+clock = esb[start.start():end] + clock_start + '\n\n'
 if not all(name in clock for name in ('clocks_start(', 'clocks_stop(', 'esb_release_tx_clock(')):
     raise RuntimeError('tracker clock section is incomplete')
 pair_body = function(esb, 'esb_pair')

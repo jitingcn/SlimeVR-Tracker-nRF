@@ -442,21 +442,6 @@ int sensor_debug_start(uint32_t duration_sec)
 	return 0;
 }
 
-int sensor_debug_stop(void)
-{
-	k_spinlock_key_t key = k_spin_lock(&debug_lock);
-	bool enabled = debug_state.enabled;
-	debug_state.enabled = false;
-	uint32_t output_count = debug_state.output_count;
-	sensor_operation_result(LED_OWNER_SENSOR, 0, true);
-	k_spin_unlock(&debug_lock, key);
-	connection_feedback_maintenance_update();
-	if (enabled) {
-		LOG_INF("Debug mode stopped. %u outputs generated", output_count);
-	}
-	return 0;
-}
-
 bool sensor_debug_is_active(void)
 {
 	return sensor_debug_session() != 0;

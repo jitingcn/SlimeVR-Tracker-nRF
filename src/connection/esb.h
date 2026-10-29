@@ -66,7 +66,6 @@ void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 void clocks_stop(void);
 void clocks_request_start(uint32_t delay_us);
-void clocks_request_stop(uint32_t delay_us);
 int esb_initialize(bool);
 void esb_deinitialize(void);
 /* Quiesce TX then re-init PTX (channel/NVS already applied in esb_initialize). */

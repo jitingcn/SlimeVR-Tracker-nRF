@@ -43,8 +43,8 @@ int main(void)
     cal_event_reject(CAL_KIND_ACCEL_POSES, CAL_REASON_BUSY);
     tracker_events_schedule_boot(false, true);
     tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WILL_WOM, POWER_WOM_NORMAL);
-    tracker_event_set_state(TRACKER_EVENT_KIND_TRACKER_REST, TRACKER_REST_REST, TRACKER_REST_OBSERVED);
-    tracker_event_set_state(TRACKER_EVENT_KIND_FUSION_REST, FUSION_REST_DETECTED, FUSION_BACKEND_VQF);
+    tracker_events_observe_sensor(tracker_events_sensor_epoch(), true, true,
+        true, true, FUSION_BACKEND_VQF, now_ms);
     pump(7500, true); /* Includes delayed boot, repeats, calibration/state heartbeats, both fusion backends. */
     cal_event_end(op, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
     cal_event_end(online, CAL_OUTCOME_FAILED, CAL_PHASE_VALIDATE, CAL_REASON_RADIAL);
