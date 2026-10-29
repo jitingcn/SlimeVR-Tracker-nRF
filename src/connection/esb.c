@@ -1601,8 +1601,7 @@ void event_handler(struct esb_evt const *event)
 						ping_success_streak = 0;
 					}
 
-					uint32_t ping_rx_ticks = ((uint32_t)rx_payload.data[3] << 24) | ((uint32_t)rx_payload.data[4] << 16)
-										   | ((uint32_t)rx_payload.data[5] << 8) | ((uint32_t)rx_payload.data[6]);
+					uint32_t ping_rx_ticks = sys_get_be32(&rx_payload.data[3]);
 
 					// Find send ticks for this PONG's counter in history
 					uint32_t ping_ticks_for_this_ctr = 0;
