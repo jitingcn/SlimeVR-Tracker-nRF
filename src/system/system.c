@@ -1383,6 +1383,7 @@ static void button_thread(void)
 					button_press_cancel(original_press_time);
 					button_status_clear_if_idle();
 				} else if (err == 0) { // shutting down or rebooting
+					watchdog_pause(WDT_CHANNEL_BUTTON);
 					k_thread_abort(button_thread_id);
 				} else {
 					LOG_WRN("Button shutdown rejected: %d", err);

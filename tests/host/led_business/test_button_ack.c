@@ -37,6 +37,7 @@ static void set_status(int status, bool value)
 static bool get_status(int status) { return (status_state & status) != 0; }
 static int watchdog_register_thread(int channel, int timeout) { (void)channel; (void)timeout; return 0; }
 static void watchdog_feed(int channel) { (void)channel; }
+static void watchdog_pause(int channel) { (void)channel; assert(false); }
 static inline unsigned int irq_lock(void) { return 0; }
 static inline void irq_unlock(unsigned int key) { (void)key; }
 static bool esb_ota_is_active(void) { return ota_busy; }

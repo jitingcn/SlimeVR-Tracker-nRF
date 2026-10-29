@@ -47,6 +47,8 @@ static uint32_t abort_at_ms, hold_first_ms, hold_last_ms, exit_origin_ms, power_
 static bool saw_exit, saw_cancel, saw_failed;
 static uint16_t last_exit_value;
 static jmp_buf script_finished;
+static unsigned watchdog_pauses, watchdog_feeds;
+static uint32_t watchdog_pause_ms, watchdog_feed_ms;
 
 static bool button_read(void) { return physical_pressed; }
 static int button0;
@@ -58,8 +60,22 @@ static void set_status(int status, bool value)
 	button_status = value;
 }
 static bool get_status(int status) { (void)status; return button_status; }
-static int watchdog_register_thread(int channel, int timeout) { (void)channel; (void)timeout; return 0; }
-static void watchdog_feed(int channel) { (void)channel; }
+static int watchdog_register_thread(int channel, int timeout)
+{ assert(channel == WDT_CHANNEL_BUTTON && timeout == 0); return 0; }
+static void watchdog_feed(int channel)
+{
+	assert(channel == WDT_CHANNEL_BUTTON && watchdog_pauses == 0);
+	watchdog_feeds++;
+	watchdog_feed_ms = host_now_ms;
+}
+static void watchdog_pause(int channel)
+{
+	assert(channel == WDT_CHANNEL_BUTTON && watchdog_pauses == 0);
+	assert(power_requests.request == (USER_SHUTDOWN_ENABLED ?
+		SYS_POWER_REQ_SYSTEM_OFF : SYS_POWER_REQ_REBOOT));
+	watchdog_pauses++;
+	watchdog_pause_ms = host_now_ms;
+}
 static unsigned int irq_depth;
 static void (*irq_deferred)(void);
 static inline unsigned int irq_lock(void) { return irq_depth++; }
@@ -104,7 +120,12 @@ static void sys_poweroff(void)
 static void sys_reboot(int mode) { (void)mode; ++physical_reboots; }
 static void k_msleep(int milliseconds);
 static void k_thread_abort(int thread)
-{ (void)thread; abort_at_ms = host_now_ms; longjmp(script_finished, 1); }
+{
+	assert(thread == button_thread_id && watchdog_pauses == 1);
+	assert(watchdog_pause_ms == host_now_ms);
+	abort_at_ms = host_now_ms;
+	longjmp(script_finished, 1);
+}
 static int sys_user_shutdown(void);
 static int sys_button_reboot(uint32_t generation);
 #include "manual_production.inc"
@@ -196,6 +217,7 @@ static void reset_case(enum led_capability capability)
 	host_vbus_present = false; host_reset_reason = 0;
 	pair_requests = reset_requests = click_notices = physical_offs = physical_reboots = 0;
 	abort_at_ms = hold_first_ms = hold_last_ms = exit_origin_ms = power_notice_ms = 0;
+	watchdog_pauses = watchdog_feeds = watchdog_pause_ms = watchdog_feed_ms = 0;
 	saw_exit = saw_cancel = saw_failed = false;
 	handoff_release_ms = 0;
 	action_count = action_index = 0; end_ms = 8000;
@@ -220,6 +242,7 @@ static void held_release_and_complete(void)
 	assert(hold_first_ms == 100 && hold_last_ms == 1300);
 	assert(saw_exit && exit_origin_ms == 1100 && last_exit_value == 0);
 	assert(abort_at_ms == 1300 + LED_MANUAL_EXIT_MS && !engine.button_hold_active);
+	assert(watchdog_pauses == 1 && watchdog_pause_ms == abort_at_ms);
 	assert(click_notices == 0 && !saw_cancel && !saw_failed);
 	assert(power_requests.request == (USER_SHUTDOWN_ENABLED ? SYS_POWER_REQ_SYSTEM_OFF : SYS_POWER_REQ_REBOOT));
 	assert(USER_SHUTDOWN_ENABLED ? sys_system_off() : sys_system_reboot());
@@ -248,6 +271,7 @@ static void short_hold_release_and_single_click(void)
 	assert(hold_last_ms == 899 && !engine.button_hold_active && saw_exit);
 	assert(click_notices == 1 && exit_origin_ms > 1900 && exit_origin_ms <= 1920);
 	assert(abort_at_ms == 0); /* Short click retains the original thread lifecycle. */
+	assert(watchdog_pauses == 0 && watchdog_feeds > 0 && watchdog_feed_ms >= 4980 && watchdog_feed_ms < 5000);
 	assert(power_requests.request == SYS_POWER_REQ_REBOOT && reset_requests == (CONFIG_USER_EXTRA_ACTIONS ? 1U : 0U));
 }
 static void physical_origin_and_duplicate_edges(void)
@@ -346,6 +370,7 @@ static void deliberate_cancel_and_refusal(void)
 	assert(saw_failed && !saw_exit && !engine.button_hold_active && !press_time && !abort_at_ms);
 	assert(power_requests.state == POWER_REQUEST_EMPTY && power_requests.ota_reboot == POWER_OTA_REBOOT_RESERVED);
 	assert(click_notices == 0); /* Refused after release is not another click. */
+	assert(watchdog_pauses == 0 && watchdog_feeds > 0 && watchdog_feed_ms >= 3480 && watchdog_feed_ms < 3500);
 	reset_case(LED_CAP_RGB_PWM);
 	add_action(100, EDGE, true); add_action(900, OTA_ACTIVE, false); add_action(1500, EDGE, false);
 	run_button(3500);

@@ -23,7 +23,7 @@ static uint32_t press_generation, last_press_generation;
 static int button_thread_id;
 static bool button_status, hold_to_cancel;
 static unsigned reads, pairs, aborts, requests;
-static bool watchdog_registered, watchdog_fed;
+static bool watchdog_registered, watchdog_fed, watchdog_paused;
 static int admission_result;
 static jmp_buf iteration_done;
 static bool scripted, ota_busy, test_busy;
@@ -45,7 +45,9 @@ static bool get_status(int id) { (void)id; return button_status; }
 static int watchdog_register_thread(int channel, int timeout)
 { assert(channel == WDT_CHANNEL_BUTTON); (void)timeout; watchdog_registered = true; return 0; }
 static void watchdog_feed(int channel)
-{ assert(channel == WDT_CHANNEL_BUTTON && watchdog_registered); watchdog_fed = true; }
+{ assert(channel == WDT_CHANNEL_BUTTON && watchdog_registered && !watchdog_paused); watchdog_fed = true; }
+static void watchdog_pause(int channel)
+{ assert(channel == WDT_CHANNEL_BUTTON && watchdog_registered && !watchdog_paused); watchdog_paused = true; }
 static inline unsigned int irq_lock(void) { return 0; }
 static inline void irq_unlock(unsigned int key) { (void)key; }
 static void reboot_counter_write(int value) { (void)value; }
@@ -85,6 +87,7 @@ static void test_sleep(int ms, const char *caller)
 static void k_thread_abort(int thread)
 {
 	(void)thread;
+	assert(watchdog_paused && requests == 1 && admission_result == 0);
 	aborts++;
 	longjmp(iteration_done, 1);
 }
@@ -100,7 +103,7 @@ static void dispatch(int result, bool cancel)
 	button_status = false;
 	hold_to_cancel = cancel;
 	reads = pairs = aborts = requests = 0;
-	watchdog_registered = watchdog_fed = false;
+	watchdog_registered = watchdog_fed = watchdog_paused = false;
 	memset(led_test_events, 0, sizeof(led_test_events));
 	led_test_quiesced = false;
 	admission_result = result;
@@ -120,7 +123,7 @@ static void run_script(void)
 {
 	scripted = true;
 	script_index = notices = requests = 0;
-	watchdog_registered = watchdog_fed = false;
+	watchdog_registered = watchdog_fed = watchdog_paused = false;
 	last_press_started_at = 0;
 	press_time = 0;
 	press_generation = 0; last_press_generation = led_button_input();
@@ -173,10 +176,13 @@ int main(void)
 	assert(requests == 1 && pairs == 0 && aborts == 0);
 	assert(press_time == 0 && !button_status);
 	assert(!led_test_quiesced);
+	assert(!watchdog_paused);
 	dispatch(0, false);
 	assert(requests == 1 && pairs == 0 && aborts == 1);
+	assert(watchdog_paused);
 	dispatch(0, true);
 	assert(requests == 0 && aborts == 0);
+	assert(!watchdog_paused);
 	assert(pairs == (CONFIG_USER_EXTRA_ACTIONS ? 0U : 1U));
 	assert(press_time == 0 && !button_status);
 	assert(!led_test_quiesced);
