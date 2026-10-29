@@ -90,8 +90,9 @@ static bool sensor_tcal_get_auto_calibration(void) { return auto_enabled; }
 static void sensor_tcal_set_auto_calibration(bool value) { auto_enabled = value; auto_writes++; }
 static void cmd_reset_tcal(void) {}
 static void sensor_tcal_remove_point(int index) { removed_index = index; remove_calls++; }
-static float sensor_get_current_imu_temperature(void) { return 25; }
-static void sensor_tcal_test_methods(float temperature) { (void)temperature; test_calls++; }
+static float current_temperature = 25.0f, tested_temperature;
+static float sensor_get_current_imu_temperature(void) { return current_temperature; }
+static void sensor_tcal_test_methods(float temperature) { tested_temperature = temperature; test_calls++; }
 static bool sensor_tcal_needs_nearby_point(float temperature, float *closest, float *distance)
 {
     (void)temperature; *closest = 25; *distance = 0; return false;
@@ -167,7 +168,7 @@ int main(void)
     command("tcal test 25 extra");
     assert(rejects == 7 && status_calls == 1 && test_calls == 0);
     command("tcal test");
-    assert(test_calls == 1);
+    assert(test_calls == 1 && tested_temperature == 25.0f);
     command("tcal boot");
     command("tcal boot on");
     assert(retained->bootCalState.enabled && rejects == 7);
@@ -185,6 +186,27 @@ int main(void)
     command("tcal heat status");
     assert(heat_reports == 1);
 #endif
+    const char *invalid_temperatures[] = {
+        "nan", "inf", "-inf", "1e100", "1e-100", "25junk"
+    };
+    for (size_t i = 0; i < ARRAY_SIZE(invalid_temperatures); i++) {
+        char line[128];
+        snprintf(line, sizeof(line), "tcal test %s", invalid_temperatures[i]);
+        command(line);
+        assert(test_calls == 1);
+    }
+    const float invalid_current[] = {NAN, INFINITY, -INFINITY};
+    for (size_t i = 0; i < ARRAY_SIZE(invalid_current); i++) {
+        current_temperature = invalid_current[i];
+        command("tcal test");
+        assert(test_calls == 1);
+    }
+    errno = ERANGE;
+    command("tcal test -12.5");
+    assert(test_calls == 2 && tested_temperature == -12.5f);
+    current_temperature = 31.25f;
+    command("tcal test");
+    assert(test_calls == 3 && tested_temperature == 31.25f);
 #else
     command("tcal");
     assert(rejects == 1 && backup_calls == 0);

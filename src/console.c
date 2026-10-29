@@ -1970,16 +1970,17 @@ static void console_cmd_tcal(size_t argc, char **argv)
 		char *temp_str = arg2;
 		if (temp_str == NULL) {
 			float current_temp = sensor_get_current_imu_temperature();
-			if (isnan(current_temp)) {
+			if (!isfinite(current_temp)) {
 				printk("Error: Cannot read current temperature. Please specify temperature: tcal test <temp>\n");
 			} else {
 				sensor_tcal_test_methods(current_temp);
 			}
 		} else {
 			char *endptr = NULL;
+			errno = 0;
 			float test_temp = strtof(temp_str, &endptr);
 
-			if (endptr == temp_str || *endptr != '\0') {
+			if (endptr == temp_str || *endptr != '\0' || errno == ERANGE || !isfinite(test_temp)) {
 				printk("Error: Invalid temperature '%s'. Use: tcal test <temp>\n", temp_str);
 				printk("Example: tcal test 25.5\n");
 			} else {
