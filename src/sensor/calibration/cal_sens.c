@@ -261,7 +261,6 @@ extern uint8_t sens_cal_axis;
 extern uint16_t sens_cal_revolutions;
 
 // =============================================================================
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 // The user spins the tracker a known number of full revolutions about a single
 // axis. We integrate the measured gyro rate over that motion and compare the
 // measured angle against the true angle to derive a per-axis scale factor that
@@ -580,6 +579,5 @@ void sensor_calibrate_sens(void)
 		LOG_ERR("Sensitivity calibration applied in RAM; persistence failed: %d", storage_err);
 	}
 }
-#endif
 
 #endif /* CONFIG_SENSOR_USE_SENS_CALIBRATION */
