@@ -266,6 +266,7 @@ extern uint16_t sens_cal_revolutions;
 // measured angle against the true angle to derive a per-axis scale factor that
 // corrects cumulative over- or under-rotation.
 #define SENS_CAL_BIAS_SAMPLE_MS 1000    // In-situ bias averaging window
+#define SENS_CAL_REST_RATE_DPS 2.0f     // Discard an untriggered candidate only at rest
 #define SENS_CAL_START_RATE_DPS 30.0f   // Rate that counts as "spin started"
 #define SENS_CAL_STOP_RATE_DPS 10.0f    // Rate that counts as "spin stopped"
 #define SENS_CAL_STOP_DWELL_MS 1000     // Rate must stay low this long to stop
@@ -380,50 +381,68 @@ void sensor_calibrate_sens(void)
 		k_mutex_unlock(&sensitivity_lock);
 	}
 
-	// 3. Arm and wait for the user to start spinning.
+	// Preserve the whole contiguous motion candidate, including a slow ramp
+	// before the start threshold. Only pretrigger rest discards a candidate.
 	LOG_INF("Sensitivity calibration: spin the tracker about the %c axis now", axis_char);
 	sensitivity_step(operation_id, feedback, CAL_PHASE_WAIT_ROTATION, axis);
 	int64_t arm_start = k_uptime_get();
 	int64_t last_wdt = arm_start;
-	float rate = 0.0f;
+	int64_t spin_start = 0;
+	double measured = 0.0;
+	double axis_motion = 0.0;
+	double off_axis_motion = 0.0;
+	double below_time = 0.0; // Only the current stop-dwell window.
+	bool recording = false;
+	bool finished = false;
 	while (true) {
-		if (k_uptime_get() - arm_start >= SENS_CAL_START_TIMEOUT_MS) {
+		if (!recording && k_uptime_get() - arm_start >= SENS_CAL_START_TIMEOUT_MS) {
 			LOG_WRN("Sensitivity calibration: no spin detected, aborting");
 			printk("Gyro sensitivity auto-calibration failed: no spin detected.\n");
 			sensitivity_failed(operation_id, feedback, CAL_PHASE_WAIT_ROTATION, CAL_REASON_START_TIMEOUT);
 			return;
 		}
+		if (recording && k_uptime_get() - spin_start >= SENS_CAL_SPIN_TIMEOUT_MS) {
+			break;
+		}
 		int err = sensitivity_wait_sample(&sample, &stream, K_MSEC(1000));
 		if (err) {
+			if (recording) {
+				LOG_WRN("Sensitivity calibration: missing or invalid gyro interval, aborting");
+				printk("Gyro sensitivity auto-calibration failed: missing or invalid gyro interval.\n");
+				sensitivity_failed(operation_id, feedback, CAL_PHASE_RECORD_ROTATION, CAL_REASON_INSUFFICIENT_SAMPLES);
+				return;
+			}
 			if (err == -EOVERFLOW || err == -EINVAL) {
 				sensitivity_failed(operation_id, feedback, CAL_PHASE_WAIT_ROTATION, CAL_REASON_INSUFFICIENT_SAMPLES);
 				return;
 			}
 			continue; // Wall-clock timeout still bounds a missing stream.
 		}
-		rate = sample.v[axis] - gyro_bias[axis];
+		if (recording && k_uptime_get() - spin_start >= SENS_CAL_SPIN_TIMEOUT_MS) {
+			break;
+		}
+		float rate = sample.v[axis] - gyro_bias[axis];
 		if (k_uptime_get() - last_wdt >= 1000) {
 			watchdog_feed(WDT_CHANNEL_CALIBRATION);
 			last_wdt = k_uptime_get();
 		}
-		if (fabsf(rate) > SENS_CAL_START_RATE_DPS) {
-			break;
+		if (!recording) {
+			if (fabsf(rate) < SENS_CAL_REST_RATE_DPS) {
+				measured = 0.0;
+				axis_motion = 0.0;
+				off_axis_motion = 0.0;
+				continue;
+			}
+			if (fabsf(rate) > SENS_CAL_START_RATE_DPS) {
+				LOG_INF("Sensitivity calibration: recording");
+				sensitivity_step(operation_id, feedback, CAL_PHASE_RECORD_ROTATION, axis);
+				recording = true;
+				spin_start = k_uptime_get();
+				last_wdt = spin_start;
+			}
 		}
-	}
 
-	// 4. Integrate each represented interval, including the trigger above
-	//    exactly once. Wall clock is only the operational watchdog/timeout.
-	LOG_INF("Sensitivity calibration: recording");
-	sensitivity_step(operation_id, feedback, CAL_PHASE_RECORD_ROTATION, axis);
-	double measured = 0.0;
-	double axis_motion = 0.0;
-	double off_axis_motion = 0.0;
-	int64_t spin_start = k_uptime_get();
-	double below_time = 0.0; // Only the current stop-dwell window.
-	bool finished = false;
-	last_wdt = spin_start;
-	while (k_uptime_get() - spin_start < SENS_CAL_SPIN_TIMEOUT_MS) {
-		rate = sample.v[axis] - gyro_bias[axis];
+		// Every represented interval, including the trigger, is integrated once.
 		double dt = sample.dt;
 		measured += (double)rate * dt;
 		axis_motion += fabs((double)rate) * dt;
@@ -436,9 +455,8 @@ void sensor_calibrate_sens(void)
 		}
 		off_axis_motion += sqrt(off_axis_rate_sq) * dt;
 
-		if (k_uptime_get() - last_wdt >= 1000) {
-			watchdog_feed(WDT_CHANNEL_CALIBRATION);
-			last_wdt = k_uptime_get();
+		if (!recording) {
+			continue;
 		}
 
 		// The spin is complete once the rate stays low for the dwell time, but only
@@ -452,12 +470,6 @@ void sensor_calibrate_sens(void)
 			}
 		} else {
 			below_time = 0.0;
-		}
-		if (sensitivity_wait_sample(&sample, &stream, K_MSEC(1000))) {
-			LOG_WRN("Sensitivity calibration: missing or invalid gyro interval, aborting");
-			printk("Gyro sensitivity auto-calibration failed: missing or invalid gyro interval.\n");
-			sensitivity_failed(operation_id, feedback, CAL_PHASE_RECORD_ROTATION, CAL_REASON_INSUFFICIENT_SAMPLES);
-			return;
 		}
 	}
 

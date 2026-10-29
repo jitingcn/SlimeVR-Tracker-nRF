@@ -55,7 +55,7 @@ static struct {
 } data;
 static typeof(data) *retained = &data;
 static unsigned writes, retained_updates, successes, cancellations, failures;
-static uint8_t phase, cancel_reason;
+static uint8_t phase, cancel_reason, failure_reason, failure_phase;
 static uint16_t cancelled_operation;
 static int replacement, spin_samples;
 static bool complete_during_write;
@@ -65,8 +65,8 @@ static const float degrees[3] = {10.5f, -2.1f, 15.0f};
 static uint32_t gyro_sequence;
 static bool replay_mode;
 static unsigned replay_index, replay_count, delivery_batch = 1;
-static struct sensor_gyro_sample replay[128];
-static uint32_t sample_timestamp_us[128];
+static struct sensor_gyro_sample replay[1024];
+static uint32_t sample_timestamp_us[1024];
 static uint32_t delivered_hash;
 static unsigned imu_loads;
 static float magBias[3];
@@ -94,7 +94,7 @@ static void cal_event_end(uint16_t operation, uint8_t outcome, uint8_t at, uint8
     if (outcome == CAL_OUTCOME_SUCCESS) successes++;
     else if (outcome == CAL_OUTCOME_CANCELLED) {
         cancellations++; cancel_reason=reason; cancelled_operation=operation;
-    } else failures++;
+    } else { failures++; failure_reason=reason; failure_phase=at; }
 }
 static void cal_event_step(uint16_t operation, uint8_t at, uint8_t detail) {
     (void)operation; (void)detail; phase=at;
@@ -140,7 +140,7 @@ void sys_warm_transaction_end(bool schedule) { (void)schedule; warm_end++; }
 int sensor_wait_gyro(struct sensor_gyro_sample *sample,k_timeout_t timeout) {
     (void)timeout;
     if (replay_mode) {
-        assert(replay_index < replay_count);
+        if (replay_index == replay_count) { now_ms += timeout; return -EAGAIN; }
         *sample = replay[replay_index];
         /* Delivery may be uniform, paired, or an entire FIFO at one instant;
          * the physical timestamp/interval/sequence/vector stream is identical. */
@@ -304,17 +304,18 @@ static void physical_stream(bool pause) {
     }
     for (int i=0;i<8;i++) append_physical_sample(0); /* Exactly one second to stop. */
 }
-static float run_physical_stream(unsigned batch, bool accepted_fit) {
+static float run_axis_stream(unsigned batch, bool accepted_fit, unsigned axis, unsigned turns) {
     replay_mode=true; replay_index=0; delivery_batch=batch;
     now_ms=0; phase=0; replacement=0; spin_samples=0; delivered_hash=2166136261U;
     unsigned prior_writes=writes, prior_success=successes, prior_failure=failures;
     uint32_t prior_generation=sensitivity_generation;
     float before[3]; memcpy(before,data.gyroSensScale,sizeof(before));
-    assert(sensor_request_calibration_sens(0,1)==0);
+    assert(sensor_request_calibration_sens(axis,turns)==0);
     sensor_calibrate_sens();
     if (accepted_fit) {
         assert(replay_index==replay_count); /* Entire stop dwell, no consumer-clock shortcut. */
         assert(writes==prior_writes+1 && successes==prior_success+1 && failures==prior_failure);
+        for (unsigned i=0;i<3;i++) if (i!=axis) assert(data.gyroSensScale[i]==before[i]);
     } else {
         assert(writes==prior_writes && successes==prior_success && failures==prior_failure+1);
         assert(!memcmp(before,data.gyroSensScale,sizeof(before)));
@@ -323,7 +324,10 @@ static float run_physical_stream(unsigned batch, bool accepted_fit) {
         (accepted_fit ? (unsigned)CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION : 0U));
     assert(sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER)==0);
     replay_mode=false;
-    return data.gyroSensScale[0];
+    return data.gyroSensScale[axis];
+}
+static float run_physical_stream(unsigned batch, bool accepted_fit) {
+    return run_axis_stream(batch,accepted_fit,0,1);
 }
 static void batching_trigger_and_stop_dwell_invariants(void) {
     for (unsigned pause=0;pause<2;pause++) {
@@ -356,6 +360,130 @@ static void missing_intervals_reject_the_measurement(void) {
     for (unsigned i=0;i<replay_count;i++) replay[i].sequence += UINT32_MAX-12U;
     assert(fabsf(run_physical_stream(64,true)-1.0f)<1e-6f);
 }
+static void append_axis_sample(unsigned axis, float rate, float off_rate) {
+    append_physical_sample(0);
+    struct sensor_gyro_sample *sample=&replay[replay_count-1];
+    sample->v[axis]+=rate;
+    sample->v[(axis+1)%3]+=off_rate;
+}
+static void begin_axis_stream(void) {
+    replay_count=0;
+    for (unsigned i=0;i<8;i++) append_physical_sample(0);
+}
+static void append_axis_stop(unsigned axis) {
+    for (unsigned i=0;i<8;i++) append_axis_sample(axis,0,0);
+}
+static void append_full_turns(unsigned axis, unsigned turns, float sign, float earlier_angle) {
+    for (unsigned i=0;i<4*turns-1;i++) append_axis_sample(axis,sign*720,0);
+    append_axis_sample(axis,sign*(720-earlier_angle*8),0);
+    append_axis_stop(axis);
+}
+static void slow_ramp_axes_signs_counts_and_batches(void) {
+    const unsigned counts[]={1,5,100}, batches[]={1,2,3,8,64};
+    const float ramp[]={2,3,5,9,10,20,30};
+    for (unsigned axis=0;axis<3;axis++) for (unsigned negative=0;negative<2;negative++) {
+        float sign=negative ? -1.0f : 1.0f;
+        for (unsigned n=0;n<sizeof(counts)/sizeof(*counts);n++) {
+            begin_axis_stream();
+            for (unsigned i=0;i<sizeof(ramp)/sizeof(*ramp);i++) append_axis_sample(axis,sign*ramp[i],0);
+            append_full_turns(axis,counts[n],sign,9.875f);
+            uint32_t hash=0;
+            float first=0;
+            for (unsigned b=0;b<sizeof(batches)/sizeof(*batches);b++) {
+                float fitted=run_axis_stream(batches[b],true,axis,counts[n]);
+                assert(fabsf(fitted-1.0f)<1e-6f);
+                if (!b) { first=fitted; hash=delivered_hash; }
+                else { assert(!memcmp(&first,&fitted,sizeof(first))); assert(hash==delivered_hash); }
+            }
+        }
+    }
+}
+static void rest_resets_only_the_untriggered_candidate(void) {
+    begin_axis_stream();
+    append_axis_sample(0,20,2000);
+    append_axis_sample(0,0,0);
+    append_axis_sample(0,5,0);
+    append_full_turns(0,1,1,0.625f);
+    assert(fabsf(run_axis_stream(3,true,0,1)-1.0f)<1e-6f);
+
+    begin_axis_stream();
+    append_axis_sample(0,20,1000);
+    append_full_turns(0,1,1,2.5f);
+    run_axis_stream(2,false,0,1);
+    assert(failure_phase==CAL_PHASE_VALIDATE && failure_reason==CAL_REASON_QUALITY);
+
+    begin_axis_stream();
+    append_axis_sample(0,720,0);
+    for (unsigned i=0;i<12;i++) append_axis_sample(0,0,0);
+    for (unsigned i=0;i<3;i++) append_axis_sample(0,720,0);
+    append_axis_stop(0);
+    assert(fabsf(run_axis_stream(8,true,0,1)-1.0f)<1e-6f);
+}
+static void signed_reversal_is_net_angle(void) {
+    begin_axis_stream();
+    append_axis_sample(0,-20,0);
+    append_axis_sample(0,20,0);
+    append_axis_sample(0,720,0);
+    append_axis_sample(0,-720,0);
+    append_full_turns(0,1,1,0);
+    assert(fabsf(run_axis_stream(3,true,0,1)-1.0f)<1e-6f);
+}
+static void trigger_and_final_stop_boundaries(void) {
+    const float near_rest[]={nextafterf(2,0),2,nextafterf(2,INFINITY)};
+    for (unsigned i=0;i<3;i++) {
+        begin_axis_stream();
+        append_axis_sample(1,20,0);
+        append_axis_sample(1,near_rest[i],0);
+        append_full_turns(1,1,1,i ? 2.75f : 0);
+        assert(fabsf(run_axis_stream(1,true,1,1)-1.0f)<1e-6f);
+    }
+    const float near_start[]={nextafterf(30,0),30,nextafterf(30,INFINITY)};
+    for (unsigned i=0;i<3;i++) {
+        begin_axis_stream();
+        append_axis_sample(1,near_start[i],0);
+        for (unsigned j=0;j<8;j++) append_axis_sample(1,0,0);
+        run_axis_stream(1,false,1,1);
+        assert(failure_phase==(i==2 ? CAL_PHASE_RECORD_ROTATION : CAL_PHASE_WAIT_ROTATION));
+        assert(failure_reason==(i==2 ? CAL_REASON_INSUFFICIENT_SAMPLES : CAL_REASON_START_TIMEOUT));
+    }
+    const float near_stop[]={nextafterf(10,0),10,nextafterf(10,INFINITY)};
+    for (unsigned i=0;i<3;i++) {
+        begin_axis_stream();
+        for (unsigned j=0;j<4;j++) append_axis_sample(0,720,0);
+        for (unsigned j=0;j<7;j++) append_axis_sample(0,0,0);
+        append_axis_sample(0,near_stop[i],0);
+        if (i) append_axis_stop(0);
+        float fitted=run_axis_stream(1,true,0,1);
+        assert(fabsf(fitted-360.0f/361.25f)<1e-6f);
+    }
+}
+static void sensitivity_deadlines_and_pretrigger_validation(void) {
+    begin_axis_stream();
+    for (unsigned i=0;i<16;i++) append_axis_sample(0,1.5f,100);
+    append_full_turns(0,1,1,0);
+    assert(fabsf(run_axis_stream(8,true,0,1)-1.0f)<1e-6f);
+    begin_axis_stream();
+    for (unsigned i=0;i<250;i++) append_axis_sample(0,0,0);
+    run_axis_stream(1,false,0,1);
+    assert(failure_reason==CAL_REASON_START_TIMEOUT && failure_phase==CAL_PHASE_WAIT_ROTATION);
+    begin_axis_stream();
+    append_axis_sample(0,40,0);
+    append_axis_sample(0,40,0);
+    sample_timestamp_us[replay_count-1]+=60000000;
+    run_axis_stream(1,false,0,1);
+    assert(failure_reason==CAL_REASON_RECORD_TIMEOUT && failure_phase==CAL_PHASE_RECORD_ROTATION);
+    for (unsigned invalid=0;invalid<3;invalid++) {
+        begin_axis_stream();
+        append_axis_sample(0,5,0);
+        append_axis_sample(0,0,0);
+        append_full_turns(0,1,1,0);
+        if (invalid==0) replay[8].dt=0;
+        if (invalid==1) for (unsigned i=8;i<replay_count;i++) replay[i].sequence++;
+        if (invalid==2) for (unsigned i=9;i<replay_count;i++) replay[i].sequence++;
+        run_axis_stream(1,false,0,1);
+        assert(failure_reason==CAL_REASON_INSUFFICIENT_SAMPLES && failure_phase==CAL_PHASE_WAIT_ROTATION);
+    }
+}
 int main(void) {
     run_worker(0,false); /* Control reaches a valid production worker commit. */
     run_worker(1,false); run_worker(2,false);
@@ -365,6 +493,11 @@ int main(void) {
     loaded_invalid_axes_are_healed_before_use();
     batching_trigger_and_stop_dwell_invariants();
     missing_intervals_reject_the_measurement();
+    slow_ramp_axes_signs_counts_and_batches();
+    rest_resets_only_the_untriggered_candidate();
+    signed_reversal_is_net_angle();
+    trigger_and_final_stop_boundaries();
+    sensitivity_deadlines_and_pretrigger_validation();
     sensor_tcal_heated_lock();
     assert(sensor_calibration_heated_reserve_locked()==0);
     sensor_tcal_heated_unlock();
