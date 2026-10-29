@@ -289,7 +289,7 @@ uint16_t lsm6dso_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 		}
 		uint16_t packet_capacity = capacity_bytes / PACKET_SIZE;
 		if (packet_count > packet_capacity) {
-			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", packet_count - packet_capacity);
+			LOG_WRN("FIFO read buffer limit reached, %d packets retained in FIFO", packet_count - packet_capacity);
 			packet_count = packet_capacity;
 		}
 		err = ssi_burst_read_interval(

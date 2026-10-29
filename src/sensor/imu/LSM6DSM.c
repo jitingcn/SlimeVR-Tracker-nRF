@@ -321,7 +321,7 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 		uint16_t samples = words / 3;
 		uint16_t packet_capacity = capacity_bytes / PACKET_SIZE;
 		if (samples > packet_capacity) {
-			LOG_WRN("FIFO read buffer limit reached, %d packets dropped", samples - packet_capacity);
+			LOG_WRN("FIFO read buffer limit reached, %d packets retained in FIFO", samples - packet_capacity);
 			samples = packet_capacity;
 		}
 		/* Bound each batch when a status read reports an implausibly large word count. */
