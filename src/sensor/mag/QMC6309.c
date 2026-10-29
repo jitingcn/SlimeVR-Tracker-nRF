@@ -213,6 +213,9 @@ bool qmc_mag_read(float m[3])
 				oneshot_pending = false;
 				return false;
 			}
+			if (status & STAT_DATA_RDY_MASK) {
+				break;
+			}
 			if (k_uptime_get() >= deadline_ms) {
 				LOG_WRN("Data ready status timeout!");
 				oneshot_pending = false;

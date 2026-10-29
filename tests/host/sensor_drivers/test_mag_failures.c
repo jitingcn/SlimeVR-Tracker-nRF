@@ -1279,6 +1279,24 @@ static int test_rates_qmc_fresh_identical_samples(void)
 	return 0;
 }
 
+static int test_rates_qmc_ready_after_deadline(void)
+{
+	const sensor_mag_t *drivers[] = {&sensor_mag_qmc5883l, &sensor_mag_qmc6309};
+	const uint8_t status_regs[] = {0x06, 0x09};
+	for (size_t i = 0; i < ARRAY_SIZE(drivers); i++) {
+		fake_bus_reset();
+		float actual;
+		CHECK(drivers[i]->init(INFINITY, &actual) == 0);
+		drivers[i]->mag_oneshot();
+		bus.now_ms += 20;
+		bus.registers[status_regs[i]] = 1;
+		float m[3] = {123, 456, 789};
+		CHECK(drivers[i]->mag_read(m));
+		CHECK(m[0] == 0 && m[1] == 0 && m[2] == 0);
+	}
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1327,6 +1345,7 @@ int main(void)
 		{"Fractional magnetometer rates", test_rates_fractional_selection},
 		{"QMC6309 variant rate ceiling", test_rates_qmc_ceiling},
 		{"QMC confirmed identical samples", test_rates_qmc_fresh_identical_samples},
+		{"QMC ready poll wins deadline", test_rates_qmc_ready_after_deadline},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
 		{"LIS temperatures", test_lis_temperatures_fail_loudly_and_apply_offset},

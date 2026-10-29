@@ -188,6 +188,9 @@ bool qmc5883l_mag_read(float m[3])
 				oneshot_pending = false;
 				return false;
 			}
+			if (status & QMC5883L_STATUS_DRDY) {
+				break;
+			}
 			if (k_uptime_get() >= deadline_ms) {
 				LOG_WRN("Data ready status timeout!");
 				oneshot_pending = false;
