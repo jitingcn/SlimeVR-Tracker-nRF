@@ -222,7 +222,8 @@ bool qmc5883l_mag_read(float m[3])
 	}
 
 	int64_t now = k_uptime_get();
-	if (last_raw_sample_valid && memcmp(rawData, last_raw_sample, 6) == 0) {
+	if (!was_oneshot && sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) == SENSOR_INTERFACE_SPEC_EXT &&
+	    last_raw_sample_valid && memcmp(rawData, last_raw_sample, 6) == 0) {
 		if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10)) {
 			return false;
 		}

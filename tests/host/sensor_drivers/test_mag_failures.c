@@ -1247,6 +1247,38 @@ static int test_rates_qmc_ceiling(void)
 	return 0;
 }
 
+static int test_rates_qmc_fresh_identical_samples(void)
+{
+	const sensor_mag_t *drivers[] = {&sensor_mag_qmc5883l, &sensor_mag_qmc6309};
+	const uint8_t status_regs[] = {0x06, 0x09};
+	const uint8_t data_regs[] = {0x00, 0x01};
+	for (size_t i = 0; i < ARRAY_SIZE(drivers); i++) {
+		fake_bus_reset();
+		float actual;
+		CHECK(drivers[i]->init(0.02f, &actual) == 0);
+		bus.registers[status_regs[i]] = 1;
+		bus.registers[data_regs[i]] = 12;
+		float m[3] = {0};
+		bus.now_ms = 100;
+		CHECK(drivers[i]->mag_read(m));
+		bus.now_ms = 101;
+		CHECK(drivers[i]->mag_read(m));
+		for (int shot = 0; shot < 2; shot++) {
+			drivers[i]->mag_oneshot();
+			CHECK(drivers[i]->mag_read(m));
+		}
+		CHECK(drivers[i]->init(0.02f, &actual) == 0);
+		fake_spec = SENSOR_INTERFACE_SPEC_EXT;
+		bus.now_ms = 200;
+		CHECK(drivers[i]->mag_read(m));
+		bus.now_ms = 201;
+		CHECK(!drivers[i]->mag_read(m));
+		bus.now_ms = 223;
+		CHECK(drivers[i]->mag_read(m));
+	}
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1294,6 +1326,7 @@ int main(void)
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"Fractional magnetometer rates", test_rates_fractional_selection},
 		{"QMC6309 variant rate ceiling", test_rates_qmc_ceiling},
+		{"QMC confirmed identical samples", test_rates_qmc_fresh_identical_samples},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
 		{"LIS temperatures", test_lis_temperatures_fail_loudly_and_apply_offset},
