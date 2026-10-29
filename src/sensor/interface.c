@@ -36,7 +36,7 @@ static int ssi_report_error(enum sensor_interface_dev dev, const char *operation
 	const char *bus = "unknown";
 	const char *controller = "unknown";
 	int address = -1;
-	int spec_type = dev < 0 || dev >= SENSOR_INTERFACE_DEV_COUNT ?
+	int spec_type = (unsigned)dev >= SENSOR_INTERFACE_DEV_COUNT ?
 		-1 : (int)sensor_interface_dev_spec[dev];
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -252,7 +252,7 @@ int sensor_interface_ext_set_prefetch(bool enabled)
 
 enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev)
 {
-	if (dev < 0 || dev >= SENSOR_INTERFACE_DEV_COUNT)
+	if ((unsigned)dev >= SENSOR_INTERFACE_DEV_COUNT)
 		return SENSOR_INTERFACE_SPEC_SPI; // safe default
 	return sensor_interface_dev_spec[dev];
 }

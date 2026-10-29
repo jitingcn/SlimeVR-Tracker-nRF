@@ -78,7 +78,7 @@ static uint16_t breathe_value(uint32_t elapsed_ms, uint32_t duration_ms)
 struct led_envelope led_timeline(enum led_style style, uint32_t elapsed_ms, bool gpio, bool finite)
 {
 	struct led_envelope out = {.next_ms = UINT32_MAX};
-	if (style < LED_STYLE_SHORT || style >= LED_STYLE_COUNT) {
+	if ((unsigned)style >= LED_STYLE_COUNT) {
 		out.complete = true;
 		return out;
 	}

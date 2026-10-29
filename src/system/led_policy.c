@@ -415,7 +415,7 @@ void led_engine_fault(
 	uint32_t now_ms
 )
 {
-	if (!led_owner_valid(owner) || fault < LED_FAULT_NONE || fault > LED_FAULT_SAFETY) {
+	if (!led_owner_valid(owner) || (unsigned)fault > LED_FAULT_SAFETY) {
 		return;
 	}
 	struct led_owner_state *state = &e->owners[owner];

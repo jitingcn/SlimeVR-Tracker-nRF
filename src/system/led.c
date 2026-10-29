@@ -189,7 +189,7 @@ void led_connection_publish(const struct led_connection_facts *facts)
 }
 void led_power_publish(enum led_power_state state, bool low)
 {
-	if (state < LED_POWER_BATTERY || state > LED_POWER_EXTERNAL_UNKNOWN) {
+	if ((unsigned)state > LED_POWER_EXTERNAL_UNKNOWN) {
 		return;
 	}
 	uint32_t now_ms = local_ms();
@@ -208,7 +208,7 @@ void led_fault_publish(enum led_owner owner, enum led_fault_kind fault, uint32_t
 {
 	/* Reject before computing changes: an invalid fault must not wake the
 	 * worker and consume or expire otherwise untouched pending feedback. */
-	if (!led_owner_valid(owner) || fault < LED_FAULT_NONE || fault > LED_FAULT_SAFETY) {
+	if (!led_owner_valid(owner) || (unsigned)fault > LED_FAULT_SAFETY) {
 		return;
 	}
 	uint32_t now_ms = local_ms();
