@@ -1778,7 +1778,6 @@ int sensor_set_mag_enabled(bool enabled)
 			return sensor_operation_result(LED_OWNER_MAG, err, false);
 		}
 	}
-	sensor_invalidate_mag_fusion(false);
 	if (mag_available) {
 		if (enabled) {
 			err = sensor_mag_runtime_enable();
@@ -1796,6 +1795,7 @@ int sensor_set_mag_enabled(bool enabled)
 		main_imu_resume();
 		return sensor_operation_result(LED_OWNER_MAG, err, false);
 	}
+	sensor_invalidate_mag_fusion(false);
 
 	bool val = enabled;
 	int storage_err = sys_write(MAG_ENABLED_ID, &retained->mag_enabled, &val, sizeof(val));

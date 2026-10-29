@@ -645,17 +645,29 @@ int main(void) {
     assert(!skip_fusion_save); sensor_retained_write(); assert(saves==3 && retained->fusion_id==fusion_id);
     main_ok=false; mag_enabled=false; retained->mag_enabled=true;
     interleave_initialization=true;
-    assert(sensor_set_mag_enabled(false)==0 && !retained->mag_enabled && skip_fusion_save);
+    assert(sensor_set_mag_enabled(false)==0 && !retained->mag_enabled);
     interleave_initialization=false;
-    assert(retained->fusion_id==0 && mag_fusion_finish_pending==1);
-    sensor_retained_write(); assert(retained->fusion_id==0 && saves==3);
-    main_ok=true; sensor_service_pending_mag_fusion();
-    assert(!skip_fusion_save && !mag_fusion_finish_pending);
-    sensor_retained_write(); assert(retained->fusion_id==fusion_id && saves==4);
+    sensor_retained_write(); assert(retained->fusion_id==0 && saves==3 && retained->fusion_data[0]==43);
+    main_ok=true; enable_error=-EIO;
+    assert(sensor_set_mag_enabled(true)==-EIO);
+    assert(!mag_enabled && !retained->mag_enabled && !main_suspended);
+    sensor_retained_write(); assert(retained->fusion_id==0 && saves==3 && retained->fusion_data[0]==43);
+    enable_error=0; sensor_service_pending_mag_fusion();
+    sensor_retained_write(); assert(retained->fusion_id==fusion_id && saves==4 && retained->fusion_data[0]==44);
     mag_enabled=false; mag_available=false; hardware_on=false;
     assert(sensor_set_mag_enabled(true)==0);
     assert(mag_enabled && !hardware_on && !skip_fusion_save && last_fusion_mag==0);
     sensor_retained_write(); assert(saves==5 && retained->fusion_id==fusion_id);
+    mag_available=true;
+    assert(sensor_set_mag_enabled(false)==0);
+    sensor_retained_write(); assert(retained->fusion_id==fusion_id && saves==6 && retained->fusion_data[0]==46);
+    enable_error=-EIO;
+    assert(sensor_set_mag_enabled(true)==-EIO);
+    assert(!mag_enabled && !retained->mag_enabled && !main_suspended);
+    assert(retained->fusion_id==fusion_id && retained->fusion_data[0]==46);
+    assert(sensor_set_mag_enabled(false)==0);
+    assert(retained->fusion_id==fusion_id && retained->fusion_data[0]==46);
+    sensor_retained_write(); assert(retained->fusion_id==fusion_id && saves==7 && retained->fusion_data[0]==47);
     puts("PM mode and retained fusion gates survive failure, recovery and absent hardware");
 }
 '''
