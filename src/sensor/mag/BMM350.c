@@ -426,7 +426,7 @@ error:
 void bmm3_mag_oneshot(void)
 {
 	last_state = UINT16_MAX;
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM350_PMU_CMD, PMU_CMD_FM_FAST);
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM350_PMU_CMD, PMU_CMD_FM);
 	oneshot_pending = true;
 	oneshot_failed = err != 0;
 }
@@ -442,7 +442,8 @@ bool bmm3_mag_read(float m[3])
 		return false;
 	}
 
-	int64_t deadline = k_uptime_get() + 20;
+	/* Normal forced mode can take about 30 ms with eight-sample averaging. */
+	int64_t deadline = k_uptime_get() + 40;
 	uint8_t frame[13];
 	while (true) {
 		int err = bmm3_read(BMM350_INT_STATUS, frame, sizeof(frame));

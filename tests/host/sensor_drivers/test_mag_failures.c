@@ -1077,6 +1077,61 @@ static int test_modes_ak_fractional_rates(void)
 	return 0;
 }
 
+static int test_modes_bmm350_normal_forced(void)
+{
+	fake_bus_reset();
+	bus.registers[BMM350_CHIP_ID_REG] = BMM350_CHIP_ID;
+	float actual;
+	CHECK(bmm3_init(1.0f, &actual) == 0);
+	CHECK(bus.registers[BMM350_PMU_CMD_AGGR_SET] == ((AGGR_AVG_8 << 4) | AGGR_ODR_1_5625Hz));
+	CHECK(bmm3_update_odr(0, &actual) == 0);
+	bus.precise_clock = true;
+	bus.now_us = 200000;
+	fake_bus_clear_transactions();
+	bmm3_mag_oneshot();
+	CHECK(bus.ops[0].reg == BMM350_PMU_CMD && bus.ops[0].value == 0x03);
+	bus.ready_at_us = bus.now_us + 30000;
+	bus.ready_reg = BMM350_INT_STATUS;
+	bus.ready_mask = BMM350_DRDY_DATA_REG;
+	float m[3] = {1, 2, 3};
+	CHECK(bmm3_mag_read(m));
+	CHECK(bus.now_us == 230000);
+	CHECK(m[0] == 0 && m[1] == 0 && m[2] == 0);
+	CHECK(bmm3_update_odr(INFINITY, &actual) == 0);
+	static const int64_t gaps_us[] = {10000, 200000};
+	for (size_t i = 0; i < ARRAY_SIZE(gaps_us); i++) {
+		bus.now_us += gaps_us[i];
+		bus.registers[BMM350_INT_STATUS] = 0;
+		bus.ready_at_us = 0;
+		fake_bus_clear_transactions();
+		bmm3_mag_oneshot();
+		CHECK(bus.op_count == 1 && bus.ops[0].value == 0x03);
+		int64_t trigger_us = bus.now_us;
+		bus.ready_at_us = trigger_us + 3100;
+		bus.registers[BMM350_MAG_X_XLSB] = (uint8_t)(10 * (i + 1));
+		CHECK(bmm3_mag_read(m));
+		CHECK(bus.now_us - trigger_us == 3100);
+		static const float expected_x[] = {0.0007069979f, 0.0014139958f};
+		CHECK(fabsf(m[0] - expected_x[i]) < 0.00000001f && m[1] == 0 && m[2] == 0);
+	}
+	fake_bus_clear_transactions();
+	bus.fail_transaction = 1;
+	bmm3_mag_oneshot();
+	fake_bus_clear_transactions();
+	m[0] = 1; m[1] = 2; m[2] = 3;
+	CHECK(!bmm3_mag_read(m));
+	CHECK(bus.op_count == 0 && m[0] == 1 && m[1] == 2 && m[2] == 3);
+	bus.ready_at_us = 0;
+	bus.registers[BMM350_INT_STATUS] = 0;
+	bmm3_mag_oneshot();
+	fake_bus_clear_transactions();
+	int64_t timeout_start_us = bus.now_us;
+	CHECK(!bmm3_mag_read(m));
+	CHECK(bus.now_us - timeout_start_us >= 39000);
+	CHECK(m[0] == 1 && m[1] == 2 && m[2] == 3);
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1119,6 +1174,7 @@ int main(void)
 		{"Modes AK powerdown transitions", test_modes_ak_powerdown_transitions},
 		{"Modes AK conversion deadline", test_modes_ak_conversion_deadline},
 		{"Modes AK fractional rates", test_modes_ak_fractional_rates},
+		{"Modes BMM350 normal forced", test_modes_bmm350_normal_forced},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
