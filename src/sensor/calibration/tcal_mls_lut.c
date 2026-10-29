@@ -625,9 +625,7 @@ bool sensor_tcal_build_lut_continue(void)
 // =============================================================================
 // Canonical Grid Lookup
 // =============================================================================
-// Cached-only and on-demand lookups share the same indices, endpoint clamps
-// and arithmetic. Builder progress changes cost, never the compensation curve.
-static int sensor_tcal_grid_lookup_locked(float temp, float bias_out[3], bool fill_missing)
+static int sensor_tcal_grid_lookup_locked(float temp, float bias_out[3])
 {
 	if (!v_finite(&temp, 1) || mls_lut.version != model_generation) {
 		return -1;  // LUT not available
@@ -635,10 +633,7 @@ static int sensor_tcal_grid_lookup_locked(float temp, float bias_out[3], bool fi
 
 	/* Outside configured LUT range: clamp to nearest edge entry (no slope run-away). */
 	if (temp < MLS_LUT_TEMP_MIN) {
-		if (fill_missing && !sensor_tcal_lut_compute_entry(0)) {
-			return -1;
-		}
-		if (!mls_lut.entries[0].computed) {
+		if (!sensor_tcal_lut_compute_entry(0)) {
 			return -1;
 		}
 		memcpy(bias_out, mls_lut.entries[0].bias, sizeof(float) * 3);
@@ -646,10 +641,7 @@ static int sensor_tcal_grid_lookup_locked(float temp, float bias_out[3], bool fi
 	}
 	if (temp > MLS_LUT_TEMP_MAX) {
 		int hi = MLS_LUT_SIZE - 1;
-		if (fill_missing && !sensor_tcal_lut_compute_entry(hi)) {
-			return -1;
-		}
-		if (!mls_lut.entries[hi].computed) {
+		if (!sensor_tcal_lut_compute_entry(hi)) {
 			return -1;
 		}
 		memcpy(bias_out, mls_lut.entries[hi].bias, sizeof(float) * 3);
@@ -676,12 +668,7 @@ static int sensor_tcal_grid_lookup_locked(float temp, float bias_out[3], bool fi
 		idx_lo = 0;
 	}
 
-	if (fill_missing &&
-	    (!sensor_tcal_lut_compute_entry(idx_lo) || !sensor_tcal_lut_compute_entry(idx_hi))) {
-		return -1;
-	}
-	// Check if required entries are computed
-	if (!mls_lut.entries[idx_lo].computed || !mls_lut.entries[idx_hi].computed) {
+	if (!sensor_tcal_lut_compute_entry(idx_lo) || !sensor_tcal_lut_compute_entry(idx_hi)) {
 		return -1;
 	}
 
@@ -711,18 +698,10 @@ static int sensor_tcal_grid_lookup_locked(float temp, float bias_out[3], bool fi
 	return 0;
 }
 
-int sensor_tcal_lut_lookup(float temp, float bias_out[3])
-{
-	sensor_tcal_lock();
-	int result = mls_lut.valid ? sensor_tcal_grid_lookup_locked(temp, bias_out, false) : -1;
-	sensor_tcal_unlock();
-	return result;
-}
-
 int sensor_tcal_curve_lookup(float temp, float bias_out[3])
 {
 	sensor_tcal_lock();
-	int result = sensor_tcal_grid_lookup_locked(temp, bias_out, true);
+	int result = sensor_tcal_grid_lookup_locked(temp, bias_out);
 	sensor_tcal_unlock();
 	return result;
 }

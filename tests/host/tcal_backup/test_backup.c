@@ -98,7 +98,7 @@ static void roundtrip(unsigned count, bool destination_enabled) {
     struct retained_fixture expected = *retained;
     expected.tcal_enabled = destination_enabled;
     float before_bias[3] = {0};
-    if (count >= 4) { finish_model(); assert(sensor_tcal_lut_lookup(25, before_bias) == 0); }
+    if (count >= 4) { finish_model(); assert(sensor_tcal_curve_lookup(25, before_bias) == 0); }
     export_model();
     seed(1, destination_enabled);
     struct retained_fixture unrelated_before = *retained;
@@ -116,12 +116,16 @@ static void roundtrip(unsigned count, bool destination_enabled) {
     assert(sensor_tcal_model_generation() > generation && !retained->bootCalState.doffset_valid);
     float other[3];
     if (count >= 4) {
-        finish_model(); assert(sensor_tcal_lut_lookup(25, other) == 0);
+        finish_model(); assert(sensor_tcal_curve_lookup(25, other) == 0);
         for (unsigned a = 0; a < 3; a++) assert(fabsf(other[a] - before_bias[a]) < 1e-6f);
     }
     cold_restore(); compare_model(&expected); unrelated(&unrelated_before);
     if (count >= 4) {
-        finish_model(); assert(sensor_tcal_lut_lookup(25, other) == 0);
+        assert(sensor_tcal_lut_get_computed_count() == 0);
+        assert(sensor_tcal_curve_lookup(25, other) == 0);
+        assert(sensor_tcal_lut_get_computed_count() == 2);
+        for (unsigned a = 0; a < 3; a++) assert(fabsf(other[a] - before_bias[a]) < 1e-6f);
+        finish_model(); assert(sensor_tcal_curve_lookup(25, other) == 0);
         for (unsigned a = 0; a < 3; a++) assert(fabsf(other[a] - before_bias[a]) < 1e-6f);
     }
     printf("UART full-burst roundtrip count=%u destination-enabled=%u exact float32/cold restore/MLS OK\n", count, destination_enabled);
@@ -294,7 +298,7 @@ int main(int argc,char **argv) {
         seed(0,false);memset(&flash_data,0,sizeof(flash_data));replay(saved,true);assert(strstr(output,"saved successfully"));
         struct retained_fixture expected=*retained;cold_restore();compare_model(&expected);
         clear_output();command("tcal export");assert(!strcmp(saved,output));fputs(output,stdout);
-        if(retained->tempCalState.count>=4) {float bias[3];finish_model();assert(sensor_tcal_lut_lookup(25,bias)==0);fprintf(stderr,"cold restored real MLS bias: %.9g %.9g %.9g\n",(double)bias[0],(double)bias[1],(double)bias[2]);}
+        if(retained->tempCalState.count>=4) {float bias[3];finish_model();assert(sensor_tcal_curve_lookup(25,bias)==0);fprintf(stderr,"cold restored real MLS bias: %.9g %.9g %.9g\n",(double)bias[0],(double)bias[1],(double)bias[2]);}
         fprintf(stderr,"external-file full-burst UART import/save/cold restore exact; points=%u enabled=%u\n",retained->tempCalState.count,retained->tcal_enabled);return 0;
     }
     assert(argc==1);

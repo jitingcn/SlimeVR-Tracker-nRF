@@ -109,7 +109,7 @@ static void finish(void) {
 }
 static void expect(float temp, float base, float shift, bool lut) {
     float bias[3];
-    int result = lut ? sensor_tcal_lut_lookup(temp, bias) : sensor_tcal_mls_lookup(temp, bias);
+    int result = lut ? sensor_tcal_curve_lookup(temp, bias) : sensor_tcal_mls_lookup(temp, bias);
     assert(result == 0);
     for (int axis = 0; axis < 3; axis++)
         assert(fabsf(bias[axis] - (base * (axis + 1) + shift)) < 0.002f);
@@ -153,6 +153,68 @@ static void seed_nonlinear(void) {
 }
 static void expect_exact(const float actual[3], const float expected[3]) {
     assert(memcmp(actual, expected, 3 * sizeof(float)) == 0);
+}
+static void reference_curve(float temp, float out[3]) {
+    if (temp < 10.0f) {
+        assert(sensor_tcal_mls_lookup(10.0f, out) == 0);
+        return;
+    }
+    if (temp > 45.0f) {
+        assert(sensor_tcal_mls_lookup(45.0f, out) == 0);
+        return;
+    }
+    float index = (temp - 10.0f) * 2.0f;
+    int lo = (int)index;
+    if (lo >= MLS_LUT_SIZE - 1) lo = MLS_LUT_SIZE - 2;
+    float a[3], b[3];
+    assert(sensor_tcal_mls_lookup(10.0f + .5f * lo, a) == 0);
+    assert(sensor_tcal_mls_lookup(10.0f + .5f * (lo + 1), b) == 0);
+    float fraction = index - lo;
+    for (int axis = 0; axis < 3; axis++) out[axis] = a[axis] + fraction * (b[axis] - a[axis]);
+}
+static void literal_curve(void) {
+    static const float points[] = {10, 15, 20, 30, 40, 45};
+    static const struct { float temp, bias[3]; int bins; } cases[] = {
+        {-5,    {.0100000007f, .0009868421f, -.0069999998f}, 1},
+        {10.25f,{.0102500003f, .0010552631f, -.0071749995f}, 2},
+        {22.25f,{.0222500004f, .0051602963f, -.0155750001f}, 2},
+        {44.75f,{.0447500013f, .0200375002f, -.0313250013f}, 2},
+        {50,    {.0450000018f, .0202500001f, -.0315000005f}, 1},
+    };
+    sensor_tcal_lock();
+    retained->tempCalState.count = sizeof(points) / sizeof(*points);
+    for (unsigned i = 0; i < sizeof(points) / sizeof(*points); i++) {
+        float t = points[i];
+        retained->tempCalPoints[i].temp = t;
+        retained->tempCalPoints[i].bias[0] = t * .001f;
+        retained->tempCalPoints[i].bias[1] = t * t * .00001f;
+        retained->tempCalPoints[i].bias[2] = t * -.0007f;
+    }
+    sensor_tcal_model_changed();
+    sensor_tcal_unlock();
+    uint32_t generation = sensor_tcal_model_generation();
+    float actual[3];
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        sensor_tcal_cache_invalidate();
+        assert(sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_IDLE);
+        assert(!sensor_tcal_lut_is_valid() && sensor_tcal_lut_get_computed_count() == 0);
+        assert(sensor_tcal_curve_lookup(cases[i].temp, actual) == 0);
+        for (int axis = 0; axis < 3; axis++)
+            assert(fabsf(actual[axis] - cases[i].bias[axis]) < .0000002f);
+        assert(sensor_tcal_lut_get_computed_count() == cases[i].bins);
+        assert(!sensor_tcal_lut_is_valid());
+        assert(sensor_tcal_curve_lookup(cases[i].temp, actual) == 0);
+        assert(sensor_tcal_lut_get_computed_count() == cases[i].bins);
+    }
+    sensor_tcal_build_lut_priority(22.25f);
+    finish();
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); i++) {
+        assert(sensor_tcal_curve_lookup(cases[i].temp, actual) == 0);
+        for (int axis = 0; axis < 3; axis++)
+            assert(fabsf(actual[axis] - cases[i].bias[axis]) < .0000002f);
+    }
+    assert(sensor_tcal_lut_get_computed_count() == MLS_LUT_SIZE);
+    assert(sensor_tcal_model_generation() == generation);
 }
 static void query_between_entries(void) {
     assert(lock_depth == 0);
@@ -207,7 +269,7 @@ static void nonlinear_builder(void) {
         after_unlock = NULL;
         assert(sensor_tcal_lut_get_computed_count() == MLS_LUT_SIZE);
         for (int i = 0; i < MLS_LUT_SIZE; i++) {
-            assert(sensor_tcal_lut_lookup(10.0f + .5f * i, actual) == 0);
+            assert(sensor_tcal_curve_lookup(10.0f + .5f * i, actual) == 0);
             expect_exact(actual, expected[i]);
         }
     }
@@ -221,10 +283,14 @@ static void curve_progress(void) {
     float expected[sizeof(temps) / sizeof(*temps)][3], actual[3];
     seed_nonlinear();
     uint32_t generation = sensor_tcal_model_generation();
+    for (unsigned i = 0; i < sizeof(temps) / sizeof(*temps); i++)
+        reference_curve(temps[i], expected[i]);
     sensor_tcal_build_lut_priority(27.24f);
     finish();
-    for (unsigned i = 0; i < sizeof(temps) / sizeof(*temps); i++)
-        assert(sensor_tcal_lut_lookup(temps[i], expected[i]) == 0);
+    for (unsigned i = 0; i < sizeof(temps) / sizeof(*temps); i++) {
+        assert(sensor_tcal_curve_lookup(temps[i], actual) == 0);
+        expect_exact(actual, expected[i]);
+    }
     for (unsigned i = 0; i < sizeof(temps) / sizeof(*temps); i++) {
         sensor_tcal_cache_invalidate();
         assert(sensor_tcal_lut_get_computed_count() == 0);
@@ -259,7 +325,7 @@ static void curve_progress(void) {
     assert(sensor_tcal_model_generation() == generation);
 }
 static void curve_generation(void) {
-    float before[3], after[3], complete[3];
+    float before[3], after[3], complete[3], reference[3];
     seed_nonlinear();
     assert(sensor_tcal_mls_lookup(27.24f, before) == 0);
     assert(sensor_tcal_curve_lookup(27.24f, before) == 0);
@@ -276,17 +342,21 @@ static void curve_generation(void) {
     assert(sensor_tcal_curve_lookup(27.24f, after) == 0);
     for (int axis = 0; axis < 3; axis++)
         assert(fabsf(after[axis] - before[axis] - 7.0f) < .00001f);
+    reference_curve(27.24f, reference);
+    expect_exact(after, reference);
     sensor_tcal_build_lut_priority(27.24f);
     finish();
-    assert(sensor_tcal_lut_lookup(27.24f, complete) == 0);
-    expect_exact(after, complete);
+    assert(sensor_tcal_curve_lookup(27.24f, complete) == 0);
+    expect_exact(complete, reference);
 }
 int main(int argc, char **argv) {
     assert(argc == 2);
     seed();
     uint32_t generation = sensor_tcal_model_generation();
     const char *scenario = argv[1];
-    if (!strcmp(scenario, "nonlinear_query_order")) {
+    if (!strcmp(scenario, "literal_curve")) {
+        literal_curve();
+    } else if (!strcmp(scenario, "nonlinear_query_order")) {
         nonlinear_query_order();
     } else if (!strcmp(scenario, "nonlinear_builder")) {
         nonlinear_builder();
@@ -317,7 +387,12 @@ int main(int argc, char **argv) {
         expect(25.0f, 25.0f, 0, true);
         sensor_tcal_cache_invalidate();
         float bias[3];
-        assert(sensor_tcal_lut_lookup(25.0f, bias) == -1);
+        assert(sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_IDLE);
+        assert(!sensor_tcal_lut_is_valid() && sensor_tcal_lut_get_computed_count() == 0);
+        assert(sensor_tcal_curve_lookup(25.0f, bias) == 0);
+        for (int axis = 0; axis < 3; axis++)
+            assert(fabsf(bias[axis] - 25.0f * (axis + 1)) < .002f);
+        assert(sensor_tcal_lut_get_computed_count() == 2 && !sensor_tcal_lut_is_valid());
         assert(sensor_tcal_model_generation() == generation);
         sensor_tcal_build_lut_priority(25.0f);
         finish();
@@ -334,7 +409,7 @@ int main(int argc, char **argv) {
         assert(sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_PRIORITY);
         finish();
         float before[3], after[3];
-        assert(sensor_tcal_lut_lookup(20.0f, after) == 0);
+        assert(sensor_tcal_curve_lookup(20.0f, after) == 0);
         for (int axis = 0; axis < 3; axis++) before[axis] = 20.0f * (axis + 1);
         for (int axis = 0; axis < 3; axis++) assert(after[axis] > before[axis] + 0.005f);
     } else if (!strcmp(scenario, "interleaving")) {
@@ -347,7 +422,7 @@ int main(int argc, char **argv) {
         for (int idx = 0; idx < MLS_LUT_SIZE; idx++) {
             float bias[3];
             float temp = CONFIG_SENSOR_POLY_TEMP_MIN + 0.5f * idx;
-            assert(sensor_tcal_lut_lookup(temp, bias) == 0);
+            assert(sensor_tcal_curve_lookup(temp, bias) == 0);
             for (int axis = 0; axis < 3; axis++) assert(fabsf(bias[axis] - (77.0f + axis)) < 0.002f);
         }
     } else if (!strcmp(scenario, "nonfinite")) {
@@ -365,11 +440,12 @@ int main(int argc, char **argv) {
         assert(sensor_tcal_lut_get_build_state() == MLS_LUT_BUILD_IDLE);
         sensor_tcal_build_lut_priority(25.0f);
         finish();
-        assert(sensor_tcal_lut_lookup(NAN, bias) == -1);
-        assert(sensor_tcal_lut_lookup(INFINITY, bias) == -1);
         sensor_tcal_build_lut_priority(-INFINITY);
         for (unsigned i = 0; i < sizeof(invalid) / sizeof(*invalid); i++) {
+            const float untouched[3] = {123, 456, 789};
+            memcpy(bias, untouched, sizeof(bias));
             assert(sensor_tcal_curve_lookup(invalid[i], bias) == -1);
+            expect_exact(bias, untouched);
             assert(sensor_tcal_lut_get_computed_count() == MLS_LUT_SIZE);
         }
         expect(25.0f, 25.0f, 0, true);
@@ -407,8 +483,8 @@ int main(int argc, char **argv) {
         float bias[3] = {123, 456, 789};
         assert(sensor_tcal_mls_lookup(25.0f, bias) == -1);
         sensor_tcal_build_lut_priority(25.0f);
-        assert(sensor_tcal_lut_lookup(25.0f, bias) == -1);
         assert(sensor_tcal_curve_lookup(25.0f, bias) == -1);
+        assert(bias[0] == 123 && bias[1] == 456 && bias[2] == 789);
     } else {
         assert(!"unknown scenario");
     }
@@ -438,5 +514,5 @@ with tempfile.TemporaryDirectory(prefix="tcal-cache-") as directory:
                               "-I", str(work), str(harness), "-lm", "-o", str(executable)], check=True)
     for scenario in ("same_count", "rebuild", "restart", "interleaving", "nonfinite",
                      "boot_recovery", "boot_clear", "nonlinear_query_order",
-                     "nonlinear_builder", "curve_progress", "curve_generation"):
+                     "nonlinear_builder", "curve_progress", "curve_generation", "literal_curve"):
         subprocess.run([str(executable), scenario], check=True)

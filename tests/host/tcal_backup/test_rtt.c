@@ -35,7 +35,14 @@ int main(void) {
     char full[sizeof(saved)]; strcpy(full,saved); strcpy(full+PAYLOAD_CHARS,"\r\n");
     rtt_receive(full); assert(strstr(output,"saved successfully") && !live_allocations);
     compare_model(&expected); cold_restore(); compare_model(&expected);
-    float bias[3]; finish_model(); assert(sensor_tcal_lut_lookup(25,bias) == 0);
+    float bias[3];
+    assert(sensor_tcal_lut_get_computed_count() == 0);
+    assert(sensor_tcal_curve_lookup(25,bias) == 0);
+    assert(sensor_tcal_lut_get_computed_count() == 2);
+    const float expected_bias[3] = {.15250943f, .27596614f, .39942282f};
+    for (unsigned axis = 0; axis < 3; axis++) assert(fabsf(bias[axis] - expected_bias[axis]) < 1e-5f);
+    finish_model(); assert(sensor_tcal_curve_lookup(25,bias) == 0);
+    for (unsigned axis = 0; axis < 3; axis++) assert(fabsf(bias[axis] - expected_bias[axis]) < 1e-5f);
     seed(1,false);
     struct retained_fixture boundary_before=*retained;
     unsigned boundary_writes=persist_calls, boundary_alloc=allocations, boundary_rejected=console_rejected;
