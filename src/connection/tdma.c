@@ -31,21 +31,20 @@
 
 LOG_MODULE_REGISTER(tdma, LOG_LEVEL_INF);
 
-/*
- * Pack slot_index[7:0] | slot_ticks[15:8] | frame_ticks[31:16] into one atomic
- * so ESB RX can publish and TX thread can snapshot without irq_lock.
- */
+/* Slot[3:0], enabled[7], width[15:8], total[23:16], receiver epoch[31:24]. */
 static atomic_t tdma_cfg_pack;
-static atomic_t tdma_epoch_at;
-static atomic_t tdma_runtime_enabled;
 
 static uint8_t tdma_slot_index_init; /* used only before first dyn config */
 
-#define TDMA_PACK(slot, sticks, frame) \
-	(((uint32_t)(uint8_t)(slot)) | ((uint32_t)(uint8_t)(sticks) << 8) | ((uint32_t)(uint16_t)(frame) << 16))
-#define TDMA_UNPACK_SLOT(p) ((uint8_t)((p) & 0xFFu))
+#define TDMA_ENABLED_BIT 0x80U
+#define TDMA_PACK(slot, sticks, total, epoch) \
+	((uint32_t)(uint8_t)(slot) | ((uint32_t)(uint8_t)(sticks) << 8) \
+	 | ((uint32_t)(uint8_t)(total) << 16) | ((uint32_t)(uint8_t)(epoch) << 24))
+#define TDMA_UNPACK_SLOT(p) ((uint8_t)((p) & 0x0Fu))
 #define TDMA_UNPACK_STICKS(p) ((uint8_t)(((p) >> 8) & 0xFFu))
-#define TDMA_UNPACK_FRAME(p) ((uint16_t)(((p) >> 16) & 0xFFFFu))
+#define TDMA_UNPACK_TOTAL(p) ((uint8_t)(((p) >> 16) & 0xFFu))
+#define TDMA_UNPACK_EPOCH(p) ((uint8_t)((p) >> 24))
+#define TDMA_UNPACK_FRAME(p) ((uint16_t)(TDMA_UNPACK_STICKS(p) * TDMA_UNPACK_TOTAL(p)))
 
 /* Cumulative canary counters; printed only on explicit console request. */
 static uint32_t tdma_admitted;
@@ -67,14 +66,14 @@ static uint32_t tdma_last_ping_pack;
 void tdma_init(uint8_t tracker_id)
 {
 	tdma_slot_index_init = tracker_id % TDMA_NUM_TRACKERS;
+	unsigned key = irq_lock();
 	atomic_set(&tdma_cfg_pack,
-		   (atomic_val_t)TDMA_PACK(tdma_slot_index_init, TDMA_SLOT_TICKS, TDMA_FRAME_TICKS));
-	atomic_set(&tdma_epoch_at, 0);
-	atomic_set(&tdma_runtime_enabled, 0);
+		   (atomic_val_t)TDMA_PACK(tdma_slot_index_init, TDMA_SLOT_TICKS, TDMA_NUM_TRACKERS, 0));
 	tdma_last_admitted_frame = UINT64_MAX;
 	tdma_last_admitted_pack = 0;
 	tdma_last_ping_frame = UINT64_MAX;
 	tdma_last_ping_pack = 0;
+	irq_unlock(key);
 #if CONFIG_CONNECTION_TDMA
 	LOG_INF("TDMA init: slot=%u/%u, frame=%u ticks (~%u.%01u ms), ~%u TPS/tracker",
 		tdma_slot_index_init, TDMA_NUM_TRACKERS,
@@ -136,29 +135,19 @@ static uint8_t tdma_reserve_ticks(uint8_t payload_length)
 
 static bool tdma_config_snapshot(struct tdma_config *config)
 {
-	unsigned key = irq_lock();
-	bool enabled = atomic_get(&tdma_runtime_enabled) != 0;
 	config->pack = (uint32_t)atomic_get(&tdma_cfg_pack);
-	config->epoch = (uint8_t)atomic_get(&tdma_epoch_at);
-	irq_unlock(key);
+	config->epoch = TDMA_UNPACK_EPOCH(config->pack);
 	config->slot_index = TDMA_UNPACK_SLOT(config->pack);
 	config->slot_ticks = TDMA_UNPACK_STICKS(config->pack);
 	config->frame_ticks = TDMA_UNPACK_FRAME(config->pack);
-	config->total_slots = config->slot_ticks ? config->frame_ticks / config->slot_ticks : 0;
-	return enabled && config->slot_ticks >= TDMA_MIN_SAFE_SLOT_TICKS
-		&& config->total_slots > 0 && config->total_slots <= TDMA_MAX_TRACKERS
-		&& config->frame_ticks == config->total_slots * config->slot_ticks
-		&& config->slot_index < config->total_slots;
+	config->total_slots = TDMA_UNPACK_TOTAL(config->pack);
+	return (config->pack & TDMA_ENABLED_BIT) && config->total_slots != 0;
 }
 
 static bool tdma_config_matches(const struct tdma_config *config)
 {
-	unsigned key = irq_lock();
-	bool matches = atomic_get(&tdma_runtime_enabled)
-		&& (uint32_t)atomic_get(&tdma_cfg_pack) == config->pack
-		&& (uint8_t)atomic_get(&tdma_epoch_at) == config->epoch;
-	irq_unlock(key);
-	return matches;
+	return (config->pack & TDMA_ENABLED_BIT)
+		&& (uint32_t)atomic_get(&tdma_cfg_pack) == config->pack;
 }
 
 static bool tdma_clock_snapshot(const struct tdma_config *config, struct esb_network_clock *clock)
@@ -519,14 +508,21 @@ void tdma_print_stats(void)
 void tdma_set_enabled(bool enabled)
 {
 #if CONFIG_CONNECTION_TDMA
-	atomic_val_t prev = atomic_set(&tdma_runtime_enabled, enabled ? 1 : 0);
-	if (prev == 0 && enabled) {
+	unsigned key = irq_lock();
+	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
+	bool prev = (pack & TDMA_ENABLED_BIT) != 0;
+	atomic_set(&tdma_cfg_pack, (atomic_val_t)(enabled
+		? pack | TDMA_ENABLED_BIT : pack & ~TDMA_ENABLED_BIT));
+	if (!prev && enabled) {
 		tdma_last_admitted_frame = UINT64_MAX;
 		tdma_last_admitted_pack = 0;
 	}
 	if ((prev != 0) != enabled) {
 		tdma_last_ping_frame = UINT64_MAX;
 		tdma_last_ping_pack = 0;
+	}
+	irq_unlock(key);
+	if (prev != enabled) {
 		LOG_INF("TDMA %s at runtime", enabled ? "enabled" : "disabled");
 	}
 #else
@@ -557,10 +553,13 @@ uint16_t tdma_frame_ticks_get(void)
 bool tdma_config_get(uint8_t *slot_index, uint8_t *slot_ticks, uint16_t *frame_ticks)
 {
 #if CONFIG_CONNECTION_TDMA
-	if (!atomic_get(&tdma_runtime_enabled) || slot_index == NULL || slot_ticks == NULL || frame_ticks == NULL) {
+	if (slot_index == NULL || slot_ticks == NULL || frame_ticks == NULL) {
 		return false;
 	}
 	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
+	if (!(pack & TDMA_ENABLED_BIT)) {
+		return false;
+	}
 	*slot_index = TDMA_UNPACK_SLOT(pack);
 	*slot_ticks = TDMA_UNPACK_STICKS(pack);
 	*frame_ticks = TDMA_UNPACK_FRAME(pack);
@@ -576,7 +575,7 @@ bool tdma_config_get(uint8_t *slot_index, uint8_t *slot_ticks, uint16_t *frame_t
 bool tdma_is_enabled(void)
 {
 #if CONFIG_CONNECTION_TDMA
-	return atomic_get(&tdma_runtime_enabled) != 0;
+	return (atomic_get(&tdma_cfg_pack) & TDMA_ENABLED_BIT) != 0;
 #else
 	return false;
 #endif
@@ -586,7 +585,7 @@ bool tdma_admission_stalled(void)
 {
 	/* Every TDMA config is validated before it can enable admission, so a
 	 * missing runtime config is "not stalled" rather than a permanent stall. */
-	if (!atomic_get(&tdma_runtime_enabled)) {
+	if (!(atomic_get(&tdma_cfg_pack) & TDMA_ENABLED_BIT)) {
 		return false;
 	}
 	/* Mirrors the refusal in tdma_wait_for_data_admission(): without receiver
@@ -611,14 +610,16 @@ bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 
 #if CONFIG_CONNECTION_TDMA
 	uint16_t frame_ticks = (uint16_t)slot_ticks * total_slots;
-	atomic_set(&tdma_cfg_pack, (atomic_val_t)TDMA_PACK(slot_index, slot_ticks, frame_ticks));
-	atomic_set(&tdma_epoch_at, epoch);
-	bool newly_enabled = (atomic_set(&tdma_runtime_enabled, 1) == 0);
+	unsigned key = irq_lock();
+	bool newly_enabled = !(atomic_get(&tdma_cfg_pack) & TDMA_ENABLED_BIT);
+	atomic_set(&tdma_cfg_pack, (atomic_val_t)(TDMA_PACK(slot_index, slot_ticks, total_slots, epoch)
+		| TDMA_ENABLED_BIT));
 
 	tdma_last_admitted_frame = UINT64_MAX;
 	tdma_last_admitted_pack = 0;
 	tdma_last_ping_frame = UINT64_MAX;
 	tdma_last_ping_pack = 0;
+	irq_unlock(key);
 	if (newly_enabled) {
 		LOG_INF("TDMA auto-enabled by receiver config");
 	}
@@ -639,7 +640,7 @@ bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 uint8_t tdma_get_config_epoch(void)
 {
 #if CONFIG_CONNECTION_TDMA
-	return (uint8_t)atomic_get(&tdma_epoch_at);
+	return TDMA_UNPACK_EPOCH((uint32_t)atomic_get(&tdma_cfg_pack));
 #else
 	return 0;
 #endif

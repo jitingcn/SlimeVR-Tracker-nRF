@@ -22,7 +22,7 @@ def function(source, name):
 
 
 macros = []
-for source, names in ((tdma, ("TDMA_UNPACK_SLOT", "TDMA_UNPACK_STICKS", "TDMA_UNPACK_FRAME", "TDMA_MIN_SAFE_SLOT_TICKS", "TDMA_SYNC_STALE_MS")),
+for source, names in ((tdma, ("TDMA_ENABLED_BIT", "TDMA_UNPACK_TOTAL", "TDMA_UNPACK_EPOCH", "TDMA_UNPACK_SLOT", "TDMA_UNPACK_STICKS", "TDMA_UNPACK_FRAME", "TDMA_MIN_SAFE_SLOT_TICKS", "TDMA_SYNC_STALE_MS")),
                       ((SRC / "esb.h").read_text(), ("PING_INTERVAL_MS",)),
                       ((SRC / "tdma.h").read_text(), ("TDMA_MAX_TRACKERS",)),
                       (esb, ("TIME_SYNC_TIMEOUT_MS", "SKEW_REF_REFRESH_TICKS", "SYNC_WARM_UP_COUNT"))):

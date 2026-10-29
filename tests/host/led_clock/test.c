@@ -27,7 +27,7 @@ struct esb_sync_filter {
 };
 static struct esb_sync_filter sync_filter;
 
-static uint32_t tdma_runtime_enabled, tdma_cfg_pack, tdma_epoch_at;
+static uint32_t tdma_cfg_pack;
 static uint32_t atomic_get(const uint32_t *value) { return *value; }
 static unsigned irq_lock(void) { unsigned prior = irq_depth++; locked = true; return prior; }
 static void irq_unlock(unsigned key)
@@ -75,8 +75,7 @@ static void reset(void)
 	sync_filter.offset = 1000;
 	sync_filter.last_local_ticks = 100U * 32768;
 	sync_filter.skew_ppb = 0;
-	tdma_runtime_enabled = 1;
-	tdma_cfg_pack = 1U | (22U << 8) | (220U << 16);
+	tdma_cfg_pack = 0x80U | 1U | (22U << 8) | (10U << 16);
 	change_on_unlock = false;
 }
 static void unavailable(void)
@@ -174,10 +173,9 @@ int main(void)
 	reset(); server_time_synced = false; unavailable();
 	reset(); channel_wait_normal = true; unavailable();
 	reset(); channel_redirect_pending = true; unavailable();
-	reset(); tdma_runtime_enabled = 0; unavailable();
+	reset(); tdma_cfg_pack &= ~TDMA_ENABLED_BIT; unavailable();
 	reset(); tdma_cfg_pack = 0; unavailable();
-	reset(); tdma_cfg_pack = 10U | (22U << 8) | (220U << 16); unavailable();
-	reset(); tdma_cfg_pack = (15U << 8) | (150U << 16); unavailable();
+	reset(); tdma_cfg_pack = TDMA_ENABLED_BIT; unavailable();
 	reset(); g_last_sync_timestamp = 100001; unavailable();
 	reset(); g_last_sync_timestamp -= TDMA_SYNC_STALE_MS;
 	assert(esb_get_status_clock(&local, &network));
