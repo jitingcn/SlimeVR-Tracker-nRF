@@ -185,16 +185,14 @@ bool qmc5883l_mag_read(float m[3])
 		while ((status & QMC5883L_STATUS_DRDY) == 0) {
 			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_STATUS, &status);
 			if (err) {
-				oneshot_pending = false;
-				return false;
+				goto read_error;
 			}
 			if (status & QMC5883L_STATUS_DRDY) {
 				break;
 			}
 			if (k_uptime_get() >= deadline_ms) {
 				LOG_WRN("Data ready status timeout!");
-				oneshot_pending = false;
-				return false;
+				goto read_error;
 			}
 		}
 		oneshot_trigger_ms = 0;
@@ -204,7 +202,7 @@ bool qmc5883l_mag_read(float m[3])
 				LOG_INF("Magnetometer overflow");
 			}
 			last_overflow = true;
-			return false;
+			goto read_error;
 		}
 		last_overflow = false;
 	}
@@ -221,6 +219,9 @@ bool qmc5883l_mag_read(float m[3])
 	uint8_t rawData[6];
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, rawData, 6);
 	if (err) {
+		goto read_error;
+	}
+	if (was_oneshot && ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, QMC5883L_MODE_STANDBY)) {
 		return false;
 	}
 
@@ -241,6 +242,14 @@ bool qmc5883l_mag_read(float m[3])
 	last_raw_sample_valid = true;
 	qmc5883l_mag_process(rawData, m);
 	return true;
+
+read_error:
+	if (was_oneshot) {
+		oneshot_pending = false;
+		oneshot_trigger_ms = 0;
+		ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883L_CTRL_1, QMC5883L_MODE_STANDBY);
+	}
+	return false;
 }
 
 void qmc5883l_mag_process(uint8_t *raw_m, float m[3])

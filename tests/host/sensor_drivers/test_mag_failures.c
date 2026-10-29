@@ -1297,6 +1297,42 @@ static int test_rates_qmc_ready_after_deadline(void)
 	return 0;
 }
 
+static int test_rates_qmc5883_shot_standby(void)
+{
+	for (int outcome = 0; outcome < 6; outcome++) {
+		fake_bus_reset();
+		float actual;
+		CHECK(qmc5883l_init(INFINITY, &actual) == 0);
+		qmc5883l_mag_oneshot();
+		fake_bus_clear_transactions();
+		bus.registers[0x06] = outcome == 1 ? 0 : outcome == 2 ? 3 : 1;
+		bus.registers[0] = 12;
+		if (outcome == 3) bus.fail_transaction = 1;
+		if (outcome == 4) bus.fail_transaction = 2;
+		if (outcome == 5) bus.fail_transaction = 3;
+		float m[3] = {123, 456, 789};
+		CHECK(qmc5883l_mag_read(m) == (outcome == 0));
+		CHECK(bus.ops[bus.op_count - 1].type == FAKE_REG_WRITE);
+		CHECK(bus.ops[bus.op_count - 1].reg == 0x09);
+		CHECK(bus.ops[bus.op_count - 1].value == 0);
+		if (outcome != 0) {
+			CHECK(m[0] == 123 && m[1] == 456 && m[2] == 789);
+		} else {
+			CHECK(float_equal(m[0], 0.004f));
+			CHECK(m[1] == 0 && m[2] == 0);
+		}
+		fake_bus_clear_transactions();
+		bus.registers[0x06] = 1;
+		qmc5883l_mag_oneshot();
+		CHECK(qmc5883l_mag_read(m));
+		CHECK(bus.registers[0x09] == 0);
+		fake_bus_clear_transactions();
+		CHECK(qmc5883l_update_odr(0.02f, &actual) == 0);
+		CHECK(bus.op_count == 1 && bus.registers[0x09] == 0x15);
+	}
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -1346,6 +1382,7 @@ int main(void)
 		{"QMC6309 variant rate ceiling", test_rates_qmc_ceiling},
 		{"QMC confirmed identical samples", test_rates_qmc_fresh_identical_samples},
 		{"QMC ready poll wins deadline", test_rates_qmc_ready_after_deadline},
+		{"QMC5883 shot terminal standby", test_rates_qmc5883_shot_standby},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
 		{"LIS temperatures", test_lis_temperatures_fail_loudly_and_apply_offset},
