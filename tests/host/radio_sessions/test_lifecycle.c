@@ -61,7 +61,12 @@ static uint32_t ping_server_phase_delay_ms(uint32_t interval) { return 0; }
 uint8_t connection_get_id(void) { return tracker_id; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
 static void esb_get_ping_request_data(uint8_t *data) {}
-static int esb_write_ping(uint8_t *data, bool force) { ping_calls++; return ping_result; }
+static int esb_write_ping(uint8_t *data, bool force)
+{
+    assert(data[0] == ESB_PING_TYPE && data[1] == tracker_id && data[7] == 0);
+    ping_calls++;
+    return ping_result;
+}
 static void ping_stats_attempt(uint32_t now) {}
 static uint32_t ping_next_periodic_deadline(uint32_t deadline, uint32_t now, uint32_t interval) { return now + interval; }
 static bool esb_ota_is_active(void) { return ota_active; }
@@ -126,6 +131,9 @@ static void reset(bool batch)
     disconnected = searching = radio_available = test_enabled = true;
     ota_active = ota_suppressed = force_ping = hid_available = false;
     ping_result = 0;
+    ping_resync_requested = ping_server_phase_aligned = 0;
+    ping_aligned_interval_ms = 0;
+    memset(&ping_sched_stats, 0, sizeof(ping_sched_stats));
     test_stops = search_calls = ping_calls = ota_calls = 0;
 }
 static void active(bool batch)
@@ -162,19 +170,24 @@ int main(void)
         tick(120102); stopped();
 
         /* The same deadline applies to other early-continue paths. */
-        for (unsigned path = 0; path < 7; path++) {
+        for (unsigned path = 0; path < 8; path++) {
             reset(batch);
             searching = path == 6;
             radio_available = path != 0 && path != 5;
             hid_available = path == 5;
-            force_ping = path == 1 || path == 2;
-            ping_result = path == 2 ? -EAGAIN : 0;
+            force_ping = path == 1 || path == 2 || path == 7;
+            ping_result = path == 2 ? -EAGAIN : path == 7 ? -EIO : 0;
             ota_active = path == 3;
             ota_suppressed = path == 4;
             tick(100);
             tick(60100); active(batch);
             tick(60101); stopped();
-            if (force_ping) assert(ping_calls == 3);
+            assert(ping_calls == (force_ping ? 3U : 0U));
+            assert(ping_sched_stats.due == (path == 1 || path == 7 ? 3 : 0));
+            assert(ping_sched_stats.attempts == (path == 1 || path == 7 ? 3 : 0));
+            assert(ping_sched_stats.queue_ok == (path == 1 ? 3 : 0));
+            assert(ping_sched_stats.queue_fail == (path == 7 ? 3 : 0));
+            assert(ping_sched_stats.retry_deferred == (path == 7 ? 3 : 0));
             assert(ota_calls == 3);
         }
     }

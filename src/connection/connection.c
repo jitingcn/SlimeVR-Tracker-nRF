@@ -1604,6 +1604,79 @@ static void connection_idle_wait(int64_t now)
 	(void)k_sem_take(&connection_wake_sem, K_MSEC(wait_ms));
 }
 
+static bool connection_service_ping(int64_t now)
+{
+	/* Synchronized operation derives the next PING directly from server
+	 * frame time. The deterministic interval is always <=1 second and the
+	 * following physical slot is reserved by every tracker. Startup and
+	 * receiver-reset recovery retain the immediate unslotted path. */
+	uint32_t effective_ping_interval_ms = get_ping_interval_ms();
+	uint32_t ping_deadline = (uint32_t)atomic_get(&next_ping_deadline_ms);
+	bool force_resync = atomic_cas(&ping_resync_requested, 1, 0);
+	uint32_t ping_window_delay_ms = 0;
+	bool guarded_schedule = !force_resync && tdma_ping_wake_delay_ms(&ping_window_delay_ms);
+	if (guarded_schedule) {
+		ping_deadline = (uint32_t)now + ping_window_delay_ms;
+		ping_aligned_interval_ms = effective_ping_interval_ms;
+		atomic_set(&ping_server_phase_aligned, 1);
+	} else if (!force_resync) {
+		if (ping_aligned_interval_ms != effective_ping_interval_ms) {
+			atomic_set(&ping_server_phase_aligned, 0);
+		}
+		if (!atomic_get(&ping_server_phase_aligned)) {
+			uint32_t phase_delay_ms = ping_server_phase_delay_ms(effective_ping_interval_ms);
+			if (phase_delay_ms > 0) {
+				ping_deadline = (uint32_t)now + phase_delay_ms;
+				atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
+				ping_aligned_interval_ms = effective_ping_interval_ms;
+				atomic_set(&ping_server_phase_aligned, 1);
+			}
+		}
+	}
+
+	bool ping_due = force_resync
+		|| (guarded_schedule ? ping_window_delay_ms == 0
+			: (int32_t)((uint32_t)now - ping_deadline) >= 0);
+	if (ping_due) {
+		uint8_t ping[ESB_PING_LEN] = {0};
+		ping[0] = ESB_PING_TYPE;
+		ping[1] = connection_get_id();
+		ping[7] = esb_get_ping_ack_flag();
+		esb_get_ping_request_data(&ping[8]);
+		int err = esb_write_ping(ping, force_resync);
+		if (err == -EAGAIN) {
+			uint32_t retry_delay_ms = 0;
+			if (tdma_ping_wake_delay_ms(&retry_delay_ms)) {
+				atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
+			}
+			return true;
+		}
+		atomic_inc(&ping_sched_stats.due);
+		atomic_inc(&ping_sched_stats.attempts);
+		ping_stats_attempt((uint32_t)now);
+		if (!guarded_schedule) {
+			ping_deadline = ping_next_periodic_deadline(
+				ping_deadline, (uint32_t)now, effective_ping_interval_ms
+			);
+			atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
+		}
+		if (err == 0) {
+			atomic_inc(&ping_sched_stats.queue_ok);
+		} else {
+			atomic_inc(&ping_sched_stats.queue_fail);
+			atomic_inc(&ping_sched_stats.retry_deferred);
+			atomic_set(&ping_server_phase_aligned, 0);
+			uint32_t retry_delay_ms = PING_QUEUE_RETRY_MS;
+			if (guarded_schedule) {
+				(void)tdma_ping_wake_delay_ms(&retry_delay_ms);
+			}
+			atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
+		}
+		return true;
+	}
+	return false;
+}
+
 void connection_thread(void)
 {
 	/* Register connection thread with watchdog */
@@ -1676,72 +1749,7 @@ void connection_thread(void)
 #endif
 
 		if (radio_ready) {
-			/* Synchronized operation derives the next PING directly from server
-			 * frame time. The deterministic interval is always <=1 second and the
-			 * following physical slot is reserved by every tracker. Startup and
-			 * receiver-reset recovery retain the immediate unslotted path. */
-			uint32_t effective_ping_interval_ms = get_ping_interval_ms();
-			uint32_t ping_deadline = (uint32_t)atomic_get(&next_ping_deadline_ms);
-			bool force_resync = atomic_cas(&ping_resync_requested, 1, 0);
-			uint32_t ping_window_delay_ms = 0;
-			bool guarded_schedule = !force_resync && tdma_ping_wake_delay_ms(&ping_window_delay_ms);
-			if (guarded_schedule) {
-				ping_deadline = (uint32_t)now + ping_window_delay_ms;
-				ping_aligned_interval_ms = effective_ping_interval_ms;
-				atomic_set(&ping_server_phase_aligned, 1);
-			} else if (!force_resync) {
-				if (ping_aligned_interval_ms != effective_ping_interval_ms) {
-					atomic_set(&ping_server_phase_aligned, 0);
-				}
-				if (!atomic_get(&ping_server_phase_aligned)) {
-					uint32_t phase_delay_ms = ping_server_phase_delay_ms(effective_ping_interval_ms);
-					if (phase_delay_ms > 0) {
-						ping_deadline = (uint32_t)now + phase_delay_ms;
-						atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
-						ping_aligned_interval_ms = effective_ping_interval_ms;
-						atomic_set(&ping_server_phase_aligned, 1);
-					}
-				}
-			}
-
-			bool ping_due = force_resync
-				|| (guarded_schedule ? ping_window_delay_ms == 0
-					: (int32_t)((uint32_t)now - ping_deadline) >= 0);
-			if (ping_due) {
-				uint8_t ping[ESB_PING_LEN] = {0};
-				ping[0] = ESB_PING_TYPE;
-				ping[1] = connection_get_id();
-				ping[7] = esb_get_ping_ack_flag();
-				esb_get_ping_request_data(&ping[8]);
-				int err = esb_write_ping(ping, force_resync);
-				if (err == -EAGAIN) {
-					uint32_t retry_delay_ms = 0;
-					if (tdma_ping_wake_delay_ms(&retry_delay_ms)) {
-						atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
-					}
-					continue;
-				}
-				atomic_inc(&ping_sched_stats.due);
-				atomic_inc(&ping_sched_stats.attempts);
-				ping_stats_attempt((uint32_t)now);
-				if (!guarded_schedule) {
-					ping_deadline = ping_next_periodic_deadline(
-						ping_deadline, (uint32_t)now, effective_ping_interval_ms
-					);
-					atomic_set(&next_ping_deadline_ms, (atomic_val_t)ping_deadline);
-				}
-				if (err == 0) {
-					atomic_inc(&ping_sched_stats.queue_ok);
-				} else {
-					atomic_inc(&ping_sched_stats.queue_fail);
-					atomic_inc(&ping_sched_stats.retry_deferred);
-					atomic_set(&ping_server_phase_aligned, 0);
-					uint32_t retry_delay_ms = PING_QUEUE_RETRY_MS;
-					if (guarded_schedule) {
-						(void)tdma_ping_wake_delay_ms(&retry_delay_ms);
-					}
-					atomic_set(&next_ping_deadline_ms, (atomic_val_t)((uint32_t)now + retry_delay_ms));
-				}
+			if (connection_service_ping(now)) {
 				continue;
 			}
 

@@ -1376,6 +1376,434 @@ static void esb_ping_timeout(int64_t now)
 	}
 }
 
+static void esb_receive_pong(const struct esb_payload *payload)
+{
+	if (payload->data[0] == ESB_PONG_TYPE) {
+		// check CRC first
+		uint8_t crc_calc = crc8_ccitt(0x07, payload->data, ESB_PONG_LEN - 1);
+		if (payload->data[ESB_PONG_LEN - 1] != crc_calc) {
+			LOG_WRN("PONG CRC mismatch");
+			return;
+		}
+		uint8_t rx_id = payload->data[1];
+		if (rx_id != tracker_id) {
+			return;
+		}
+		uint8_t pong_flags = payload->data[7];
+		/* OTA status ACK cancellation is not a PING/time-sync reply. */
+		if (pong_flags == ESB_PONG_FLAG_OTA_ABORT && esb_ota_is_active()) {
+			esb_ota_request_abort();
+			return;
+		}
+		if (!ping_pending || payload->data[2] != ping_ctr_sent) {
+			return;
+		}
+		if (pong_flags == ESB_PONG_FLAG_CHANNEL_CONFIRM) {
+			uint8_t advertised = payload->data[8];
+			if (!ping_channel_confirm_sent || advertised > 100
+			    || payload->data[9] != ESB_CHANNEL_CONFIRM_VERSION
+			    || payload->data[10] != 0 || payload->data[11] != 0) {
+				return;
+			}
+			channel_confirm_capable = true;
+			channel_legacy_peer = false;
+			if (advertised != radio_channel) {
+				/* IRQ publishes intent; only the idle TX owner retunes. */
+				channel_confirmed = false;
+				channel_redirect = advertised;
+				channel_redirect_pending = true;
+				channel_wait_normal = true;
+				channel_found = false;
+				ping_pending = false;
+				return;
+			}
+			channel_confirmed = true;
+		} else {
+			if (!esb_pong_is_legacy(pong_flags)) {
+				return;
+			}
+			if (ping_channel_confirm_sent && !channel_confirm_capable) {
+				channel_legacy_peer = true;
+			}
+			if (!channel_confirmed && !channel_legacy_peer) {
+				return;
+			}
+		}
+		if (channel_redirect_pending) {
+			return;
+		}
+		own_pong_time = k_uptime_get();
+		own_pong_seen = true;
+		channel_heard = true;
+		uint8_t rx_ctr = payload->data[2];
+		// set ping valid first
+		ping_pending = false;
+		ping_failed = false;
+		ping_failures = 0;
+		esb_conn_state = ESB_ST_PAIRED;
+		if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
+			ping_success_streak++;
+			if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
+				set_status(SYS_STATUS_CONNECTION_ERROR, false);
+				connection_error_start_time = 0;
+				shutdown_requested = false;
+				ping_success_streak = 0;
+			}
+		} else {
+			ping_success_streak = 0;
+		}
+
+		uint32_t ping_rx_ticks = sys_get_be32(&payload->data[3]);
+
+		// Find send ticks for this PONG's counter in history
+		uint32_t ping_ticks_for_this_ctr = 0;
+		uint32_t ping_ticks_kernel_for_this_ctr = 0;
+		bool ping_history_valid = false;
+		for (int i = 0; i < PING_HISTORY_SIZE; i++) {
+			if (ping_history[i].valid && ping_history[i].counter == rx_ctr) {
+				ping_ticks_for_this_ctr = ping_history[i].ping_ticks;
+				ping_ticks_kernel_for_this_ctr = ping_history[i].ping_ticks_kernel;
+				ping_history_valid = true;
+				break;
+			}
+		}
+
+		uint32_t rtt_us = 0;
+		float pong_sens_data[3] = {0.0f, 0.0f, 0.0f};
+		uint8_t pong_sens_auto_axis = 0;
+		uint16_t pong_sens_auto_revolutions = 0;
+		bool receiver_clock_restarted = false;
+		if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
+			// Special case: SENS_SET command repurposes time sync bytes for data
+			// Skip time sync update
+			int16_t x_int = (int16_t)((payload->data[3] << 8) | payload->data[4]);
+			int16_t y_int = (int16_t)((payload->data[5] << 8) | payload->data[6]);
+			int16_t z_int = (int16_t)((payload->data[8] << 8) | payload->data[9]);
+
+			pong_sens_data[0] = (float)x_int / 100.0f;
+			pong_sens_data[1] = (float)y_int / 100.0f;
+			pong_sens_data[2] = (float)z_int / 100.0f;
+
+			LOG_INF(
+				"Received SENS_SET data: %.2f, %.2f, %.2f",
+				(double)pong_sens_data[0],
+				(double)pong_sens_data[1],
+				(double)pong_sens_data[2]
+			);
+		} else if (pong_flags == ESB_PONG_FLAG_SENS_AUTO) {
+			pong_sens_auto_axis = payload->data[3];
+			pong_sens_auto_revolutions
+				= ((uint16_t)payload->data[4] << 8) | (uint16_t)payload->data[5];
+			if (pong_sens_auto_revolutions == 0) {
+				LOG_INF("Received SENS_AUTO data: axis=%u, revolutions=default", pong_sens_auto_axis);
+			} else {
+				LOG_INF(
+					"Received SENS_AUTO data: axis=%u, revolutions=%u",
+					pong_sens_auto_axis,
+					pong_sens_auto_revolutions
+				);
+			}
+		} else if (ping_history_valid) {
+			uint32_t rx_difference = ping_rx_ticks - g_last_rx_raw_ticks;
+			receiver_clock_restarted = g_time_initialized
+				&& rx_difference > 0x80000000U
+				&& 0U - rx_difference > RECEIVER_RESTART_BACKWARD_TICKS;
+			if (receiver_clock_restarted) {
+				receiver_restart_detections++;
+				LOG_WRN(
+					"Receiver clock restart detected old=%u new=%u count=%u",
+					g_last_rx_raw_ticks,
+					ping_rx_ticks,
+					receiver_restart_detections
+				);
+				/* A restarted receiver may reuse the previous 8-bit
+				 * layout epoch. Stop ordinary data until fresh channel
+				 * proof, time sync and a usable NORMAL re-enable TDMA. */
+				channel_wait_normal = true;
+				channel_found = false;
+				channel_confirmed = false;
+				channel_legacy_peer = false;
+				esb_clear_time_sync_state();
+				esb_wom_reset();
+				tdma_set_enabled(false);
+				ping_failures = 0;
+				connection_request_ping_resync();
+				/* Do not accept this pre-proof PONG as the new
+				 * schedule or execute its control payload. */
+				return;
+			}
+			// ====================================================================
+			// RTT and Server Time Offset Calculation (Reference-Point Model)
+			// ====================================================================
+			// In ESB, the return path (ACK) has FIXED delay regardless of
+			// retransmissions. All retransmission time is on the forward path.
+			//
+			// No retransmit:    T1 --[air]--> T2,  T4 <--[ACK]-- T3≈T2
+			// With retransmit:  T1 --[fail]--[fail]--[air]--> T2
+			//                   T4 <--[ACK]-- T3≈T2
+			//
+			// offset = T2 - T4 (constant one-way bias cancels for TDMA)
+			// ====================================================================
+			/* T4 = ACK RX stamp exported by the ESB lib (radio
+			 * moment). Read the wrapping uint32 once; RTT keeps
+			 * the kernel-domain pair, and only the network-domain
+			 * view extends it to the nearest 64-bit epoch. */
+			uint32_t t4_ticks = esb_last_ack_rx_ticks;
+			uint32_t t4_net_ticks =
+				(uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(t4_ticks));
+
+			// Calculate full RTT: from PING send (T1) to PONG receive (T4)
+			uint32_t rtt_ticks = t4_ticks - ping_ticks_kernel_for_this_ctr;
+			rtt_us = k_ticks_to_us_floor32(rtt_ticks);
+
+			// Track minimum RTT (no-retransmission baseline)
+			// with aging: if min hasn't been refreshed in
+			// MIN_RTT_AGE_LIMIT PONGs, nudge it upward by 1 tick
+			// to recover from anomalously low measurements.
+			if (rtt_ticks > 0 && rtt_ticks <= g_min_rtt_ticks) {
+				g_min_rtt_ticks = rtt_ticks;
+				g_min_rtt_age = 0;
+			} else {
+				g_min_rtt_age++;
+				if (g_min_rtt_age >= MIN_RTT_AGE_LIMIT &&
+				    g_min_rtt_ticks < MIN_RTT_CEILING) {
+					g_min_rtt_ticks++;
+					g_min_rtt_age = 0;
+					LOG_DBG("min_rtt aged up to %u ticks", g_min_rtt_ticks);
+				}
+			}
+
+			// log ping and rtt
+			if (rtt_us > 1000) {
+				LOG_DBG(
+					"PONG ok, ack rtt=%u.%03u ms (ctr=%u)",
+					(unsigned)(rtt_us / 1000),
+					(unsigned)(rtt_us % 1000),
+					rx_ctr
+				);
+			} else if (rtt_us < 1000) {
+				LOG_DBG("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
+			}
+
+			/*
+			 * Adaptive RTT acceptance threshold.
+			 * Accept PONGs with RTT up to 4× min_rtt (handles minor
+			 * retransmissions) or 1000µs absolute floor (during min_rtt
+			 * warm-up when min is unreliable).
+			 */
+			uint32_t rtt_threshold_us = k_ticks_to_us_floor32(g_min_rtt_ticks * 4);
+			if (rtt_threshold_us < 1000) {
+				rtt_threshold_us = 1000;
+			}
+			if (rtt_us < rtt_threshold_us) {
+				// Reference-point offset: T2 - T4
+				// The constant one-way delay bias is the same for
+				// all trackers and cancels out in TDMA slot alignment.
+				// Decoupling from min_rtt avoids noise injection when
+				// min_rtt ages/updates.
+				uint32_t server_offset_ticks = ping_rx_ticks - t4_net_ticks;
+
+				/* Save prior sync stamp before overwrite — EMA predict
+				 * needs elapsed since last accepted PONG, not zero. */
+				uint32_t prev_sync_local_ticks = g_last_sync_local_ticks;
+				g_last_rx_raw_ticks = ping_rx_ticks;
+				g_last_sync_local_ticks = ping_ticks_for_this_ctr;
+				g_last_sync_timestamp = k_uptime_get();
+
+				if (!g_time_initialized) {
+					g_server_ticks_offset = server_offset_ticks;
+					g_skew_ref_offset = server_offset_ticks;
+					g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
+					g_sync_update_count = 0;
+					g_time_initialized = true;
+					server_time_synced = true;
+					LOG_DBG("Server offset initialized: %u ticks", server_offset_ticks);
+				} else {
+					uint32_t delta_from_ref = ping_ticks_for_this_ctr - g_skew_ref_local_ticks;
+					int64_t predicted_drift = (int64_t)g_clock_skew_ppb
+						* delta_from_ref / 1000000000LL;
+					uint32_t predicted_offset = g_skew_ref_offset + (uint32_t)predicted_drift;
+					int64_t innovation = net_tick_difference(server_offset_ticks, predicted_offset);
+					if (innovation > 32000 || innovation < -32000) {
+						LOG_WRN(
+							"Large offset jump detected (%lld ticks), resetting (old=%u new=%u)",
+							(long long)innovation,
+							g_server_ticks_offset,
+							server_offset_ticks
+						);
+						g_server_ticks_offset = server_offset_ticks;
+						g_skew_ref_offset = server_offset_ticks;
+						g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
+						g_clock_skew_ppb = 0;
+					} else {
+						if (delta_from_ref >= 32768) {
+							int64_t total_drift = net_tick_difference(server_offset_ticks, g_skew_ref_offset);
+							int64_t raw_skew_ppb = total_drift * 1000000000LL / delta_from_ref;
+							int64_t filtered_skew = (int64_t)g_clock_skew_ppb
+								+ (raw_skew_ppb - g_clock_skew_ppb) / 4;
+							g_clock_skew_ppb = (int32_t)CLAMP(filtered_skew, INT32_MIN, INT32_MAX);
+						}
+						g_sync_update_count++;
+						uint32_t delta_since_sync = ping_ticks_for_this_ctr - prev_sync_local_ticks;
+						uint32_t predicted_current = g_server_ticks_offset
+							+ (uint32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
+						int64_t offset_innovation = net_tick_difference(server_offset_ticks, predicted_current);
+						if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
+							g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation * 3 + 2) / 4);
+						} else {
+							g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation + 2) / 4);
+						}
+						if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
+							g_skew_ref_offset = server_offset_ticks;
+							g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
+						}
+						LOG_DBG(
+							"Offset update: innovation=%lld offset=%u skew=%d ppb (rtt=%u min=%u)",
+							(long long)innovation, g_server_ticks_offset, g_clock_skew_ppb,
+							rtt_ticks, g_min_rtt_ticks
+						);
+					}
+				}
+
+				server_time_synced = true;
+
+				// Display skew-compensated estimated server time
+				uint32_t local_now = (uint32_t)net_ticks_from_kernel64(k_uptime_ticks());
+				uint32_t elapsed_since_meas = local_now - ping_ticks_for_this_ctr;
+				int32_t skew_corr = (int32_t)((int64_t)g_clock_skew_ppb * elapsed_since_meas / 1000000000LL);
+				uint32_t est_ticks = g_server_ticks_offset + local_now + (uint32_t)skew_corr;
+				uint32_t server_time_ms = net_ticks_to_ms_32(est_ticks);
+				uint32_t server_ms = server_time_ms % 1000;
+				uint32_t server_s = (server_time_ms / 1000) % 60;
+				uint32_t server_m = (server_time_ms / 60000) % 60;
+				uint32_t server_h = (server_time_ms / 3600000) % 24;
+				LOG_DBG(
+					"estimated server time: %02u:%02u:%02u.%03u (ticks=%u)",
+					server_h,
+					server_m,
+					server_s,
+					server_ms,
+					est_ticks
+				);
+			}
+		} else {
+			// No history found - likely too old or buffer wrapped
+		}
+
+		/* Dedicated replies never touch TDMA or command/echo state. */
+		if (pong_flags == ESB_PONG_FLAG_CHANNEL_CONFIRM) {
+			return;
+		}
+		/* NORMAL retains the legacy slot/total layout. */
+		if (pong_flags == ESB_PONG_FLAG_NORMAL) {
+			uint8_t tdma_slot   = payload->data[8];
+			uint8_t tdma_total  = payload->data[9];
+			uint8_t tdma_sticks = payload->data[10];
+			uint8_t tdma_epoch  = payload->data[11];
+
+			bool valid_schedule = tdma_total > 0 && tdma_total <= 16
+				&& tdma_slot < tdma_total && tdma_sticks >= 16;
+			if (valid_schedule &&
+			    (channel_wait_normal || tdma_epoch != tdma_get_config_epoch())) {
+				tdma_update_config(tdma_slot, tdma_total, tdma_sticks, tdma_epoch);
+			}
+			if (valid_schedule && server_time_synced && channel_wait_normal) {
+				channel_found = true;
+			}
+		}
+
+		if (pong_flags == ESB_PONG_FLAG_WOM_CONTROL) {
+#if CONFIG_CONNECTION_RAW_COLLECTION
+			metadata_echo_pending = false;
+#endif
+			esb_wom_receive(sys_get_be16(&payload->data[8]),
+				sys_get_be16(&payload->data[10]));
+#if CONFIG_CONNECTION_RAW_COLLECTION
+		} else if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
+			received_metadata_mask = payload->data[8];
+			received_metadata_chunk = payload->data[9];
+			received_metadata_token = sys_get_be16(&payload->data[10]);
+			connection_request_raw_metadata(
+				received_metadata_mask, received_metadata_chunk, received_metadata_token);
+			metadata_echo_pending = true;
+#endif
+		} else if (pong_flags != ESB_PONG_FLAG_NORMAL) {
+			/* Real controls may supersede a pending metadata echo. */
+#if CONFIG_CONNECTION_RAW_COLLECTION
+			metadata_echo_pending = false;
+#endif
+			esb_wom_reset();
+			uint16_t pong_test_rate_tps = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
+				&& payload->length >= 10 ? sys_get_be16(&payload->data[8]) : 0;
+#if CONFIG_CONNECTION_RAW_COLLECTION
+			uint8_t pong_batch_rate_hz = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
+				&& payload->length >= 9 ? payload->data[8] : 0;
+#endif
+			bool test_rate_changed = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
+				&& pong_test_rate_tps != received_test_rate_tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
+			bool batch_rate_changed = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
+				&& pong_batch_rate_hz != received_batch_rate_hz;
+#endif
+			bool channel_changed = pong_flags == ESB_PONG_FLAG_SET_CHANNEL
+				&& sys_get_be32(&payload->data[8]) != received_channel_value;
+			if (received_remote_command == ESB_PONG_FLAG_NORMAL
+			    || test_rate_changed || channel_changed
+#if CONFIG_CONNECTION_RAW_COLLECTION
+			    || batch_rate_changed
+#endif
+			    || ((received_remote_command == acked_remote_command || remote_command_rejected)
+			        && pong_flags != received_remote_command)) {
+				if (channel_changed && acked_remote_command == ESB_PONG_FLAG_SET_CHANNEL) {
+					acked_remote_command = ESB_PONG_FLAG_NORMAL;
+				}
+				received_remote_command = pong_flags;
+				remote_command_rejected = false;
+				remote_command_generation++;
+				remote_command_receive_time = k_uptime_get();
+				if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
+					received_channel_value = ((uint32_t)payload->data[8] << 24)
+						| ((uint32_t)payload->data[9] << 16)
+						| ((uint32_t)payload->data[10] << 8) | payload->data[11];
+				} else if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
+					memcpy(received_sens_data, pong_sens_data, sizeof(received_sens_data));
+				} else if (pong_flags == ESB_PONG_FLAG_SENS_AUTO) {
+					received_sens_auto_axis = pong_sens_auto_axis;
+					received_sens_auto_revolutions = pong_sens_auto_revolutions;
+				} else if (pong_flags == ESB_PONG_FLAG_TEST_MODE_ON) {
+					received_test_rate_tps = pong_test_rate_tps;
+#if CONFIG_CONNECTION_RAW_COLLECTION
+				} else if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
+					received_batch_rate_hz = pong_batch_rate_hz;
+#endif
+				}
+				LOG_INF("Remote command %s (0x%02X) received",
+					esb_remote_cmd_name(pong_flags), pong_flags);
+			}
+		} else if (!channel_wait_normal && !channel_search) {
+			/* A requested proof NORMAL did not consume the low-bit
+			 * command/metadata echo. Keep it for the post-proof PING. */
+#if CONFIG_CONNECTION_RAW_COLLECTION
+			metadata_echo_pending = false;
+#endif
+			if (wom_command.response_pending
+			    && wom_command.sent_token == wom_command.cached_token
+			    && wom_command.sent_flag == wom_command.result_flag) {
+				wom_command.response_pending = false;
+				wom_command.cached = false;
+			}
+			if (acked_remote_command != ESB_PONG_FLAG_NORMAL
+			    || !esb_remote_command_supported(received_remote_command)) {
+				received_remote_command = ESB_PONG_FLAG_NORMAL;
+				acked_remote_command = ESB_PONG_FLAG_NORMAL;
+				remote_command_receive_time = 0;
+				remote_command_rejected = false;
+				remote_command_generation++;
+			}
+		}
+	}
+}
+
 void event_handler(struct esb_evt const *event)
 {
 	static uint32_t tx_success_count = 0;
@@ -1498,430 +1926,7 @@ void event_handler(struct esb_evt const *event)
 		} else {
 			switch (rx_payload.length) {
 			case ESB_PONG_LEN: {
-				if (rx_payload.data[0] == ESB_PONG_TYPE) {
-					// check CRC first
-					uint8_t crc_calc = crc8_ccitt(0x07, rx_payload.data, ESB_PONG_LEN - 1);
-					if (rx_payload.data[ESB_PONG_LEN - 1] != crc_calc) {
-						LOG_WRN("PONG CRC mismatch");
-						break;
-					}
-					uint8_t rx_id = rx_payload.data[1];
-					if (rx_id != tracker_id) {
-						break;
-					}
-					uint8_t pong_flags = rx_payload.data[7];
-					/* OTA status ACK cancellation is not a PING/time-sync reply. */
-					if (pong_flags == ESB_PONG_FLAG_OTA_ABORT && esb_ota_is_active()) {
-						esb_ota_request_abort();
-						return;
-					}
-					if (!ping_pending || rx_payload.data[2] != ping_ctr_sent) {
-						break;
-					}
-					if (pong_flags == ESB_PONG_FLAG_CHANNEL_CONFIRM) {
-						uint8_t advertised = rx_payload.data[8];
-						if (!ping_channel_confirm_sent || advertised > 100
-						    || rx_payload.data[9] != ESB_CHANNEL_CONFIRM_VERSION
-						    || rx_payload.data[10] != 0 || rx_payload.data[11] != 0) {
-							break;
-						}
-						channel_confirm_capable = true;
-						channel_legacy_peer = false;
-						if (advertised != radio_channel) {
-							/* IRQ publishes intent; only the idle TX owner retunes. */
-							channel_confirmed = false;
-							channel_redirect = advertised;
-							channel_redirect_pending = true;
-							channel_wait_normal = true;
-							channel_found = false;
-							ping_pending = false;
-							break;
-						}
-						channel_confirmed = true;
-					} else {
-						if (!esb_pong_is_legacy(pong_flags)) {
-							break;
-						}
-						if (ping_channel_confirm_sent && !channel_confirm_capable) {
-							channel_legacy_peer = true;
-						}
-						if (!channel_confirmed && !channel_legacy_peer) {
-							break;
-						}
-					}
-					if (channel_redirect_pending) {
-						break;
-					}
-					own_pong_time = k_uptime_get();
-					own_pong_seen = true;
-					channel_heard = true;
-					uint8_t rx_ctr = rx_payload.data[2];
-					// set ping valid first
-					ping_pending = false;
-					ping_failed = false;
-					ping_failures = 0;
-					esb_conn_state = ESB_ST_PAIRED;
-					if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
-						ping_success_streak++;
-						if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
-							set_status(SYS_STATUS_CONNECTION_ERROR, false);
-							connection_error_start_time = 0;
-							shutdown_requested = false;
-							ping_success_streak = 0;
-						}
-					} else {
-						ping_success_streak = 0;
-					}
-
-					uint32_t ping_rx_ticks = sys_get_be32(&rx_payload.data[3]);
-
-					// Find send ticks for this PONG's counter in history
-					uint32_t ping_ticks_for_this_ctr = 0;
-					uint32_t ping_ticks_kernel_for_this_ctr = 0;
-					bool ping_history_valid = false;
-					for (int i = 0; i < PING_HISTORY_SIZE; i++) {
-						if (ping_history[i].valid && ping_history[i].counter == rx_ctr) {
-							ping_ticks_for_this_ctr = ping_history[i].ping_ticks;
-							ping_ticks_kernel_for_this_ctr = ping_history[i].ping_ticks_kernel;
-							ping_history_valid = true;
-							break;
-						}
-					}
-
-					uint32_t rtt_us = 0;
-					float pong_sens_data[3] = {0.0f, 0.0f, 0.0f};
-					uint8_t pong_sens_auto_axis = 0;
-					uint16_t pong_sens_auto_revolutions = 0;
-					bool receiver_clock_restarted = false;
-					if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
-						// Special case: SENS_SET command repurposes time sync bytes for data
-						// Skip time sync update
-						int16_t x_int = (int16_t)((rx_payload.data[3] << 8) | rx_payload.data[4]);
-						int16_t y_int = (int16_t)((rx_payload.data[5] << 8) | rx_payload.data[6]);
-						int16_t z_int = (int16_t)((rx_payload.data[8] << 8) | rx_payload.data[9]);
-
-						pong_sens_data[0] = (float)x_int / 100.0f;
-						pong_sens_data[1] = (float)y_int / 100.0f;
-						pong_sens_data[2] = (float)z_int / 100.0f;
-
-						LOG_INF(
-							"Received SENS_SET data: %.2f, %.2f, %.2f",
-							(double)pong_sens_data[0],
-							(double)pong_sens_data[1],
-							(double)pong_sens_data[2]
-						);
-					} else if (pong_flags == ESB_PONG_FLAG_SENS_AUTO) {
-						pong_sens_auto_axis = rx_payload.data[3];
-						pong_sens_auto_revolutions
-							= ((uint16_t)rx_payload.data[4] << 8) | (uint16_t)rx_payload.data[5];
-						if (pong_sens_auto_revolutions == 0) {
-							LOG_INF("Received SENS_AUTO data: axis=%u, revolutions=default", pong_sens_auto_axis);
-						} else {
-							LOG_INF(
-								"Received SENS_AUTO data: axis=%u, revolutions=%u",
-								pong_sens_auto_axis,
-								pong_sens_auto_revolutions
-							);
-						}
-					} else if (ping_history_valid) {
-						uint32_t rx_difference = ping_rx_ticks - g_last_rx_raw_ticks;
-						receiver_clock_restarted = g_time_initialized
-							&& rx_difference > 0x80000000U
-							&& 0U - rx_difference > RECEIVER_RESTART_BACKWARD_TICKS;
-						if (receiver_clock_restarted) {
-							receiver_restart_detections++;
-							LOG_WRN(
-								"Receiver clock restart detected old=%u new=%u count=%u",
-								g_last_rx_raw_ticks,
-								ping_rx_ticks,
-								receiver_restart_detections
-							);
-							/* A restarted receiver may reuse the previous 8-bit
-							 * layout epoch. Stop ordinary data until fresh channel
-							 * proof, time sync and a usable NORMAL re-enable TDMA. */
-							channel_wait_normal = true;
-							channel_found = false;
-							channel_confirmed = false;
-							channel_legacy_peer = false;
-							esb_clear_time_sync_state();
-							esb_wom_reset();
-							tdma_set_enabled(false);
-							ping_failures = 0;
-							connection_request_ping_resync();
-							/* Do not accept this pre-proof PONG as the new
-							 * schedule or execute its control payload. */
-							break;
-						}
-						// ====================================================================
-						// RTT and Server Time Offset Calculation (Reference-Point Model)
-						// ====================================================================
-						// In ESB, the return path (ACK) has FIXED delay regardless of
-						// retransmissions. All retransmission time is on the forward path.
-						//
-						// No retransmit:    T1 --[air]--> T2,  T4 <--[ACK]-- T3≈T2
-						// With retransmit:  T1 --[fail]--[fail]--[air]--> T2
-						//                   T4 <--[ACK]-- T3≈T2
-						//
-						// offset = T2 - T4 (constant one-way bias cancels for TDMA)
-						// ====================================================================
-						/* T4 = ACK RX stamp exported by the ESB lib (radio
-						 * moment). Read the wrapping uint32 once; RTT keeps
-						 * the kernel-domain pair, and only the network-domain
-						 * view extends it to the nearest 64-bit epoch. */
-						uint32_t t4_ticks = esb_last_ack_rx_ticks;
-						uint32_t t4_net_ticks =
-							(uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(t4_ticks));
-
-						// Calculate full RTT: from PING send (T1) to PONG receive (T4)
-						uint32_t rtt_ticks = t4_ticks - ping_ticks_kernel_for_this_ctr;
-						rtt_us = k_ticks_to_us_floor32(rtt_ticks);
-
-						// Track minimum RTT (no-retransmission baseline)
-						// with aging: if min hasn't been refreshed in
-						// MIN_RTT_AGE_LIMIT PONGs, nudge it upward by 1 tick
-						// to recover from anomalously low measurements.
-						if (rtt_ticks > 0 && rtt_ticks <= g_min_rtt_ticks) {
-							g_min_rtt_ticks = rtt_ticks;
-							g_min_rtt_age = 0;
-						} else {
-							g_min_rtt_age++;
-							if (g_min_rtt_age >= MIN_RTT_AGE_LIMIT &&
-							    g_min_rtt_ticks < MIN_RTT_CEILING) {
-								g_min_rtt_ticks++;
-								g_min_rtt_age = 0;
-								LOG_DBG("min_rtt aged up to %u ticks", g_min_rtt_ticks);
-							}
-						}
-
-						// log ping and rtt
-						if (rtt_us > 1000) {
-							LOG_DBG(
-								"PONG ok, ack rtt=%u.%03u ms (ctr=%u)",
-								(unsigned)(rtt_us / 1000),
-								(unsigned)(rtt_us % 1000),
-								rx_ctr
-							);
-						} else if (rtt_us < 1000) {
-							LOG_DBG("PONG ok, ack rtt=%u us (ctr=%u)", (unsigned)rtt_us, rx_ctr);
-						}
-
-						/*
-						 * Adaptive RTT acceptance threshold.
-						 * Accept PONGs with RTT up to 4× min_rtt (handles minor
-						 * retransmissions) or 1000µs absolute floor (during min_rtt
-						 * warm-up when min is unreliable).
-						 */
-						uint32_t rtt_threshold_us = k_ticks_to_us_floor32(g_min_rtt_ticks * 4);
-						if (rtt_threshold_us < 1000) {
-							rtt_threshold_us = 1000;
-						}
-						if (rtt_us < rtt_threshold_us) {
-							// Reference-point offset: T2 - T4
-							// The constant one-way delay bias is the same for
-							// all trackers and cancels out in TDMA slot alignment.
-							// Decoupling from min_rtt avoids noise injection when
-							// min_rtt ages/updates.
-							uint32_t server_offset_ticks = ping_rx_ticks - t4_net_ticks;
-
-							/* Save prior sync stamp before overwrite — EMA predict
-							 * needs elapsed since last accepted PONG, not zero. */
-							uint32_t prev_sync_local_ticks = g_last_sync_local_ticks;
-							g_last_rx_raw_ticks = ping_rx_ticks;
-							g_last_sync_local_ticks = ping_ticks_for_this_ctr;
-							g_last_sync_timestamp = k_uptime_get();
-
-							if (!g_time_initialized) {
-								g_server_ticks_offset = server_offset_ticks;
-								g_skew_ref_offset = server_offset_ticks;
-								g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-								g_sync_update_count = 0;
-								g_time_initialized = true;
-								server_time_synced = true;
-								LOG_DBG("Server offset initialized: %u ticks", server_offset_ticks);
-							} else {
-								uint32_t delta_from_ref = ping_ticks_for_this_ctr - g_skew_ref_local_ticks;
-								int64_t predicted_drift = (int64_t)g_clock_skew_ppb
-									* delta_from_ref / 1000000000LL;
-								uint32_t predicted_offset = g_skew_ref_offset + (uint32_t)predicted_drift;
-								int64_t innovation = net_tick_difference(server_offset_ticks, predicted_offset);
-								if (innovation > 32000 || innovation < -32000) {
-									LOG_WRN(
-										"Large offset jump detected (%lld ticks), resetting (old=%u new=%u)",
-										(long long)innovation,
-										g_server_ticks_offset,
-										server_offset_ticks
-									);
-									g_server_ticks_offset = server_offset_ticks;
-									g_skew_ref_offset = server_offset_ticks;
-									g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-									g_clock_skew_ppb = 0;
-								} else {
-									if (delta_from_ref >= 32768) {
-										int64_t total_drift = net_tick_difference(server_offset_ticks, g_skew_ref_offset);
-										int64_t raw_skew_ppb = total_drift * 1000000000LL / delta_from_ref;
-										int64_t filtered_skew = (int64_t)g_clock_skew_ppb
-											+ (raw_skew_ppb - g_clock_skew_ppb) / 4;
-										g_clock_skew_ppb = (int32_t)CLAMP(filtered_skew, INT32_MIN, INT32_MAX);
-									}
-									g_sync_update_count++;
-									uint32_t delta_since_sync = ping_ticks_for_this_ctr - prev_sync_local_ticks;
-									uint32_t predicted_current = g_server_ticks_offset
-										+ (uint32_t)((int64_t)g_clock_skew_ppb * delta_since_sync / 1000000000LL);
-									int64_t offset_innovation = net_tick_difference(server_offset_ticks, predicted_current);
-									if (g_sync_update_count <= SYNC_WARM_UP_COUNT) {
-										g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation * 3 + 2) / 4);
-									} else {
-										g_server_ticks_offset = predicted_current + (uint32_t)((offset_innovation + 2) / 4);
-									}
-									if (delta_from_ref > SKEW_REF_REFRESH_TICKS) {
-										g_skew_ref_offset = server_offset_ticks;
-										g_skew_ref_local_ticks = ping_ticks_for_this_ctr;
-									}
-									LOG_DBG(
-										"Offset update: innovation=%lld offset=%u skew=%d ppb (rtt=%u min=%u)",
-										(long long)innovation, g_server_ticks_offset, g_clock_skew_ppb,
-										rtt_ticks, g_min_rtt_ticks
-									);
-								}
-							}
-
-							server_time_synced = true;
-
-							// Display skew-compensated estimated server time
-							uint32_t local_now = (uint32_t)net_ticks_from_kernel64(k_uptime_ticks());
-							uint32_t elapsed_since_meas = local_now - ping_ticks_for_this_ctr;
-							int32_t skew_corr = (int32_t)((int64_t)g_clock_skew_ppb * elapsed_since_meas / 1000000000LL);
-							uint32_t est_ticks = g_server_ticks_offset + local_now + (uint32_t)skew_corr;
-							uint32_t server_time_ms = net_ticks_to_ms_32(est_ticks);
-							uint32_t server_ms = server_time_ms % 1000;
-							uint32_t server_s = (server_time_ms / 1000) % 60;
-							uint32_t server_m = (server_time_ms / 60000) % 60;
-							uint32_t server_h = (server_time_ms / 3600000) % 24;
-							LOG_DBG(
-								"estimated server time: %02u:%02u:%02u.%03u (ticks=%u)",
-								server_h,
-								server_m,
-								server_s,
-								server_ms,
-								est_ticks
-							);
-						}
-					} else {
-						// No history found - likely too old or buffer wrapped
-					}
-
-					/* Dedicated replies never touch TDMA or command/echo state. */
-					if (pong_flags == ESB_PONG_FLAG_CHANNEL_CONFIRM) {
-						break;
-					}
-					/* NORMAL retains the legacy slot/total layout. */
-					if (pong_flags == ESB_PONG_FLAG_NORMAL) {
-						uint8_t tdma_slot   = rx_payload.data[8];
-						uint8_t tdma_total  = rx_payload.data[9];
-						uint8_t tdma_sticks = rx_payload.data[10];
-						uint8_t tdma_epoch  = rx_payload.data[11];
-
-						bool valid_schedule = tdma_total > 0 && tdma_total <= 16
-							&& tdma_slot < tdma_total && tdma_sticks >= 16;
-						if (valid_schedule &&
-						    (channel_wait_normal || tdma_epoch != tdma_get_config_epoch())) {
-							tdma_update_config(tdma_slot, tdma_total, tdma_sticks, tdma_epoch);
-						}
-						if (valid_schedule && server_time_synced && channel_wait_normal) {
-							channel_found = true;
-						}
-					}
-
-					if (pong_flags == ESB_PONG_FLAG_WOM_CONTROL) {
-#if CONFIG_CONNECTION_RAW_COLLECTION
-						metadata_echo_pending = false;
-#endif
-						esb_wom_receive(sys_get_be16(&rx_payload.data[8]),
-							sys_get_be16(&rx_payload.data[10]));
-#if CONFIG_CONNECTION_RAW_COLLECTION
-					} else if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_METADATA) {
-						received_metadata_mask = rx_payload.data[8];
-						received_metadata_chunk = rx_payload.data[9];
-						received_metadata_token = sys_get_be16(&rx_payload.data[10]);
-						connection_request_raw_metadata(
-							received_metadata_mask, received_metadata_chunk, received_metadata_token);
-						metadata_echo_pending = true;
-#endif
-					} else if (pong_flags != ESB_PONG_FLAG_NORMAL) {
-						/* Real controls may supersede a pending metadata echo. */
-#if CONFIG_CONNECTION_RAW_COLLECTION
-						metadata_echo_pending = false;
-#endif
-						esb_wom_reset();
-						uint16_t pong_test_rate_tps = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
-							&& rx_payload.length >= 10 ? sys_get_be16(&rx_payload.data[8]) : 0;
-#if CONFIG_CONNECTION_RAW_COLLECTION
-						uint8_t pong_batch_rate_hz = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
-							&& rx_payload.length >= 9 ? rx_payload.data[8] : 0;
-#endif
-						bool test_rate_changed = pong_flags == ESB_PONG_FLAG_TEST_MODE_ON
-							&& pong_test_rate_tps != received_test_rate_tps;
-#if CONFIG_CONNECTION_RAW_COLLECTION
-						bool batch_rate_changed = pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
-							&& pong_batch_rate_hz != received_batch_rate_hz;
-#endif
-						bool channel_changed = pong_flags == ESB_PONG_FLAG_SET_CHANNEL
-							&& sys_get_be32(&rx_payload.data[8]) != received_channel_value;
-						if (received_remote_command == ESB_PONG_FLAG_NORMAL
-						    || test_rate_changed || channel_changed
-#if CONFIG_CONNECTION_RAW_COLLECTION
-						    || batch_rate_changed
-#endif
-						    || ((received_remote_command == acked_remote_command || remote_command_rejected)
-						        && pong_flags != received_remote_command)) {
-							if (channel_changed && acked_remote_command == ESB_PONG_FLAG_SET_CHANNEL) {
-								acked_remote_command = ESB_PONG_FLAG_NORMAL;
-							}
-							received_remote_command = pong_flags;
-							remote_command_rejected = false;
-							remote_command_generation++;
-							remote_command_receive_time = k_uptime_get();
-							if (pong_flags == ESB_PONG_FLAG_SET_CHANNEL) {
-								received_channel_value = ((uint32_t)rx_payload.data[8] << 24)
-									| ((uint32_t)rx_payload.data[9] << 16)
-									| ((uint32_t)rx_payload.data[10] << 8) | rx_payload.data[11];
-							} else if (pong_flags == ESB_PONG_FLAG_SENS_SET) {
-								memcpy(received_sens_data, pong_sens_data, sizeof(received_sens_data));
-							} else if (pong_flags == ESB_PONG_FLAG_SENS_AUTO) {
-								received_sens_auto_axis = pong_sens_auto_axis;
-								received_sens_auto_revolutions = pong_sens_auto_revolutions;
-							} else if (pong_flags == ESB_PONG_FLAG_TEST_MODE_ON) {
-								received_test_rate_tps = pong_test_rate_tps;
-#if CONFIG_CONNECTION_RAW_COLLECTION
-							} else if (pong_flags == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
-								received_batch_rate_hz = pong_batch_rate_hz;
-#endif
-							}
-							LOG_INF("Remote command %s (0x%02X) received",
-								esb_remote_cmd_name(pong_flags), pong_flags);
-						}
-					} else if (!channel_wait_normal && !channel_search) {
-						/* A requested proof NORMAL did not consume the low-bit
-						 * command/metadata echo. Keep it for the post-proof PING. */
-#if CONFIG_CONNECTION_RAW_COLLECTION
-						metadata_echo_pending = false;
-#endif
-						if (wom_command.response_pending
-						    && wom_command.sent_token == wom_command.cached_token
-						    && wom_command.sent_flag == wom_command.result_flag) {
-							wom_command.response_pending = false;
-							wom_command.cached = false;
-						}
-						if (acked_remote_command != ESB_PONG_FLAG_NORMAL
-						    || !esb_remote_command_supported(received_remote_command)) {
-							received_remote_command = ESB_PONG_FLAG_NORMAL;
-							acked_remote_command = ESB_PONG_FLAG_NORMAL;
-							remote_command_receive_time = 0;
-							remote_command_rejected = false;
-							remote_command_generation++;
-						}
-					}
-				}
+				esb_receive_pong(&rx_payload);
 			} break;
 			case ESB_SENSOR_DATA_LEN: {
 				// received other tracker's sensor data, likely due to shared pipe, just ignore
@@ -2474,6 +2479,31 @@ static int esb_queue_ping(const struct esb_payload *payload)
 	return status;
 }
 
+static void esb_prepare_ping(uint8_t *data)
+{
+	data[7] &= ~ESB_PING_FLAG_CHANNEL_CONFIRM;
+	if (!channel_confirmed && !channel_legacy_peer) {
+		/* Never echo an unexecuted control while asking for channel proof. */
+		data[7] = ESB_PING_FLAG_CHANNEL_CONFIRM;
+	}
+	// Set sequence number
+	data[2] = ping_counter;
+	struct esb_network_clock clock;
+	if (esb_get_network_clock(&clock)) {
+		uint32_t server_time_ticks = clock.receiver_ticks;
+		data[3] = (server_time_ticks >> 24) & 0xFF;
+		data[4] = (server_time_ticks >> 16) & 0xFF;
+		data[5] = (server_time_ticks >> 8) & 0xFF;
+		data[6] = server_time_ticks & 0xFF;
+	} else {
+		LOG_DBG("Sending PING while time not synced - attempting to re-sync");
+	}
+	esb_wom_prepare_ping(data);
+	// Calculate crc8 checksum over first 12 bytes
+	uint8_t crc_calc = crc8_ccitt(0x07, data, ESB_PING_LEN - 1);
+	data[ESB_PING_LEN - 1] = crc_calc;
+}
+
 static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 {
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) {
@@ -2514,27 +2544,7 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length)
 	esb_write_rate_tick();
 
 	if (is_ping) {
-		data[7] &= ~ESB_PING_FLAG_CHANNEL_CONFIRM;
-		if (!channel_confirmed && !channel_legacy_peer) {
-			/* Never echo an unexecuted control while asking for channel proof. */
-			data[7] = ESB_PING_FLAG_CHANNEL_CONFIRM;
-		}
-		// Set sequence number
-		data[2] = ping_counter;
-		struct esb_network_clock clock;
-		if (esb_get_network_clock(&clock)) {
-			uint32_t server_time_ticks = clock.receiver_ticks;
-			data[3] = (server_time_ticks >> 24) & 0xFF;
-			data[4] = (server_time_ticks >> 16) & 0xFF;
-			data[5] = (server_time_ticks >> 8) & 0xFF;
-			data[6] = server_time_ticks & 0xFF;
-		} else {
-			LOG_DBG("Sending PING while time not synced - attempting to re-sync");
-		}
-		esb_wom_prepare_ping(data);
-		// Calculate crc8 checksum over first 12 bytes
-		uint8_t crc_calc = crc8_ccitt(0x07, data, ESB_PING_LEN - 1);
-		data[ESB_PING_LEN - 1] = crc_calc;
+		esb_prepare_ping(data);
 	}
 	memcpy(tx_payload.data, data, data_length);
 

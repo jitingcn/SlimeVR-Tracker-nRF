@@ -159,7 +159,7 @@ static uint32_t ping_server_phase_delay_ms(uint32_t x) { (void)x; return 0; }
 static uint8_t connection_get_id(void) { return tracker_id; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
 static void esb_get_ping_request_data(uint8_t p[4]) { memset(p,0,4); }
-static int esb_write_ping(uint8_t *p,bool force) { (void)force; assert(p[0]==ESB_PING_TYPE); ping_calls++; return 0; }
+static int esb_write_ping(uint8_t *p,bool force) { (void)force; assert(p[0]==ESB_PING_TYPE); ping_calls++; return send_error; }
 static void ping_stats_attempt(uint32_t n) { (void)n; }
 static uint32_t ping_next_periodic_deadline(uint32_t p,uint32_t n,uint32_t i) { (void)p;return n+i; }
 static void esb_ota_periodic_status(void) {}
@@ -559,6 +559,10 @@ static void test_backoff_and_control_priority(void) {
     reset(); raw=raw_pending=true; iteration(); assert(sends==1 && raw_calls==0 && packet_sequence==19);
     reset(); raw=raw_pending=true; next_ping_deadline_ms=now_ms; iteration();
     assert(ping_calls==1 && sends==0 && selects==0 && raw_calls==0 && radio_rotations==0);
+    assert(ping_sched_stats.due==1 && ping_sched_stats.attempts==1 && ping_sched_stats.queue_ok==1);
+    reset(); raw=raw_pending=true; next_ping_deadline_ms=now_ms; send_error=-EAGAIN; iteration();
+    assert(ping_calls==1 && sends==0 && selects==0 && raw_calls==0 && radio_rotations==0);
+    assert(ping_sched_stats.due==0 && ping_sched_stats.attempts==0 && next_ping_deadline_ms==now_ms);
     reset(); event_due=false; test_enabled=true; publish_a(); send_error=-EAGAIN; iteration();
     assert(test_rate_schedule.next_due_us==clock_us && radio_rotations==0 && packet_sequence==19);
     send_error=0; iteration(); assert(test_rate_schedule.next_due_us==10007812 && radio_rotations==1 && packet_sequence==20);
@@ -598,6 +602,7 @@ def build_source(source=None):
     parts.append(source[start:end])
     for name in ("connection_send_retry_ms", "connection_send_tracker_event"):
         parts.append(function(source, name))
+    parts.append(function(source, "connection_service_ping"))
     thread = function(source, "connection_thread")
     start = thread.index("\t\tif (radio_ready) {")
     end = thread.rindex("\n\t}")

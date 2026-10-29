@@ -21,6 +21,8 @@ def function(source, name):
 
 esb = (SOURCE / "connection/esb.c").read_text()
 connection = (SOURCE / "connection/connection.c").read_text()
+pong = function(esb, "esb_receive_pong")
+restart = block(pong, r"^\t+if \(receiver_clock_restarted\) \{")
 snapshot = (SOURCE / "connection/sensor_data_snapshot.h").read_text()
 snapshot_types = (
     block(snapshot, r"^enum sensor_stream \{", True) + "\n"
@@ -50,6 +52,7 @@ else:
     raise ValueError("Unclosed clock control section")
 payload += "\n" + esb[clock_start:clock_end]
 payload += "\n" + function(esb, "esb_queue_ping")
+payload += "\n" + function(esb, "esb_prepare_ping")
 clocked_writer = re.search(r"^static int esb_write_clocked\(", esb, re.MULTILINE)
 if clocked_writer:
     payload += "\n" + function(esb, "esb_write_clocked")
@@ -81,13 +84,13 @@ static void host_tx_success(void)
 """ + esb[start:end] + """
 }
 """
-payload += "\nstatic unsigned host_receiver_restart(void) {\n"
-payload += "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
+payload += "\nstatic void host_receiver_restart_body(unsigned *detections, unsigned *continued) {\n"
+payload += "bool receiver_clock_restarted = true;\n#define receiver_restart_detections (*detections)\n"
 payload += "uint32_t g_last_rx_raw_ticks = 123456, ping_rx_ticks = 1234;\n"
-payload += "unsigned continued_after_restart = 0;\ndo {\n"
-payload += block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
-payload += "\ncontinued_after_restart = 1;\n} while (0);\n"
-payload += "return receiver_restart_detections + 256 * continued_after_restart;\n}\n"
+payload += restart + "\n*continued = 1;\n#undef receiver_restart_detections\n}\n"
+payload += "static unsigned host_receiver_restart(void) {\n"
+payload += "unsigned detections = 0, continued = 0;\nhost_receiver_restart_body(&detections, &continued);\n"
+payload += "return detections + 256 * continued;\n}\n"
 
 # Keep the actual TX cases and lifetime counters observable in the focused
 # failure fixture. Only hardware leaves and the enclosing RX switch are omitted.
@@ -120,22 +123,24 @@ commands.insert(0, function((SRC / "system/system.c").read_text(), "sys_command_
 commands += [registry, function(esb, "esb_remote_command_execute"),
              function(esb, "esb_ping_timeout"), function(esb, "esb_thread")]
 # Exercise the production control-admission tail after PONG validation.
-start = esb.index("\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)")
-end = esb.index("\n\t\t\t\t}\n\t\t\t} break;", start)
+start = pong.index("\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)")
+end = pong.rindex("\n\t}")
 commands.append("static void receive_control(uint8_t pong_flags) {\n"
+                + "const struct esb_payload *payload = &rx_payload;\n"
                 + "float pong_sens_data[3] = {0}; uint8_t pong_sens_auto_axis = 0; uint16_t pong_sens_auto_revolutions = 0;\n"
-                + esb[start:end] + "\n}")
+                + pong[start:end] + "\n}")
 commands.append("static void receive_stop(void) { receive_control(ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF); }")
 commands.append(re.search(r"^static uint32_t g_last_rx_raw_ticks = [^;]+;", esb, re.MULTILINE).group(0))
-restart_tick_start = esb.index("\t\t\t\t\tuint32_t ping_rx_ticks =")
-restart_tick_end = esb.index(";\n", restart_tick_start) + 1
-commands.append("static unsigned host_receiver_restart(void) {\n"
-                + "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
-                + "unsigned continued_after_restart = 0;\n"
-                + esb[restart_tick_start:restart_tick_end] + "\ndo {\n"
-                + block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
-                + "\ncontinued_after_restart = 1;\n} while (0);\n"
-                + "return receiver_restart_detections + 256 * continued_after_restart;\n}")
+restart_tick_start = pong.index("\t\tuint32_t ping_rx_ticks =")
+restart_tick_end = pong.index(";\n", restart_tick_start) + 1
+commands.append("static void host_receiver_restart_body(unsigned *detections, unsigned *continued) {\n"
+                + "bool receiver_clock_restarted = true;\n#define receiver_restart_detections (*detections)\n"
+                + "const struct esb_payload *payload = &rx_payload;\n"
+                + pong[restart_tick_start:restart_tick_end] + "\n"
+                + restart + "\n*continued = 1;\n#undef receiver_restart_detections\n}\n"
+                + "static unsigned host_receiver_restart(void) {\n"
+                + "unsigned detections = 0, continued = 0;\nhost_receiver_restart_body(&detections, &continued);\n"
+                + "return detections + 256 * continued;\n}")
 collection = []
 for name in ("connection_raw_collection_active", "connection_feedback_maintenance_update", "connection_reset_raw_collection", "connection_set_data_collection", "connection_get_data_collection", "connection_set_data_collection_batch", "connection_get_data_collection_batch", "connection_get_data_collection_batch_rate", "connection_send_raw_metadata"):
     collection.append(function(connection, name))
@@ -147,12 +152,12 @@ collection.append("static int batch_request(bool enable, uint16_t rate) { " + ("
 # Keep the real status bit values and getter: treating the connection-error
 # mask as a bool in a fixture would hide a permanently blocked producer.
 status = (SOURCE / "system/status.c").read_text()
-start = esb.index("\t\t\t\t\tuint8_t rx_id = rx_payload.data[1];")
-end = esb.index("\n\t\t\t\t\tuint32_t ping_rx_ticks", start)
+start = pong.index("\t\tuint8_t rx_id = payload->data[1];")
+end = pong.index("\n\t\tuint32_t ping_rx_ticks", start)
 recovery = constants + "\n" + function(status, "get_status")
 recovery += "\n" + function(esb, "esb_pong_is_legacy")
 recovery += "\n" + "\n".join(re.findall(r"^#define PING_RECOVERY_THRESHOLD[^\n]*", esb, re.MULTILINE))
-recovery += "\nstatic void receive_valid_pong(void) { do {\n" + esb[start:end] + "\n(void)rx_ctr;\n} while (0); }\n"
+recovery += "\nstatic void receive_valid_pong(void) {\nconst struct esb_payload *payload = &rx_payload;\n" + pong[start:end] + "\n(void)rx_ctr;\n}\n"
 
 channels = constants + "\n" + block(esb, r"^static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS\[\] = \{", True)
 channels += "\n#define ESB_ALLOWED_CHANNELS_COUNT (sizeof(ESB_ALLOWED_CHANNELS))\n"
@@ -175,32 +180,32 @@ channels += "struct esb_payload tx_payload = { .length = ESB_PING_LEN, .data = {
 channels += "tx_payload.data[7] = esb_get_ping_ack_flag();\n"
 channels += "esb_get_ping_request_data(&tx_payload.data[8]);\n"
 channels += "assert(esb_queue_ping(&tx_payload) == 0);\n}\n"
-start = esb.index("\t\t\t\t\tuint32_t ping_ticks_for_this_ctr = 0;")
-end = esb.index("uint32_t rtt_us = 0;", start)
-channels += ("\nstatic bool host_ping_history(uint8_t rx_ctr) {\n" + esb[start:end]
+start = pong.index("\t\tuint32_t ping_ticks_for_this_ctr = 0;")
+end = pong.index("uint32_t rtt_us = 0;", start)
+channels += ("\nstatic bool host_ping_history(uint8_t rx_ctr) {\n" + pong[start:end]
              + "\n(void)ping_ticks_for_this_ctr; (void)ping_ticks_kernel_for_this_ctr;"
              + "\nreturn ping_history_valid;\n}\n")
 channels += "\nstatic void maintenance_timeout(void) { int64_t now_idle = k_uptime_get();\n"
 channels += "\tesb_ping_timeout(now_idle);\n}\n"
 channels += "\n" + function(esb, "esb_deinitialize")
 channels += "\n" + function(esb, "esb_channel_search_poll")
-start = esb.index("\t\t\t\tif (rx_payload.data[0] == ESB_PONG_TYPE)")
-end = esb.index("\n\t\t\t\t\tuint32_t ping_rx_ticks", start)
-channels += "\n#define PING_RECOVERY_THRESHOLD 1\nstatic bool pong_admitted;\nstatic void receive_pong_prefix(void) { do {\n" + esb[start:end] + "\n(void)rx_ctr;\npong_admitted = true;\n}\n} while (0); }\n"
+start = pong.index("\tif (payload->data[0] == ESB_PONG_TYPE)")
+end = pong.index("\n\t\tuint32_t ping_rx_ticks", start)
+channels += "\n#define PING_RECOVERY_THRESHOLD 1\nstatic bool pong_admitted;\nstatic void receive_pong_prefix(void) {\nconst struct esb_payload *payload = &rx_payload;\n" + pong[start:end] + "\n(void)rx_ctr;\npong_admitted = true;\n}\n}\n"
 channels += "\nstatic bool accept_pong(void) { pong_admitted = false; if (rx_payload.length == ESB_PONG_LEN) receive_pong_prefix(); return pong_admitted; }\n"
-start = esb.index("\t\t\t\t\t/* NORMAL retains the legacy slot/total layout.")
-end = esb.index("\n\n\t\t\t\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)", start)
-channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\n" + esb[start:end] + "\n}\n"
+start = pong.index("\t\t/* NORMAL retains the legacy slot/total layout.")
+end = pong.index("\n\n\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)", start)
+channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\nconst struct esb_payload *payload = &rx_payload;\n" + pong[start:end] + "\n}\n"
 channels += "\n" + function(esb, "esb_send_pair_step")
 channels += "\n" + function(esb, "esb_pair")
 channels += "\n" + function(esb, "esb_led_connection_facts")
-channels += "\nstatic unsigned host_receiver_restart(void) {\n"
-channels += "bool receiver_clock_restarted = true; unsigned receiver_restart_detections = 0;\n"
+channels += "\nstatic void host_receiver_restart_body(unsigned *detections, unsigned *continued) {\n"
+channels += "bool receiver_clock_restarted = true;\n#define receiver_restart_detections (*detections)\n"
 channels += "uint32_t g_last_rx_raw_ticks = 123456, ping_rx_ticks = 1234;\n"
-channels += "unsigned continued_after_restart = 0;\ndo {\n"
-channels += block(esb, r"^\t+if \(receiver_clock_restarted\) \{")
-channels += "\ncontinued_after_restart = 1;\n} while (0);\n"
-channels += "return receiver_restart_detections + 256 * continued_after_restart;\n}\n"
+channels += restart + "\n*continued = 1;\n#undef receiver_restart_detections\n}\n"
+channels += "static unsigned host_receiver_restart(void) {\n"
+channels += "unsigned detections = 0, continued = 0;\nhost_receiver_restart_body(&detections, &continued);\n"
+channels += "return detections + 256 * continued;\n}\n"
 start = esb.index("\t\tif (!paired_addr[0]) // zero, not paired")
 end = esb.index("\n\t\t} else {\n\t\t\tswitch (rx_payload.length)", start)
 channels += "\nstatic void receive_pair(void) { do {\n" + esb[start:end] + "\n}\n} while (0); }\n"
@@ -210,7 +215,8 @@ with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     (temporary / "connection").mkdir()
     (temporary / "connection/connection.h").write_text((SOURCE / "connection/connection.h").read_text())
     (temporary / "snapshot_types.inc").write_text(snapshot_types)
-    for name, parts in (("payload", payload), ("tx_failures", tx_failures), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery), ("channels", channels), ("lifecycle", function(connection, "connection_thread"))):
+    lifecycle = function(connection, "connection_service_ping") + "\n" + function(connection, "connection_thread")
+    for name, parts in (("payload", payload), ("tx_failures", tx_failures), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery), ("channels", channels), ("lifecycle", lifecycle)):
         (temporary / f"{name}.inc").write_text(parts)
     # Keep hardware leaves in the established fixture; exercise the new private
     # packet through the same extracted production ESB dispatch.

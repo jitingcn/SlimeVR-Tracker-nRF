@@ -56,7 +56,7 @@ static uint32_t executing_channel_value, applied_channel;
 static unsigned channel_calls;
 static int channel_control_set(int channel) { applied_channel = channel; ++channel_calls; return 0; }
 static float received_sens_data[3];
-static struct { uint8_t data[13], length; } rx_payload = {.length = 13};
+static struct esb_payload { uint8_t data[13], length; } rx_payload = {.length = 13};
 static uint16_t sys_get_be16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
 static uint32_t sys_get_be32(const uint8_t *p)
 {
