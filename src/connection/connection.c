@@ -843,6 +843,11 @@ static void connection_reset_raw_collection(bool reset_arq)
 		raw_retx_total = 0;
 	}
 }
+uint32_t connection_get_raw_collection_session(void)
+{
+	return (uint32_t)atomic_get(&raw_collection_session);
+}
+
 void connection_set_data_collection(bool enable)
 {
 	bool was_active = connection_get_data_collection();

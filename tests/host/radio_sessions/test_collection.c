@@ -54,6 +54,18 @@ void connection_queue_raw_sample(const struct raw_imu_sample *sample)
     assert(sample_count < 16);
     samples[sample_count++] = *sample;
 }
+static void (*batch_publication_hook)(void);
+static atomic_val_t publication_atomic_set(atomic_t *target, atomic_val_t value)
+{
+    atomic_val_t previous = atomic_set(target, value);
+    if (target == &data_collection_batch_active && value && batch_publication_hook) {
+        void (*hook)(void) = batch_publication_hook;
+        batch_publication_hook = NULL;
+        hook();
+    }
+    return previous;
+}
+#define atomic_set(target, value) publication_atomic_set(target, value)
 #include "collection.inc"
 #include "sensor/raw_collection.c"
 
@@ -62,13 +74,14 @@ static const struct sensor_raw_collection_config config = {
     .gyro_range = 2000, .accel_range = 16, .gyro_oversample_n = 1,
     .imu_id = 7, .mag_id = 2, .mag_active = true,
 };
-static void frame(bool restart_expected)
+static void frame_with_config(const struct sensor_raw_collection_config *settings, bool restart_expected)
 {
     bool active;
     bool restart = sensor_raw_collection_begin_frame(&active);
     assert(active && restart == restart_expected);
-    if (restart) sensor_raw_collection_send_metadata(&config);
+    if (restart) sensor_raw_collection_send_metadata(settings);
 }
+static void frame(bool restart_expected) { frame_with_config(&config, restart_expected); }
 static void sample(void)
 {
     const float accel[3] = {1, 2, 3}, gyro[3] = {0, 0, 90};
@@ -81,6 +94,88 @@ static void restart_during_capture(void)
     assert(batch_request(false, 0) == 0);
     assert(batch_request(true, 2) == 0);
 }
+static void test_single_restart_between_frames(void)
+{
+    struct sensor_raw_collection_config settings = config;
+    settings.gyro_oversample_n = 3;
+    connection_set_data_collection(true);
+    frame_with_config(&settings, true);
+    sample();
+    assert(sample_count == 0);
+    unsigned captures_before = calibration_captures;
+    uint32_t session_before = connection_get_raw_collection_session();
+    connection_set_data_collection(false);
+    connection_set_data_collection(true);
+    assert(connection_get_raw_collection_session() != session_before);
+    assert(!atomic_get(&raw_snapshot_ready));
+    frame_with_config(&settings, true);
+    assert(atomic_get(&raw_snapshot_ready));
+    assert(calibration_captures == captures_before + 1);
+    connection_set_data_collection(true);
+    frame_with_config(&settings, false);
+    assert(calibration_captures == captures_before + 1);
+
+    const float zero[3] = {0}, gyro[3] = {0, 0, 90};
+    sensor_raw_collection_on_sample(zero, gyro, 25, true);
+    assert(sample_count == 0);
+    sensor_raw_collection_on_sample(zero, gyro, 25, true);
+    assert(sample_count == 1);
+    near(samples[0].gyr_quat[0], cosf(0.1570796327f));
+    near(samples[0].gyr_quat[3], sinf(0.1570796327f));
+    near(samples[0].accel[0], 1);
+    near(samples[0].accel[1], 2);
+    near(samples[0].accel[2], 3);
+
+    /* Raw session zero is a valid identity after wrap, not inactivity. */
+    atomic_set(&raw_collection_session, (atomic_val_t)UINT32_MAX);
+    connection_set_data_collection(false);
+    connection_set_data_collection(true);
+    assert(connection_get_raw_collection_session() == 0);
+    frame(true);
+    sample();
+    assert(sample_count == 1);
+    near(samples[0].gyr_quat[0], cosf(0.0785398163f));
+    near(samples[0].gyr_quat[3], sinf(0.0785398163f));
+}
+
+static uint32_t observed_publication_session;
+static void observe_before_batch_settings(void)
+{
+    bool active;
+    assert(sensor_raw_collection_begin_frame(&active));
+    assert(active);
+    observed_publication_session = connection_get_raw_collection_session();
+}
+static void test_batch_publication_after_session_observation(void)
+{
+    /* Observe the session before sensor batch settings are published. The
+     * later generation must still request a frame restart for those settings. */
+    batch_publication_hook = observe_before_batch_settings;
+    assert(batch_request(true, 5) == 0);
+    assert(!batch_publication_hook);
+    assert(connection_get_raw_collection_session() == observed_publication_session);
+    frame(true);
+    float rate;
+    memcpy(&rate, raw_metadata_buf + 10, sizeof(rate));
+    near(rate, 5);
+    sample(); sample();
+    assert(sample_count == 1);
+    near(samples[0].gyr_quat[0], cosf(0.1570796327f));
+    near(samples[0].gyr_quat[3], sinf(0.1570796327f));
+    assert(batch_request(true, 5) == 0);
+    frame(false);
+
+    connection_set_data_collection(true);
+    frame(true);
+    memcpy(&rate, raw_metadata_buf + 10, sizeof(rate));
+    near(rate, 10);
+    assert(!connection_get_data_collection_batch());
+    sample();
+    assert(sample_count == 1);
+    near(samples[0].gyr_quat[0], cosf(0.0785398163f));
+    near(samples[0].gyr_quat[3], sinf(0.0785398163f));
+}
+
 int main(void)
 {
     assert(batch_request(true, 5) == 0);
@@ -132,6 +227,8 @@ int main(void)
     connection_send_raw_metadata(1, 2, 3, 4, 5, 6, 7, 8, 9);
     assert(atomic_get(&raw_snapshot_ready));
     assert(raw_cal_snapshot.generation == published + 2);
+    test_single_restart_between_frames();
+    test_batch_publication_after_session_observation();
     puts("collection: rejected/same-rate starts preserve metadata, queued data and partial integration");
     return 0;
 }

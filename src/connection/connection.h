@@ -70,6 +70,9 @@ void connection_set_data_collection(bool enable);
 // Returns -EBUSY for an active session's rate change; stop before restarting.
 int connection_set_data_collection_batch(bool enable, uint16_t rate_hz);
 
+/* Restart identity only, not a coherent snapshot of activity or batch settings. */
+uint32_t connection_get_raw_collection_session(void);
+
 // Queue a raw IMU sample for transmission (called from sensor thread).
 // Samples during the first five seconds of a session are intentionally
 // discarded while metadata/calibration establishes the recording baseline.

@@ -17,13 +17,14 @@ struct sensor_raw_collection_config {
 	bool mag_active;
 };
 
-/* Connection-thread publication; all remaining entry points are sensor-thread owned. */
+/* Connection control publication; remaining hooks belong to the sensor owner
+ * or its exclusive suspended-owner hardware-restart path. */
 void sensor_set_batch_collect(bool active, float emit_hz);
 
 /* Set the frame's activity snapshot. True means the caller must resume the
- * hardware, send metadata, then acquire samples. Both activation and an active
- * batch configuration change reset the quaternion and fractional accumulator;
- * the single-mode emit counter and latest acceleration remain unchanged. */
+ * hardware, send metadata, then acquire samples. Activation, a new transport
+ * session or active batch configuration change reset the quaternion and
+ * fractional accumulator; single emit phase and latest acceleration persist. */
 bool sensor_raw_collection_begin_frame(bool *dc_active);
 void sensor_raw_collection_send_metadata(const struct sensor_raw_collection_config *config);
 

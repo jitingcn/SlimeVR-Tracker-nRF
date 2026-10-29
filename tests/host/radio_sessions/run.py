@@ -17,7 +17,7 @@ SOURCE = Path(os.environ.get("RADIO_SOURCE_ROOT", SRC))
 
 
 def function(source, name):
-    return block(source, rf"^(?:static )?(?:bool|int|void|uint8_t|uint16_t) {re.escape(name)}\([^;]*?\)\n\{{")
+    return block(source, rf"^(?:static )?(?:bool|int|void|uint8_t|uint16_t|uint32_t) {re.escape(name)}\([^;]*?\)\n\{{")
 
 esb = (SOURCE / "connection/esb.c").read_text()
 connection = (SOURCE / "connection/connection.c").read_text()
@@ -144,6 +144,7 @@ commands.append("static void host_receiver_restart_body(unsigned *detections, un
 collection = []
 for name in ("connection_raw_collection_active", "connection_feedback_maintenance_update", "connection_reset_raw_collection", "connection_set_data_collection", "connection_get_data_collection", "connection_set_data_collection_batch", "connection_get_data_collection_batch", "connection_get_data_collection_batch_rate", "connection_send_raw_metadata"):
     collection.append(function(connection, name))
+collection.insert(3, function(connection, "connection_get_raw_collection_session"))
 # Old API snapshots return void. Adapt only the test observation, not production
 # control flow, so pre-fix comparison fails on behavior rather than compilation.
 returns_status = re.search(r"^int connection_set_data_collection_batch\(", connection, re.MULTILINE)

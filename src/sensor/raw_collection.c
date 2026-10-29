@@ -25,6 +25,7 @@ static atomic_t batch_collect_rate_hz;
 static atomic_t batch_collect_generation;
 static bool last_data_collection_state;
 static atomic_val_t last_batch_collect_generation;
+static uint32_t last_raw_collection_session;
 static float gyro_actual_time;
 /* Integrate uncorrected gyro so offline fusion can re-estimate bias. */
 static float raw_gyr_quat[4] = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -80,11 +81,14 @@ void sensor_raw_collection_send_metadata(const struct sensor_raw_collection_conf
 
 bool sensor_raw_collection_begin_frame(bool *dc_active)
 {
-	/* A generation change catches an in-place rate update or batch->single cutover. */
+	/* Session identity catches OFF/ON between frames. Batch publication also
+	 * needs its generation because its settings are published separately. */
 	*dc_active = connection_get_data_collection() || connection_get_data_collection_batch();
 	atomic_val_t generation = atomic_get(&batch_collect_generation);
+	uint32_t session = connection_get_raw_collection_session();
 	bool config_changed = *dc_active && generation != last_batch_collect_generation;
-	bool restart = *dc_active && (!last_data_collection_state || config_changed);
+	bool restart = *dc_active && (!last_data_collection_state || config_changed
+				     || session != last_raw_collection_session);
 	if (restart) {
 		raw_gyr_quat[0] = 1.0f;
 		raw_gyr_quat[1] = 0.0f;
@@ -94,6 +98,7 @@ bool sensor_raw_collection_begin_frame(bool *dc_active)
 	}
 	/* Metadata/calibration are session-stable; no periodic resend. */
 	last_batch_collect_generation = generation;
+	last_raw_collection_session = session;
 	last_data_collection_state = *dc_active;
 	return restart;
 }

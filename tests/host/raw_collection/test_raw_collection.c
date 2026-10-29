@@ -10,6 +10,7 @@
 
 static bool single_active;
 static bool batch_active;
+static uint32_t raw_session;
 static struct raw_imu_sample samples[32];
 static unsigned sample_count;
 static unsigned metadata_count;
@@ -28,6 +29,11 @@ bool connection_get_data_collection(void)
 bool connection_get_data_collection_batch(void)
 {
 	return batch_active;
+}
+
+uint32_t connection_get_raw_collection_session(void)
+{
+	return raw_session;
 }
 
 void connection_queue_raw_sample(const struct raw_imu_sample *sample)
