@@ -16,10 +16,10 @@
 #include <hal/nrf_gpio.h>
 
 #include "ICM42686.h"
-#include "icm426xx_hires.h"
+#include "icm_hires.h"
 #include "sensor/sensor_none.h"
 
-#define PACKET_SIZE ICM426XX_HIRES_PACKET_SIZE
+#define PACKET_SIZE ICM_HIRES_PACKET_SIZE
 #define ICM42686_FIFO_COUNT_RECORDS 0x40
 #define ICM42686_FIFO_HIRES_EN 0x10
 #define ICM42686_FIFO_TEMP_EN 0x04
@@ -290,7 +290,7 @@ int icm42686_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
 	const uint16_t packet_offset = index * PACKET_SIZE;
 	const uint8_t *packet = &data[packet_offset];
-	return icm426xx_hires_decode(packet, accel_sensitivity_32, gyro_sensitivity_32, a, g);
+	return icm_hires_decode(packet, accel_sensitivity_32, gyro_sensitivity_32, a, g);
 }
 
 void icm42686_accel_read(float a[3])

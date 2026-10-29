@@ -2,7 +2,7 @@
 #ifndef ICM426XX_IO_H
 #define ICM426XX_IO_H
 
-#include "icm426xx_hires.h"
+#include "icm_hires.h"
 
 static inline uint16_t icm426xx_fifo_read(
 	uint8_t count_reg, uint8_t data_reg, float multiplier,
@@ -10,7 +10,7 @@ static inline uint16_t icm426xx_fifo_read(
 {
 	*temperature_valid = false;
 	uint16_t total_packets = 0;
-	while (capacity_bytes >= ICM426XX_HIRES_PACKET_SIZE) {
+	while (capacity_bytes >= ICM_HIRES_PACKET_SIZE) {
 		uint8_t raw_count[2];
 		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, count_reg, raw_count, 2);
 		if (err) {
@@ -21,7 +21,7 @@ static inline uint16_t icm426xx_fifo_read(
 		if (!packet_count) {
 			break;
 		}
-		uint16_t packet_capacity = capacity_bytes / ICM426XX_HIRES_PACKET_SIZE;
+		uint16_t packet_capacity = capacity_bytes / ICM_HIRES_PACKET_SIZE;
 		float requested_packets = packet_count + packet_count * multiplier;
 		if (requested_packets > packet_capacity) {
 			LOG_WRN("FIFO read buffer limit reached");
@@ -29,9 +29,9 @@ static inline uint16_t icm426xx_fifo_read(
 		} else {
 			packet_count = (uint16_t)requested_packets;
 		}
-		uint16_t byte_count = packet_count * ICM426XX_HIRES_PACKET_SIZE;
+		uint16_t byte_count = packet_count * ICM_HIRES_PACKET_SIZE;
 		err = ssi_burst_read_interval(SENSOR_INTERFACE_DEV_IMU, data_reg, data, byte_count,
-			ICM426XX_HIRES_PACKET_SIZE);
+			ICM_HIRES_PACKET_SIZE);
 		if (err) {
 			*temperature_valid = false;
 			return total_packets;

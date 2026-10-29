@@ -6,7 +6,7 @@
 #include <hal/nrf_gpio.h>
 
 #include "ICM45686.h"
-#include "icm426xx_hires.h"
+#include "icm_hires.h"
 #include "../interface_internal.h"
 #include "sensor/sensor_none.h"
 
@@ -711,7 +711,7 @@ int icm45_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 		);
 		debug_count++;
 	}
-	return icm426xx_hires_decode(
+	return icm_hires_decode(
 		packet, accel_g_per_left_aligned_lsb, gyro_dps_per_left_aligned_lsb, a, g
 	);
 }

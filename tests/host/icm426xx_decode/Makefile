@@ -7,7 +7,7 @@ LDLIBS += -lm -fsanitize=undefined
 
 DRIVERS := ../../../src/sensor/imu/ICM42686.c ../../../src/sensor/imu/ICM42688.c
 HEADERS := ../../../src/sensor/imu/ICM42686.h ../../../src/sensor/imu/ICM42688.h \
-	../../../src/sensor/imu/icm426xx_hires.h ../../../src/sensor/imu/icm426xx_io.h \
+	../../../src/sensor/imu/icm_hires.h ../../../src/sensor/imu/icm426xx_io.h \
 	../../../src/sensor/imu/icm426xx_odr.h \
 	../../../src/sensor/sensor.h \
 	../../../src/sensor/sensor_none.h ../../../src/sensor/interface.h \

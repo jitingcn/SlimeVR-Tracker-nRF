@@ -145,11 +145,11 @@ with tempfile.TemporaryDirectory(prefix='sensor-temp-') as directory:
         names={'INIT':f'{prefix}_init','SHUTDOWN':f'{prefix}_shutdown','FIFO_READ':f'{prefix}_fifo_read','TEMP_READ':f'{prefix}_temp_read','UPDATE_ODR':f'{prefix}_update_odr','COUNT_REG':f'{model}_FIFO_COUNTH','TEMP_REG':f'{model}_TEMP_DATA1'}
         aliases='\n'.join(f'#define {key} {value}' for key,value in names.items())
         state=source[source.index('static uint8_t last_accel_odr'):source.index('LOG_MODULE_REGISTER')]
-        decoder=(ROOT/'src/sensor/imu/icm426xx_hires.h').read_text()
+        decoder=(ROOT/'src/sensor/imu/icm_hires.h').read_text()
         io_path = ROOT/'src/sensor/imu/icm426xx_io.h'
-        io = io_path.read_text().replace('#include "icm426xx_hires.h"', '') if io_path.exists() else ''
+        io = io_path.read_text().replace('#include "icm_hires.h"', '') if io_path.exists() else ''
         unit=tmp/f'{model}.c'
-        unit.write_text(defines+'\n'+aliases+'\n'+preamble+'\n'+decoder+'\n'+io+'\n#define PACKET_SIZE ICM426XX_HIRES_PACKET_SIZE\n'+state+'\n'+'\n'.join(function(source,names[key]) for key in ('INIT','SHUTDOWN','FIFO_READ','TEMP_READ'))+main)
+        unit.write_text(defines+'\n'+aliases+'\n'+preamble+'\n'+decoder+'\n'+io+'\n#define PACKET_SIZE ICM_HIRES_PACKET_SIZE\n'+state+'\n'+'\n'.join(function(source,names[key]) for key in ('INIT','SHUTDOWN','FIFO_READ','TEMP_READ'))+main)
         binary=tmp/model
         subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie',str(unit),'-lm','-o',str(binary)],check=True)
         subprocess.run([str(binary)],check=True)

@@ -2,13 +2,13 @@
  * 01/14/2022 Copyright Tlera Corporation; created by Kris Winer.
  * Library may be used freely and without limit with attribution.
  */
-#ifndef SLIMENRF_ICM426XX_HIRES_H
-#define SLIMENRF_ICM426XX_HIRES_H
+#ifndef SLIMENRF_ICM_HIRES_H
+#define SLIMENRF_ICM_HIRES_H
 
 #include <stdint.h>
 #include <string.h>
 
-#define ICM426XX_HIRES_PACKET_SIZE 20
+#define ICM_HIRES_PACKET_SIZE 20
 
 /* Family-private, no-I/O decoder. Scales apply to signed 20-bit samples
  * left-aligned in int32_t, not to right-aligned 20-bit counts.
@@ -16,7 +16,7 @@
  * an invalid vector in an otherwise usable packet becomes zero. The legacy
  * invalid sentinel compares only the upper 16 bits of all three axes.
  */
-static inline int icm426xx_hires_decode(
+static inline int icm_hires_decode(
 	const uint8_t *packet, float accel_scale, float gyro_scale, float a[3], float g[3]
 )
 {
@@ -63,7 +63,7 @@ static inline int icm426xx_hires_decode(
 static inline int icm426xx_hires_temperature(const uint8_t *data, uint16_t packets, float *temperature)
 {
 	while (packets > 0) {
-		const uint8_t *packet = &data[--packets * ICM426XX_HIRES_PACKET_SIZE];
+		const uint8_t *packet = &data[--packets * ICM_HIRES_PACKET_SIZE];
 		if ((packet[0] & 0xF0) != 0x70 || (packet[0] & 0x7F) == 0x7F) {
 			continue;
 		}

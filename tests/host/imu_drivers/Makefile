@@ -13,7 +13,7 @@ IMU_SOURCES := \
 	../../../src/sensor/imu/LSM6DSO.c
 
 IMU_HEADERS := $(IMU_SOURCES:.c=.h) \
-	../../../src/sensor/imu/icm426xx_hires.h ../../../src/sensor/imu/icm426xx_io.h
+	../../../src/sensor/imu/icm_hires.h ../../../src/sensor/imu/icm426xx_io.h
 IMU_HEADERS += ../../../src/sensor/imu/icm426xx_odr.h
 IMU_HEADERS += ../../../src/sensor/imu/lsm6dsx_select.h
 COMMON_HEADERS := ../../../src/sensor/sensor.h ../../../src/sensor/sensor_none.h \
