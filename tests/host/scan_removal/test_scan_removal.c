@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "sensor/sensors.h"
+#include "sensor/scan_spi.h"
 #include "build_defines.h"
 
 /* Only the bus and supported drivers are modeled. The scanners, the device
@@ -122,6 +123,8 @@ static struct {
 	uint8_t id;
 	unsigned spi_id_offset;
 	unsigned target_reads;
+	unsigned spi_calls;
+	bool fail_spi;
 } chip;
 
 int i2c_reg_read_byte(const struct device *dev, uint16_t addr, uint8_t reg, uint8_t *value)
@@ -164,12 +167,15 @@ int spi_transceive_dt(const struct spi_dt_spec *spec, const struct spi_buf_set *
 	CHECK(spec == &host_spi_bus);
 	CHECK(tx->count == 1 && tx->buffers[0].len == 1);
 	CHECK(rx->count == 1 && rx->buffers[0].len == 3);
+	chip.spi_calls++;
 	uint8_t requested = *(const uint8_t *)tx->buffers[0].buf;
 	CHECK((requested & 0x80) != 0);
 	uint8_t *response = rx->buffers[0].buf;
 	memset(response, 0, 3);
 	if ((requested & 0x7F) == chip.reg) {
 		chip.target_reads++;
+		if (chip.fail_spi)
+			return -EIO;
 		response[chip.spi_id_offset] = chip.id;
 	}
 	return 0;
@@ -203,6 +209,8 @@ static void set_chip(const struct scan_row *row, uint16_t addr, unsigned spi_id_
 	chip.id = row->chip_id;
 	chip.spi_id_offset = spi_id_offset;
 	chip.target_reads = 0;
+	chip.spi_calls = 0;
+	chip.fail_spi = false;
 	current_case = row->name;
 	current_addr = addr;
 	current_reg = row->reg;
@@ -279,8 +287,40 @@ static void check_scans(void)
 	}
 }
 
+static void check_spi_group_dedup(void)
+{
+	const uint8_t registers[] = {2, 0x00, 0x0f, 1, 0x00, 1, 0x0f, 1, 0x4f};
+	const uint8_t ids[] = {2, 0x08, 0x90, 1, 0x3d, 1, 0xa3, 1, 0x42, 0};
+	const int devices[] = {101, 102, 103, 104, 105};
+	const struct scan_row cases[] = {
+		{"first shared ID", 0, 0, 0x08, 101, true},
+		{"second shared ID", 0, 0, 0x90, 102, true},
+		{"later register ID", 0, 0x0f, 0x3d, 103, true},
+		{"later-only ID", 0, 0, 0xa3, 104, true},
+		{"later duplicate-register ID", 0, 0x0f, 0x42, 105, true},
+		{"unmatched duplicate register", 0, 0, 0x77, -1, false},
+	};
+	for (unsigned offset = 1; offset <= 2; offset++) {
+		for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+			set_chip(&cases[i], 0, offset);
+			uint8_t reg = 0xff;
+			CHECK(sensor_scan_spi(&host_spi_bus, &reg, 4, registers, ids, devices) == cases[i].enum_id);
+			CHECK(chip.target_reads == 1);
+			CHECK(chip.spi_calls <= 2);
+			if (cases[i].detectable)
+				CHECK(reg == (cases[i].reg | 0x80));
+		}
+	}
+	set_chip(&cases[0], 0, 1);
+	chip.fail_spi = true;
+	uint8_t reg = 0xff;
+	CHECK(sensor_scan_spi(&host_spi_bus, &reg, 4, registers, ids, devices) == -1);
+	CHECK(chip.target_reads == 1 && chip.spi_calls == 2);
+}
+
 int main(void)
 {
+	check_spi_group_dedup();
 	check_identities();
 	check_scans();
 	printf("scan removal: %zu identities, %zu chip rows, I2C and SPI passed\n",

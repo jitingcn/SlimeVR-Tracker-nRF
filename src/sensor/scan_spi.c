@@ -31,6 +31,34 @@
 
 LOG_MODULE_REGISTER(sensor_scan_spi, LOG_LEVEL_DBG);
 
+static int sensor_scan_spi_match(uint8_t reg, uint8_t id, int groups,
+	const uint8_t dev_reg[], const uint8_t dev_id[], const int dev_ids[])
+{
+	int ri = 0, ii = 0, fi = 0;
+	for (int group = 0; group < groups; group++) {
+		int registers = dev_reg[ri++];
+		for (int entry = 0; entry < registers; entry++) {
+			uint8_t candidate_reg = dev_reg[ri++];
+			int count = dev_id[ii++];
+			for (int item = 0; item < count; item++) {
+				uint8_t candidate = dev_id[ii + item];
+				if (candidate_reg != reg || candidate == 0xff)
+					continue;
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+				if (reg == ICT153XX_MANU_ID && candidate == ICT153XX_MANU_ID_VALUE
+					&& dev_ids[fi + item] == MAG_ICT153XX)
+					continue;
+#endif
+				if (candidate == id)
+					return dev_ids[fi + item];
+			}
+			ii += count;
+			fi += count;
+		}
+	}
+	return -1;
+}
+
 int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_count, const uint8_t dev_reg[], const uint8_t dev_id[], const int dev_ids[])
 {
 	uint8_t buf[3] = {0};
@@ -39,74 +67,34 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 	struct spi_buf rx_buf = {.buf = buf, .len = 3};
 	const struct spi_buf_set rx = {.buffers = &rx_buf, .count = 1};
 
-	int reg_index = 0;
-	int id_index = 0;
-	int found_id = 0;
-
-	for (int i = 0; i < dev_addr_count; i++)
-	{
-		int reg_count = dev_reg[reg_index];
-		int id_count = dev_id[id_index];
-		reg_index++;
-		id_index++;
-		int id_cnt = id_count;
-		int id_ind = id_index;
-		int fnd_id = found_id;
-		for (int k = 0; k < reg_count; k++)
-		{
-			uint8_t reg = dev_reg[reg_index + k];
-			/* Retained imu_reg keeps bit7 as SPI interface flag (also SPI read bit). */
-			if (*spi_dev_reg == 0xFF || (*spi_dev_reg & 0x7F) == reg)
-			{
-				uint8_t id;
-				tx_buf.buf = &reg;
-				reg |= 0x80; // set read bit / SPI interface flag for retained
-				LOG_DBG("Scanning register: 0x%02X", reg);
-				// TODO: BMM150 workaround?
-				int err = spi_transceive_dt(bus, &tx, &rx);
-				LOG_DBG("err: %d", err);
-				id = buf[1] ? buf[1] : buf[2]; // ID may follow a dummy byte
-				LOG_DBG("Read value: 0x%02X, 0x%02X, 0x%02X (0x%02X)", buf[0], buf[1], buf[2], id);
-				// Advance packed-table cursors even when a register transaction fails.
-				for (int l = 0; !err && l < id_cnt; l++)
-				{
-					// 0xFF is a "no real WHO_AM_I" sentinel (e.g. QMC5883L, an
-					// I2C-only part). On SPI a reserved-register read floats to
-					// 0xFF, so this would false-match and shadow real SPI mags
-					// later in the table (e.g. LIS2MDL at 0x4F). Skip it on SPI.
-					if (dev_id[id_ind + l] == 0xFF)
-						continue;
-#if defined(CONFIG_SENSOR_DRV_ICT153XX)
-					// Shared tables include this I2C-only family; do not match native SPI data.
-					if ((reg & 0x7F) == ICT153XX_MANU_ID && dev_id[id_ind + l] == ICT153XX_MANU_ID_VALUE
-						&& dev_ids[fnd_id + l] == MAG_ICT153XX)
-						continue;
-#endif
-					if (id == dev_id[id_ind + l])
-					{
-						*spi_dev_reg = reg;
-						LOG_INF("Valid device found using register: 0x%02X (value: 0x%02X)", reg, id);
-						return dev_ids[fnd_id + l];
-					}
-				}
+	/* SPI has no address groups. Probe each eligible register once, then
+	 * match its response against every group, including later-only IDs. */
+	uint8_t seen[16] = {0};
+	int reg_index = 0, id_index = 0;
+	for (int group = 0; group < dev_addr_count; group++) {
+		int count = dev_reg[reg_index++];
+		for (int entry = 0; entry < count; entry++) {
+			uint8_t reg = dev_reg[reg_index++];
+			int ids = dev_id[id_index++];
+			id_index += ids;
+			if (!ids || (*spi_dev_reg != 0xff && (*spi_dev_reg & 0x7f) != reg))
+				continue;
+			uint8_t bit = 1u << (reg & 7);
+			if (seen[(reg & 0x7f) >> 3] & bit)
+				continue;
+			seen[(reg & 0x7f) >> 3] |= bit;
+			uint8_t command = reg | 0x80;
+			tx_buf.buf = &command;
+			int err = spi_transceive_dt(bus, &tx, &rx);
+			if (err)
+				continue;
+			uint8_t id = buf[1] ? buf[1] : buf[2];
+			int found = sensor_scan_spi_match(reg, id, dev_addr_count, dev_reg, dev_id, dev_ids);
+			if (found >= 0) {
+				*spi_dev_reg = command;
+				LOG_INF("Valid device found using register: 0x%02X (value: 0x%02X)", command, id);
+				return found;
 			}
-			id_ind += id_cnt;
-			fnd_id += id_cnt;
-			if (k + 1 < reg_count)
-			{
-				id_cnt = dev_id[id_ind];
-				id_ind++;
-			}
-		}
-		reg_index += reg_count;
-		id_index += id_count;
-		found_id += id_count;
-		for (int j = 1; j < reg_count; j++)
-		{
-			id_count = dev_id[id_index];
-			id_index++;
-			id_index += id_count;
-			found_id += id_count;
 		}
 	}
 
