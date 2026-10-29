@@ -226,9 +226,6 @@ int sys_interface_resume(void)
 }
 
 // TODO: the gpio sense is weird, maybe the device will turn back on immediately after shutdown or after (attempting to) enter WOM
-// TODO: there should be a better system of how to handle all system_off cases and all the sense pins
-// TODO: just changed it make sure to test it thanks
-
 // TODO: should the tracker start again if docking state changes?
 // TODO: keep sending battery state while plugged and docked?
 // TODO: on some boards there is actual power path, try to use the LED in this case
@@ -729,7 +726,7 @@ static void sys_power_notice(uint8_t code)
 }
 
 /* Returns true when the request is consumed; false to keep it queued. */
-static bool sys_system_off(void) // TODO: add timeout
+static bool sys_system_off(void)
 {
 	LOG_INF("System off requested");
 	k_mutex_lock(&power_plan_lock, K_FOREVER);
@@ -772,7 +769,7 @@ static bool sys_system_off(void) // TODO: add timeout
 	nrf_gpio_cfg(int0_gpios, NRF_GPIO_PIN_DIR_INPUT, NRF_GPIO_PIN_INPUT_DISCONNECT, NRF_GPIO_PIN_PULLDOWN, NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_NOSENSE);
 	LOG_INF("Configured IMU wake-up GPIO idle (pulldown)");
 #endif
-	/* TODO: only an improvement during shutdown? causes higher usage in WOM */
+
 	sys_disconnect_interface_pins();
 	LOG_INF("Powering off nRF");
 #if CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
@@ -788,7 +785,7 @@ static bool sys_system_off(void) // TODO: add timeout
 	return true;
 }
 
-static bool sys_system_reboot(void) // TODO: add timeout
+static bool sys_system_reboot(void)
 {
 	LOG_INF("System reboot requested");
 	k_mutex_lock(&power_plan_lock, K_FOREVER);

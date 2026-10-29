@@ -1951,12 +1951,8 @@ static void sensor_apply_calibration_frame(void)
 	}
 }
 
-
-// TODO: get rid of it.. ?
 static void set_update_time_ms(int time_ms)
 {
-	// TODO: maybe not get rid of it? it is now repurposed to also change FIFO threshold
-	// TODO: return pin_config and replace call in sensor_init
 #if IMU_INT_EXISTS
 	float fifo_threshold = (float)time_ms / 1000.0f / sensor_actual_time; // target loop rate
 	sensor_fifo_threshold = MAX(1, (int16_t)fifo_threshold);
@@ -2068,9 +2064,7 @@ static void sensor_update_session_motion(float angular_speed_dps, float lin_acce
 #endif
 }
 
-// Check the IMU gyroscope // TODO: gyro sanity not used
-// TODO: timeouts and power management should be outside sensor! (ie. sleeping/shutdown even if the imu completely
-// errored out) all this really means is that this should be called in sensor loop while the sensor is in an error state
+// TODO: consider automatic sleep and shutdown policy when the IMU is in an error state.
 static void sensor_update_sensor_state(bool resting)
 {
 	bool calibrating = get_status(SYS_STATUS_CALIBRATION_RUNNING);
