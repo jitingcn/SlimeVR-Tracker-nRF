@@ -215,6 +215,24 @@ static void test_failures(void)
 	}
 }
 
+static void test_overrun(void)
+{
+	for (unsigned words = 0; words <= 3; words += 3) {
+		for (unsigned flag = 0x20; flag <= 0x40; flag += 0x20) {
+			configure(0, .005f);
+			load_samples(0, words / 3, 1, flag);
+			uint8_t data[7];
+			assert(lsm6dsm_fifo_read(data, sizeof(data)) == (words ? 1 : 0));
+			assert(host_bus_gyro_discontinuities() == (flag == 0x40 ? 1 : 0));
+		}
+	}
+	configure(0, .005f);
+	load_samples(0, 0, 1, 0x40);
+	host_bus_fail_read(LSM6DSM_FIFO_STATUS1);
+	uint8_t data[7];
+	assert(lsm6dsm_fifo_read(data, sizeof(data)) == 0);
+	assert(host_bus_gyro_discontinuities() == 0);
+}
 
 static void test_alignment_and_stable_tags(void)
 {
@@ -251,6 +269,7 @@ int main(void)
 	test_streams();
 	test_ratios();
 	test_failures();
+	test_overrun();
 	test_alignment_and_stable_tags();
 	puts("DSM actual-driver FIFO stream tests passed");
 	return 0;

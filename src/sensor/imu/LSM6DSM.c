@@ -294,6 +294,9 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 		if (err) {
 			break;
 		}
+		if (status[1] & BIT(6)) {
+			sensor_gyro_report_discontinuity();
+		}
 
 		uint16_t words = (uint16_t)((status[1] & 7) << 8 | status[0]); // DIFF_FIFO[10:0]
 		if (!words) {                                                  // nothing to do
