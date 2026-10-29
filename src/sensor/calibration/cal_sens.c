@@ -470,12 +470,6 @@ void sensor_calibrate_sens(void)
 
 	sensitivity_step(operation_id, feedback, CAL_PHASE_VALIDATE, 0);
 	float measured_deg = (float)fabs(measured);
-	if (measured_deg < 1e-3f) {
-		LOG_WRN("Sensitivity calibration: measured angle too small, aborting");
-		printk("Gyro sensitivity auto-calibration failed: measured angle too small.\n");
-		sensitivity_failed(operation_id, feedback, CAL_PHASE_VALIDATE, CAL_REASON_QUALITY);
-		return;
-	}
 
 	// Want measured_deg * scale == expected_deg, independent of rotation direction.
 	float scale = expected_deg / measured_deg;
