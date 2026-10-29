@@ -13,6 +13,16 @@ static bool oneshot_failed;
 
 LOG_MODULE_REGISTER(AK09940, LOG_LEVEL_DBG);
 
+static int ak_set_mode(uint8_t mode)
+{
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL3, MT_LND2 << 5 | MODE_PDM);
+	if (err || mode == MODE_PDM) {
+		return err;
+	}
+	k_busy_wait(100);
+	return ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL3, MT_LND2 << 5 | mode);
+}
+
 int ak_init(float period_s, float *actual_period_s)
 {
 	last_mode_code = 0xff; // invalidate mode cache
@@ -76,7 +86,7 @@ int ak_update_odr(float period_s, float *actual_period_s)
 		mode_code = MODE_PDM; // set PDM, oneshot will set SMM
 	}
 
-	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, AK09940_CNTL3, MT_LND2 << 5 | mode_code);
+	int err = ak_set_mode(mode_code);
 	if (err) {
 		last_mode_code = 0xff;
 		return err;
@@ -92,11 +102,7 @@ int ak_update_odr(float period_s, float *actual_period_s)
 void ak_mag_oneshot(void)
 {
 	last_mode_code = 0xff;
-	int err = ssi_reg_write_byte(
-		SENSOR_INTERFACE_DEV_MAG,
-		AK09940_CNTL3,
-		MT_LND2 << 5 | MODE_SMM
-	); // low-noise drive 2, single measurement
+	int err = ak_set_mode(MODE_SMM);
 	oneshot_trigger_ms = k_uptime_get();
 	oneshot_pending = true;
 	oneshot_failed = err != 0;

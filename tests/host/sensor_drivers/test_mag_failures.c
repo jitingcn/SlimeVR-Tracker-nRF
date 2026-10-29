@@ -36,6 +36,7 @@ struct fake_op {
 	uint8_t value;
 	uint8_t mask;
 	uint32_t length;
+	int64_t timestamp_us;
 };
 
 #define MAX_FAKE_OPS 512
@@ -48,6 +49,14 @@ struct fake_bus {
 	uint8_t registers[256];
 	int64_t now_ms;
 	uint16_t bmm350_otp[32];
+	bool precise_clock;
+	int64_t now_us;
+	uint32_t transaction_us;
+	int64_t ready_at_us;
+	uint8_t ready_reg;
+	uint8_t ready_mask;
+	uint32_t waits_us[MAX_FAKE_OPS];
+	size_t wait_count;
 };
 
 static struct fake_bus bus;
@@ -92,28 +101,52 @@ static bool fake_bus_record(
 		.value = value,
 		.mask = mask,
 		.length = length,
+		.timestamp_us = bus.precise_clock ? bus.now_us : bus.now_ms * 1000,
 	};
 	bus.transaction_count++;
+	if (bus.precise_clock) {
+		bus.now_us += bus.transaction_us;
+		if (bus.ready_at_us && bus.now_us >= bus.ready_at_us)
+			bus.registers[bus.ready_reg] |= bus.ready_mask;
+	}
 	return bus.fail_transaction == bus.transaction_count;
 }
 
 int64_t host_k_uptime_get(void)
 {
+	if (bus.precise_clock)
+		return bus.now_us / 1000;
 	return bus.now_ms++;
 }
 
 void host_k_busy_wait(uint32_t usec)
 {
+	if (bus.wait_count < MAX_FAKE_OPS)
+		bus.waits_us[bus.wait_count++] = usec;
+	if (bus.precise_clock) {
+		bus.now_us += usec;
+		return;
+	}
 	bus.now_ms += (usec + 999U) / 1000U;
 }
 
 void host_k_msleep(int32_t msec)
 {
+	if (bus.precise_clock) {
+		bus.now_us += (int64_t)msec * 1000;
+		return;
+	}
 	bus.now_ms += msec;
 }
 
 void host_k_usleep(int32_t usec)
 {
+	if (bus.wait_count < MAX_FAKE_OPS)
+		bus.waits_us[bus.wait_count++] = usec;
+	if (bus.precise_clock) {
+		bus.now_us += usec;
+		return;
+	}
 	bus.now_ms += (usec + 999) / 1000;
 }
 
@@ -240,6 +273,7 @@ struct odr_case {
 };
 
 static const struct expected_write ak_writes[] = {
+	EXPECT_WRITE(AK09940_CNTL3, (MT_LND2 << 5) | MODE_PDM),
 	EXPECT_WRITE(AK09940_CNTL3, (MT_LND2 << 5) | MODE_CMM4_100Hz),
 };
 static const struct expected_write bmm150_writes[] = {
@@ -357,7 +391,7 @@ static int test_fixed_odr_case(const struct odr_case *test)
 	fake_bus_clear_transactions();
 	test->oneshot();
 	if (test->oneshot_writes)
-		CHECK(bus.transaction_count == 1);
+		CHECK(bus.transaction_count == (strcmp(test->name, "AK09940") == 0 ? 2U : 1U));
 	else
 		CHECK(bus.transaction_count == 0);
 	if (strcmp(test->name, "BMM150") == 0) {
@@ -932,6 +966,45 @@ static int test_ist8308_init_programs_drive_rate_first(void)
 	return 0;
 }
 
+static int test_modes_ak_powerdown_transitions(void)
+{
+	reset_driver(&odr_cases[0]);
+	bus.precise_clock = true;
+	float actual = -1;
+	CHECK(ak_update_odr(0.01f, &actual) == 0);
+	CHECK(bus.op_count == 2);
+	CHECK(bus.ops[0].value == ((MT_LND2 << 5) | MODE_PDM));
+	CHECK(bus.ops[1].value == ((MT_LND2 << 5) | MODE_CMM4_100Hz));
+	CHECK(bus.ops[1].timestamp_us - bus.ops[0].timestamp_us >= 100);
+	CHECK(bus.wait_count == 1 && bus.waits_us[0] == 100);
+	fake_bus_clear_transactions();
+	CHECK(ak_update_odr(0.01f, &actual) == 0);
+	CHECK(bus.op_count == 0);
+	CHECK(ak_update_odr(0.02f, &actual) == 0);
+	CHECK(bus.op_count == 2 && bus.ops[1].timestamp_us - bus.ops[0].timestamp_us >= 100);
+	fake_bus_clear_transactions();
+	CHECK(ak_update_odr(INFINITY, &actual) == 0);
+	CHECK(actual == 0 && bus.op_count == 1);
+	CHECK(bus.ops[0].value == ((MT_LND2 << 5) | MODE_PDM));
+	fake_bus_clear_transactions();
+	ak_mag_oneshot();
+	CHECK(bus.op_count == 2);
+	CHECK(bus.ops[1].value == ((MT_LND2 << 5) | MODE_SMM));
+	CHECK(bus.ops[1].timestamp_us - bus.ops[0].timestamp_us >= 100);
+	for (size_t fail = 1; fail <= 2; fail++) {
+		fake_bus_clear_transactions();
+		bus.fail_transaction = fail;
+		ak_mag_oneshot();
+		CHECK(bus.transaction_count == fail);
+		fake_bus_clear_transactions();
+		float m[3] = {1, 2, 3};
+		CHECK(!ak_mag_read(m));
+		CHECK(bus.transaction_count == 0);
+		CHECK(m[0] == 1 && m[1] == 2 && m[2] == 3);
+	}
+	return 0;
+}
+
 struct test_case {
 	const char *name;
 	int (*run)(void);
@@ -971,6 +1044,7 @@ int main(void)
 {
 	static const struct test_case tests[] = {
 		{"BMM350 init and compensation", test_bmm350_init_and_compensation},
+		{"Modes AK powerdown transitions", test_modes_ak_powerdown_transitions},
 		{"11-driver fixed-ODR transaction matrix", test_all_fixed_odr_transactions},
 		{"IST8308 init drive-rate write", test_ist8308_init_programs_drive_rate_first},
 		{"LIS3 oneshot timeout", test_lis3_oneshot_timeout_stops_before_data},
