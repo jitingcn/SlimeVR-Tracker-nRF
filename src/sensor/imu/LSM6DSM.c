@@ -6,6 +6,7 @@
 
 #include "LSM6DSM.h"
 #include "LSM6DSV.h" // Common functions
+#include "lsm6dsx_select.h"
 #include "sensor/sensor_none.h"
 
 #define PACKET_SIZE 7              // first byte is pattern, only 6 actual sample bytes
@@ -49,33 +50,8 @@ int lsm6dsm_init(
 
 void lsm6dsm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
 {
-	if (accel_range > 8) {
-		accel_fs = DSM_FS_XL_16G;
-		accel_range = 16;
-	} else if (accel_range > 4) {
-		accel_fs = DSM_FS_XL_8G;
-		accel_range = 8;
-	} else if (accel_range > 2) {
-		accel_fs = DSM_FS_XL_4G;
-		accel_range = 4;
-	} else {
-		accel_fs = DSM_FS_XL_2G;
-		accel_range = 2;
-	}
-
-	if (gyro_range > 1000) {
-		gyro_fs = DSM_FS_G_2000DPS;
-		gyro_range = 2000;
-	} else if (gyro_range > 500) {
-		gyro_fs = DSM_FS_G_1000DPS;
-		gyro_range = 1000;
-	} else if (gyro_range > 250) {
-		gyro_fs = DSM_FS_G_500DPS;
-		gyro_range = 500;
-	} else {
-		gyro_fs = DSM_FS_G_250DPS;
-		gyro_range = 250;
-	}
+	accel_fs = lsm6dsx_accel_range(&accel_range);
+	gyro_fs = lsm6dsx_gyro_range(&gyro_range);
 
 	accel_sensitivity = accel_range / 32768.0f;
 	gyro_sensitivity = 35.0f * gyro_range / 1000000.0f;
@@ -114,37 +90,8 @@ int lsm6dsm_update_odr(
 	if (requested_odr_hz == 0) {
 		accel_period_s = 0; // off
 		accel_odr_bits = DSM_ODR_OFF;
-	} else if (accel_period_s < 0.3f / 1000) // Preserve the period thresholds and rounded period outputs.
-	{
-		accel_odr_bits = DSM_ODR_6_66kHz;
-		accel_period_s = 0.15 / 1000;
-	} else if (accel_period_s < 0.6f / 1000) {
-		accel_odr_bits = DSM_ODR_3_33kHz;
-		accel_period_s = 0.3 / 1000;
-	} else if (accel_period_s < 1.2f / 1000) {
-		accel_odr_bits = DSM_ODR_1_66kHz;
-		accel_period_s = 0.6 / 1000;
-	} else if (accel_period_s < 2.4f / 1000) {
-		accel_odr_bits = DSM_ODR_833Hz;
-		accel_period_s = 1.2 / 1000;
-	} else if (accel_period_s < 4.8f / 1000) {
-		accel_odr_bits = DSM_ODR_416Hz;
-		accel_period_s = 2.4 / 1000;
-	} else if (accel_period_s < 9.6f / 1000) {
-		accel_odr_bits = DSM_ODR_208Hz;
-		accel_period_s = 4.8 / 1000;
-	} else if (accel_period_s < 19.2f / 1000) {
-		accel_odr_bits = DSM_ODR_104Hz;
-		accel_period_s = 9.6 / 1000;
-	} else if (accel_period_s < 38.4f / 1000) {
-		accel_odr_bits = DSM_ODR_52Hz;
-		accel_period_s = 19.2 / 1000;
-	} else if (requested_odr_hz > 12.5) {
-		accel_odr_bits = DSM_ODR_26Hz;
-		accel_period_s = 38.4 / 1000;
 	} else {
-		accel_odr_bits = DSM_ODR_12_5Hz;
-		accel_period_s = 1.0 / 12.5;
+		accel_odr_bits = lsm6dsx_select_odr(&accel_period_s, requested_odr_hz);
 	}
 
 	// Calculate gyro
@@ -171,37 +118,11 @@ int lsm6dsm_update_odr(
 	} else if (requested_odr_hz < 0) {
 		/* Sleep retains the previously selected gyro ODR. */
 		gyro_period_s = INFINITY;
-	} else if (gyro_period_s < 0.3f / 1000) // Preserve the period thresholds and rounded period outputs.
-	{
-		gyro_odr_bits = DSM_ODR_6_66kHz;
-		gyro_period_s = 1.0 / 6660;
-	} else if (gyro_period_s < 0.6f / 1000) {
-		gyro_odr_bits = DSM_ODR_3_33kHz;
-		gyro_period_s = 0.3 / 1000;
-	} else if (gyro_period_s < 1.2f / 1000) {
-		gyro_odr_bits = DSM_ODR_1_66kHz;
-		gyro_period_s = 0.6 / 1000;
-	} else if (gyro_period_s < 2.4f / 1000) {
-		gyro_odr_bits = DSM_ODR_833Hz;
-		gyro_period_s = 1.2 / 1000;
-	} else if (gyro_period_s < 4.8f / 1000) {
-		gyro_odr_bits = DSM_ODR_416Hz;
-		gyro_period_s = 2.4 / 1000;
-	} else if (gyro_period_s < 9.6f / 1000) {
-		gyro_odr_bits = DSM_ODR_208Hz;
-		gyro_period_s = 4.8 / 1000;
-	} else if (gyro_period_s < 19.2f / 1000) {
-		gyro_odr_bits = DSM_ODR_104Hz;
-		gyro_period_s = 9.6 / 1000;
-	} else if (gyro_period_s < 38.4f / 1000) {
-		gyro_odr_bits = DSM_ODR_52Hz;
-		gyro_period_s = 19.2 / 1000;
-	} else if (requested_odr_hz > 12.5) {
-		gyro_odr_bits = DSM_ODR_26Hz;
-		gyro_period_s = 38.4 / 1000;
 	} else {
-		gyro_odr_bits = DSM_ODR_12_5Hz;
-		gyro_period_s = 1.0 / 12.5;
+		gyro_odr_bits = lsm6dsx_select_odr(&gyro_period_s, requested_odr_hz);
+		if (gyro_odr_bits == DSM_ODR_6_66kHz) {
+			gyro_period_s = 1.0 / 6660;
+		}
 	}
 
 	if (last_accel_mode == accel_mode && last_gyro_mode == gyro_mode && last_accel_odr == accel_odr_bits

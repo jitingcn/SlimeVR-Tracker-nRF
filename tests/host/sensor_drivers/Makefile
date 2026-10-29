@@ -70,6 +70,7 @@ test_lsm6dsv: test_lsm6dsv.c ../../../src/sensor/imu/LSM6DSV.c ../../../src/sens
 test_lsm6dso: test_lsm6dso.c ../../../src/sensor/imu/LSM6DSO.c ../../../src/sensor/interface.c \
 		../../../src/sensor/mag/QMC6309.c ../../../src/sensor/imu/LSM6DSO.h \
 		../../../src/sensor/imu/LSM6DSV.h ../../../src/sensor/mag/QMC6309.h \
+		../../../src/sensor/imu/lsm6dsx_select.h \
 		$(COMMON_HEADERS) $(HOST_HEADERS) $(HOST_LOG) Makefile
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -Wl,--gc-sections -o $@ \
 		test_lsm6dso.c ../../../src/sensor/imu/LSM6DSO.c ../../../src/sensor/interface.c \
