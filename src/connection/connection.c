@@ -397,6 +397,69 @@ static uint8_t write_hid_composite_as_normal_packets(const uint8_t *encoded, int
 }
 #endif
 
+static uint8_t get_server_constant_imu_id(int id)
+{
+	switch (id)
+	{
+	case IMU_BMI160:
+		return SVR_IMU_BMI160;
+	case IMU_BMI270:
+		return SVR_IMU_BMI270;
+	case IMU_BMI323:
+		return 0;
+	case IMU_MPU6050:
+		return SVR_IMU_MPU6050;
+	case IMU_MPU6500:
+		return SVR_IMU_MPU6500;
+	case IMU_MPU9250:
+		return SVR_IMU_MPU9250;
+	case IMU_ICM20948:
+		return SVR_IMU_ICM20948;
+	case IMU_ICM42688:
+		return SVR_IMU_ICM42688;
+	case IMU_ICM42686:
+		// currently just report as 42688 since it's close enough and doesn't have a server constant yet
+		// todo: add a proper constant for it in the server and update this
+		return SVR_IMU_ICM42688;
+	case IMU_ICM45686:
+		return SVR_IMU_ICM45686;
+	case IMU_ICM45688:
+		return SVR_IMU_ICM45686; // compatible with driver, but not really
+	case IMU_ISM330IS:
+		return 0;
+	case IMU_LSM6DS3:
+		return 0;
+	case IMU_LSM6DSM:
+		return SVR_IMU_LSM6DS3TRC;
+	case IMU_LSM6DSR:
+		return SVR_IMU_LSM6DSR;
+	case IMU_LSM6DSO:
+		return SVR_IMU_LSM6DSO;
+	case IMU_LSM6DST:
+		return 0;
+	case IMU_LSM6DSV:
+		return SVR_IMU_LSM6DSV;
+	case IMU_ISM330BX:
+		return SVR_IMU_LSM6DSV; // not really
+	default:
+		return SVR_IMU_UNKNOWN;
+	}
+}
+
+static uint8_t get_server_constant_mag_id(int id)
+{
+	if (id < 0)
+		return SVR_MAG_STATUS_NOT_SUPPORTED;
+	return sensor_get_mag_enabled() ? SVR_MAG_STATUS_ENABLED : SVR_MAG_STATUS_DISABLED;
+}
+
+static uint8_t get_server_constant_tracker_status(int status)
+{
+	if (status & (SYS_STATUS_SENSOR_ERROR | SYS_STATUS_SYSTEM_ERROR))
+		return SVR_STATUS_ERROR;
+	return SVR_STATUS_OK;
+}
+
 void connection_update_sensor_ids(int imu, int mag)
 {
 	imu_id = get_server_constant_imu_id(imu);

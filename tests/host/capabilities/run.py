@@ -78,7 +78,7 @@ def restore_source():
                   function(magneto, "mag_bainv_structurally_ok")]
     build = (SRC / "build_defines.h").read_text()
     parts.append("\n".join(re.findall(r"^#define SVR_MAG_STATUS_[^\n]+", build, re.MULTILINE)))
-    parts.append(function(build, "get_server_constant_mag_id"))
+    parts.append(function(connection, "get_server_constant_mag_id"))
     return "\n\n".join(parts)
 
 

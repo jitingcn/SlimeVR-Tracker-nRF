@@ -591,7 +591,7 @@ def build_source(source=None):
     parts = [constants, PREFIX, function(utility, "q_fem"), function(utility, "q_epsilon"),
              function(source, "connection_update_sensor_data")]
     start = source.index("enum sub_packet_type {")
-    end = source.index("\nvoid connection_update_sensor_ids(", start)
+    end = source.index("\nstatic uint8_t get_server_constant_imu_id(", start)
     parts.append(source[start:end])
     parts.append(block(source, r"^static struct \{(?=\n\s*uint64_t next_due_us;)") + " test_rate_schedule;")
     for name in ("test_rate_schedule_sync", "test_rate_due", "test_rate_advance"):

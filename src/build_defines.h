@@ -45,9 +45,6 @@
 #define FW_GIT_AUTHOR "unknown"
 #endif
 
-static uint8_t get_server_constant_imu_id(int id) __attribute__((unused));
-static uint8_t get_server_constant_mag_id(int id) __attribute__((unused));
-static uint8_t get_server_constant_tracker_status(int status) __attribute__((unused));
 
 // constants from server, should include BoardType, MCUType, IMUType, MagType (not yet)
 // https://github.com/SlimeVR/SlimeVR-Server/blob/main/server/core/src/main/java/dev/slimevr/tracking/trackers/udp/FirmwareConstants.kt
@@ -136,113 +133,7 @@ static uint8_t get_server_constant_tracker_status(int status) __attribute__((unu
 #define FW_MCU 0
 #endif
 
-static uint8_t get_server_constant_imu_id(int id)
-{
-	switch (id)
-	{
-	case IMU_BMI160:
-		return SVR_IMU_BMI160;
-	case IMU_BMI270:
-		return SVR_IMU_BMI270;
-	case IMU_BMI323:
-		return 0;
-	case IMU_MPU6050:
-		return SVR_IMU_MPU6050;
-	case IMU_MPU6500:
-		return SVR_IMU_MPU6500;
-	case IMU_MPU9250:
-		return SVR_IMU_MPU9250;
-	case IMU_ICM20948:
-		return SVR_IMU_ICM20948;
-	case IMU_ICM42688:
-		return SVR_IMU_ICM42688;
-	case IMU_ICM42686:
-		// currently just report as 42688 since it's close enough and doesn't have a server constant yet
-		// todo: add a proper constant for it in the server and update this
-		return SVR_IMU_ICM42688;
-	case IMU_ICM45686:
-		return SVR_IMU_ICM45686;
-	case IMU_ICM45688:
-		return SVR_IMU_ICM45686; // compatible with driver, but not really
-	case IMU_ISM330IS:
-		return 0;
-	case IMU_LSM6DS3:
-		return 0;
-	case IMU_LSM6DSM:
-		return SVR_IMU_LSM6DS3TRC;
-	case IMU_LSM6DSR:
-		return SVR_IMU_LSM6DSR;
-	case IMU_LSM6DSO:
-		return SVR_IMU_LSM6DSO;
-	case IMU_LSM6DST:
-		return 0;
-	case IMU_LSM6DSV:
-		return SVR_IMU_LSM6DSV;
-	case IMU_ISM330BX:
-		return SVR_IMU_LSM6DSV; // not really
-	default:
-		return SVR_IMU_UNKNOWN;
-	}
-}
 
-// does not exist in server enums yet
-extern bool sensor_get_mag_enabled(void);
-static uint8_t get_server_constant_mag_id(int id)
-{
-	if (id < 0)
-		return SVR_MAG_STATUS_NOT_SUPPORTED;
-	else
-		return sensor_get_mag_enabled() ? SVR_MAG_STATUS_ENABLED : SVR_MAG_STATUS_DISABLED;
-//	switch (id)
-//	{
-//	case MAG_HMC5883L:
-//		return 0;
-//	case MAG_QMC5883L:
-//		return 0;
-//	case MAG_AK8963:
-//		return 0;
-//	case MAG_AK09916:
-//		return 0;
-//	case MAG_AK09940:
-//		return 0;
-//	case MAG_BMM150:
-//		return 0;
-//	case MAG_BMM350:
-//		return 0;
-//	case MAG_IST8306:
-//		return 0;
-//	case MAG_IST8308:
-//		return 0;
-//	case MAG_IST8320:
-//		return 0;
-//	case MAG_IST8321:
-//		return 0;
-//	case MAG_LIS2MDL:
-//		return 0;
-//	case MAG_LIS3MDL:
-//		return 0;
-//	case MAG_MMC34160PJ:
-//		return 0;
-//	case MAG_MMC3630KJ:
-//		return 0;
-//	case MAG_MMC5633NJL:
-//		return 0;
-//	case MAG_MMC5616WA:
-//		return 0;
-//	case MAG_MMC5983MA:
-//		return 0;
-//	default:
-//		return 0;
-//	}
-}
-
-static uint8_t get_server_constant_tracker_status(int status)
-{
-	if (status & (SYS_STATUS_SENSOR_ERROR | SYS_STATUS_SYSTEM_ERROR))
-		return SVR_STATUS_ERROR;
-	else
-		return SVR_STATUS_OK;
-}
 
 // https://stackoverflow.com/questions/11697820/how-to-use-date-and-time-predefined-macros-in-as-two-integers-then-stri
 #define COMPUTE_BUILD_YEAR \

@@ -5,6 +5,13 @@ CPPFLAGS += -I. -I../imu_drivers -I../../../src -include zephyr/kernel.h
 CPPFLAGS += -DCONFIG_SENSOR_USE_MAGNETOMETER=0
 LDFLAGS += -fsanitize=address,undefined
 
+.DEFAULT_GOAL := check
+IMU_MAPPING := .generated/server_imu_id.inc
+
+$(IMU_MAPPING): ../../../src/connection/connection.c extract_imu.py ../harness/python/c_extract.py
+	mkdir -p .generated
+	python3 extract_imu.py $< $@
+
 SOURCES := test_scan_removal.c ../../../src/sensor/scan.c ../../../src/sensor/scan_spi.c \
 	../../../src/sensor/sensors_tables.c ../../../src/sensor/sensor_none.c
 HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h) app_version.h \
@@ -13,7 +20,7 @@ HEADERS := $(wildcard zephyr/*.h zephyr/*/*.h) app_version.h \
 	../harness/include/device_types.h ../harness/include/i2c_types.h ../harness/include/spi_types.h \
 	$(wildcard ../../../src/sensor/*.h) \
 	$(wildcard ../../../src/sensor/imu/*.h) ../../../src/build_defines.h \
-	../../../src/system/status.h
+	../../../src/system/status.h $(IMU_MAPPING)
 
 FULL_CONFIG := -DCONFIG_SENSOR_DRV_ICM42688=1 -DCONFIG_SENSOR_DRV_ICM42686=1 \
 	-DCONFIG_SENSOR_DRV_ICM45686=1 -DCONFIG_SENSOR_DRV_LSM6DSM=1 \
@@ -79,3 +86,4 @@ test_ext_icm: $(PROBE_SOURCES) $(PROBE_HEADERS) ../sensor_drivers/test_icm45686.
 clean:
 	$(RM) test_full test_minimal_mixed test_minimal_group_a test_minimal_group_b \
 		test_ext_dso test_ext_dsv test_ext_icm
+	$(RM) $(IMU_MAPPING)

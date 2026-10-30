@@ -8,6 +8,7 @@
 #include "sensor/sensors.h"
 #include "sensor/scan_spi.h"
 #include "build_defines.h"
+#include ".generated/server_imu_id.inc"
 
 /* Only the bus and supported drivers are modeled. The scanners, the device
  * tables, the none driver, and the server-ID conversion are production code. */
@@ -28,8 +29,6 @@ const sensor_imu_t sensor_imu_lsm6dsm = {.init = modeled_init};
 const sensor_imu_t sensor_imu_lsm6dso = {.init = modeled_init};
 const sensor_imu_t sensor_imu_lsm6dsv = {.init = modeled_init};
 
-/* An unused static conversion in build_defines.h references this function. */
-bool sensor_get_mag_enabled(void) { return false; }
 
 static const char *current_case = "identity";
 static unsigned current_addr;
