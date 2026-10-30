@@ -1,7 +1,7 @@
 /*
  * OTA RAM Engine — Bare-Metal ESB PTX + Flash Writer
  *
- * A self-contained function that runs entirely from RAM, performing:
+ * A RAM-resident engine performing:
  *   1. ESB PTX polling (send STATUS, receive DATA via ACK payload)
  *   2. Direct NVMC flash erase/write to target address
  *   3. CRC32 verification of written data
@@ -10,8 +10,8 @@
  * This enables in-place OTA updates on devices with limited flash
  * (e.g. nRF52833 with 512KB) where dual-bank staging is not possible.
  *
- * The function uses NO external calls — all register access is done
- * directly through hardware register pointers.
+ * All reachable code and literal pools must remain in RAM. Register access
+ * is done directly through hardware register pointers.
  *
  */
 
@@ -56,11 +56,53 @@ struct ota_ram_engine_params {
 	uint8_t *page_buf;
 };
 
+static __ramfunc __attribute__((noinline))
+bool ota_ram_wait(volatile uint32_t *event, uint32_t timeout_ms)
+{
+	volatile uint32_t *cycles = (volatile uint32_t *)0xE0001004;
+	volatile uint32_t *wdt_rr0 = (volatile uint32_t *)0x40010600;
+	uint32_t wait_start = *cycles;
+
+	while (!*event) {
+		*wdt_rr0 = 0x6E524635u;
+		if ((uint32_t)(*cycles - wait_start) >= timeout_ms * 64000u) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static __ramfunc __attribute__((noinline))
+uint8_t ota_ram_crc8(const uint8_t *bytes, uint32_t len, uint8_t initial)
+{
+	uint8_t crc = initial;
+
+	for (uint32_t i = 0; i < len; i++) {
+		crc ^= bytes[i];
+		for (uint32_t b = 0; b < 8; b++) {
+			crc = crc & 0x80 ? (crc << 1) ^ 0x07 : crc << 1;
+		}
+	}
+	return crc;
+}
+
+static __ramfunc __attribute__((noinline))
+bool ota_ram_radio_disable(volatile uint32_t *radio)
+{
+	if (radio[0x550 / 4] != 0) {
+		radio[0x200 / 4] = 0;
+		radio[0x110 / 4] = 0;
+		radio[0x010 / 4] = 1;
+		return ota_ram_wait(&radio[0x110 / 4], 10);
+	}
+	return true;
+}
+
 /*
  * ota_ram_engine() — The main RAM-resident OTA engine
  *
  * MUST be linked into .ramfunc and initialized in RAM by startup.
- * MUST NOT call any external functions.
+ * All reachable code and literal pools MUST reside in RAM.
  *
  * Packet formats:
  *   TX (STATUS): [0x21][id][status][seq_hi][seq_lo][bytes_LE32][0][0][0][crc8]  (13 bytes)
@@ -71,7 +113,7 @@ struct ota_ram_engine_params {
  *   Byte 1: [noack:1][pid:2][rfu:5]  — S1 field
  *   Byte 2..N: payload data
  */
-/* Keep every instruction and literal in the linked RAM function. Interrupts
+/* Keep reachable instructions and literal pools in RAM. Interrupts
  * are disabled on entry; nRF52833/840 run this Cortex-M4 at a fixed 64 MHz.
  * The wire format remains protocol v1, including legacy 44-byte DATA payloads. */
 __ramfunc __attribute__((used))
@@ -91,12 +133,8 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 #define RAM_FEED() (*wdt_rr0 = 0x6E524635u)
 #define RAM_DSB() __asm volatile("dsb" ::: "memory")
 #define RAM_WAIT(event, milliseconds) do { \
-	uint32_t wait_start = *cycles; \
-	while (!(event)) { \
-		RAM_FEED(); \
-		if ((uint32_t)(*cycles - wait_start) >= (milliseconds) * 64000u) \
-			goto recover; \
-	} \
+	if (!ota_ram_wait(&(event), (milliseconds))) \
+		goto recover; \
 } while (0)
 
 	/* CYCCNT needs no TIMER/PPI resource. Unsigned elapsed comparisons cover
@@ -134,11 +172,8 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 	RAM_REG(clock, 0x100) = 0;
 	RAM_REG(clock, 0x000) = 1;
 	RAM_WAIT(RAM_REG(clock, 0x100), 1000);
-	if (RAM_REG(radio, 0x550) != 0) {
-		RAM_REG(radio, 0x200) = 0;
-		RAM_REG(radio, 0x110) = 0;
-		RAM_REG(radio, 0x010) = 1;
-		RAM_WAIT(RAM_REG(radio, 0x110), 10);
+	if (!ota_ram_radio_disable(radio)) {
+		goto recover;
 	}
 	RAM_REG(radio, 0x110) = 0;
 
@@ -188,14 +223,7 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 		out[9] = status == OTA_STATUS_VERIFY_FAIL ? p->image_crc32 : 0;
 		out[10] = status == OTA_STATUS_VERIFY_FAIL ? p->image_crc32 >> 8 : 0;
 		out[11] = status == OTA_STATUS_VERIFY_FAIL ? p->image_crc32 >> 16 : 0;
-		uint8_t status_crc = 0;
-		for (uint32_t i = 0; i < 12; i++) {
-			status_crc ^= out[i];
-			for (uint32_t b = 0; b < 8; b++) {
-				status_crc = status_crc & 0x80 ? (status_crc << 1) ^ 0x07 : status_crc << 1;
-			}
-		}
-		out[12] = status_crc;
+		out[12] = ota_ram_crc8(out, 12, 0);
 
 		RAM_REG(radio, 0x100) = 0;
 		RAM_REG(radio, 0x10C) = 0;
@@ -235,14 +263,7 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 		if (valid_ack && (status == OTA_STATUS_RECEIVING || status == OTA_STATUS_VERIFY_OK) &&
 		    rx_len == ESB_PONG_LEN && rx_buf[2] == ESB_PONG_TYPE &&
 		    rx_buf[3] == p->tracker_id && rx_buf[9] == ESB_PONG_FLAG_OTA_ABORT) {
-			uint8_t pong_crc = 0x07;
-			for (uint32_t i = 2; i < 14; i++) {
-				pong_crc ^= rx_buf[i];
-				for (uint32_t b = 0; b < 8; b++) {
-					pong_crc = pong_crc & 0x80 ? (pong_crc << 1) ^ 0x07 : pong_crc << 1;
-				}
-			}
-			if (pong_crc == rx_buf[14]) {
+			if (ota_ram_crc8(&rx_buf[2], 12, 0x07) == rx_buf[14]) {
 				goto recover;
 			}
 		}
@@ -400,11 +421,8 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 		}
 		if (status == OTA_STATUS_COMPLETE && terminal_rounds >= 5) {
 			*gpregret = 0xDE;
-			if (RAM_REG(radio, 0x550) != 0) {
-				RAM_REG(radio, 0x200) = 0;
-				RAM_REG(radio, 0x110) = 0;
-				RAM_REG(radio, 0x010) = 1;
-				RAM_WAIT(RAM_REG(radio, 0x110), 10);
+			if (!ota_ram_radio_disable(radio)) {
+				goto recover;
 			}
 			goto reset;
 		}
