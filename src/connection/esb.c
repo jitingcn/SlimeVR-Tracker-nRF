@@ -102,7 +102,7 @@ static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS[] = {
 #define ESB_ALLOWED_CHANNELS_COUNT ARRAY_SIZE(ESB_ALLOWED_CHANNELS)
 
 /* Shared producer/lifecycle admission; recursive for owner-driven probes. */
-K_MUTEX_DEFINE(esb_radio_lock);
+static K_MUTEX_DEFINE(esb_radio_lock);
 static uint8_t radio_channel;
 static uint32_t own_pong_time;
 static bool own_pong_seen;
@@ -1776,7 +1776,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 	}
 }
 
-void event_handler(struct esb_evt const *event)
+static void event_handler(struct esb_evt const *event)
 {
 	static uint32_t tx_success_count = 0;
 	static uint32_t tx_failed_count = 0;

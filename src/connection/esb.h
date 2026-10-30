@@ -62,7 +62,6 @@ static inline uint8_t esb_rf_channel_decode(uint8_t stored)
 	return stored;
 }
 void esb_write_ack(uint8_t type);
-void event_handler(struct esb_evt const *event);
 int clocks_start(void);
 void clocks_stop(void);
 void clocks_request_start(uint32_t delay_us);

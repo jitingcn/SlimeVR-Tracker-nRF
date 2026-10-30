@@ -558,7 +558,11 @@ struct raw_imu_queued {
 	uint32_t session;
 };
 
-K_MSGQ_DEFINE(raw_imu_msgq, sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE, 4);
+static char __noinit __aligned(4) _k_fifo_buf_raw_imu_msgq[
+	RAW_IMU_QUEUE_SIZE * sizeof(struct raw_imu_queued)];
+static STRUCT_SECTION_ITERABLE(k_msgq, raw_imu_msgq) =
+	Z_MSGQ_INITIALIZER(raw_imu_msgq, _k_fifo_buf_raw_imu_msgq,
+			   sizeof(struct raw_imu_queued), RAW_IMU_QUEUE_SIZE);
 
 static uint16_t raw_sequence = 0;
 static atomic_t data_collection_active;
@@ -1700,7 +1704,7 @@ static bool connection_service_ping(int64_t now)
 	return false;
 }
 
-void connection_thread(void)
+static void connection_thread(void)
 {
 	/* Register connection thread with watchdog */
 	if (watchdog_register_thread(WDT_CHANNEL_CONNECTION, 0) < 0) {

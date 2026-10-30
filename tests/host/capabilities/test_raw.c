@@ -31,10 +31,11 @@ struct k_spinlock { bool held; };
 typedef int k_spinlock_key_t;
 static k_spinlock_key_t k_spin_lock(struct k_spinlock *lock) { assert(!lock->held); lock->held = true; return 0; }
 static void k_spin_unlock(struct k_spinlock *lock, k_spinlock_key_t key) { (void)key; assert(lock->held); lock->held = false; }
-struct k_msgq { unsigned char *bytes; size_t size, capacity, count, head; };
-#define K_MSGQ_DEFINE(name, size, capacity, alignment) \
-    static unsigned char name##_bytes[(size) * (capacity)]; \
-    static struct k_msgq name = {name##_bytes, size, capacity, 0, 0}
+struct k_msgq { char *bytes; size_t size, capacity, count, head; };
+#define __noinit
+#define __aligned(value) __attribute__((aligned(value)))
+#define STRUCT_SECTION_ITERABLE(type, name) struct type name
+#define Z_MSGQ_INITIALIZER(name, buffer, size, capacity) {buffer, size, capacity, 0, 0}
 static void k_msgq_purge(struct k_msgq *queue) { queue->count = queue->head = 0; }
 static int k_msgq_put(struct k_msgq *queue, const void *message, int wait)
 {
