@@ -1859,7 +1859,8 @@ static void event_handler(struct esb_evt const *event)
 		err = esb_read_rx_payload(&rx_payload);
 		if (err == -ENODATA) {
 			return;
-		} else if (err) {
+		}
+		if (err) {
 			LOG_ERR("Error while reading rx packet: %d", err);
 			return;
 		}
