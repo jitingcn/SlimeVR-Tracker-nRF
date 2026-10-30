@@ -26,7 +26,7 @@
 
 LOG_MODULE_REGISTER(sensor_none, LOG_LEVEL_INF);
 
-int imu_none_init(
+static int imu_none_init(
 	float clock_rate,
 	float accel_time,
 	float gyro_time,
@@ -38,61 +38,61 @@ int imu_none_init(
 	return -1;
 }
 
-void imu_none_shutdown(void)
+static void imu_none_shutdown(void)
 {
 	LOG_DBG("imu_none_shutdown, sensor has no IMU or IMU cannot be shutdown");
 	return;
 }
 
-void imu_none_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
+static void imu_none_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
 {
 	LOG_DBG("imu_none_update_fs, sensor has no IMU or IMU has no configurable FS");
 	return;
 }
 
-int imu_none_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
+static int imu_none_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
 {
 	LOG_DBG("imu_none_update_odr, sensor has no IMU or IMU has no configurable ODR");
 	return -1;
 }
 
-uint16_t imu_none_fifo_read(uint8_t *data, uint16_t len)
+static uint16_t imu_none_fifo_read(uint8_t *data, uint16_t len)
 {
 	LOG_DBG("imu_none_fifo_read, sensor has no IMU or IMU has no FIFO");
 	return 0;
 }
 
-int imu_none_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
+static int imu_none_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
 	LOG_DBG("imu_none_fifo_process, sensor has no IMU or IMU has no FIFO");
 	return -1;
 }
 
-void imu_none_accel_read(float a[3])
+static void imu_none_accel_read(float a[3])
 {
 	LOG_DBG("imu_none_accel_read, sensor has no IMU or IMU has no direct data register");
 	return;
 }
 
-void imu_none_gyro_read(float g[3])
+static void imu_none_gyro_read(float g[3])
 {
 	LOG_DBG("imu_none_gyro_read, sensor has no IMU or IMU has no direct data register");
 	return;
 }
 
-float imu_none_temp_read(void)
+static float imu_none_temp_read(void)
 {
 	LOG_DBG("imu_none_temp_read, sensor has no IMU or IMU has no temperature register");
 	return 0;
 }
 
-uint8_t imu_none_setup_DRDY(uint16_t threshold)
+static uint8_t imu_none_setup_DRDY(uint16_t threshold)
 {
 	LOG_DBG("imu_none_setup_DRDY, sensor has no IMU or IMU has no FIFO threshold/watermark support");
 	return 0;
 }
 
-uint8_t imu_none_setup_WOM(void)
+static uint8_t imu_none_setup_WOM(void)
 {
 	LOG_DBG("imu_none_setup_WOM, sensor has no IMU or IMU has no wake up support");
 	return 0;
@@ -125,31 +125,31 @@ const sensor_imu_t sensor_imu_none = {
 };
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-int mag_none_init(float time, float *actual_time)
+static int mag_none_init(float time, float *actual_time)
 {
 	LOG_DBG("mag_none_init, sensor has no magnetometer or magnetometer cannot be initialized");
 	return -1;
 }
 
-void mag_none_shutdown(void)
+static void mag_none_shutdown(void)
 {
 	LOG_DBG("mag_none_shutdown, sensor has no magnetometer or magnetometer cannot be shutdown");
 	return;
 }
 
-int mag_none_update_odr(float time, float *actual_time)
+static int mag_none_update_odr(float time, float *actual_time)
 {
 	LOG_DBG("mag_none_update_odr, sensor has no magnetometer or magnetometer has no configurable ODR");
 	return -1;
 }
 
-void mag_none_mag_oneshot(void)
+static void mag_none_mag_oneshot(void)
 {
 	LOG_DBG("mag_none_mag_oneshot, sensor has no magnetometer or magnetometer has no oneshot mode");
 	return;
 }
 
-bool mag_none_mag_read(float m[3])
+static bool mag_none_mag_read(float m[3])
 {
 	LOG_DBG("mag_none_mag_read, sensor has no magnetometer or magnetometer has no direct data register");
 	return false;
@@ -161,7 +161,7 @@ float mag_none_temp_read(float bias[3])
 	return 0;
 }
 
-void mag_none_mag_process(uint8_t *raw_m, float m[3])
+static void mag_none_mag_process(uint8_t *raw_m, float m[3])
 {
 	LOG_DBG("mag_none_mag_process, sensor has no magnetometer");
 	return;
