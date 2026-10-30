@@ -514,7 +514,6 @@ static int sys_retained_init(void)
 		}
 		// read from nvs to retained
 		sys_read(PAIRED_ID, &retained->paired_addr, sizeof(retained->paired_addr));
-		sys_read(MAIN_SENSOR_DATA_ID, &retained->sensor_data, sizeof(retained->sensor_data));
 		sys_read(MAIN_GYRO_BIAS_ID, &retained->gyroBias, sizeof(retained->gyroBias));
 		sys_read(MAIN_MAG_BIAS_ID, &retained->magBAinv, sizeof(retained->magBAinv));
 		sys_read(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, sizeof(retained->accBAinv));
@@ -527,7 +526,6 @@ static int sys_retained_init(void)
 		sys_read(MAIN_GYRO_TEMP_ID, &retained->gyroTemp, sizeof(retained->gyroTemp));
 		sys_read(MAIN_GYRO_TCAL_POINTS_ID, &retained->tempCalPoints, sizeof(retained->tempCalPoints));
 		sys_read(MAIN_GYRO_TCAL_COEFFS_ID, &retained->tempCalCoeffs, sizeof(retained->tempCalCoeffs));
-		// tempCalCorrectionOffset is retained for compatibility only; no longer used.
 		sys_read(MAIN_GYRO_TCAL_STATE_ID, &retained->tempCalState, sizeof(retained->tempCalState));
 		/*
 		 * TCAL_ENABLED_ID:

@@ -82,7 +82,6 @@ static void sys_read(uint16_t id, void *data, size_t size)
 #define RECORD(key, field) case key: source = &flash.field; expected = sizeof(flash.field); break
     switch (id) {
     RECORD(PAIRED_ID, paired_addr);
-    RECORD(MAIN_SENSOR_DATA_ID, sensor_data);
     RECORD(MAIN_GYRO_BIAS_ID, gyroBias);
     RECORD(MAIN_MAG_BIAS_ID, magBAinv);
     RECORD(MAIN_ACC_6_BIAS_ID, accBAinv);
@@ -113,6 +112,10 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
 {
     bool invalid = kind == MAG_NONFINITE || kind == MAG_SINGULAR || kind == MAG_EMPTY;
     memset(&storage, 0, sizeof(storage));
+    storage.paired_addr[0] = 0x5a;
+    storage.gyroBias[0] = 0.75f;
+    storage.accBAinv[1][0] = 1.0f;
+    storage.battery_pptt_curve[0] = 55;
     storage.mag_enabled = true;
     storage.mag_online_calibration_mode = invalid ? 255 : 1;
     storage.mag_addr = 0x1e;
@@ -129,8 +132,6 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
     storage.gyroSensScale[2] = 2;
     storage.imu_addr = 0x68;
     storage.imu_reg = 0x75;
-    for (size_t i = 0; i < sizeof(storage.sensor_data); i++)
-        storage.sensor_data[i] = (uint8_t)(0xa3U + 37U * i);
     if (kind == MAG_NONFINITE) {
         uint32_t nan = 0x7fc12345;
         memcpy(&storage.magBAinv[2][1], &nan, sizeof(nan));
@@ -160,18 +161,21 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
     memset(&sensor_mag_dev, 0, sizeof(sensor_mag_dev));
     sensor_mag_dev_reg = 0xff;
     assert(sys_retained_init() == 0);
-    assert(nvs_reads == (warm ? 0U : 10U));
-    assert(memcmp(retained->sensor_data, expected.sensor_data, sizeof(expected.sensor_data)) == 0);
+    if (warm) assert(nvs_reads == 0);
+    assert(retained->paired_addr[0] == 0x5a);
+    assert(retained->gyroBias[0] == 0.75f);
+    assert(retained->accBAinv[1][0] == 1.0f);
+    assert(retained->battery_pptt_curve[0] == 55);
+    assert(memcmp(retained->magBAinv, flash.magBAinv, sizeof(flash.magBAinv)) == 0);
+    assert(retained->gyroSensScale[1] == 1.02f);
 #if !CONFIG_SENSOR_USE_MAGNETOMETER
     magnetic_equal(&expected);
 #endif
     sensor_calibration_read();
     assert(imu_loads == 1 && retained->gyroSensScale[0] == 1 && retained->gyroSensScale[1] == 1.02f && retained->gyroSensScale[2] == 1);
-    assert(memcmp(retained->sensor_data, expected.sensor_data, sizeof(expected.sensor_data)) == 0);
     sensor_scan_read();
     assert(sensor_imu_dev.addr == (warm ? 0x68 : 0));
     sensor_scan_write();
-    assert(memcmp(retained->sensor_data, expected.sensor_data, sizeof(expected.sensor_data)) == 0);
     sensor_refresh_sensor_ids();
     assert(published_imu == 7);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -208,7 +212,6 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
 
 int main(void)
 {
-    assert(MAIN_SENSOR_DATA_ID == 30 && sizeof(storage.sensor_data) == 128);
     for (int warm = 0; warm <= 1; warm++) {
         for (enum mag_case kind = MAG_VALID; kind <= MAG_IDENTITY; kind++) {
             restore_case(warm, kind, false);

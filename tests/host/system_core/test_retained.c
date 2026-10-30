@@ -15,8 +15,11 @@ static void k_mutex_unlock(int *lock) { (void)lock; }
 #define K_FOREVER 0
 
 #ifdef RETAINED_TEST_IMPLEMENTATION
-static struct retained_data retained_storage;
-struct retained_data *retained = &retained_storage;
+static union {
+    struct retained_data current;
+    uint8_t bytes[sizeof(struct retained_data) + 164];
+} retained_storage;
+struct retained_data *retained = &retained_storage.current;
 static uint64_t init_time;
 static int retained_lock;
 #define NRF_STATIC_ASSERT(condition, message) _Static_assert(condition, message)
@@ -36,10 +39,40 @@ static uint32_t crc32_ieee(const uint8_t *data, size_t size)
     return ~crc;
 }
 #include "production_retained.inc"
+void test_install_old_retained(void)
+{
+    struct retained_data current = {0};
+    current.build_timestamp = BUILD_TIMESTAMP;
+    current.gyroBias[1] = 3.25f;
+    current.fusion_id = 7;
+    current.watchdog_state.total_wdt_resets = 9;
+    const uint8_t *source = (const uint8_t *)&current;
+    uint8_t *image = retained_storage.bytes;
+    const size_t gyro = offsetof(struct retained_data, gyroBias);
+    const size_t mag = offsetof(struct retained_data, magBAinv);
+    const size_t crc_offset = offsetof(struct retained_data, crc);
+    memset(image, 0, sizeof(retained_storage.bytes));
+    memcpy(image, source, gyro);
+    memcpy(image + gyro + 140, source + gyro, mag - gyro);
+#if CONFIG_SENSOR_USE_TCAL
+    const size_t tcal_state = offsetof(struct retained_data, tempCalState);
+    memcpy(image + mag + 152, source + mag, tcal_state - mag);
+    memcpy(image + tcal_state + 164, source + tcal_state, crc_offset - tcal_state);
+    const size_t old_crc = crc_offset + 164;
+#else
+    memcpy(image + mag + 152, source + mag, crc_offset - mag);
+    const size_t old_crc = crc_offset + 152;
+#endif
+    uint32_t crc = crc32_ieee(image, old_crc);
+    for (unsigned i = 0; i < 4; i++) image[old_crc + i] = (uint8_t)(crc >> (8 * i));
+    memcpy(image + old_crc + 4, &current.watchdog_state, sizeof(current.watchdog_state));
+    assert(crc32_ieee(image, old_crc + 4) == 0x2144df1c);
+}
 void test_retained_init(void) { retained_init(); }
 #else
 uint64_t test_ticks;
 void test_retained_init(void);
+void test_install_old_retained(void);
 static int sys_storage_lock, fs;
 static bool nvs_init;
 static bool nvs_available = true;
@@ -149,6 +182,12 @@ int main(void)
     assert(!retained_validate());
     assert_defaults(7);
     assert(retained->gyroBias[0] == 0.0f);
+    test_install_old_retained();
+    test_ticks = 19;
+    test_retained_init();
+    assert(!retained_validate());
+    assert_defaults(19);
+    assert(retained->gyroBias[1] == 0.0f && retained->fusion_id == 0);
     puts("retained reset and warm validation passed");
     return 0;
 }

@@ -22,6 +22,11 @@ struct TempCalPoint {
 };
 #endif
 
+/* Retention is checked by build timestamp and CRC, not a schema version.
+ * A different firmware build normally invalidates the old layout. Layout
+ * changes also move the CRC, but do not guarantee rejection on their own.
+ * Invalid data resets retained-only runtime state, including watchdog data.
+ * When NVS is available, startup reloads surviving persistent values. */
 struct retained_data {
 	/* The build version of the firmware that last updated the
 	 * retained data.
@@ -62,11 +67,7 @@ struct retained_data {
 	uint8_t reboot_counter;
 	uint8_t paired_addr[8];
 
-	uint8_t sensor_data[128]; // Reserved legacy BMI270 gain data; preserve retained layout.
-
-	float accelBias[3];
 	float gyroBias[3];
-	float magBias[3];
 	float magBAinv[4][3];
 	float accBAinv[4][3];
 	float gyroSensScale[3]; // Gyro sensitivity
@@ -109,7 +110,6 @@ struct retained_data {
 		(int)((CONFIG_SENSOR_POLY_TEMP_MAX - CONFIG_SENSOR_POLY_TEMP_MIN) * CONFIG_SENSOR_POLY_STEPS_PER_DEGREE)
 		struct TempCalPoint tempCalPoints[TCAL_BUFFER_SIZE];
 	float tempCalCoeffs[3][CONFIG_SENSOR_POLY_DEGREE + 1];
-	float tempCalCorrectionOffset[3];
 
 	struct {
 		uint16_t count;
