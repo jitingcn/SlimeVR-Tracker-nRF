@@ -292,7 +292,7 @@ static struct {
     struct {
         unsigned magic, reset_count, total_wdt_resets, last_failed_channel;
     } watchdog_state;
-} retained_storage, *retained = &retained_storage;
+} retained_storage, *const retained = &retained_storage;
 static struct { unsigned GPREGRET; } power;
 #define NRF_POWER (&power)
 static bool reset_was_wdt, wdt_ready = true;

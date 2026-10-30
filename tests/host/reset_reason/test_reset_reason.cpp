@@ -115,7 +115,7 @@ static void sys_reset_mode(uint8_t mode) { applied_reset_mode = mode; }
 #define CUSTOMER_INFO_REPORT_LOG_SUMMARY 0
 static void customer_info_report(int) {}
 
-static struct { struct { uint8_t reset_count; } watchdog_state; } retained_storage, *retained = &retained_storage;
+static struct { struct { uint8_t reset_count; } watchdog_state; } retained_storage, *const retained = &retained_storage;
 static void retained_update() {}
 static bool locked;
 static unsigned inject_marker;

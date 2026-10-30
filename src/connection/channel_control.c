@@ -12,12 +12,6 @@ static K_MUTEX_DEFINE(channel_control_lock);
 static int channel_control_apply(uint8_t stored)
 {
 	k_mutex_lock(&channel_control_lock, K_FOREVER);
-	if (!retained) {
-		k_mutex_unlock(&channel_control_lock);
-		led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
-		return -ENODEV;
-	}
-
 	esb_channel_control_begin();
 	int storage_error = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &stored, sizeof(stored));
 	int radio_error = esb_reinitialize();

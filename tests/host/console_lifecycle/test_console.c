@@ -11,7 +11,7 @@
 #include "retained.h"
 #define CONFIG_SENSOR_USE_SENS_CALIBRATION 1
 static struct retained_data retained_storage;
-struct retained_data *retained = &retained_storage;
+struct retained_data *const retained = &retained_storage;
 static struct { uint32_t DEVICEADDR[2]; } ficr;
 #define NRF_FICR (&ficr)
 #define ESB_RF_CHANNEL_DEFAULT 255

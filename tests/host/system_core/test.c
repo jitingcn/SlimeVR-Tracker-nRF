@@ -18,7 +18,7 @@
 #define STATUS_LED_ERROR_MASK (SYS_STATUS_SENSOR_ERROR | SYS_STATUS_SYSTEM_ERROR)
 static int sys_storage_lock, fs;
 static bool ram_retention_valid, reboot_counter_ram_only;
-static struct { uint8_t reboot_counter; } retained_data, *retained = &retained_data;
+static struct { uint8_t reboot_counter; } retained_data, *const retained = &retained_data;
 static bool mount_ok;
 static int read_result, write_result, reads, writes, seals;
 static uint8_t flash_counter;

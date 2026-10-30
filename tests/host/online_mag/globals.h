@@ -21,5 +21,5 @@ struct retained_fixture {
 	} onlineMagState;
 	uint8_t mag_online_calibration_mode;
 };
-extern struct retained_fixture *retained;
+extern struct retained_fixture *const retained;
 #endif

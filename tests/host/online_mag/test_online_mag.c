@@ -8,7 +8,7 @@
 #include "sensor/calibration/online_mag.c"
 
 static struct retained_fixture storage;
-struct retained_fixture *retained = &storage;
+struct retained_fixture *const retained = &storage;
 float magBAinv[4][3];
 #ifdef REAL_FIT
 /* mag_fit.c is linked here without cal_mag.c, which owns the production copy. */

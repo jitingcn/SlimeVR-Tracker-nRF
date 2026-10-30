@@ -835,33 +835,29 @@ static void print_sens_calibration_info(void)
 {
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	// Display Gyro sensitivity
-	if (retained) {
-		float scale_x = retained->gyroSensScale[0];
-		float scale_y = retained->gyroSensScale[1];
-		float scale_z = retained->gyroSensScale[2];
+	float scale_x = retained->gyroSensScale[0];
+	float scale_y = retained->gyroSensScale[1];
+	float scale_z = retained->gyroSensScale[2];
 
-		// Calculate the approximate input degrees difference based on the stored scale factor
-		// degrees = (1.0 - (1.0 / scale)) * 360.0 * number of revolutions
-		float deg_x = (1.0f - (1.0f / scale_x)) * (360.0f * CONFIG_SENSOR_SENS_REV);
-		float deg_y = (1.0f - (1.0f / scale_y)) * (360.0f * CONFIG_SENSOR_SENS_REV);
-		float deg_z = (1.0f - (1.0f / scale_z)) * (360.0f * CONFIG_SENSOR_SENS_REV);
+	// Calculate the approximate input degrees difference based on the stored scale factor
+	// degrees = (1.0 - (1.0 / scale)) * 360.0 * number of revolutions
+	float deg_x = (1.0f - (1.0f / scale_x)) * (360.0f * CONFIG_SENSOR_SENS_REV);
+	float deg_y = (1.0f - (1.0f / scale_y)) * (360.0f * CONFIG_SENSOR_SENS_REV);
+	float deg_z = (1.0f - (1.0f / scale_z)) * (360.0f * CONFIG_SENSOR_SENS_REV);
 
-		printk(
-			"Gyroscope sensitivity (degrees diff over %u rev): %.3f %.3f %.3f\n",
-			(int)CONFIG_SENSOR_SENS_REV,
-			(double)deg_x,
-			(double)deg_y,
-			(double)deg_z
-		);
-		printk(
-			"Gyroscope sensitivity scale: %.5f %.5f %.5f\n",
-			(double)scale_x,
-			(double)scale_y,
-			(double)scale_z
-		);
-	} else {
-		printk("Gyroscope sensitivity: Retained data unavailable.\n");
-	}
+	printk(
+		"Gyroscope sensitivity (degrees diff over %u rev): %.3f %.3f %.3f\n",
+		(int)CONFIG_SENSOR_SENS_REV,
+		(double)deg_x,
+		(double)deg_y,
+		(double)deg_z
+	);
+	printk(
+		"Gyroscope sensitivity scale: %.5f %.5f %.5f\n",
+		(double)scale_x,
+		(double)scale_y,
+		(double)scale_z
+	);
 #endif
 }
 

@@ -7,7 +7,7 @@
 #include <stdlib.h>
 
 static struct retained_data storage;
-struct retained_data *retained = &storage;
+struct retained_data *const retained = &storage;
 static int64_t now_ms = 10000;
 static struct sensor_temperature_observation sample = {25.0f, 25.0f, 10000, 1};
 static bool external_power = true, power_ready = true, hw_available = true;

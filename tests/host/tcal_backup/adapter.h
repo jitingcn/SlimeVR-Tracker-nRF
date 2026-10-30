@@ -102,7 +102,7 @@ struct retained_fixture {
     struct { bool enabled, completed, doffset_valid; unsigned attempt_count; float doffset[3]; } bootCalState;
 };
 static struct retained_fixture retained_data, flash_data;
-static struct retained_fixture *retained = &retained_data;
+static struct retained_fixture *const retained = &retained_data;
 static bool tcal_compensation_enabled, tcal_curve_apply_ready;
 static unsigned reset_reference_calls, persist_calls;
 static bool maintenance;

@@ -122,7 +122,7 @@ static unsigned sensor_update_time_ms=6;
 static bool sensor_session_woke_from_wom=true,sensor_session_meaningful_motion;
 static struct sensor_activity_score sensor_session_activity_score={.last_update_ms=-1};
 static struct {unsigned wom_idle_wake_streak;} retained_data;
-static typeof(retained_data) *retained=&retained_data;
+static typeof(retained_data) *const retained=&retained_data;
 static void retained_update(void) {}
 static bool take_observation(bool *out) {
     bool available=detector_pending; detector_pending=false;

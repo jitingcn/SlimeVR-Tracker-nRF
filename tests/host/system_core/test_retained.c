@@ -19,7 +19,7 @@ static union {
     struct retained_data current;
     uint8_t bytes[sizeof(struct retained_data) + 164];
 } retained_storage;
-struct retained_data *retained = &retained_storage.current;
+struct retained_data *const retained = &retained_storage.current;
 static uint64_t init_time;
 static int retained_lock;
 #define NRF_STATIC_ASSERT(condition, message) _Static_assert(condition, message)

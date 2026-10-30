@@ -16,7 +16,7 @@
 #include "event_probe.h"
 void tracker_events_sensor_invalidate(uint8_t reason) { (void)reason; }
 static struct host_retained retained_storage;
-struct host_retained *retained = &retained_storage;
+struct host_retained *const retained = &retained_storage;
 void sensor_tcal_clear_doffset(void)
 {
 	retained->bootCalState.doffset_valid = false;

@@ -159,7 +159,7 @@ struct retained_data {
 /* For simplicity in the sample just allow anybody to see and
  * manipulate the retained state.
  */
-extern struct retained_data *retained;
+extern struct retained_data *const retained;
 
 /* Check whether the retained data is valid, and if not reset it.
  *

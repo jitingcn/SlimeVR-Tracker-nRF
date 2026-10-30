@@ -21,7 +21,7 @@
 #define LOG_ERR(...) ((void)0)
 #define POWER_RESETREAS_RESETPIN_Msk 1
 static struct retained_data storage, flash;
-struct retained_data *retained = &storage;
+struct retained_data *const retained = &storage;
 static bool warm_boot, ram_retention_valid;
 static unsigned nvs_reads, retained_updates, imu_loads, model_restores, model_configures, online_loads;
 static bool configured_online;

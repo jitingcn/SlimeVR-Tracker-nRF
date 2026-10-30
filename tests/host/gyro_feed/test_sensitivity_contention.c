@@ -27,7 +27,7 @@ static int nvs_error, fs;
 static struct {
     float gyroSensScale[3];
 } retained_data = {{0.9375f, 1.0625f, 0.96875f}};
-static typeof(retained_data) *retained = &retained_data;
+static typeof(retained_data) *const retained = &retained_data;
 static unsigned imu_loads, retained_updates;
 
 static int k_mutex_lock(pthread_mutex_t *mutex, int timeout)
@@ -202,10 +202,6 @@ int main(void)
 
     float persisted[3];
     memcpy(persisted, retained->gyroSensScale, sizeof(persisted));
-    retained = NULL;
-    assert(!sensor_calibration_sensitivity_init());
-    assert(imu_loads == 0 && !sensitivity_cache_seeded);
-    retained = &retained_data;
     sensor_calibration_read();
     assert(imu_loads == 1);
     assert(!memcmp(persisted, retained->gyroSensScale, sizeof(persisted)));
@@ -225,13 +221,8 @@ int main(void)
     sensor_calibration_read(); /* A later read must not reseed the live owner. */
     assert(imu_loads == 2 && TEST_CACHE_GENERATION == pending_cache_generation);
     exercise_contention(unity, unity, true, 0, true);
-    /* Preserve the existing absent-retained fallback and its transition back. */
     exercise_contention(unity, replacement, false, 0, true);
     unsigned old_discards = history_discards;
-    retained = NULL;
-    feed_and_check(unity, old_discards + 1);
-    retained = &retained_data;
-    feed_and_check(replacement, old_discards + 2);
 
     /* Later validation heals only the bad axis and publishes a new epoch
      * without touching the sensor-owned cache from the load caller. */
@@ -245,8 +236,8 @@ int main(void)
     assert(TEST_CACHE_GENERATION == before_heal_cache);
     float healed[3] = {replacement[0], 1.0f, replacement[2]};
     assert(!memcmp(retained->gyroSensScale, healed, sizeof(healed)));
-    feed_and_check(healed, old_discards + 3);
-    feed_and_check(healed, old_discards + 3);
+    feed_and_check(healed, old_discards + 1);
+    feed_and_check(healed, old_discards + 1);
     puts("sensitivity contention: persisted first feed, coherent g/delta, deferred epochs, equal replacement and failed reset");
     return 0;
 }

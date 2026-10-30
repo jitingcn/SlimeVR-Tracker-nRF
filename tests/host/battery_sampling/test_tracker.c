@@ -36,7 +36,7 @@ static struct {
     int16_t battery_pptt_curve[18];
     int16_t max_battery_pptt, min_battery_pptt, battery_pptt_saved;
     uint64_t battery_runtime_sum, battery_runtime_saved, battery_uptime_latest;
-} retained_data, *retained = &retained_data;
+} retained_data, *const retained = &retained_data;
 static uint64_t ticks;
 static uint64_t k_uptime_ticks(void) { return ticks; }
 static uint64_t k_ticks_to_us_floor64(uint64_t value) { return value * 1000; }

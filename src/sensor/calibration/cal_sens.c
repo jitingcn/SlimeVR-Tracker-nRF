@@ -50,8 +50,7 @@ static struct led_token sensitivity_feedback;
 static struct sensitivity_snapshot {
 	float scale[3];
 	uint32_t generation;
-	bool retained_available;
-} sensitivity_cache = {{1.0f, 1.0f, 1.0f}, 0, false};
+} sensitivity_cache = {{1.0f, 1.0f, 1.0f}, 0};
 static bool sensitivity_cache_seeded;
 #endif
 
@@ -72,29 +71,26 @@ bool sensor_calibration_sensitivity_init(void)
 	sys_warm_transaction_begin();
 	k_mutex_lock(&sensitivity_lock, K_FOREVER);
 	bool healed = false;
-	if (retained) {
+	for (int i = 0; i < 3; i++) {
+		if (!sensor_calibration_sensitivity_valid(retained->gyroSensScale[i])) {
+			retained->gyroSensScale[i] = 1.0f;
+			healed = true;
+		}
+	}
+	if (healed) {
+		/* A later validation can heal retained state, but must not
+		 * mutate the cache after it belongs to the sensor owner. */
+		if (sensitivity_cache_seeded) {
+			sensitivity_generation++;
+		}
+		retained_update();
+	}
+	if (!sensitivity_cache_seeded) {
 		for (int i = 0; i < 3; i++) {
-			if (!sensor_calibration_sensitivity_valid(retained->gyroSensScale[i])) {
-				retained->gyroSensScale[i] = 1.0f;
-				healed = true;
-			}
+			sensitivity_cache.scale[i] = retained->gyroSensScale[i];
 		}
-		if (healed) {
-			/* A later validation can heal retained state, but must not
-			 * mutate the cache after it belongs to the sensor owner. */
-			if (sensitivity_cache_seeded) {
-				sensitivity_generation++;
-			}
-			retained_update();
-		}
-		if (!sensitivity_cache_seeded) {
-			for (int i = 0; i < 3; i++) {
-				sensitivity_cache.scale[i] = retained->gyroSensScale[i];
-			}
-			sensitivity_cache.generation = sensitivity_generation;
-			sensitivity_cache.retained_available = true;
-			sensitivity_cache_seeded = true;
-		}
+		sensitivity_cache.generation = sensitivity_generation;
+		sensitivity_cache_seeded = true;
 	}
 	k_mutex_unlock(&sensitivity_lock);
 	sys_warm_transaction_end(false);
@@ -107,14 +103,11 @@ bool sensor_calibration_apply_sensitivity(float g[3], float delta[3])
 	 * sensor-owned snapshot on contention, including its observed epoch. */
 	bool changed = false;
 	if (k_mutex_lock(&sensitivity_lock, K_NO_WAIT) == 0) {
-		bool available = retained != NULL;
-		if (sensitivity_cache.generation != sensitivity_generation ||
-		    sensitivity_cache.retained_available != available) {
+		if (sensitivity_cache.generation != sensitivity_generation) {
 			for (int i = 0; i < 3; i++) {
-				sensitivity_cache.scale[i] = available ? retained->gyroSensScale[i] : 1.0f;
+				sensitivity_cache.scale[i] = retained->gyroSensScale[i];
 			}
 			sensitivity_cache.generation = sensitivity_generation;
-			sensitivity_cache.retained_available = available;
 			changed = true;
 		}
 		k_mutex_unlock(&sensitivity_lock);
@@ -173,9 +166,6 @@ static void sensitivity_failed(uint16_t operation_id, struct led_token feedback,
 int sensor_calibration_set_sensitivity(const float degrees[3])
 {
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	if (!retained) {
-		return sensor_operation_result(LED_OWNER_SENS, -ENODEV, false);
-	}
 	if (!degrees) {
 		return sensor_operation_result(LED_OWNER_SENS, -EINVAL, false);
 	}
@@ -223,9 +213,6 @@ int sensor_calibration_set_sensitivity(const float degrees[3])
 int sensor_calibration_reset_sensitivity(void)
 {
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
-	if (!retained) {
-		return sensor_operation_result(LED_OWNER_SENS, -ENODEV, false);
-	}
 	float scales[3] = {1.0f, 1.0f, 1.0f};
 	#if CONFIG_SENSOR_TCAL_HEATED
 	int reserve_err = sensor_calibration_sensitivity_maintenance_begin();
@@ -516,13 +503,6 @@ void sensor_calibrate_sens(void)
 			(double)SENS_CAL_MAX_OFF_AXIS_RATIO
 		);
 		sensitivity_failed(operation_id, feedback, CAL_PHASE_VALIDATE, CAL_REASON_QUALITY);
-		return;
-	}
-
-	if (!retained) {
-		LOG_ERR("Sensitivity calibration: retained data unavailable, not applied");
-		printk("Gyro sensitivity auto-calibration failed: retained data unavailable.\n");
-		sensitivity_failed(operation_id, feedback, CAL_PHASE_APPLIED, CAL_REASON_SENSOR_UNAVAILABLE);
 		return;
 	}
 

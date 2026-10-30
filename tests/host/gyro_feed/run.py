@@ -45,7 +45,7 @@ static float fusion_bias[3] = {1.25f, -0.75f, 0.5f};
 static float received[64][3], received_dt[64];
 static float cal_samples[64][3];
 static struct {float gyroSensScale[3];} retained_data = {{1.0625f, 0.9375f, 1.03125f}};
-static typeof(retained_data) *retained = &retained_data;
+static typeof(retained_data) *const retained = &retained_data;
 static bool sensor_owner_active;
 static struct {unsigned depth;} sensitivity_lock;
 static uint32_t sensitivity_generation;

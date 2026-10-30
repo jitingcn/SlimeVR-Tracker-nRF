@@ -20,7 +20,7 @@
 #define LOG_WRN(...) ((void)0)
 #define K_NO_WAIT 0
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT mx, my, mz
-static struct { float gyroSensScale[3]; } saved = {{1.01f, 0.99f, 1.02f}}, *retained = &saved;
+static struct { float gyroSensScale[3]; } saved = {{1.01f, 0.99f, 1.02f}}, *const retained = &saved;
 static uint8_t tracker_id = 2;
 static int64_t now_ms;
 static int64_t k_uptime_get(void) { return now_ms; }

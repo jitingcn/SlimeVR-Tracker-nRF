@@ -48,7 +48,7 @@ static int esb_conn_state;
 static struct led_token pair_feedback;
 static uint32_t own_pong_time, radio_session_generation;
 static uint8_t radio_channel, base_addr_0[4], base_addr_1[4], addr_prefix[8];
-static struct { uint8_t rf_channel; } storage, *retained = &storage;
+static struct { uint8_t rf_channel; } storage, *const retained = &storage;
 static uint8_t esb_rf_channel_decode(uint8_t channel) { return channel; }
 static void retained_update(void) {}
 static int fail_step, steps, disable_calls;

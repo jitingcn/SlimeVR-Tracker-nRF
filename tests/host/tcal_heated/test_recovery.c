@@ -15,7 +15,7 @@ static struct {
     struct { uint8_t count; bool valid; uint8_t degree; } tempCalState;
     float tempCalCoeffs[3][4];
     bool tcal_enabled;
-} storage, *retained = &storage;
+} storage, *const retained = &storage;
 typedef enum { SENSOR_TCAL_APPLY_DISABLED, SENSOR_TCAL_APPLY_CURVE,
     SENSOR_TCAL_APPLY_ZRO_FALLBACK } sensor_tcal_apply_mode_t;
 static bool tcal_compensation_enabled, tcal_curve_apply_ready;

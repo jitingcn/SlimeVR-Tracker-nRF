@@ -513,7 +513,7 @@ static int accel_oversample_count;
 static float accel_oversample_sum[3];
 #endif
 static struct {bool mag_enabled; int fusion_id; unsigned char fusion_data[8];} retained_data;
-static typeof(retained_data) *retained=&retained_data;
+static typeof(retained_data) *const retained=&retained_data;
 static int fusion_id=4;
 static void retained_update(void) { retained_updates++; }
 static bool sensor_calibration_fusion_stale(void) { return calibration_stale; }

@@ -86,7 +86,7 @@ static struct {
     bool tcal_enabled;
     uint8_t fusion_id;
 } retained_data;
-static typeof(retained_data) *retained = &retained_data;
+static typeof(retained_data) *const retained = &retained_data;
 static int64_t clock_ms = 10000;
 static float temperature = 25.0f;
 static bool stationary = true;

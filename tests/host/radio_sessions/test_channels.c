@@ -105,7 +105,7 @@ static void warning_log(const char *format, ...) {
     if (trace_warnings) printf("ping-warning t=%lldms failures=%u\n", (long long)now, failures);
 }
 static unsigned probes, writes, changes, disables, tdma_resets, tx_flushes, rx_flushes;
-static struct { uint8_t rf_channel, paired_addr[8]; } storage, *retained = &storage;
+static struct { uint8_t rf_channel, paired_addr[8]; } storage, *const retained = &storage;
 static struct esb_payload rx_payload;
 #define RF_CHANNEL_ID 31
 static int64_t k_uptime_get(void) {

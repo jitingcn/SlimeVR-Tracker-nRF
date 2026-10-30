@@ -33,7 +33,7 @@ static struct {
     float tempCalCoeffs[3][4];
     bool tcal_enabled;
 } retained_data;
-static typeof(retained_data) *retained = &retained_data;
+static typeof(retained_data) *const retained = &retained_data;
 static bool tcal_compensation_enabled, tcal_curve_apply_ready;
 static void retained_update(void) {}
 static void sensor_calibration_reset_gyro_reference(void) {}

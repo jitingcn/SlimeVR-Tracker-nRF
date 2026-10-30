@@ -16,7 +16,7 @@
 #define LOG_INF(...) ((void)0)
 
 static struct host_retained retained_storage;
-struct host_retained *retained = &retained_storage;
+struct host_retained *const retained = &retained_storage;
 static uint16_t requested_operation = 61;
 static unsigned token_reads;
 static int sample_result;

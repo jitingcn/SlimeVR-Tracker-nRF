@@ -15,7 +15,7 @@ void esb_channel_control_end(void) {}
 #include "../../../src/connection/channel_control.c"
 
 static struct retained_data state;
-struct retained_data *retained = &state;
+struct retained_data *const retained = &state;
 static int storage_error;
 static int radio_error;
 static uint8_t persisted_channel;
@@ -77,9 +77,6 @@ int main(void)
 	assert(channel_control_reset() == 0);
 	assert(active_channel == ESB_RF_CHANNEL_DEFAULT);
 	assert(esb_rf_channel_decode(persisted_channel) == ESB_RF_CHANNEL_DEFAULT);
-	retained = NULL;
-	assert(channel_control_set(25) == -ENODEV);
-	assert(channel_control_reset() == -ENODEV);
 	puts("channel control: PASS");
 	return 0;
 }

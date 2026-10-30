@@ -118,7 +118,7 @@ static int nvs_clear(void *filesystem) {
     return clear_result;
 }
 static struct { float gyroSensScale[3]; unsigned build_timestamp; uint8_t wom_idle_wake_streak; } retained_data;
-static __typeof__(retained_data) *retained = &retained_data;
+static __typeof__(retained_data) *const retained = &retained_data;
 static unsigned warm_dirty_count;
 static void retained_update(void) {}
 static void retained_reset(void) {

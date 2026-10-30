@@ -53,7 +53,7 @@ static struct {
     uint8_t mag_online_calibration_mode;
     struct { float last_buf_avg_norm; uint8_t update_count, reserved[3]; } onlineMagState;
 } data;
-static typeof(data) *retained = &data;
+static typeof(data) *const retained = &data;
 static unsigned writes, retained_updates, successes, cancellations, failures;
 static uint8_t phase, cancel_reason, failure_reason, failure_phase;
 static uint16_t cancelled_operation;

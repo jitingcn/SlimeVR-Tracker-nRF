@@ -68,7 +68,7 @@ static struct {
     struct { bool valid; unsigned count; } tempCalState;
     struct { float temp, bias[3]; } tempCalPoints[TCAL_BUFFER_SIZE];
 } storage;
-static typeof(storage) *retained = &storage;
+static typeof(storage) *const retained = &storage;
 static float last_manual_sample[3];
 static float live_matrix[4][3], durable_matrix[4][3], raw_queued[3];
 static bool raw_available, invalid_fit, mag_cal_led_pending;

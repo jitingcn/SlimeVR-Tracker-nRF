@@ -34,7 +34,7 @@ static struct {
     struct { int count; } tempCalState;
     struct { float temp, bias[3]; } tempCalPoints[TCAL_BUFFER_SIZE];
     struct { bool enabled, completed, doffset_valid; unsigned attempt_count; float doffset[3]; } bootCalState;
-} retained_storage, *retained = &retained_storage;
+} retained_storage, *const retained = &retained_storage;
 static unsigned rejects, auto_writes, remove_calls, test_calls, status_calls;
 static unsigned sens_writes, sens_resets, sens_auto_calls, backup_calls, input_losses;
 static uint8_t sens_axis;

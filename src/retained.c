@@ -23,7 +23,7 @@
 #error "retained_mem region not defined"
 #endif
 
-struct retained_data *retained = (struct retained_data *)DT_REG_ADDR(MEMORY_REGION);
+struct retained_data *const retained = (struct retained_data *)DT_REG_ADDR(MEMORY_REGION);
 
 #define RETAINED_CRC_OFFSET offsetof(struct retained_data, crc)
 #define RETAINED_CHECKED_SIZE (RETAINED_CRC_OFFSET + sizeof(retained->crc))

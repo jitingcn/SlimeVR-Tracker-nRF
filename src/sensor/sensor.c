@@ -2704,14 +2704,12 @@ static void feed_gyro_sample(
 		vqf_discard_motion_history();
 	}
 #else
-	if (retained) {
-		g[0] *= retained->gyroSensScale[0];
-		g[1] *= retained->gyroSensScale[1];
-		g[2] *= retained->gyroSensScale[2];
-		reference_delta[0] *= retained->gyroSensScale[0];
-		reference_delta[1] *= retained->gyroSensScale[1];
-		reference_delta[2] *= retained->gyroSensScale[2];
-	}
+	g[0] *= retained->gyroSensScale[0];
+	g[1] *= retained->gyroSensScale[1];
+	g[2] *= retained->gyroSensScale[2];
+	reference_delta[0] *= retained->gyroSensScale[0];
+	reference_delta[1] *= retained->gyroSensScale[1];
+	reference_delta[2] *= retained->gyroSensScale[2];
 #endif
 #endif
 	if (!v_finite(g, 3) || !v_finite(reference_delta, 3)) {

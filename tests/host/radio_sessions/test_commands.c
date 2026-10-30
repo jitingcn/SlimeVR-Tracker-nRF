@@ -80,7 +80,7 @@ static void receive_stop(void);
 static bool inject_stop, replaced_shutdown, batch_active = true;
 static int64_t remote_command_receive_time = 1, now_ms = 1000;
 static uint8_t paired_addr[8];
-static struct { uint8_t paired_addr[8]; } retained_state, *retained = &retained_state;
+static struct { uint8_t paired_addr[8]; } retained_state, *const retained = &retained_state;
 static int esb_conn_state = 1;
 static uint32_t ping_failures, ping_success_streak;
 static bool ping_pending, ping_failed;
