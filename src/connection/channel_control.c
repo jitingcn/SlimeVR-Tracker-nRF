@@ -27,7 +27,7 @@ static int channel_control_apply(uint8_t stored)
 	 * may already be changed after either error, never imply link recovery. */
 	int result = storage_error < 0 ? storage_error : radio_error;
 	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), result ? LED_PARTIAL : LED_SUCCESS);
-	return storage_error < 0 ? storage_error : radio_error;
+	return result;
 }
 
 int channel_control_set(int channel)
