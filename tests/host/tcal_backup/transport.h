@@ -27,6 +27,10 @@ static void k_thread_create(struct k_thread *t, void *s, size_t n, k_thread_entr
 static jmp_buf worker_idle;
 struct k_msgq { unsigned char *data; size_t size, capacity, head, count; };
 #define K_MSGQ_DEFINE(name,size,depth,alignment) static unsigned char name##_storage[(size)*(depth)]; static struct k_msgq name={name##_storage,size,depth,0,0}
+#define __noinit
+#define __aligned(n) __attribute__((aligned(n)))
+#define STRUCT_SECTION_ITERABLE(type, name) struct type name
+#define Z_MSGQ_INITIALIZER(name, buffer, size, depth) {(unsigned char *)(buffer), size, depth, 0, 0}
 static int k_msgq_put(struct k_msgq *q,const void *m,int timeout) {
     assert(timeout==K_NO_WAIT); if(q->count==q->capacity)return -ENOMSG;
     size_t slot=(q->head+q->count++)%q->capacity; memcpy(q->data+slot*q->size,m,q->size);return 0;

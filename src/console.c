@@ -153,7 +153,11 @@ struct console_input_state {
 	uint16_t echo_head;
 	uint16_t echo_tail;
 };
-K_MSGQ_DEFINE(console_line_msgq, sizeof(struct console_line_message), CONSOLE_LINE_QUEUE_DEPTH, 4);
+static char __noinit __aligned(4) _k_fifo_buf_console_line_msgq[
+	CONSOLE_LINE_QUEUE_DEPTH * sizeof(struct console_line_message)];
+static STRUCT_SECTION_ITERABLE(k_msgq, console_line_msgq) =
+	Z_MSGQ_INITIALIZER(console_line_msgq, _k_fifo_buf_console_line_msgq,
+		sizeof(struct console_line_message), CONSOLE_LINE_QUEUE_DEPTH);
 #if CONFIG_SENSOR_USE_TCAL
 /* Separate from the bounded command queue: completion/close cannot be lost. */
 K_SEM_DEFINE(console_input_wake, 0, 1);

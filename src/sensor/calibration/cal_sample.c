@@ -42,10 +42,22 @@ struct cal_sample_vector {
 	float v[3];
 };
 
-K_MSGQ_DEFINE(accel_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
-K_MSGQ_DEFINE(gyro_sample_queue, sizeof(struct sensor_gyro_sample), CAL_SAMPLE_QUEUE_CAPACITY, 4);
+static char __noinit __aligned(4) _k_fifo_buf_accel_sample_queue[
+	CAL_SAMPLE_QUEUE_CAPACITY * sizeof(struct cal_sample_vector)];
+static STRUCT_SECTION_ITERABLE(k_msgq, accel_sample_queue) =
+	Z_MSGQ_INITIALIZER(accel_sample_queue, _k_fifo_buf_accel_sample_queue,
+		sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY);
+static char __noinit __aligned(4) _k_fifo_buf_gyro_sample_queue[
+	CAL_SAMPLE_QUEUE_CAPACITY * sizeof(struct sensor_gyro_sample)];
+static STRUCT_SECTION_ITERABLE(k_msgq, gyro_sample_queue) =
+	Z_MSGQ_INITIALIZER(gyro_sample_queue, _k_fifo_buf_gyro_sample_queue,
+		sizeof(struct sensor_gyro_sample), CAL_SAMPLE_QUEUE_CAPACITY);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-K_MSGQ_DEFINE(mag_sample_queue, sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY, 4);
+static char __noinit __aligned(4) _k_fifo_buf_mag_sample_queue[
+	CAL_SAMPLE_QUEUE_CAPACITY * sizeof(struct cal_sample_vector)];
+static STRUCT_SECTION_ITERABLE(k_msgq, mag_sample_queue) =
+	Z_MSGQ_INITIALIZER(mag_sample_queue, _k_fifo_buf_mag_sample_queue,
+		sizeof(struct cal_sample_vector), CAL_SAMPLE_QUEUE_CAPACITY);
 #endif
 
 static float latest_accel[3] = {0};
