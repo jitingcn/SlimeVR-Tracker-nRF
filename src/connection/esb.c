@@ -114,11 +114,11 @@ static uint8_t search_home;
 static uint8_t search_index;
 static bool channel_search;
 static bool channel_wait_normal;
-static volatile bool channel_found;
-static volatile bool channel_heard;
+static atomic_t channel_found;
+static atomic_t channel_heard;
 static int64_t search_deadline;
 static int64_t search_probe_at;
-static volatile bool channel_redirect_pending;
+static atomic_t channel_redirect_pending;
 static uint8_t channel_redirect;
 static bool channel_confirm_capable;
 static bool channel_legacy_peer;
@@ -290,7 +290,7 @@ static void esb_wom_process(void)
 {
 	unsigned key = irq_lock();
 	if (!wom_command.requested || (!channel_confirmed && !channel_legacy_peer)
-	    || channel_redirect_pending) {
+	    || atomic_get(&channel_redirect_pending)) {
 		irq_unlock(key);
 		return;
 	}
@@ -848,8 +848,8 @@ static struct {
 	uint8_t data[CONFIG_ESB_MAX_PAYLOAD_LENGTH];
 	uint8_t length;
 } ota_rx_queue[OTA_RX_QUEUE_SIZE];
-static volatile uint8_t ota_rx_head;
-static volatile uint8_t ota_rx_tail;
+static atomic_t ota_rx_head;
+static atomic_t ota_rx_tail;
 
 // Server time synchronization for TDMA scheduling (using ticks)
 static bool server_time_synced = false;
@@ -1440,9 +1440,9 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				/* IRQ publishes intent; only the idle TX owner retunes. */
 				channel_confirmed = false;
 				channel_redirect = advertised;
-				channel_redirect_pending = true;
+				atomic_set(&channel_redirect_pending, true);
 				channel_wait_normal = true;
-				channel_found = false;
+				atomic_set(&channel_found, false);
 				ping_pending = false;
 				return;
 			}
@@ -1458,12 +1458,12 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				return;
 			}
 		}
-		if (channel_redirect_pending) {
+		if (atomic_get(&channel_redirect_pending)) {
 			return;
 		}
 		own_pong_time = k_uptime_get();
 		own_pong_seen = true;
-		channel_heard = true;
+		atomic_set(&channel_heard, true);
 		uint8_t rx_ctr = payload->data[2];
 		// set ping valid first
 		ping_pending = false;
@@ -1549,7 +1549,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				 * layout epoch. Stop ordinary data until fresh channel
 				 * proof, time sync and a usable NORMAL re-enable TDMA. */
 				channel_wait_normal = true;
-				channel_found = false;
+				atomic_set(&channel_found, false);
 				channel_confirmed = false;
 				channel_legacy_peer = false;
 				esb_clear_time_sync_state();
@@ -1679,7 +1679,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 					tdma_slot, tdma_total, tdma_sticks, tdma_epoch
 				);
 				if (valid_schedule && server_time_synced && channel_wait_normal) {
-					channel_found = true;
+					atomic_set(&channel_found, true);
 				}
 			}
 		}
@@ -1926,13 +1926,13 @@ void event_handler(struct esb_evt const *event)
 				if (rx_payload.length >= 2 &&
 					 rx_payload.data[0] >= ESB_OTA_DATA_TYPE &&
 					 rx_payload.data[0] <= ESB_OTA_ACTIVATE_TYPE) {
-					uint8_t next = (ota_rx_head + 1) % OTA_RX_QUEUE_SIZE;
-					if (next != ota_rx_tail) {
-						memcpy(ota_rx_queue[ota_rx_head].data,
+					uint8_t head = (uint8_t)atomic_get(&ota_rx_head);
+					uint8_t next = (head + 1) % OTA_RX_QUEUE_SIZE;
+					if (next != atomic_get(&ota_rx_tail)) {
+						memcpy(ota_rx_queue[head].data,
 						       rx_payload.data, rx_payload.length);
-						ota_rx_queue[ota_rx_head].length = rx_payload.length;
-						__DMB();
-						ota_rx_head = next;
+						ota_rx_queue[head].length = rx_payload.length;
+						atomic_set(&ota_rx_head, next);
 					}
 				}
 				else {
@@ -2052,13 +2052,13 @@ int esb_initialize(bool tx)
 	LOG_INF("ESB initialized, %sX mode", tx ? "T" : "R");
 	esb_initialized = true;
 	channel_wait_normal = true;
-	channel_redirect_pending = false;
+	atomic_set(&channel_redirect_pending, false);
 	channel_confirmed = false;
 	channel_legacy_peer = false;
 	ping_channel_confirm_sent = false;
 	esb_wom_reset();
-	channel_found = false;
-	channel_heard = false;
+	atomic_set(&channel_found, false);
+	atomic_set(&channel_heard, false);
 	ping_pending = false;
 	memset(ping_history, 0, sizeof(ping_history));
 	esb_clear_time_sync_state();
@@ -2080,9 +2080,9 @@ void esb_deinitialize(void)
 	}
 	channel_search = false;
 	channel_wait_normal = true;
-	channel_found = false;
-	channel_heard = false;
-	channel_redirect_pending = false;
+	atomic_set(&channel_found, false);
+	atomic_set(&channel_heard, false);
+	atomic_set(&channel_redirect_pending, false);
 	channel_confirmed = false;
 	channel_legacy_peer = false;
 	ping_channel_confirm_sent = false;
@@ -2408,16 +2408,18 @@ int esb_user_set_enabled(bool enabled)
 
 void esb_process_ota_rx_queue(void)
 {
-	while (ota_rx_tail != ota_rx_head) {
-		uint8_t idx = ota_rx_tail;
+	for (;;) {
+		uint8_t idx = (uint8_t)atomic_get(&ota_rx_tail);
+		if (idx == atomic_get(&ota_rx_head)) {
+			break;
+		}
 		if (ota_rx_queue[idx].data[0] != ESB_OTA_DATA_TYPE) {
 			LOG_WRN("OTA queue: non-data type=0x%02X len=%u",
 				ota_rx_queue[idx].data[0], ota_rx_queue[idx].length);
 		}
 		esb_ota_process_rx_packet(ota_rx_queue[idx].data,
 					  ota_rx_queue[idx].length);
-		__DMB();
-		ota_rx_tail = (idx + 1) % OTA_RX_QUEUE_SIZE;
+		atomic_set(&ota_rx_tail, (idx + 1) % OTA_RX_QUEUE_SIZE);
 	}
 }
 
@@ -2785,15 +2787,15 @@ bool esb_channel_search_poll(bool blocked)
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
 	}
-	blocked |= esb_ota_is_active() || ota_rx_head != ota_rx_tail;
-	if (blocked && !channel_found) {
+	blocked |= esb_ota_is_active() || atomic_get(&ota_rx_head) != atomic_get(&ota_rx_tail);
+	if (blocked && !atomic_get(&channel_found)) {
 		/* Holds freeze retunes, not same-channel proof. Keep an outstanding
 		 * proof PING alive so a pending UNSUPPRESS/ABORT can follow it. */
 		unsigned key = irq_lock();
-		if (channel_redirect_pending) {
+		if (atomic_get(&channel_redirect_pending)) {
 			/* An advertisement held across another channel owner's exchange
 			 * must be re-probed, not replayed as a deferred retune. */
-			channel_redirect_pending = false;
+			atomic_set(&channel_redirect_pending, false);
 			ping_pending = false;
 		}
 		irq_unlock(key);
@@ -2803,7 +2805,7 @@ bool esb_channel_search_poll(bool blocked)
 		k_mutex_unlock(&esb_radio_lock);
 		return false;
 	}
-	if (channel_found) {
+	if (atomic_get(&channel_found)) {
 		uint8_t stored = retained->rf_channel;
 		uint8_t configured = esb_rf_channel_decode(stored);
 		if (configured == ESB_RF_CHANNEL_DEFAULT) {
@@ -2833,10 +2835,10 @@ bool esb_channel_search_poll(bool blocked)
 				address_error || channel_error ? LED_PARTIAL : LED_SUCCESS);
 			LOG_INF("Pairing confirmed on channel %u", radio_channel);
 		}
-		channel_found = false;
+		atomic_set(&channel_found, false);
 		channel_search = false;
 		channel_wait_normal = false;
-		channel_heard = false;
+		atomic_set(&channel_heard, false);
 		ping_warning_at = 0;
 		set_status(SYS_STATUS_CONNECTION_ERROR, false);
 		connection_error_start_time = 0;
@@ -2851,7 +2853,7 @@ bool esb_channel_search_poll(bool blocked)
 	int64_t now = k_uptime_get();
 	uint32_t lost_ms = (uint32_t)((uint32_t)now - own_pong_time);
 	irq_unlock(age_key);
-	if (!channel_search && !channel_wait_normal && !channel_redirect_pending
+	if (!channel_search && !channel_wait_normal && !atomic_get(&channel_redirect_pending)
 	    && ping_failures < 3 && lost_ms < 4500) {
 		ping_warning_at = 0;
 		k_mutex_unlock(&esb_radio_lock);
@@ -2879,7 +2881,7 @@ bool esb_channel_search_poll(bool blocked)
 	 * changing physical channel. No queued pose or OTA frame crosses it. */
 	if (!esb_is_idle()) {
 		k_mutex_unlock(&esb_radio_lock);
-		return channel_search || channel_wait_normal || channel_redirect_pending;
+		return channel_search || channel_wait_normal || atomic_get(&channel_redirect_pending);
 	}
 	drop_failed_tx_payload_if_pending();
 	if (!channel_search) {
@@ -2894,8 +2896,8 @@ bool esb_channel_search_poll(bool blocked)
 		}
 		channel_search = true;
 		channel_wait_normal = true;
-		channel_heard = false;
-		channel_found = false;
+		atomic_set(&channel_heard, false);
+		atomic_set(&channel_found, false);
 		ping_pending = false;
 		irq_unlock(key);
 		search_deadline = now + 240 + (k_cycle_get_32() % 61);
@@ -2906,12 +2908,12 @@ bool esb_channel_search_poll(bool blocked)
 		memset(ping_history, 0, sizeof(ping_history));
 		tdma_set_enabled(false);
 	}
-	if (channel_redirect_pending) {
+	if (atomic_get(&channel_redirect_pending)) {
 		unsigned key = irq_lock();
 		uint8_t target = channel_redirect;
 		ping_pending = false;
-		channel_found = false;
-		channel_heard = false;
+		atomic_set(&channel_found, false);
+		atomic_set(&channel_heard, false);
 		channel_confirmed = false;
 		irq_unlock(key);
 		esb_flush_tx();
@@ -2926,7 +2928,7 @@ bool esb_channel_search_poll(bool blocked)
 		}
 		key = irq_lock();
 		radio_channel = target;
-		channel_redirect_pending = false;
+		atomic_set(&channel_redirect_pending, false);
 		irq_unlock(key);
 		search_deadline = now + 300;
 		search_probe_at = now;
@@ -2936,8 +2938,8 @@ bool esb_channel_search_poll(bool blocked)
 		/* Invalidate the old outstanding probe atomically with the final
 		 * RX result check; a late ISR must never confirm the next channel. */
 		unsigned key = irq_lock();
-		bool heard = channel_heard || channel_found;
-		channel_heard = false;
+		bool heard = atomic_get(&channel_heard) || atomic_get(&channel_found);
+		atomic_set(&channel_heard, false);
 		if (!heard) {
 			ping_pending = false;
 			channel_confirmed = false;
@@ -3074,7 +3076,7 @@ bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks)
 	unsigned key = irq_lock();
 	uint64_t kernel_ticks = k_uptime_ticks();
 	bool synced = server_time_synced && esb_conn_state == ESB_ST_PAIRED
-		&& !channel_wait_normal && !channel_redirect_pending
+		&& !channel_wait_normal && !atomic_get(&channel_redirect_pending)
 		&& get_status(SYS_STATUS_CONNECTION_ERROR) == 0;
 	int64_t max_age_ms = tdma_status_clock_max_age_ms();
 	int64_t last_sync_ms = g_last_sync_timestamp;
@@ -3221,7 +3223,7 @@ static void esb_thread(void)
 		int64_t now_idle = k_uptime_get();
 		esb_wom_process();
 
-		bool command_pending = (channel_confirmed || channel_legacy_peer) && !channel_redirect_pending
+		bool command_pending = (channel_confirmed || channel_legacy_peer) && !atomic_get(&channel_redirect_pending)
 			&& received_remote_command != ESB_PONG_FLAG_NORMAL
 #if CONFIG_CONNECTION_RAW_COLLECTION
 			&& received_remote_command != ESB_PONG_FLAG_DATA_COLLECT_METADATA

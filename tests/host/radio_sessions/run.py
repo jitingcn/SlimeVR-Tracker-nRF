@@ -216,7 +216,25 @@ with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     (temporary / "connection").mkdir()
     (temporary / "connection/connection.h").write_text((SOURCE / "connection/connection.h").read_text())
     (temporary / "snapshot_types.inc").write_text(snapshot_types)
-    lifecycle = function(connection, "connection_service_ping") + "\n" + function(connection, "connection_thread")
+    suppression_start = connection.index("static struct k_spinlock ota_suppress_lock;")
+    suppression_end = connection.index("\n#if CONFIG_CONNECTION_RAW_COLLECTION", suppression_start)
+    lifecycle = connection[suppression_start:suppression_end]
+    lifecycle += "\n" + "\n".join(function(connection, name) for name in (
+        "connection_set_ota_suppressed", "connection_get_ota_suppressed",
+        "connection_ota_suppression_active", "connection_service_ping", "connection_thread"))
+    suppression = connection[suppression_start:suppression_end]
+    suppression += "\n" + "\n".join(function(connection, name) for name in (
+        "connection_set_ota_suppressed", "connection_get_ota_suppressed",
+        "connection_ota_suppression_active"))
+    (temporary / "suppression.inc").write_text(suppression)
+    queue_start = esb.index("#define OTA_RX_QUEUE_SIZE")
+    queue_end = esb.index("\n// Server time synchronization", queue_start)
+    ingress_start = esb.index("\n\t\t\tdefault:\n") + len("\n\t\t\tdefault:\n")
+    ingress_end = esb.index("\n\t\t\t} // end of rx_payload length switch", ingress_start)
+    ota_queue = constants + "\n" + esb[queue_start:queue_end]
+    ota_queue += "\nstatic void receive_auxiliary(void) {\n" + esb[ingress_start:ingress_end] + "\n}\n"
+    ota_queue += "\n" + function(esb, "esb_process_ota_rx_queue")
+    (temporary / "ota_queue.inc").write_text(ota_queue)
     for name, parts in (("payload", payload), ("tx_failures", tx_failures), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery), ("channels", channels), ("lifecycle", lifecycle)):
         (temporary / f"{name}.inc").write_text(parts)
     # Keep hardware leaves in the established fixture; exercise the new private
@@ -273,6 +291,17 @@ int main(void) {
         subprocess.run([str(binary)], check=True)
         if name == "commands":
             subprocess.run(command + ["-DCONFIG_SENSOR_TCAL_HEATED=1"], check=True)
+            subprocess.run([str(binary)], check=True)
+    if os.environ.get("RADIO_CASE") in (None, "ota_sync"):
+        for name in ("ota_suppression", "ota_queue"):
+            binary = temporary / name
+            command = shlex.split(os.environ.get("CC", "cc")) + [
+                "-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1", "-pthread",
+                "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
+                "-I", str(temporary), "-I", str(HERE / "../concurrency"),
+                str(HERE / f"test_{name}.c"), "-o", str(binary),
+            ]
+            subprocess.run(command, check=True)
             subprocess.run([str(binary)], check=True)
     if os.environ.get("RADIO_CASE") in (None, "capabilities"):
         actual = set(actual_handlers) | {

@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include "connection/tracker_event_protocol.h"
+#include "../harness/include/atomic.h"
 static unsigned warning_count, rejected_events, event_notifications;
 static uint8_t rejected_kind, rejected_reason;
 static char last_warning[256];
@@ -84,7 +85,8 @@ static struct { uint8_t paired_addr[8]; } retained_state, *const retained = &ret
 static int esb_conn_state = 1;
 static uint32_t ping_failures, ping_success_streak;
 static bool ping_pending, ping_failed;
-static bool channel_wait_normal, channel_redirect_pending, channel_search, channel_found;
+static bool channel_wait_normal, channel_search;
+static atomic_t channel_redirect_pending, channel_found;
 static bool channel_confirmed = true, channel_legacy_peer;
 static unsigned fw_info_requests, abort_requests;
 static void esb_ota_handle_query_info(void) { ++fw_info_requests; }
@@ -329,10 +331,10 @@ static void test_wom_transactions(void)
     run_wom_owner();
     assert(wom_writes == 3 && esb_get_ping_ack_flag() == ESB_PING_FLAG_CHANNEL_CONFIRM);
     channel_confirmed = true;
-    channel_redirect_pending = true;
+    atomic_set(&channel_redirect_pending, true);
     run_wom_owner();
     assert(wom_writes == 3);
-    channel_redirect_pending = false;
+    atomic_set(&channel_redirect_pending, false);
     run_wom_owner();
     expect_wom(ESB_PING_FLAG_WOM_RESULT, 35791, 8);
     receive_control(ESB_PONG_FLAG_DATA_COLLECT_METADATA);
@@ -385,12 +387,12 @@ static void test_wom_transactions(void)
     expect_wom(ESB_PING_FLAG_WOM_RESULT, 20, 1);
     /* A detected restart retires even an unconsumed/error response. */
     g_last_rx_raw_ticks = 123456;
-    channel_wait_normal = false; channel_found = true;
+    channel_wait_normal = false; atomic_set(&channel_found, true);
     channel_confirmed = true; channel_legacy_peer = true;
     memcpy(&rx_payload.data[3], (uint8_t[]){0, 0, 4, 210}, 4);
     assert(host_receiver_restart() == 1);
     assert(strcmp(last_warning, "Receiver clock restart detected old=123456 new=1234 count=1") == 0);
-    assert(channel_wait_normal && !channel_found && !channel_confirmed && !channel_legacy_peer);
+    assert(channel_wait_normal && !atomic_get(&channel_found) && !channel_confirmed && !channel_legacy_peer);
     channel_wait_normal = false; channel_confirmed = true;
     assert(!wom_command.cached && !wom_command.response_pending);
     wom_minutes = 30;
@@ -473,10 +475,10 @@ static void test_wom_enter(void)
     run_wom_owner();
     assert(wom_enter_calls == 0);
     channel_confirmed = true;
-    channel_redirect_pending = true;
+    atomic_set(&channel_redirect_pending, true);
     run_wom_owner();
     assert(wom_enter_calls == 0 && !wom_command.response_pending);
-    channel_redirect_pending = false;
+    atomic_set(&channel_redirect_pending, false);
     run_wom_owner();
     expect_wom(ESB_PING_FLAG_WOM_RESULT, ESB_WOM_ENTER, 300);
     assert(wom_enter_calls == 1 && wom_minutes == 0);

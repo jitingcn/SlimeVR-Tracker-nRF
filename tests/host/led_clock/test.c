@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "../harness/include/atomic.h"
 
 #if KERNEL_HZ == 31250
 #define CONFIG_SOC_SERIES_NRF54L 1
@@ -12,7 +13,8 @@
 static uint64_t now_ticks;
 static bool locked, change_on_unlock, refresh_on_unlock;
 static unsigned irq_depth;
-static bool server_time_synced, channel_wait_normal, channel_redirect_pending;
+static bool server_time_synced, channel_wait_normal;
+static atomic_t channel_redirect_pending;
 static int esb_conn_state, status_bits;
 static int64_t g_last_sync_timestamp;
 static uint32_t g_last_rx_raw_ticks, g_min_rtt_ticks, g_min_rtt_age;
@@ -27,8 +29,7 @@ struct esb_sync_filter {
 };
 static struct esb_sync_filter sync_filter;
 
-static uint32_t tdma_cfg_pack;
-static uint32_t atomic_get(const uint32_t *value) { return *value; }
+static atomic_t tdma_cfg_pack;
 static unsigned irq_lock(void) { unsigned prior = irq_depth++; locked = true; return prior; }
 static void irq_unlock(unsigned key)
 {
@@ -68,7 +69,7 @@ static void reset(void)
 {
 	now_ticks = 100ULL * KERNEL_HZ;
 	server_time_synced = true;
-	channel_wait_normal = channel_redirect_pending = false;
+	channel_wait_normal = false; atomic_set(&channel_redirect_pending, false);
 	esb_conn_state = ESB_ST_PAIRED;
 	status_bits = 0;
 	g_last_sync_timestamp = 100000;
@@ -181,7 +182,7 @@ int main(void)
 	reset(); esb_conn_state = 2; unavailable();
 	reset(); server_time_synced = false; unavailable();
 	reset(); channel_wait_normal = true; unavailable();
-	reset(); channel_redirect_pending = true; unavailable();
+	reset(); atomic_set(&channel_redirect_pending, true); unavailable();
 	reset(); tdma_cfg_pack &= ~TDMA_ENABLED_BIT; unavailable();
 	reset(); tdma_cfg_pack = 0; unavailable();
 	reset(); tdma_cfg_pack = TDMA_ENABLED_BIT; unavailable();

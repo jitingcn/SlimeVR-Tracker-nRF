@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include "../harness/include/atomic.h"
 
 static unsigned raw_calls, batch_calls, mag_calls, mag_clears, mag_calibrations, online_calls;
 static bool raw_enabled, mag_enabled, online_enabled, last_batch_enabled;
@@ -33,9 +34,8 @@ static int connection_request_raw_retransmit(uint16_t sequence)
 }
 #define RAW_ARQ_MARKER 0xAA
 #define OTA_RX_QUEUE_SIZE 16
-#define __DMB() ((void)0)
 static struct { uint8_t data[64], length; } ota_rx_queue[OTA_RX_QUEUE_SIZE];
-static uint8_t ota_rx_head, ota_rx_tail;
+static atomic_t ota_rx_head, ota_rx_tail;
 #define main enabled_regression_main
 #include "test_commands.c"
 #undef main
@@ -228,13 +228,13 @@ int main(void)
     rx_payload.length = sizeof(ota);
     memcpy(rx_payload.data, ota, sizeof(ota));
     receive_auxiliary();
-    assert(ota_rx_head == 1 && ota_rx_tail == 0);
+    assert(atomic_get(&ota_rx_head) == 1 && atomic_get(&ota_rx_tail) == 0);
     assert(ota_rx_queue[0].length == sizeof(ota));
     assert(memcmp(ota_rx_queue[0].data, ota, sizeof(ota)) == 0);
     if (getenv("CAPABILITY_SMOKE")) {
         printf("remote_auxiliary raw=%d mag=%d retransmit_calls=%u retransmit_sequence=%u ota_head=%u ota_tail=%u ota_hex=",
                CONFIG_CONNECTION_RAW_COLLECTION, CONFIG_SENSOR_USE_MAGNETOMETER,
-               retransmit_calls, retransmit_sequence, ota_rx_head, ota_rx_tail);
+               retransmit_calls, retransmit_sequence, (unsigned)atomic_get(&ota_rx_head), (unsigned)atomic_get(&ota_rx_tail));
         for (size_t i = 0; i < ota_rx_queue[0].length; i++) printf("%02x", ota_rx_queue[0].data[i]);
         putchar('\n');
     }

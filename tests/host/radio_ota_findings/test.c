@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include "../led_feedback_stub.h"
+#include "../harness/include/atomic.h"
 static unsigned irq_lock(void) { return 0; }
 static void irq_unlock(unsigned key) { (void)key; }
 #define ESB_ST_PAIRING 0
@@ -40,8 +41,8 @@ static int esb_radio_lock, lock_depth;
 static void k_mutex_lock(int *lock, int timeout) { lock_depth++; }
 static void k_mutex_unlock(int *lock) { assert(lock_depth > 0); lock_depth--; }
 static bool esb_initialized, own_pong_seen, channel_search, channel_wait_normal;
-static bool channel_found, channel_heard, ping_pending;
-static bool channel_redirect_pending, pair_provisional, pair_ack_pending, pairing_search_active;
+static atomic_t channel_found, channel_heard, channel_redirect_pending;
+static bool ping_pending, pair_provisional, pair_ack_pending, pairing_search_active;
 static bool channel_confirm_capable, channel_confirmed, channel_legacy_peer, ping_channel_confirm_sent;
 static uint8_t paired_addr[8], ping_history[80];
 static int esb_conn_state;
@@ -65,8 +66,7 @@ static void esb_clear_time_sync_state(void) {}
 static void tdma_set_enabled(bool enabled) {}
 static int64_t now_ms;
 static int64_t k_uptime_get(void) { return now_ms; }
-static uint32_t next_ping_deadline_ms;
-static uint32_t atomic_get(uint32_t *value) { return *value; }
+static atomic_t next_ping_deadline_ms;
 static bool ready, guarded, test_enabled, test_wake_delay_valid;
 static uint32_t window_delay, event_deadline;
 static uint64_t test_wake_delay_us;

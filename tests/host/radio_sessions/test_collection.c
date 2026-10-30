@@ -19,8 +19,17 @@ static bool sensor_diagnostics_maintenance_active(void) { return false; }
 #define RAW_PACKET_SIZE 52
 struct k_spinlock { bool locked; };
 typedef int k_spinlock_key_t;
-static int k_spin_lock(struct k_spinlock *lock) { assert(!lock->locked); lock->locked = true; return 0; }
-static void k_spin_unlock(struct k_spinlock *lock, int key) { assert(lock->locked); lock->locked = false; }
+static int k_spin_lock(struct k_spinlock *lock)
+{
+    while (__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {}
+    return 0;
+}
+static void k_spin_unlock(struct k_spinlock *lock, int key)
+{
+    (void)key;
+    assert(__atomic_load_n(&lock->locked, __ATOMIC_RELAXED));
+    __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
+}
 static unsigned irq_lock(void) { return 0; }
 static void irq_unlock(unsigned key) {}
 static int64_t now_ms;
@@ -32,7 +41,6 @@ static bool raw_metadata_sent, raw_metadata_pending, raw_cal_pending, raw_reques
 static int64_t raw_meta_cal_last_ms, raw_collection_start_ms;
 static struct k_spinlock raw_request_lock, latest_mag_lock;
 static uint8_t raw_metadata_buf[RAW_PACKET_SIZE], raw_ring_valid_bits[16];
-static unsigned raw_retx_total;
 static int raw_retx, raw_imu_msgq;
 static struct raw_imu_sample samples[16];
 static unsigned sample_count, calibration_captures;
@@ -44,7 +52,7 @@ static struct raw_cal_snapshot raw_cal_snapshot;
 static void (*capture_hook)(void);
 static void connection_capture_calibration_snapshot(struct raw_cal_snapshot *snapshot)
 {
-    assert(!raw_request_lock.locked);
+    assert(!__atomic_load_n(&raw_request_lock.locked, __ATOMIC_RELAXED));
     snapshot->generation = ++calibration_captures;
     if (capture_hook) capture_hook();
 }

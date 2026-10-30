@@ -5,6 +5,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
+#include "../harness/include/atomic.h"
 
 #define K_FOREVER 0
 #define CONFIG_CLOCK_CONTROL_NRF 1
@@ -29,22 +30,12 @@ static inline int k_sem_take(struct k_sem *sem, int timeout)
 static int esb_radio_lock;
 static void k_mutex_lock(int *lock, int timeout) { ++*lock; }
 static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
-static bool channel_wait_normal, channel_search, channel_redirect_pending, channel_found;
+static bool channel_wait_normal, channel_search;
+static atomic_t channel_redirect_pending, channel_found;
 static bool channel_confirmed = true, channel_legacy_peer, ping_channel_confirm_sent;
 static bool esb_ota_is_active(void) { return false; }
-typedef int atomic_t;
-static inline int atomic_get(const atomic_t *value)
-{
-	return *value;
-}
-static inline int atomic_inc(atomic_t *value)
-{
-	return (*value)++;
-}
-static inline int atomic_dec(atomic_t *value)
-{
-	return (*value)--;
-}
+static inline int atomic_inc(atomic_t *value) { return __atomic_fetch_add(value, 1, __ATOMIC_SEQ_CST); }
+static inline int atomic_dec(atomic_t *value) { return __atomic_fetch_sub(value, 1, __ATOMIC_SEQ_CST); }
 #define IS_ENABLED(option) 0
 enum tdma_ping_admission { TDMA_PING_UNAVAILABLE, TDMA_PING_DEFERRED, TDMA_PING_ADMITTED };
 static void clocks_stop(void);
@@ -342,7 +333,7 @@ static void reset(void)
 	esb_initialized = true;
 	radio_user_disabled = false;
 	esb_conn_state = 1;
-	channel_wait_normal = channel_search = channel_redirect_pending = false;
+	channel_wait_normal = channel_search = false; atomic_set(&channel_redirect_pending, false);
 	channel_confirmed = true; channel_legacy_peer = ping_channel_confirm_sent = false;
 	memset(&wom_command, 0, sizeof(wom_command));
 }
@@ -529,7 +520,7 @@ static void channel_proof_ping_preserves_arguments(void)
 			reset();
 			channel_wait_normal = proof != 0;
 			channel_search = proof == 2;
-			channel_redirect_pending = proof == 3;
+			atomic_set(&channel_redirect_pending, proof == 3);
 			channel_confirmed = proof == 0 || proof == 4;
 			channel_legacy_peer = proof == 1;
 			uint8_t ping[13] = {ESB_PING_TYPE};
@@ -577,9 +568,9 @@ static void restart_blocks_ordinary_writer(void)
 	reset();
 	tdma_enabled = true;
 	server_time_synced = true;
-	channel_found = channel_confirmed = true;
+	channel_confirmed = true; atomic_set(&channel_found, true);
 	assert(host_receiver_restart() == 1);
-	assert(channel_wait_normal && !channel_found && !channel_confirmed);
+	assert(channel_wait_normal && !atomic_get(&channel_found) && !channel_confirmed);
 	assert(!tdma_enabled && !server_time_synced);
 	uint8_t pose[17] = {1};
 	assert(esb_write(pose, true, sizeof(pose)) == -EAGAIN);

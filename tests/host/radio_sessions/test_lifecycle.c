@@ -9,7 +9,6 @@
 #define WDT_CHANNEL_CONNECTION 0
 #define PING_INTERVAL_MS 1000
 #define PING_QUEUE_RETRY_MS 5
-#define OTA_SUPPRESS_TIMEOUT_MS 60000
 #define ESB_PING_LEN 13
 #define ESB_PING_TYPE 0
 #define ESB_PONG_FLAG_TEST_MODE_ON 1
@@ -23,8 +22,7 @@ static unsigned iterations, test_stops, search_calls, ping_calls, ota_calls;
 static bool disconnected, searching, radio_available, hid_available, ota_active, test_enabled;
 static bool force_ping;
 static int ping_result;
-static int64_t dc_conn_error_start, ota_suppress_start_time;
-static bool ota_suppressed;
+static int64_t dc_conn_error_start;
 static atomic_t next_ping_deadline_ms, ping_resync_requested, ping_server_phase_aligned;
 static uint32_t ping_interval_ms, ping_aligned_interval_ms;
 static struct { atomic_t due, attempts, queue_ok, queue_fail, retry_deferred; } ping_sched_stats;
@@ -76,7 +74,6 @@ static void esb_ota_service(void)
     ota_calls++;
 }
 static void esb_ota_periodic_status(void) {}
-void connection_set_ota_suppressed(bool enabled) { ota_suppressed = enabled; }
 static void test_mode_set(bool enabled) { test_enabled = enabled; if (!enabled) test_stops++; }
 static bool test_mode_get(void) { return test_enabled; }
 static bool connection_send_tracker_event(void) { return false; }
@@ -129,7 +126,8 @@ static void reset(bool batch)
     else connection_set_data_collection(true);
     dc_conn_error_start = 0;
     disconnected = searching = radio_available = test_enabled = true;
-    ota_active = ota_suppressed = force_ping = hid_available = false;
+    ota_active = force_ping = hid_available = false;
+    connection_set_ota_suppressed(false);
     ping_result = 0;
     ping_resync_requested = ping_server_phase_aligned = 0;
     ping_aligned_interval_ms = 0;
@@ -178,7 +176,7 @@ int main(void)
             force_ping = path == 1 || path == 2 || path == 7;
             ping_result = path == 2 ? -EAGAIN : path == 7 ? -EIO : 0;
             ota_active = path == 3;
-            ota_suppressed = path == 4;
+            connection_set_ota_suppressed(path == 4);
             tick(100);
             tick(60100); active(batch);
             tick(60101); stopped();

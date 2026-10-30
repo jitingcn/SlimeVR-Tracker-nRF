@@ -37,7 +37,7 @@ PREFIX = r'''
 #define SYS_STATUS_CONNECTION_ERROR 1
 #define SYS_STATUS_USB_CONNECTED 2
 #define LOG_WRN(...) ((void)0)
-#define OTA_SUPPRESS_TIMEOUT_MS 600000
+#define LOG_INF(...) ((void)0)
 #define PING_QUEUE_RETRY_MS 10
 #define FW_BOARD 7
 #define FW_MCU 8
@@ -54,12 +54,11 @@ static inline void sys_put_le32(uint32_t value, uint8_t dst[4]) {
     sys_put_le16(value,dst); sys_put_le16(value>>16,&dst[2]);
 }
 static bool radio=true, usb=true, test_enabled, ota, error, event_due=true, raw, raw_pending;
-static bool sensor_ids_set, ota_suppressed;
+static bool sensor_ids_set;
 static sensor_data_snapshot_t sensor_data_snapshot;
 static float sensor_last_q[4];
 static unsigned publication_wakes;
 static void connection_signal_wake(void) { publication_wakes++; }
-static int64_t ota_suppress_start_time;
 static uint8_t tracker_id=2, packet_sequence=19;
 static uint8_t batt=60, batt_v=94, sensor_temp=133, imu_id=9, mag_id=10;
 static uint8_t tracker_svr_status=11, tracker_status=12;
@@ -83,6 +82,7 @@ static void capture_with_hook(sensor_data_snapshot_t *state, sensor_data_capture
     sensor_data_snapshot_capture(state,value);
 }
 static uint32_t k_uptime_get_32(void) { return now_ms; }
+static int64_t k_uptime_get(void) { return now_ms; }
 static uint64_t k_uptime_ticks(void) { return clock_us; }
 static uint64_t k_ticks_to_us_near64(uint64_t x) { return x; }
 static uint64_t k_ticks_to_us_floor64(uint64_t x) { return x; }
@@ -163,7 +163,6 @@ static int esb_write_ping(uint8_t *p,bool force) { (void)force; assert(p[0]==ESB
 static void ping_stats_attempt(uint32_t n) { (void)n; }
 static uint32_t ping_next_periodic_deadline(uint32_t p,uint32_t n,uint32_t i) { (void)p;return n+i; }
 static void esb_ota_periodic_status(void) {}
-static void connection_set_ota_suppressed(bool x) { ota_suppressed=x; }
 static bool connection_raw_collection_active(void) { return raw; }
 static bool connection_process_raw_data(void) { raw_calls++; return raw_pending; }
 static uint16_t test_mode_effective_tps(void) { return test_enabled ? target_tps : 0; }
@@ -194,7 +193,7 @@ static bool qa_pending(void) { return sensor_data_snapshot_qa_pending(&sensor_da
 static bool m_pending(void) { return sensor_data_snapshot_m_pending(&sensor_data_snapshot); }
 static void reset(void) {
     radio=usb=event_due=true; test_enabled=ota=error=raw=raw_pending=false;
-    sensor_ids_set=ota_suppressed=tdma_stalled=false; ota_suppress_start_time=0;
+    sensor_ids_set=tdma_stalled=false; connection_set_ota_suppressed(false);
     memset(&sensor_data_snapshot,0,sizeof(sensor_data_snapshot));
     publish_zero(); sensor_data_capture_t value=capture();
     sensor_data_snapshot_commit(&sensor_data_snapshot,&value,SENSOR_STREAM_QA);
@@ -601,6 +600,12 @@ def build_source(source=None):
     end = source.index("\nstatic void connection_signal_wake(", start)
     parts.append(source[start:end])
     for name in ("connection_send_retry_ms", "connection_send_tracker_event"):
+        parts.append(function(source, name))
+    suppression_start = source.index("static struct k_spinlock ota_suppress_lock;")
+    suppression_end = source.index("\n#if CONFIG_CONNECTION_RAW_COLLECTION", suppression_start)
+    parts.append(source[suppression_start:suppression_end])
+    for name in ("connection_set_ota_suppressed", "connection_get_ota_suppressed",
+                 "connection_ota_suppression_active"):
         parts.append(function(source, name))
     parts.append(function(source, "connection_service_ping"))
     thread = function(source, "connection_thread")

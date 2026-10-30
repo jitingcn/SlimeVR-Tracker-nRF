@@ -8,7 +8,7 @@
 #define LOG_WRN(...) ((void)0)
 #define ESB_ST_PAIRED 1
 #define ESB_ST_RECOVERING 2
-#define atomic_get(value) (*(value))
+#include "../harness/include/atomic.h"
 
 static int status_state;
 static uint8_t tracker_id = 3;
@@ -18,7 +18,8 @@ static bool ping_pending, ping_failed, shutdown_requested;
 static uint32_t ping_failures, ping_success_streak;
 static int esb_conn_state;
 static int64_t connection_error_start_time;
-static bool channel_wait_normal, channel_heard, channel_found, channel_redirect_pending;
+static bool channel_wait_normal;
+static atomic_t channel_heard, channel_found, channel_redirect_pending;
 static bool channel_confirm_capable, channel_legacy_peer, channel_confirmed, ping_channel_confirm_sent;
 static bool esb_ota_is_active(void) { return false; }
 static void esb_ota_request_abort(void) { assert(false); }

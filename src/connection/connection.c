@@ -512,8 +512,9 @@ static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 static int64_t last_runtime_time = 0;
 
-static volatile bool ota_suppressed = false; /* Reduce poll rate during parallel OTA */
-static int64_t ota_suppress_start_time = 0;  /* Timestamp when suppress was enabled */
+static struct k_spinlock ota_suppress_lock;
+static bool ota_suppressed; /* Reduce poll rate during parallel OTA */
+static int64_t ota_suppress_start_time; /* Timestamp when suppress was enabled */
 #define OTA_SUPPRESS_TIMEOUT_MS (10 * 60 * 1000)
 
 #if CONFIG_CONNECTION_RAW_COLLECTION
@@ -610,7 +611,6 @@ static void raw_ring_store(const uint8_t packet[RAW_PACKET_SIZE])
  * Connection thread drains this before sending new data.
  */
 static struct raw_retx_requests raw_retx;
-static volatile uint32_t raw_retx_total; /* lifetime retransmit count */
 
 int connection_request_raw_retransmit(uint16_t sequence)
 {
@@ -840,7 +840,6 @@ static void connection_reset_raw_collection(bool reset_arq)
 		unsigned key = irq_lock();
 		raw_retx_reset(&raw_retx);
 		irq_unlock(key);
-		raw_retx_total = 0;
 	}
 }
 uint32_t connection_get_raw_collection_session(void)
@@ -941,18 +940,37 @@ uint16_t connection_get_data_collection_batch_rate(void)
 
 void connection_set_ota_suppressed(bool suppressed)
 {
+	k_spinlock_key_t key = k_spin_lock(&ota_suppress_lock);
 	ota_suppressed = suppressed;
-	if (suppressed) {
-		ota_suppress_start_time = k_uptime_get();
-	} else {
-		ota_suppress_start_time = 0;
-	}
+	ota_suppress_start_time = suppressed ? k_uptime_get() : 0;
+	k_spin_unlock(&ota_suppress_lock, key);
 	LOG_INF("OTA suppression %s", suppressed ? "ENABLED (slow poll)" : "DISABLED (normal poll)");
 }
 
 bool connection_get_ota_suppressed(void)
 {
-	return ota_suppressed;
+	k_spinlock_key_t key = k_spin_lock(&ota_suppress_lock);
+	bool suppressed = ota_suppressed;
+	k_spin_unlock(&ota_suppress_lock, key);
+	return suppressed;
+}
+
+static bool connection_ota_suppression_active(int64_t now)
+{
+	k_spinlock_key_t key = k_spin_lock(&ota_suppress_lock);
+	bool expired = ota_suppressed && ota_suppress_start_time > 0
+		&& now - ota_suppress_start_time > OTA_SUPPRESS_TIMEOUT_MS;
+	if (expired) {
+		ota_suppressed = false;
+		ota_suppress_start_time = 0;
+	}
+	bool suppressed = ota_suppressed;
+	k_spin_unlock(&ota_suppress_lock, key);
+	if (expired) {
+		LOG_WRN("OTA suppress timeout, auto-unsuppressing");
+		LOG_INF("OTA suppression DISABLED (normal poll)");
+	}
+	return suppressed;
 }
 
 
@@ -1161,7 +1179,6 @@ bool connection_process_raw_data(void)
 			if (err != 0) {
 				k_msleep(1);
 			}
-			raw_retx_total++;
 		}
 		return true;
 	}
@@ -1746,7 +1763,7 @@ void connection_thread(void)
 		}
 
 		esb_process_ota_rx_queue();
-		if (esb_channel_search_poll(ota_suppressed)) {
+		if (esb_channel_search_poll(connection_get_ota_suppressed())) {
 			k_msleep(5);
 			continue;
 		}
@@ -1774,14 +1791,8 @@ void connection_thread(void)
 			 * OTA suppression: when another tracker is being updated,
 			 * this tracker reduces its poll rate to free radio bandwidth.
 			 */
-			if (ota_suppressed) {
-				/* Safety timeout: auto-unsuppress after timeout */
-				if (ota_suppress_start_time > 0 && (now - ota_suppress_start_time) > OTA_SUPPRESS_TIMEOUT_MS) {
-					LOG_WRN("OTA suppress timeout, auto-unsuppressing");
-					connection_set_ota_suppressed(false);
-				} else {
-					k_msleep(100); /* ~10 Hz poll rate */
-				}
+			if (connection_ota_suppression_active(now)) {
+				k_msleep(100); /* ~10 Hz poll rate */
 			}
 
 			/* Disconnected radios must not send collection or sensor data. */
