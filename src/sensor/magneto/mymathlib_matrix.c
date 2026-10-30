@@ -1777,8 +1777,7 @@ static int Lower_Triangular_Inverse(double *L, int n)
    {
       if (*p_k == 0.0)
          return -1;
-      else
-         *p_k = 1.0 / *p_k;
+      *p_k = 1.0 / *p_k;
    }
 
    //         Invert the remaining lower triangular matrix L row by row.
@@ -1907,8 +1906,7 @@ int Upper_Triangular_Inverse(double *U, int n)
    {
       if (*p_k == 0.0)
          return -1;
-      else
-         *p_k = 1.0 / *p_k;
+      *p_k = 1.0 / *p_k;
    }
 
    //         Invert the remaining upper triangular matrix U.

@@ -182,16 +182,15 @@ int sensor_calibrate_mag(void)
 		manual_finish(op, feedback, CAL_PHASE_FIT, CAL_REASON_INVALID_MODEL);
 		sys_warm_transaction_end(false);
 		return -1;
-	} else {
-		LOG_INF("Applying calibration");
-		cal_event_step(op, CAL_PHASE_APPLY_PENDING, 0);
-		tracker_events_notify();
-		sensor_calibration_online_mag_retained_clear();
-		magneto_online_replace_BAinv_and_reset(m_inv, op, feedback);
-		sensor_fusion_reset_mag_ref();
-		sensor_mag_ref_reset(); // Recompute magRef from new calibration
-								// fusion invalidation not necessary
 	}
+	LOG_INF("Applying calibration");
+	cal_event_step(op, CAL_PHASE_APPLY_PENDING, 0);
+	tracker_events_notify();
+	sensor_calibration_online_mag_retained_clear();
+	magneto_online_replace_BAinv_and_reset(m_inv, op, feedback);
+	sensor_fusion_reset_mag_ref();
+	sensor_mag_ref_reset(); // Recompute magRef from new calibration
+							// fusion invalidation not necessary
 	int storage_err = sys_write(MAIN_MAG_BIAS_ID, &retained->magBAinv, m_inv, sizeof(retained->magBAinv));
 	magneto_online_feedback_storage(feedback, storage_err);
 	if (storage_err) {
@@ -384,11 +383,10 @@ int sensor_calibration_collect_accel_poses(float a_inv[][3], int *captured_count
 					captured_dirs[captured_count].y = curr_dir_y;
 					captured_dirs[captured_count].z = curr_dir_z;
 					break;
-				} else {
-					// Repeated orientations are normal attempts, not failures.
-					sensor_calibration_stage(feedback, LED_WAIT_MOVE);
-					k_msleep(100); // Debounce slightly
 				}
+				// Repeated orientations are normal attempts, not failures.
+				sensor_calibration_stage(feedback, LED_WAIT_MOVE);
+				k_msleep(100); // Debounce slightly
 			}
 			k_msleep(20);
 		}

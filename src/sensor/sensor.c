@@ -1085,9 +1085,8 @@ int sensor_scan(void)
 			LOG_ERR("IMU not supported");
 			set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
 			return -1; // an IMU was detected but not supported
-		} else {
-			sensor_imu = sensor_imus[imu_id];
 		}
+		sensor_imu = sensor_imus[imu_id];
 	} else {
 		sensor_scan_clear(); // clear invalid sensor data
 		sensor_imu = &sensor_imu_none;

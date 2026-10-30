@@ -41,13 +41,11 @@ static int imu_none_init(
 static void imu_none_shutdown(void)
 {
 	LOG_DBG("imu_none_shutdown, sensor has no IMU or IMU cannot be shutdown");
-	return;
 }
 
 static void imu_none_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)
 {
 	LOG_DBG("imu_none_update_fs, sensor has no IMU or IMU has no configurable FS");
-	return;
 }
 
 static int imu_none_update_odr(float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
@@ -71,13 +69,11 @@ static int imu_none_fifo_process(uint16_t index, uint8_t *data, float a[3], floa
 static void imu_none_accel_read(float a[3])
 {
 	LOG_DBG("imu_none_accel_read, sensor has no IMU or IMU has no direct data register");
-	return;
 }
 
 static void imu_none_gyro_read(float g[3])
 {
 	LOG_DBG("imu_none_gyro_read, sensor has no IMU or IMU has no direct data register");
-	return;
 }
 
 static float imu_none_temp_read(void)
@@ -134,7 +130,6 @@ static int mag_none_init(float time, float *actual_time)
 static void mag_none_shutdown(void)
 {
 	LOG_DBG("mag_none_shutdown, sensor has no magnetometer or magnetometer cannot be shutdown");
-	return;
 }
 
 static int mag_none_update_odr(float time, float *actual_time)
@@ -146,7 +141,6 @@ static int mag_none_update_odr(float time, float *actual_time)
 static void mag_none_mag_oneshot(void)
 {
 	LOG_DBG("mag_none_mag_oneshot, sensor has no magnetometer or magnetometer has no oneshot mode");
-	return;
 }
 
 static bool mag_none_mag_read(float m[3])
@@ -164,7 +158,6 @@ float mag_none_temp_read(float bias[3])
 static void mag_none_mag_process(uint8_t *raw_m, float m[3])
 {
 	LOG_DBG("mag_none_mag_process, sensor has no magnetometer");
-	return;
 }
 
 const sensor_mag_t sensor_mag_none

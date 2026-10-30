@@ -307,14 +307,13 @@ static int lsm6dsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float
 			g[i] *= gyro_sensitivity;
 		}
 		return 0;
-	} else {
-		for (int i = 0; i < 3; i++) // x, y, z
-		{
-			a[i] = (int16_t)((((uint16_t)packet[2 + (i * 2)]) << 8) | packet[1 + (i * 2)]);
-			a[i] *= accel_sensitivity;
-		}
-		return 0;
 	}
+	for (int i = 0; i < 3; i++) // x, y, z
+	{
+		a[i] = (int16_t)((((uint16_t)packet[2 + (i * 2)]) << 8) | packet[1 + (i * 2)]);
+		a[i] *= accel_sensitivity;
+	}
+	return 0;
 }
 
 /* Threshold is in fastest-stream samples. Mixed batches also include the slower stream. */
