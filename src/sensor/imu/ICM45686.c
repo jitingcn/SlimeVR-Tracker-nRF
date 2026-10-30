@@ -51,6 +51,9 @@ static uint8_t ext_read_ahead_len = 0;
 static bool ext_scanning_mode = true;
 static bool ext_prefetch_enabled = true;
 static int icm45_ext_drain_read_ahead(enum ssi_reporting reporting);
+
+// A 15-byte read is about 0.4 ms at 400 kHz; poll BUSY instead of a nominal delay.
+#define ICM45686_I2CM_POLL_US 50
 #endif
 
 // Cache the mean temperature of accepted-header packets in the latest FIFO read.
@@ -861,6 +864,7 @@ static int icm45_i2cm_wait_done(uint8_t *status, enum ssi_reporting reporting)
 			}
 			return -ETIMEDOUT;
 		}
+		k_usleep(ICM45686_I2CM_POLL_US);
 	}
 }
 

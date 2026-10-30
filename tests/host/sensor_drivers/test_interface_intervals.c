@@ -662,6 +662,25 @@ int main(void)
 
 	CHECK(test_seven_byte_frame_and_prefetch() == EXIT_SUCCESS);
 
+	const sensor_ext_ssi_t word_proxy = {
+		.ext_write = ext_write,
+		.ext_write_read = synchronous_write_read,
+		.ext_burst = 7,
+	};
+	reset_counts();
+	ext_capacity = 7;
+	sensor_interface_ext_configure(&word_proxy);
+	CHECK(sensor_interface_register_sensor_mag_ext(0x13, 3, 8) == 0);
+	uint8_t word_frame[8] = {0};
+	const uint8_t expected_words[] = {0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49};
+	CHECK(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x42, 0, 2, word_frame, sizeof(word_frame)) == 0);
+	CHECK(memcmp(word_frame, expected_words, sizeof(word_frame)) == 0);
+	CHECK(ext_read_calls == 2);
+	CHECK(ext_read_regs[0] == 0x42 && ext_read_lengths[0] == 6);
+	CHECK(ext_read_regs[1] == 0x48 && ext_read_lengths[1] == 2);
+	CHECK(host_log_error_count() == 0);
+	sensor_interface_ext_configure(NULL);
+
 	printf("All interface interval tests passed\n");
 	return EXIT_SUCCESS;
 }

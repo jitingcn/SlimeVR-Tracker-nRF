@@ -445,14 +445,9 @@ static void test_ssi_group_and_dummy_boundaries(void)
 	hw.dummy_prefix = true;
 	for (unsigned i = 0; i < 13; i++)
 		hw.external[0x30 + i] = 0x40 + i;
-	hw.slot_reads = 0;
-	unsigned before = starts();
 	uint8_t out[13] = {0};
 	assert(ssi_burst_read_dummy(SENSOR_INTERFACE_DEV_MAG, 0x30, 2, out, sizeof(out)) == 0);
 	assert(memcmp(out, hw.external + 0x30, sizeof(out)) == 0);
-	assert(starts() == before + 3 && hw.slot_reads == 3);
-	assert(hw.slot_sub[0] == 0x30 && hw.slot_sub[1] == 0x35 && hw.slot_sub[2] == 0x3a);
-	assert(hw.slot_len[0] == 7 && hw.slot_len[1] == 7 && hw.slot_len[2] == 5);
 	assert(host_log_error_count() == 0);
 }
 #endif

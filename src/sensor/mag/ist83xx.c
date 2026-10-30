@@ -106,6 +106,7 @@ int ist83xx_update_odr(struct ist83xx_state *state, float period_s, float *actua
 	state->last_mode_code = requested_mode_code;
 	state->oneshot_pending = false;
 	state->oneshot_failed = false;
+	mag_frame_reset(&state->frame_filter, period_s);
 	*actual_period_s = period_s;
 	return 0;
 error:
@@ -149,6 +150,14 @@ bool ist83xx_mag_read(struct ist83xx_state *state, float sensitivity, float m[3]
 			}
 		}
 		state->oneshot_pending = false;
+	} else if (sensor_interface_mag_free_running()) {
+		// Unobserved hub reads consume the read-clear DRDY; detect new data by payload.
+		if (state->last_mode_code == 0xff || state->last_mode_code == MODE_STANDBY
+			|| state->last_mode_code == MODE_SINGLE
+			|| ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, 0, 1, frame, sizeof(frame))
+			|| !mag_frame_is_new(&state->frame_filter, &frame[1], sizeof(frame) - 1)) {
+			return false;
+		}
 	} else {
 		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, IST8306_STAT, frame, sizeof(frame));
 		if (err) {

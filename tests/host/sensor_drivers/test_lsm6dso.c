@@ -578,7 +578,7 @@ static bool test_qmc_failed_sample(unsigned status_io_error)
 	CHECK(!qmc_mag_read(m));
 	CHECK(m[0] == 11.0f && m[1] == 22.0f && m[2] == 33.0f);
 	CHECK(hw.payload_reads == 0 && !hw.fail_status_once);
-	CHECK(host_log_matches_error("burst_read", "dev=MAG", "bus=EXT", "controller=imu-spi",
+	CHECK(host_log_matches_error("burst_read_frame", "dev=MAG", "bus=EXT", "controller=imu-spi",
 		0x7c, 0x01, status_io_error ? -EIO : -1));
 	host_log_reset();
 	hw.nack_start = 0;

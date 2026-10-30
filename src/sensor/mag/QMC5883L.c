@@ -212,7 +212,8 @@ bool qmc5883l_mag_read(float m[3])
 		}
 	}
 	uint8_t rawData[6];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, rawData, 6);
+	int err = was_oneshot ? ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, rawData, 6)
+			      : ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, QMC5883L_XOUT_L, 0, 2, rawData, 6);
 	if (err) {
 		goto read_error;
 	}

@@ -234,7 +234,8 @@ bool bmm1_mag_read(float m[3])
 		}
 	}
 	uint8_t rawData[8];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, BMM150_DATAX_LSB, &rawData[0], 8);
+	int err = was_oneshot ? ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, BMM150_DATAX_LSB, &rawData[0], 8)
+			      : ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, BMM150_DATAX_LSB, 0, 2, &rawData[0], 8);
 	if (err) {
 		return false;
 	}

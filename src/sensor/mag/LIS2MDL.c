@@ -4,6 +4,7 @@
 #include <zephyr/logging/log.h>
 
 #include "LIS2MDL.h"
+#include "mag_frame.h"
 
 static const float sensitivity = 1.5 / 1000; // ~1.5 mgauss/LSB -> 0.0015 G/LSB
 
@@ -11,6 +12,7 @@ static const float sensitivity = 1.5 / 1000; // ~1.5 mgauss/LSB -> 0.0015 G/LSB
 #define LIS2MDL_TURN_ON_MS 10
 
 static uint8_t last_cfg_a = 0xff;
+static struct mag_frame_filter frame_filter;
 
 LOG_MODULE_REGISTER(LIS2MDL, LOG_LEVEL_DBG);
 
@@ -150,6 +152,7 @@ int lis2_update_odr(float period_s, float *actual_period_s)
 	}
 
 	last_cfg_a = cfg_a;
+	mag_frame_reset(&frame_filter, period_s);
 	*actual_period_s = period_s;
 	return 0;
 error:
@@ -165,6 +168,16 @@ void lis2_mag_oneshot(void)
 bool lis2_mag_read(float m[3])
 {
 	uint8_t frame[7];
+	if (sensor_interface_mag_free_running()) {
+		// Unobserved hub reads consume the read-clear ZYXDA; detect new data by payload.
+		if (last_cfg_a == 0xff || (last_cfg_a & 0x03) != MD_CONTINUOUS
+			|| ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_STATUS_REG, 0, 1, frame, sizeof(frame))
+			|| !mag_frame_is_new(&frame_filter, &frame[1], sizeof(frame) - 1)) {
+			return false;
+		}
+		lis2_mag_process(&frame[1], m);
+		return true;
+	}
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS2MDL_STATUS_REG, frame, sizeof(frame));
 	if (err) {
 		return false;

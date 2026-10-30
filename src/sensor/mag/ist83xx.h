@@ -2,12 +2,14 @@
 #define IST83XX_H
 
 #include "sensor/sensor.h"
+#include "mag_frame.h"
 
 struct ist83xx_state {
 	uint8_t last_mode_code;
 	int64_t oneshot_trigger_ms;
 	bool oneshot_pending;
 	bool oneshot_failed;
+	struct mag_frame_filter frame_filter;
 };
 
 int ist83xx_init(struct ist83xx_state *state, bool drive_200, float period_s, float *actual_period_s);

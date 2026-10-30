@@ -29,8 +29,8 @@ static const sensor_ext_ssi_t *ext_ssi = NULL;
 
 static int ssi_report_error(enum sensor_interface_dev dev, const char *operation, int reg, int err)
 {
-	if (!err)
-		return 0;
+	if (!err || err == -EAGAIN)
+		return err;
 
 	const char *device = dev == SENSOR_INTERFACE_DEV_IMU ? "IMU" : "unknown";
 	const char *bus = "unknown";
@@ -99,7 +99,7 @@ struct spi_buf_set rx = {.buffers = rx_bufs, .count = 2};
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 // TODO: also keep reference to sensor device drivers (such as for ext mag)
 
-static int ssi_ext_read_segmented(uint8_t start_addr, uint8_t dummy_bytes, uint8_t *buf, uint32_t num_bytes)
+static int ssi_ext_read_segmented(uint8_t start_addr, uint8_t dummy_bytes, uint8_t word_bytes, uint8_t *buf, uint32_t num_bytes)
 {
 	if (ext_ssi == NULL)
 		return -1;
@@ -114,7 +114,9 @@ static int ssi_ext_read_segmented(uint8_t start_addr, uint8_t dummy_bytes, uint8
 	if (dummy_bytes >= data_cap)
 		return -1;
 
-	uint8_t data_per_chunk = data_cap - dummy_bytes;
+	uint8_t data_per_chunk = (data_cap - dummy_bytes) / word_bytes * word_bytes;
+	if (data_per_chunk == 0)
+		return -1;
 	size_t offset = 0;
 	while (offset < num_bytes)
 	{
@@ -247,6 +249,12 @@ int sensor_interface_ext_set_prefetch(bool enabled)
 	int err = ext_ssi == NULL ? -1 :
 		(ext_ssi->ext_set_prefetch ? ext_ssi->ext_set_prefetch(enabled) : 0);
 	return ssi_report_error(SENSOR_INTERFACE_DEV_MAG, "prefetch", -1, err);
+}
+
+bool sensor_interface_mag_free_running(void)
+{
+	return sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] == SENSOR_INTERFACE_SPEC_EXT && ext_ssi != NULL
+		&& ext_ssi->ext_free_running;
 }
 #endif
 
@@ -387,7 +395,7 @@ static int ssi_write_read_unreported(enum sensor_interface_dev dev, const void *
 		if (num_read <= ext_ssi->ext_burst)
 			return ext_ssi->ext_write_read(ext_addr, write_buf, num_write, read_buf, num_read);
 		/* Longer than one I2CM transaction: segment by register-data length. */
-		return ssi_ext_read_segmented(((const uint8_t *)write_buf)[0], 0, read_buf, num_read);
+		return ssi_ext_read_segmented(((const uint8_t *)write_buf)[0], 0, 1, read_buf, num_read);
 #endif
 	default:
 		return -1;
@@ -415,42 +423,63 @@ int ssi_burst_read(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t *b
 	return ssi_burst_read_io(dev, start_addr, buf, num_bytes, SSI_REPORT);
 }
 
-int ssi_burst_read_dummy(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t dummy_bytes, uint8_t *buf, uint32_t num_bytes)
+static int ssi_burst_read_words(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t dummy_bytes, uint8_t word_bytes, uint8_t *buf, uint32_t num_bytes)
 {
-	if (dummy_bytes == 0)
-		return ssi_report_error(dev, "burst_read_dummy", start_addr,
-					ssi_burst_read_io(dev, start_addr, buf, num_bytes, SSI_UNREPORTED));
+	if (word_bytes == 0)
+		return -EINVAL;
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	/* On the external (I2CM) interface the interface layer owns segmentation:
 	 * it advances the sub-register per data chunk and strips the per-chunk
 	 * dummy prefix, so >burst register reads are merged transparently. */
 	if (sensor_interface_dev_spec[dev] == SENSOR_INTERFACE_SPEC_EXT)
-		return ssi_report_error(dev, "burst_read_dummy", start_addr,
-					ssi_ext_read_segmented(start_addr, dummy_bytes, buf, num_bytes));
+		return ssi_ext_read_segmented(start_addr, dummy_bytes, word_bytes, buf, num_bytes);
 #endif
+	if (dummy_bytes == 0)
+		return ssi_burst_read_io(dev, start_addr, buf, num_bytes, SSI_UNREPORTED);
 
 	uint8_t tmp[16];
+	if (dummy_bytes >= sizeof(tmp))
+		return -1;
+	uint32_t max_chunk = (sizeof(tmp) - dummy_bytes) / word_bytes * word_bytes;
+	if (max_chunk == 0)
+		return -1;
 	uint32_t offset = 0;
 	while (offset < num_bytes)
 	{
 		// Each segment has its own dummy prefix, so only bytes after the prefix are copied out.
-		uint32_t transfer_len = dummy_bytes + (num_bytes - offset);
-		if (transfer_len > sizeof(tmp))
-			transfer_len = sizeof(tmp);
-		if (transfer_len <= dummy_bytes)
-			return ssi_report_error(dev, "burst_read_dummy", start_addr, -1);
-
-		int err = ssi_burst_read_io(dev, start_addr + offset, tmp, transfer_len, SSI_UNREPORTED);
+		uint32_t chunk = num_bytes - offset;
+		if (chunk > max_chunk)
+			chunk = max_chunk;
+		int err = ssi_burst_read_io(dev, start_addr + offset, tmp, dummy_bytes + chunk, SSI_UNREPORTED);
 		if (err)
-			return ssi_report_error(dev, "burst_read_dummy", start_addr, err);
-
-		uint32_t chunk = transfer_len - dummy_bytes;
+			return err;
 		memcpy(buf + offset, tmp + dummy_bytes, chunk);
 		offset += chunk;
 	}
 
 	return 0;
+}
+
+int ssi_burst_read_dummy(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t dummy_bytes, uint8_t *buf, uint32_t num_bytes)
+{
+	return ssi_report_error(dev, "burst_read_dummy", start_addr,
+				ssi_burst_read_words(dev, start_addr, dummy_bytes, 1, buf, num_bytes));
+}
+
+int ssi_burst_read_frame(enum sensor_interface_dev dev, uint8_t start_addr, uint8_t dummy_bytes, uint8_t word_bytes, uint8_t *buf, uint32_t num_bytes)
+{
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+	if (sensor_interface_dev_spec[dev] == SENSOR_INTERFACE_SPEC_EXT && ext_ssi != NULL && ext_ssi->ext_read_frame != NULL
+	    && word_bytes != 0 && num_bytes <= UINT8_MAX)
+	{
+		int err = ext_ssi->ext_read_frame(ext_addr, start_addr, dummy_bytes, word_bytes, buf, num_bytes);
+		if (err != -E2BIG)
+			return ssi_report_error(dev, "burst_read_frame", start_addr, err);
+	}
+#endif
+	return ssi_report_error(dev, "burst_read_frame", start_addr,
+				ssi_burst_read_words(dev, start_addr, dummy_bytes, word_bytes, buf, num_bytes));
 }
 
 static int ssi_burst_write_unreported(enum sensor_interface_dev dev, uint8_t start_addr, const uint8_t *buf, uint32_t num_bytes)

@@ -244,7 +244,8 @@ bool qmc_mag_read(float m[3])
 		}
 	}
 	uint8_t rawData[6];
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6);
+	int err = was_oneshot ? ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, rawData, 6)
+			      : ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, QMC6309_OUTX_L_REG, 0, 2, rawData, 6);
 	if (err) {
 		return false;
 	}

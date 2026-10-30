@@ -3,9 +3,11 @@
 #include <zephyr/logging/log.h>
 
 #include "AK09940.h"
+#include "mag_frame.h"
 
 static const float sensitivity = 10; // nT/LSB
 
+static struct mag_frame_filter frame_filter;
 static uint8_t last_mode_code = 0xff;
 static int64_t oneshot_trigger_ms = 0;
 static bool oneshot_pending;
@@ -95,6 +97,7 @@ int ak_update_odr(float period_s, float *actual_period_s)
 	last_mode_code = requested_mode_code;
 	oneshot_pending = false;
 	oneshot_failed = false;
+	mag_frame_reset(&frame_filter, period_s);
 	*actual_period_s = period_s;
 	return 0;
 }
@@ -117,6 +120,7 @@ bool ak_mag_read(float m[3])
 	}
 
 	uint8_t frame[12];
+	bool free_running = false;
 	if (oneshot_pending) {
 		/* LND2 takes up to 3.1 ms; allow for the millisecond trigger quantization. */
 		int64_t deadline_ms = oneshot_trigger_ms + 5;
@@ -136,6 +140,15 @@ bool ak_mag_read(float m[3])
 			}
 		}
 		oneshot_pending = false;
+	} else if (sensor_interface_mag_free_running()) {
+		// Unobserved hub reads consume the read-clear DRDY; detect new data by payload below.
+		if (last_mode_code == 0xff || last_mode_code == MODE_PDM || last_mode_code == MODE_SMM) {
+			return false;
+		}
+		if (ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, AK09940_ST1, 0, 1, frame, sizeof(frame))) {
+			return false;
+		}
+		free_running = true;
 	} else {
 		int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, AK09940_ST1, frame, sizeof(frame));
 		if (err) {
@@ -155,6 +168,9 @@ bool ak_mag_read(float m[3])
 		if (raw == 0x1ffff) {
 			return false;
 		}
+	}
+	if (free_running && !mag_frame_is_new(&frame_filter, &frame[1], 9)) {
+		return false;
 	}
 	ak_mag_process(&frame[1], m);
 	return true;

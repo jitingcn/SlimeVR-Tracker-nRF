@@ -560,15 +560,19 @@ static void test_elapsed_deadline(void)
 		assert(read_sample(0x08, &out, 1) == -ETIMEDOUT);
 		assert(out == 0xa5 && hw.go_count == 1 && hw.data_reads == 0);
 		uint64_t poll_start = 0;
+		unsigned polls = 0;
 		for (unsigned j = first; j < hw.record_count; j++) {
 			const struct bus_record *r = &hw.records[j];
 			if (r->kind == ADDRESS && r->address == TOP(ICM45686_I2CM_STATUS) && r->at >= hw.go_at) {
-				poll_start = r->at;
-				break;
+				if (!poll_start)
+					poll_start = r->at;
+				polls++;
 			}
 		}
 		assert(poll_start);
 		assert(poll_start <= hw.go_at + 8); /* No nominal AUX pre-delay. */
+		/* BUSY polls yield between reads instead of spinning on the bus. */
+		assert(polls <= 10000 / (50 + 2 * hw.latency) + 4);
 		/* Millisecond uptime may round the start down by 999us. A physical
 		 * STATUS read is two host transfers with two mandatory 4us gaps. */
 		uint64_t elapsed = hw.now - poll_start;

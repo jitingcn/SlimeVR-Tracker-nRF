@@ -39,8 +39,10 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <zephyr/logging/log.h>
 
 #include "BMM350.h"
+#include "mag_frame.h"
 
 #define BMM350_OTP_WORDS 32
+#define BMM350_TEMP_REFRESH_MS 1000
 #define BMM350_XY_SENSITIVITY 0.007069979f
 #define BMM350_Z_SENSITIVITY 0.007174964f
 #define BMM350_TEMP_SENSITIVITY 0.000981282f
@@ -65,6 +67,8 @@ static float last_temperature_c = 25.0f;
 static uint16_t last_state = UINT16_MAX;
 static bool oneshot_pending;
 static bool oneshot_failed;
+static struct mag_frame_filter frame_filter;
+static int64_t temperature_refresh_ms;
 
 LOG_MODULE_REGISTER(BMM350, LOG_LEVEL_DBG);
 
@@ -254,6 +258,8 @@ int bmm3_init(float time, float *actual_time)
 	oneshot_failed = false;
 	compensation_valid = false;
 	last_temperature_c = 25.0f;
+	temperature_refresh_ms = 0;
+	mag_frame_reset(&frame_filter, 0.0f);
 
 	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, BMM350_CMD, BMM350_CMD_SOFTRESET);
 	if (err) {
@@ -415,6 +421,7 @@ int bmm3_update_odr(float time, float *actual_time)
 	last_state = state;
 	oneshot_pending = false;
 	oneshot_failed = false;
+	mag_frame_reset(&frame_filter, target_mode == PMU_CMD_NM ? time : 0.0f);
 	*actual_time = time;
 	return 0;
 
@@ -431,6 +438,39 @@ void bmm3_mag_oneshot(void)
 	oneshot_failed = err != 0;
 }
 
+/*
+ * A free-running hub reads INT_STATUS unobserved, consuming its read-clear
+ * DRDY, and the 13-byte status frame needs 19 hub bytes with per-slot dummy
+ * prefixes. Read XYZ in whole axes from a data address instead: BMM350 halts
+ * data updates only during a burst that starts at a data register.
+ */
+static bool bmm3_mag_read_free_running(float m[3])
+{
+	uint8_t xyz[9];
+	if (ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, BMM350_MAG_X_XLSB, 2, 3, xyz, sizeof(xyz))) {
+		return false;
+	}
+	if (!mag_frame_is_new(&frame_filter, xyz, sizeof(xyz))) {
+		return false;
+	}
+	int64_t now = k_uptime_get();
+	if (temperature_refresh_ms == 0 || now - temperature_refresh_ms >= BMM350_TEMP_REFRESH_MS) {
+		uint8_t raw[3];
+		if (!bmm3_read(BMM350_TEMP_XLSB, raw, sizeof(raw))) {
+			last_temperature_c = bmm3_compensate_temperature(decode_s24(raw));
+			temperature_refresh_ms = now;
+		}
+	}
+	float next_m[3];
+	if (!bmm3_compensate_mag(xyz, last_temperature_c, next_m)) {
+		return false;
+	}
+	m[0] = next_m[0];
+	m[1] = next_m[1];
+	m[2] = next_m[2];
+	return true;
+}
+
 bool bmm3_mag_read(float m[3])
 {
 	if (!compensation_valid) {
@@ -440,6 +480,12 @@ bool bmm3_mag_read(float m[3])
 		oneshot_pending = false;
 		oneshot_failed = false;
 		return false;
+	}
+	if (!oneshot_pending && sensor_interface_mag_free_running()) {
+		if (last_state == UINT16_MAX || (last_state >> 8) != PMU_CMD_NM) {
+			return false;
+		}
+		return bmm3_mag_read_free_running(m);
 	}
 
 	/* Normal forced mode can take about 30 ms with eight-sample averaging. */

@@ -14,10 +14,12 @@
 #include <zephyr/logging/log.h>
 
 #include "MMC5983MA.h"
+#include "mag_frame.h"
 
 static const float sensitivity = (1.0f / 16384.0f); // mag sensitivity if using 18 bit data (16384 Counts/G)
 static const float offset = 131072.0f;              // mag range unsigned to signed
 
+static struct mag_frame_filter frame_filter;
 static uint16_t last_state = 0xffff;
 static float last_continuous_period_s = 0;
 static uint8_t last_offset_temperature_raw = 0xff;
@@ -138,6 +140,7 @@ int mmc_update_odr(float period_s, float *actual_period_s)
 	oneshot_trigger_ms = 0;
 	oneshot_pending = false;
 	oneshot_failed = false;
+	mag_frame_reset(&frame_filter, odr_code != MODR_ONESHOT ? period_s : 0.0f);
 	if (period_s == 0 || (period_s > 0 && period_s < INFINITY)) {
 		last_continuous_period_s = period_s;
 	}
@@ -166,6 +169,7 @@ void mmc_mag_oneshot(void)
 
 bool mmc_mag_read(float m[3])
 {
+	bool was_oneshot = oneshot_pending;
 	if (oneshot_pending) {
 		if (oneshot_failed) {
 			oneshot_pending = false;
@@ -189,18 +193,21 @@ bool mmc_mag_read(float m[3])
 				oneshot_pending = false;
 				return false;
 			}
+			k_usleep(100);
 		}
 		oneshot_pending = false;
+	} else if (last_state == 0xffff || (last_state & 0xff) == MODR_ONESHOT) {
+		return false;
 	}
 
 	uint8_t rawData[7]; // x/y/z mag register data stored here
-	int err = ssi_burst_read(
-		SENSOR_INTERFACE_DEV_MAG,
-		MMC5983MA_XOUT_0,
-		&rawData[0],
-		7
-	); // Read the 7 raw data registers into data array
+	int err = was_oneshot ? ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, MMC5983MA_XOUT_0, rawData, sizeof(rawData))
+			      : ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, MMC5983MA_XOUT_0, 0, 1, rawData, sizeof(rawData));
 	if (err) {
+		return false;
+	}
+	// Continuous output has no data-ready bit; the read schedule can repeat a sample.
+	if (!was_oneshot && !mag_frame_is_new(&frame_filter, rawData, sizeof(rawData))) {
 		return false;
 	}
 	mmc_mag_process(rawData, m);

@@ -3,9 +3,11 @@
 #include <zephyr/logging/log.h>
 
 #include "LIS3MDL.h"
+#include "mag_frame.h"
 
 static const float sensitivity = 1.0 / 3421; // Always 8G (FS = ±8 gauss: 3421 LSB/Gauss)
 
+static struct mag_frame_filter frame_filter;
 static uint16_t last_state = 0xffff;
 static bool oneshot_pending;
 static bool oneshot_failed;
@@ -145,6 +147,7 @@ int lis3_update_odr(float period_s, float *actual_period_s)
 	last_state = state;
 	oneshot_pending = false;
 	oneshot_failed = false;
+	mag_frame_reset(&frame_filter, mode_code == MD_CONTINUOUS_CONV ? period_s : 0.0f);
 	*actual_period_s = period_s;
 	return 0;
 error:
@@ -164,6 +167,7 @@ void lis3_mag_oneshot(void)
 
 bool lis3_mag_read(float m[3])
 {
+	bool was_oneshot = oneshot_pending;
 	if (oneshot_pending) {
 		if (oneshot_failed) {
 			oneshot_pending = false;
@@ -190,6 +194,15 @@ bool lis3_mag_read(float m[3])
 	}
 
 	uint8_t frame[7];
+	if (!was_oneshot && sensor_interface_mag_free_running()) {
+		// Unobserved hub reads consume the read-clear ZYXDA; detect new data by payload.
+		if (ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_STATUS_REG, 0, 1, frame, sizeof(frame))
+			|| !mag_frame_is_new(&frame_filter, &frame[1], sizeof(frame) - 1)) {
+			return false;
+		}
+		lis3_mag_process(&frame[1], m);
+		return true;
+	}
 	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, LIS3MDL_STATUS_REG, frame, sizeof(frame));
 	if (err) {
 		return false;

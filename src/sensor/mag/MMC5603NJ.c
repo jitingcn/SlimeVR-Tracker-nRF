@@ -5,10 +5,12 @@
 #include <zephyr/logging/log.h>
 
 #include "MMC5603NJ.h"
+#include "mag_frame.h"
 
 static const float sensitivity = (1.0f / 16384.0f); // mag sensitivity if using 20 bit data (16384 Counts/G)
 static const float offset = 524288.0f;              // mag range unsigned to signed
 
+static struct mag_frame_filter frame_filter;
 static uint16_t last_state = 0xffff;
 static float last_continuous_period_s = 0;
 static uint8_t last_offset_temperature_raw = 0xff;
@@ -60,7 +62,7 @@ void mmc5603_shutdown(void)
 
 int mmc5603_update_odr(float period_s, float *actual_period_s)
 {
-	int requested_odr_hz; // Truncate fractional Hz before selecting a supported rate.
+	int requested_odr_hz; // Raise fractional Hz to the next integer ODR.
 	uint8_t odr_code;
 	uint8_t bandwidth_code;
 	uint8_t high_power_bit = 0;
@@ -68,44 +70,29 @@ int mmc5603_update_odr(float period_s, float *actual_period_s)
 
 	if (period_s <= 0 || period_s == INFINITY) { // off interpreted as oneshot
 		requested_odr_hz = 0;
+	} else if (period_s < 1.0f / 1000) {
+		requested_odr_hz = 1000;
 	} else {
-		requested_odr_hz = 1 / period_s;
+		requested_odr_hz = (int)ceilf(1 / period_s - 0.001f);
 	}
 
+	// The ODR register takes any integer rate in 1..255 Hz. Each bandwidth
+	// is kept at or below about half active time.
 	if (requested_odr_hz > 255) { // 1000Hz*1.2ms/1000ms = 120% active, hpower required
 		odr_code = 255;
 		bandwidth_code = MBW_1_2ms;
 		high_power_bit = MCTRL2_HPOWER;
 		period_s = 1.0 / 1000;
-	} else if (requested_odr_hz > 150) // Nominal working state, this should use as low power as possible
-	{                                  // 255Hz*2ms/1000ms = 51% active
-		odr_code = 255;
-		bandwidth_code = MBW_2_0ms;
-		period_s = 1.0 / 255;
-	} else if (requested_odr_hz > 75) { // 150Hz*3.5ms/1000ms = 52% active
-		odr_code = 150;
-		bandwidth_code = MBW_3_5ms;
-		period_s = 1.0 / 150;
-	} else if (requested_odr_hz > 50) { // 75Hz*6.6ms/1000ms = 50% active
-		odr_code = 75;
-		bandwidth_code = MBW_6_6ms; // 1.5mG RMS noise
-		period_s = 1.0 / 75;
-	} else if (requested_odr_hz > 20) { // 50Hz*6.6ms/1000ms = 33% active
-		odr_code = 50;
-		bandwidth_code = MBW_6_6ms;
-		period_s = 1.0 / 50;
-	} else if (requested_odr_hz > 10) { // 20Hz*6.6ms/1000ms = 13% active
-		odr_code = 20;
-		bandwidth_code = MBW_6_6ms;
-		period_s = 1.0 / 20;
-	} else if (requested_odr_hz > 1) { // 10Hz*6.6ms/1000ms = 7% active
-		odr_code = 10;
-		bandwidth_code = MBW_6_6ms;
-		period_s = 1.0 / 10;
-	} else if (requested_odr_hz > 0) { // 1Hz*6.6ms/1000ms = 0.7% active
-		odr_code = 1;
-		bandwidth_code = MBW_6_6ms;
-		period_s = 1.0 / 1;
+	} else if (requested_odr_hz > 0) {
+		odr_code = requested_odr_hz;
+		if (requested_odr_hz > 150) { // 255Hz*2ms/1000ms = 51% active
+			bandwidth_code = MBW_2_0ms;
+		} else if (requested_odr_hz > 75) { // 150Hz*3.5ms/1000ms = 52% active
+			bandwidth_code = MBW_3_5ms;
+		} else { // 75Hz*6.6ms/1000ms = 50% active, 1.5mG RMS noise
+			bandwidth_code = MBW_6_6ms;
+		}
+		period_s = 1.0f / odr_code;
 	} else { // oneshot uses the fastest measurement time
 		odr_code = 0;
 		bandwidth_code = MBW_1_2ms;
@@ -148,6 +135,7 @@ int mmc5603_update_odr(float period_s, float *actual_period_s)
 	oneshot_trigger_ms = 0;
 	oneshot_pending = false;
 	oneshot_failed = false;
+	mag_frame_reset(&frame_filter, odr_code ? period_s : 0.0f);
 	if (period_s == 0 || (period_s > 0 && period_s < INFINITY)) {
 		last_continuous_period_s = period_s;
 	}
@@ -177,6 +165,7 @@ void mmc5603_mag_oneshot(void)
 
 bool mmc5603_mag_read(float m[3])
 {
+	bool was_oneshot = oneshot_pending;
 	if (oneshot_pending) {
 		if (oneshot_failed) {
 			oneshot_pending = false;
@@ -200,18 +189,21 @@ bool mmc5603_mag_read(float m[3])
 				oneshot_pending = false;
 				return false;
 			}
+			k_usleep(100);
 		}
 		oneshot_pending = false;
+	} else if (last_state == 0xffff || (last_state & 0xff) == 0) {
+		return false;
 	}
 
 	uint8_t rawData[9]; // x/y/z mag register data stored here
-	int err = ssi_burst_read(
-		SENSOR_INTERFACE_DEV_MAG,
-		MMC5603NJ_XOUT_0,
-		&rawData[0],
-		9
-	); // Read the 9 raw data registers into data array
+	int err = was_oneshot ? ssi_burst_read(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_XOUT_0, rawData, sizeof(rawData))
+			      : ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, MMC5603NJ_XOUT_0, 0, 1, rawData, sizeof(rawData));
 	if (err) {
+		return false;
+	}
+	// Continuous output has no data-ready bit; the read schedule can repeat a sample.
+	if (!was_oneshot && !mag_frame_is_new(&frame_filter, rawData, sizeof(rawData))) {
 		return false;
 	}
 	mmc5603_mag_process(rawData, m);
