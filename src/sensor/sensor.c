@@ -1504,8 +1504,6 @@ static void sensor_log_retained_state(void)
 	);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (mag_available && mag_enabled) {
-		//		LOG_INF("Magnetometer bridge offset: %.5f %.5f %.5f", (double)retained->magBias[0],
-		//(double)retained->magBias[1], (double)retained->magBias[2]);
 		LOG_INF("Magnetometer matrix:");
 		for (int i = 0; i < 3; i++) {
 			LOG_INF(

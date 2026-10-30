@@ -60,7 +60,6 @@
 #endif
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-static float magBias[3] = {0};
 float magBAinv[4][3];
 #endif
 
@@ -373,8 +372,6 @@ bool sensor_calibration_gyro_reference_pending(void)
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 void sensor_calibration_process_mag(float m[3])
 {
-	//	for (int i = 0; i < 3; i++)
-	//		m[i] -= magBias[i];
 	sensor_sample_mag(m);
 	float snap[4][3];
 	magneto_online_snapshot_BAinv(snap);
@@ -393,10 +390,6 @@ void sensor_calibration_read(void)
 	 * or fusion use. Sensitivity axes are independent: preserve valid gains. */
 	bool healed = false;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	if (!v_finite(retained->magBias, 3)) {
-		memset(retained->magBias, 0, sizeof(retained->magBias));
-		healed = true;
-	}
 	bool retained_mag_valid = mag_bainv_structurally_ok(retained->magBAinv, 0.0f);
 	if (!retained_mag_valid) {
 		static const float empty_matrix[4][3];
@@ -432,9 +425,6 @@ void sensor_calibration_read(void)
 		retained_update();
 #endif
 	}
-#if CONFIG_SENSOR_USE_MAGNETOMETER
-	memcpy(magBias, retained->magBias, sizeof(magBias));
-#endif
 	sensor_calibration_imu_load();
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	if (retained->mag_online_calibration_mode > MAG_ONLINE_CALIBRATION_DISABLED) {

@@ -25,7 +25,7 @@ struct retained_data *retained = &storage;
 static bool warm_boot, ram_retention_valid;
 static unsigned nvs_reads, retained_updates, imu_loads, model_restores, model_configures, online_loads;
 static bool configured_online;
-static float live_matrix[4][3], pending_matrix[4][3], magBias[3];
+static float live_matrix[4][3], pending_matrix[4][3];
 static bool defer_replacement;
 static struct { uint16_t addr; } sensor_imu_dev, sensor_mag_dev;
 static uint8_t sensor_imu_dev_reg, sensor_mag_dev_reg;
@@ -101,7 +101,6 @@ static void sys_read(uint16_t id, void *data, size_t size)
 
 static void magnetic_equal(const struct retained_data *expected)
 {
-    assert(memcmp(retained->magBias, expected->magBias, sizeof(retained->magBias)) == 0);
     assert(memcmp(retained->magBAinv, expected->magBAinv, sizeof(retained->magBAinv)) == 0);
     assert(retained->mag_enabled == expected->mag_enabled);
     assert(retained->mag_online_calibration_mode == expected->mag_online_calibration_mode);
@@ -120,7 +119,6 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
     storage.mag_reg = 0x4f;
     storage.magBAinv[0][0] = 0.25f;
     storage.magBAinv[1][0] = storage.magBAinv[2][1] = storage.magBAinv[3][2] = 1.0f;
-    storage.magBias[0] = -0.125f;
     storage.onlineMagState.last_buf_avg_norm = 0.5f;
     storage.onlineMagState.update_count = 17;
     storage.onlineMagState.reserved[0] = 0x31;
@@ -136,7 +134,6 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
     if (kind == MAG_NONFINITE) {
         uint32_t nan = 0x7fc12345;
         memcpy(&storage.magBAinv[2][1], &nan, sizeof(nan));
-        memcpy(&storage.magBias[0], &nan, sizeof(nan));
     } else if (kind == MAG_SINGULAR) {
         storage.magBAinv[2][1] = 0;
     } else if (kind == MAG_EMPTY) {
@@ -147,7 +144,6 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
     flash = storage;
     struct retained_data expected = storage;
     if (!warm) {
-        memset(expected.magBias, 0, sizeof(expected.magBias));
         expected.mag_addr = 0;
         expected.mag_reg = 0;
         memset(&expected.onlineMagState, 0, sizeof(expected.onlineMagState));
@@ -189,7 +185,6 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
         assert(!memcmp(retained->magBAinv, zero_matrix, sizeof(zero_matrix)));
         assert(!memcmp(&retained->onlineMagState, zero_metadata, sizeof(zero_metadata)));
         assert(!memcmp(deferred ? pending_matrix : live_matrix, zero_matrix, sizeof(zero_matrix)));
-        if (kind == MAG_NONFINITE) assert(retained->magBias[0] == 0);
     } else {
         assert((deferred ? pending_matrix : live_matrix)[1][0] == 1);
         if (warm) assert(retained->onlineMagState.update_count == 17);
