@@ -95,7 +95,7 @@ static bool curve_sloped;
 static float model_shift;
 static unsigned lock_depth;
 #define K_FOREVER (-1)
-#define K_MUTEX_DEFINE(name) static unsigned name
+#define K_MUTEX_DEFINE(name) unsigned name
 static int k_mutex_lock(unsigned *mutex, int timeout) {
     (void)timeout;
     (*mutex)++; lock_depth++;

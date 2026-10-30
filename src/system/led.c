@@ -19,8 +19,8 @@ static uint32_t request_counter, event_counter;
 #ifdef CONFIG_LED_DEBUG
 static enum led_time_source clock_source;
 #endif
-K_SEM_DEFINE(led_changed, 0, 1);
-K_SEM_DEFINE(led_quiesced, 0, 1);
+static K_SEM_DEFINE(led_changed, 0, 1);
+static K_SEM_DEFINE(led_quiesced, 0, 1);
 static void led_thread(void);
 K_THREAD_DEFINE(led_thread_id, CONFIG_LED_THREAD_STACK_SIZE, led_thread, NULL, NULL, NULL, LED_THREAD_PRIORITY, 0, 0);
 

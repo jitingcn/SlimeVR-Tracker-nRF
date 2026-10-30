@@ -9,7 +9,7 @@ static bool sensor_peek_accel(float a[3]) {
     a[0] = a[1] = 0.0f; a[2] = 1.0f;
     return true;
 }
-K_MUTEX_DEFINE(calibration_request_lock);
+static K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
 static unsigned requested_operation, requested_generation;
 static uint8_t magneto_progress;

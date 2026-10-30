@@ -518,7 +518,7 @@ with tempfile.TemporaryDirectory(prefix='sensor-fast-') as directory:
     # Link the actual startup, writer, snapshot and feed bodies to pthread and
     # gated NVS leaves. Timeout only bounds a regression to a blocking reader.
     system = (ROOT / 'src/system/system.c').read_text()
-    globals_start = sensitivity.index('K_MUTEX_DEFINE(sensitivity_lock);')
+    globals_start = re.search(r'^(?:static )?K_MUTEX_DEFINE\(sensitivity_lock\);', sensitivity, re.MULTILINE).start()
     globals_end = sensitivity.index('\n#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION', globals_start)
     contention_parts = [
         sensitivity[globals_start:globals_end], snapshot_state,

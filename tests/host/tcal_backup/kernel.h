@@ -40,7 +40,7 @@ static void k_spin_unlock(struct k_spinlock *s, k_spinlock_key_t key) {
     (void)key; assert(s->held); s->held = false;
 }
 #define K_FOREVER (-1)
-#define K_MUTEX_DEFINE(name) static pthread_mutex_t name = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
+#define K_MUTEX_DEFINE(name) pthread_mutex_t name = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
 static unsigned lock_depth;
 static int k_mutex_lock(pthread_mutex_t *mutex, int timeout) {
     assert(!in_irq);

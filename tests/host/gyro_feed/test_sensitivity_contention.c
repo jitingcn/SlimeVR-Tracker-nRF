@@ -13,7 +13,7 @@
 
 #define K_FOREVER (-1)
 #define K_NO_WAIT 0
-#define K_MUTEX_DEFINE(name) static pthread_mutex_t name = PTHREAD_MUTEX_INITIALIZER
+#define K_MUTEX_DEFINE(name) pthread_mutex_t name = PTHREAD_MUTEX_INITIALIZER
 #define MAIN_GYRO_SENS_ID 1
 #define LOG_ERR(...) ((void)0)
 #define LOG_WRN(...) ((void)0)

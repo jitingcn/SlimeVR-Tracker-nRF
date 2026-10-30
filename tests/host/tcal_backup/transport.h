@@ -41,7 +41,7 @@ static int k_msgq_get(struct k_msgq *q,void *m,int timeout) {
     memcpy(m,q->data+q->head*q->size,q->size);q->head=(q->head+1)%q->capacity;q->count--;return 0;
 }
 struct k_sem { unsigned count, limit; };
-#define K_SEM_DEFINE(name,initial,maximum) static struct k_sem name={initial,maximum}
+#define K_SEM_DEFINE(name,initial,maximum) struct k_sem name={initial,maximum}
 static void k_sem_give(struct k_sem *s) { if(s->count<s->limit)s->count++; }
 static int k_sem_take(struct k_sem *s,int timeout) {
     if(s->count){s->count--;return 0;} if(timeout!=K_NO_WAIT)longjmp(worker_idle,1);return -EAGAIN;

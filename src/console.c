@@ -160,7 +160,7 @@ static STRUCT_SECTION_ITERABLE(k_msgq, console_line_msgq) =
 		sizeof(struct console_line_message), CONSOLE_LINE_QUEUE_DEPTH);
 #if CONFIG_SENSOR_USE_TCAL
 /* Separate from the bounded command queue: completion/close cannot be lost. */
-K_SEM_DEFINE(console_input_wake, 0, 1);
+static K_SEM_DEFINE(console_input_wake, 0, 1);
 #endif
 
 static struct console_input_state console_input;

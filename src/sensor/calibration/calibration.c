@@ -63,7 +63,7 @@
 float magBAinv[4][3];
 #endif
 
-K_MUTEX_DEFINE(calibration_request_lock);
+static K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
 static uint16_t requested_operation;
 static struct led_token requested_feedback;

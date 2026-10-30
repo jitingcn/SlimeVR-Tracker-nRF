@@ -103,7 +103,7 @@ static bool ping_transaction_schedule_valid;
 static atomic_t ping_transaction_pending;
 static bool user_capture_active;
 static bool capture_initialized;
-K_MUTEX_DEFINE(capture_metrics_lock);
+static K_MUTEX_DEFINE(capture_metrics_lock);
 
 static uint8_t metric_index(uint8_t payload_length)
 {

@@ -38,7 +38,7 @@
 
 LOG_MODULE_REGISTER(cal_tcal_mls_lut, LOG_LEVEL_INF);
 
-K_MUTEX_DEFINE(tcal_mutex);
+static K_MUTEX_DEFINE(tcal_mutex);
 static uint32_t model_generation;
 static float build_temperature;
 static bool build_temperature_valid;

@@ -275,9 +275,9 @@ static atomic_t main_suspended;
  * activity mutex is held by the loop from before initialization through each
  * complete iteration; a suspend is successful only after acquiring it.
  */
-K_MUTEX_DEFINE(sensor_lifecycle_lock);
-K_MUTEX_DEFINE(sensor_activity_lock);
-K_SEM_DEFINE(sensor_loop_gate, 0, 1);
+static K_MUTEX_DEFINE(sensor_lifecycle_lock);
+static K_MUTEX_DEFINE(sensor_activity_lock);
+static K_SEM_DEFINE(sensor_loop_gate, 0, 1);
 static atomic_t sensor_loop_stop;
 /* Existing static power thread is the only owner after terminal shutdown. */
 extern const k_tid_t power_thread_id;
@@ -337,7 +337,7 @@ bool main_imu_is_suspended(void)
 static bool main_running = false;
 
 /* Idle publication also serves the calibration scheduling hint. */
-K_EVENT_DEFINE(sensor_life_events);
+static K_EVENT_DEFINE(sensor_life_events);
 #define SENSOR_LIFE_IDLE BIT(0)
 
 static int sensor_life_events_init(void)

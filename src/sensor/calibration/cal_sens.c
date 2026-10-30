@@ -39,7 +39,7 @@
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 /* Serialize explicit replacements with the measurement's final application. */
-K_MUTEX_DEFINE(sensitivity_lock);
+static K_MUTEX_DEFINE(sensitivity_lock);
 static uint32_t sensitivity_generation;
 static uint16_t sensitivity_operation;
 static struct led_token sensitivity_feedback;

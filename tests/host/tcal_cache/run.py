@@ -44,7 +44,7 @@ KERNEL = r'''
 #include <pthread.h>
 #define K_FOREVER (-1)
 #define K_MUTEX_DEFINE(name) \
-    static pthread_mutex_t name = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
+    pthread_mutex_t name = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
 static unsigned lock_depth;
 static void (*after_unlock)(void);
 static int k_mutex_lock(pthread_mutex_t *mutex, int timeout) {

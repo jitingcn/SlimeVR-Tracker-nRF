@@ -21,7 +21,7 @@
 LOG_MODULE_REGISTER(imu_calibration, LOG_LEVEL_INF);
 
 static struct k_spinlock coefficient_lock;
-K_MUTEX_DEFINE(persistence_lock);
+static K_MUTEX_DEFINE(persistence_lock);
 static sensor_imu_calibration_t applied;
 static bool loaded;
 static bool closing;
