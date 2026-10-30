@@ -30,6 +30,8 @@
 #include "connection/esb.h"
 #include "sensor/sensor.h"
 
+#include <stdint.h>
+
 #include <zephyr/sys/reboot.h>
 #include <zephyr/drivers/gpio.h>
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
@@ -100,14 +102,12 @@ int main(void)
 
 	bool docked = dock_read();
 
-	uint8_t reset_mode = -1;
-
 	if (reboot_counter == 0) {
 		reboot_counter = 100;
 	} else if (reboot_counter > 200) {
 		reboot_counter = 200; // How did you get here
 	}
-	reset_mode = reboot_counter - 100;
+	uint8_t reset_mode = reboot_counter - 100;
 	if (reset_pin_reset && !docked) // Count pin resets while not docked
 	{
 		reboot_counter++;
@@ -123,7 +123,8 @@ int main(void)
 	if (!reset_pin_reset
 		&& reset_mode
 			   == 0) { // Only need to check once, if the button is pressed again an interrupt is triggered from before
-		reset_mode = -1; // Cancel reset_mode (shutdown)
+		const uint8_t reset_mode_cancelled = UINT8_MAX;
+		reset_mode = reset_mode_cancelled;
 	}
 
 #if USER_SHUTDOWN_ENABLED
