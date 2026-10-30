@@ -865,15 +865,15 @@ int main(int argc, char **argv)
 		admission();
 	} else if (!strcmp(which, "imu_exclusion")) {
 		start();
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		assert(sensor_calibration_reset_imu() == -EBUSY);
 		assert(sensor_calibration_reset_accel() == -EBUSY);
 		assert(sensor_calibration_commit_accel(retained->accBAinv, 0, (struct led_token){0}, false, 0) == -EBUSY);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
 		stop_hook();
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == 0);
+		assert(sensor_calibration_commit_bias(bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 	} else if (!strcmp(which, "pending_candidate")) {
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == 0);
+		assert(sensor_calibration_commit_bias(bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
 		assert(!arms && !sensor_tcal_heated_busy());
 		assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
@@ -886,7 +886,7 @@ int main(int argc, char **argv)
 		sensor_calibration_clear_begin();
 		stopped(TCAL_HEATED_STOP_SENSOR_STOP);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		sensor_tcal_heated_set_ready(true);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
 		sensor_calibration_clear_end();
@@ -1158,7 +1158,7 @@ int main(int argc, char **argv)
 		assert(heat.reason == TCAL_HEATED_STOP_USER && imu_reserved);
 		assert(reset_requested && resets == before && !partial_finishes);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		/* Owner may consume the reset without changing the frozen stage. */
 		assert(sensor_tcal_heated_feed(bias, 44));
 		unchanged();
@@ -1336,7 +1336,7 @@ int main(int argc, char **argv)
 		assert(heat.state == HEAT_OFF_FAILED && !heat.sampling && !heat.applied);
 		assert(sensor_tcal_heated_busy() && imu_reserved && output_duty > 0);
 		assert(sensor_tcal_heated_start(44) == -EBUSY);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+		assert(sensor_calibration_commit_bias(bias, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 		sensor_tcal_heated_finalize();
 		unchanged();
 		off_error = 0;
@@ -1344,7 +1344,7 @@ int main(int argc, char **argv)
 		stop_hook();
 		assert(offs == before_off + 1);
 		stopped(TCAL_HEATED_STOP_USER);
-		assert(sensor_calibration_commit_bias(zero, bias, true, 0, (struct led_token){0}, 0, 0) == 0);
+		assert(sensor_calibration_commit_bias(bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 	} else if (!strcmp(which, "accum_minimum")) {
 		resting();
 		feed_samples(1999, bias, 25);

@@ -82,7 +82,6 @@ SYSTEM = r'''
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#define MAIN_ACCEL_BIAS_ID 3
 #define MAIN_GYRO_BIAS_ID 4
 #define MAIN_ACC_6_BIAS_ID 7
 #define MAIN_GYRO_TEMP_ID 8

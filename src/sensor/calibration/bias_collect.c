@@ -64,8 +64,7 @@ bool isAccRest(const struct sensor_accel_observation *observation, uint32_t now_
 #endif
 
 int sensor_offsetBias_internal(
-	float *dest1,
-	float *dest2,
+	float *gyro_bias,
 	float *avg_temp,
 	float *temp_range,
 	int max_sample_time_ms,
@@ -326,16 +325,9 @@ int sensor_offsetBias_internal(
 #endif
 
 	// Calculate averages
-	dest2[0] = (float)(gyro_sum[0] / i);
-	dest2[1] = (float)(gyro_sum[1] / i);
-	dest2[2] = (float)(gyro_sum[2] / i);
-
-#if !CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-	// With accelerometer matrix calibration disabled, leave accelerometer bias zero.
-	dest1[0] = 0.0f;
-	dest1[1] = 0.0f;
-	dest1[2] = 0.0f;
-#endif
+	gyro_bias[0] = (float)(gyro_sum[0] / i);
+	gyro_bias[1] = (float)(gyro_sum[1] / i);
+	gyro_bias[2] = (float)(gyro_sum[2] / i);
 
 	return 0;
 }
@@ -344,11 +336,10 @@ int sensor_offsetBias_internal(
  * Standard sensor offset bias collection function
  * Uses default timing: BIAS_COLLECT_MAX_SAMPLE_TIME_MS max, BIAS_COLLECT_MIN_SAMPLE_TIME_MS min
  */
-int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_range)
+int sensor_offsetBias(float *gyro_bias, float *avg_temp, float *temp_range)
 {
 	return sensor_offsetBias_internal(
-		dest1,
-		dest2,
+		gyro_bias,
 		avg_temp,
 		temp_range,
 		BIAS_COLLECT_MAX_SAMPLE_TIME_MS,

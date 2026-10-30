@@ -1125,13 +1125,6 @@ static void print_sensor_detail(void)
 	float diag_y = calibration.accel_matrix[2][1];
 	float diag_z = calibration.accel_matrix[3][2];
 	printk("  Scale: [%.5f, %.5f, %.5f]\n", (double)diag_x, (double)diag_y, (double)diag_z);
-#else
-	printk(
-		"\nAccelerometer bias: %.5f %.5f %.5f\n",
-		(double)calibration.accel_bias[0],
-		(double)calibration.accel_bias[1],
-		(double)calibration.accel_bias[2]
-	);
 #endif
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	printk("Magnetometer matrix (stored):\n");

@@ -19,7 +19,6 @@ static void seed(unsigned count, bool enabled) {
     retained->tcal_enabled = enabled;
     retained->gyroTemp = 25.123456f;
     retained->gyroBias[0] = 17.5f;
-    retained->accelBias[2] = -8.5f;
     retained->magBias[3][1] = 1.25f;
     retained->gyroSensScale[0] = 1.01f;
     retained->fusion_id = 42;
@@ -73,7 +72,6 @@ static void compare_model(const struct retained_fixture *expected) {
 }
 static void unrelated(const struct retained_fixture *before) {
     assert(!memcmp(before->gyroBias, retained->gyroBias, sizeof(before->gyroBias)));
-    assert(!memcmp(before->accelBias, retained->accelBias, sizeof(before->accelBias)));
     assert(!memcmp(before->magBias, retained->magBias, sizeof(before->magBias)));
     assert(!memcmp(before->gyroSensScale, retained->gyroSensScale, sizeof(before->gyroSensScale)));
 }

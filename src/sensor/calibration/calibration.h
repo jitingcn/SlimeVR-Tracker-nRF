@@ -66,7 +66,6 @@ void sensor_calibration_process_mag(float m[3]);
 void sensor_calibration_read(void);
 
 typedef struct {
-	float accel_bias[3];
 	float gyro_bias[3];
 	float accel_matrix[4][3];
 } sensor_imu_calibration_t;
@@ -77,7 +76,7 @@ void sensor_calibration_snapshot(sensor_imu_calibration_t *out);
  * occupied transaction/reset-all barrier, -ESHUTDOWN once terminally closed.
  * Accepted candidates survive suspend/failed rescan for recovery or power drain;
  * reset-all cancels them. Application remains at a sensor frame boundary. */
-int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro,
+int sensor_calibration_commit_bias(const float g_bias[3], bool persist_gyro,
 	uint16_t operation_id, struct led_token feedback, int prior_error, uint32_t generation);
 int sensor_calibration_commit_accel(const float matrix[4][3], uint16_t operation_id,
 	struct led_token feedback, bool partial, uint32_t generation);

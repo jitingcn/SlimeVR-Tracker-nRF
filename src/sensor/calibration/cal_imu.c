@@ -79,8 +79,8 @@ void sensor_calibrate_imu(void)
 	const struct led_token feedback = sensor_calibration_current_feedback();
 	const uint32_t generation = sensor_calibration_current_generation();
 	int prior_error = 0;
-	float a_bias[3] = {0}, g_bias[3] = {0};
-	LOG_INF("Calibrating main accelerometer and gyroscope zero rate offset");
+	float g_bias[3] = {0};
+	LOG_INF("Calibrating main gyroscope zero rate offset");
 	LOG_INF("Rest the device on a stable surface");
 
 	sensor_calibration_stage(feedback, LED_WAIT_STILL);
@@ -102,9 +102,9 @@ void sensor_calibrate_imu(void)
 	LOG_INF("Reading data");
 	imu_step(operation_id, feedback, CAL_PHASE_COLLECT);
 #if CONFIG_SENSOR_USE_TCAL
-	int err = sensor_offsetBias(a_bias, g_bias, &avg_temp, &temp_range);
+	int err = sensor_offsetBias(g_bias, &avg_temp, &temp_range);
 #else
-	int err = sensor_offsetBias(a_bias, g_bias, NULL, NULL);
+	int err = sensor_offsetBias(g_bias, NULL, NULL);
 #endif
 	if (err) // This takes about 3s
 	{
@@ -146,7 +146,7 @@ void sensor_calibrate_imu(void)
 		sensor_calibration_result(feedback, LED_STAGE_ACK);
 	}
 	imu_step(operation_id, feedback, CAL_PHASE_APPLY_PENDING);
-	int commit_err = sensor_calibration_commit_bias(a_bias, g_bias, persist_gyro, operation_id, feedback, prior_error,
+	int commit_err = sensor_calibration_commit_bias(g_bias, persist_gyro, operation_id, feedback, prior_error,
 		generation);
 	if (commit_err) {
 #if CONFIG_SENSOR_USE_TCAL

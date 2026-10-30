@@ -57,14 +57,13 @@
 #define BIAS_COLLECT_INSUFFICIENT_SAMPLES (-4)
 
 int sensor_offsetBias_internal(
-	float *dest1,
-	float *dest2,
+	float *gyro_bias,
 	float *avg_temp,
 	float *temp_range,
 	int max_sample_time_ms,
 	int min_sample_time_ms
 );
-int sensor_offsetBias(float *dest1, float *dest2, float *avg_temp, float *temp_range);
+int sensor_offsetBias(float *gyro_bias, float *avg_temp, float *temp_range);
 
 #if CONFIG_SENSOR_USE_ACCEL_CALIBRATION
 struct sensor_accel_observation;

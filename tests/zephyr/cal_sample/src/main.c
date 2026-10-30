@@ -412,10 +412,9 @@ ZTEST(cal_sample, test_driver_flush_is_not_averaged_by_bias_consumer)
 	fifo_status[1] = LSM6DSV_FIFO_OVR_LATCHED;
 	uint8_t bytes[7];
 	zassert_equal(lsm_fifo_read(bytes, sizeof(bytes)), 0);
-	float accel_bias[3] = {7, 8, 9}, gyro_bias[3] = {10, 11, 12};
-	zassert_equal(sensor_offsetBias_internal(accel_bias, gyro_bias, NULL, NULL, 1000, 500), -2);
+	float gyro_bias[3] = {10, 11, 12};
+	zassert_equal(sensor_offsetBias_internal(gyro_bias, NULL, NULL, 1000, 500), -2);
 	for (int i = 0; i < 3; i++) {
-		zassert_equal(accel_bias[i], 7 + i);
 		zassert_equal(gyro_bias[i], 10 + i);
 	}
 }

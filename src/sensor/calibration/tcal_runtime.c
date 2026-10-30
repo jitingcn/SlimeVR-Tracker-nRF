@@ -1202,9 +1202,8 @@ static int sensor_boot_bias_collect(float *dest_bias, float *avg_temp)
 	// Use the existing sensor_offsetBias function with same parameters
 	// This ensures consistent quality between boot cal and normal cal
 	float temp_range = NAN;
-	float dummy_accel_bias[3] = {0};
 
-	int err = sensor_offsetBias(dummy_accel_bias, dest_bias, avg_temp, &temp_range);
+	int err = sensor_offsetBias(dest_bias, avg_temp, &temp_range);
 
 	if (err) {
 		if (err == -1) {
@@ -1240,12 +1239,10 @@ static int sensor_runtime_bias_collect(float *dest_bias, float *avg_temp)
 
 	// Use internal function with shorter sampling time for runtime calibration
 	float temp_range = NAN;
-	float dummy_accel_bias[3] = {0};
 
 	// Runtime calibration uses shorter max time (3s) and shorter min time (2s)
 	int min_sample_time = RUNTIME_CAL_SAMPLE_TIME_MS * 2 / 3; // ~2 seconds minimum
 	int err = sensor_offsetBias_internal(
-		dummy_accel_bias,
 		dest_bias,
 		avg_temp,
 		&temp_range,

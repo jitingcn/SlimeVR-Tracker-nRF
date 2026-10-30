@@ -135,16 +135,10 @@ void sensor_calibration_imu_load(void)
 	}
 	k_spin_unlock(&coefficient_lock, key);
 	sensor_imu_calibration_t initial;
-	memcpy(initial.accel_bias, retained->accelBias, sizeof(initial.accel_bias));
 	memcpy(initial.gyro_bias, retained->gyroBias, sizeof(initial.gyro_bias));
 	memcpy(initial.accel_matrix, retained->accBAinv, sizeof(initial.accel_matrix));
 	float zero[3] = {0};
-	bool heal_accel_bias = !v_finite(initial.accel_bias, 3) || !v_epsilon(initial.accel_bias, zero, 0.5f);
 	bool heal_gyro_bias = !v_finite(initial.gyro_bias, 3) || !v_epsilon(initial.gyro_bias, zero, 50.0f);
-	if (heal_accel_bias) {
-		memset(initial.accel_bias, 0, sizeof(initial.accel_bias));
-		sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, initial.accel_bias, sizeof(initial.accel_bias));
-	}
 	if (heal_gyro_bias) {
 		memset(initial.gyro_bias, 0, sizeof(initial.gyro_bias));
 		sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, initial.gyro_bias, sizeof(initial.gyro_bias));
@@ -160,7 +154,7 @@ void sensor_calibration_imu_load(void)
 		sensor_calibration_identity_accel(initial.accel_matrix);
 		sys_write(MAIN_ACC_6_BIAS_ID, &retained->accBAinv, initial.accel_matrix, sizeof(initial.accel_matrix));
 	}
-	if (heal_accel_bias || heal_gyro_bias || heal_matrix) {
+	if (heal_gyro_bias || heal_matrix) {
 		retained_update();
 		LOG_WRN("Invalid stored IMU calibration cleared before sampling");
 	}
@@ -231,12 +225,11 @@ void sensor_calibration_imu_release_heated(void)
 }
 #endif
 
-static int submit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro, bool reset,
+static int submit_bias(const float g_bias[3], bool persist_gyro, bool reset,
 		       uint16_t operation_id, struct led_token feedback, int prior_error, uint32_t generation)
 {
 	float zero[3] = {0};
-	if (!a_bias || !g_bias || !v_finite(a_bias, 3) || !v_finite(g_bias, 3)
-	    || !v_epsilon(a_bias, zero, 0.5f) || !v_epsilon(g_bias, zero, 50.0f)) {
+	if (!g_bias || !v_finite(g_bias, 3) || !v_epsilon(g_bias, zero, 50.0f)) {
 		return -EINVAL;
 	}
 	k_spinlock_key_t key = k_spin_lock(&coefficient_lock);
@@ -246,7 +239,6 @@ static int submit_bias(const float a_bias[3], const float g_bias[3], bool persis
 			sensor_calibration_invalidate_kind(CAL_REQUEST_IMU);
 		}
 		pending.coefficients = applied;
-		memcpy(pending.coefficients.accel_bias, a_bias, sizeof(applied.accel_bias));
 		memcpy(pending.coefficients.gyro_bias, g_bias, sizeof(applied.gyro_bias));
 		pending.bias = true;
 		pending.matrix = false;
@@ -267,10 +259,10 @@ static int submit_bias(const float a_bias[3], const float g_bias[3], bool persis
 	return err;
 }
 
-int sensor_calibration_commit_bias(const float a_bias[3], const float g_bias[3], bool persist_gyro,
+int sensor_calibration_commit_bias(const float g_bias[3], bool persist_gyro,
 				   uint16_t operation_id, struct led_token feedback, int prior_error, uint32_t generation)
 {
-	return submit_bias(a_bias, g_bias, persist_gyro, false, operation_id, feedback, prior_error, generation);
+	return submit_bias(g_bias, persist_gyro, false, operation_id, feedback, prior_error, generation);
 }
 
 
@@ -291,7 +283,7 @@ void sensor_calibration_record_storage_error(uint32_t generation, int error)
 int sensor_calibration_reset_imu(void)
 {
 	float zero[3] = {0};
-	int err = submit_bias(zero, zero, true, true, 0, (struct led_token){0}, 0, 0);
+	int err = submit_bias(zero, true, true, 0, (struct led_token){0}, 0, 0);
 	return err ? sensor_operation_result(LED_OWNER_IMU, err, false) : 0;
 }
 
@@ -416,9 +408,6 @@ void sensor_calibration_persist_pending(void)
 	sys_warm_transaction_begin();
 	int err = 0;
 	if (bias) {
-#if !CONFIG_SENSOR_USE_ACCEL_CALIBRATION
-		err = sys_write(MAIN_ACCEL_BIAS_ID, &retained->accelBias, next.accel_bias, sizeof(next.accel_bias));
-#endif
 		if (persist_gyro) {
 			int gyro_err = sys_write(MAIN_GYRO_BIAS_ID, &retained->gyroBias, next.gyro_bias, sizeof(next.gyro_bias));
 			if (gyro_err < 0) {

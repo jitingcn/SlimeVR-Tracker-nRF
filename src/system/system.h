@@ -11,7 +11,7 @@
 
 #define RBT_CNT_ID 1
 #define PAIRED_ID 2
-#define MAIN_ACCEL_BIAS_ID 3
+#define MAIN_ACCEL_BIAS_ID 3 // Reserved retired accelerometer bias; do not reuse.
 #define MAIN_GYRO_BIAS_ID 4
 #define MAIN_MAG_BIAS_ID 5
 #define MAIN_GYRO_SENS_ID 6

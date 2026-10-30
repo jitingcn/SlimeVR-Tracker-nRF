@@ -108,9 +108,8 @@ void sys_warm_transaction_mark(uint16_t id, const void *data, size_t size)
 void sys_warm_transaction_end(bool schedule) { (void)schedule; }
 int sys_flush_warm(void) { return 0; }
 
-int sensor_offsetBias(float *a, float *g, float *temp, float *range)
+int sensor_offsetBias(float *g, float *temp, float *range)
 {
-	(void)a;
 	(void)temp;
 	(void)range;
 	g[0] = invalid_candidate ? NAN : 2.0f;

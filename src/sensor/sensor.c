@@ -1495,13 +1495,6 @@ static void sensor_log_retained_state(void)
 			(double)retained->accBAinv[3][i]
 		);
 	}
-#else
-	LOG_INF(
-		"Accelerometer bias: %.5f %.5f %.5f",
-		(double)retained->accelBias[0],
-		(double)retained->accelBias[1],
-		(double)retained->accelBias[2]
-	);
 #endif
 	LOG_INF(
 		"Gyroscope bias: %.5f %.5f %.5f",

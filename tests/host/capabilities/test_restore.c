@@ -83,7 +83,6 @@ static void sys_read(uint16_t id, void *data, size_t size)
     switch (id) {
     RECORD(PAIRED_ID, paired_addr);
     RECORD(MAIN_SENSOR_DATA_ID, sensor_data);
-    RECORD(MAIN_ACCEL_BIAS_ID, accelBias);
     RECORD(MAIN_GYRO_BIAS_ID, gyroBias);
     RECORD(MAIN_MAG_BIAS_ID, magBAinv);
     RECORD(MAIN_ACC_6_BIAS_ID, accBAinv);
@@ -165,7 +164,7 @@ static void restore_case(bool warm, enum mag_case kind, bool deferred)
     memset(&sensor_mag_dev, 0, sizeof(sensor_mag_dev));
     sensor_mag_dev_reg = 0xff;
     assert(sys_retained_init() == 0);
-    assert(nvs_reads == (warm ? 0U : 11U));
+    assert(nvs_reads == (warm ? 0U : 10U));
     assert(memcmp(retained->sensor_data, expected.sensor_data, sizeof(expected.sensor_data)) == 0);
 #if !CONFIG_SENSOR_USE_MAGNETOMETER
     magnetic_equal(&expected);

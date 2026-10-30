@@ -271,15 +271,14 @@ tcal_temp_direction_t tcal_current_direction;
 float tcal_direction_ref_temp, runtime_cal_last_temp;
 static unsigned tcal_lock_depth, model_updates, measured_bias_marks, state_updates;
 static bool tcal_auto_enabled;
-static float measured_accel[3], measured_gyro[3], measured_temp;
-static float pending_accel_bias[3], pending_gyro_bias[3];
+static float measured_gyro[3], measured_temp;
+static float pending_gyro_bias[3];
 static bool pending_persist_gyro;
 static int pending_prior_error;
 static uint32_t pending_generation;
 static struct led_token pending_feedback;
 bool wait_for_motion(bool motion, int samples) { (void)motion; (void)samples; return true; }
-int sensor_offsetBias(float *a, float *g, float *temp, float *range) {
-    memcpy(a, measured_accel, sizeof(measured_accel));
+int sensor_offsetBias(float *g, float *temp, float *range) {
     memcpy(g, measured_gyro, sizeof(measured_gyro));
     *temp = measured_temp; *range = 0.125f;
     return 0;
@@ -290,12 +289,11 @@ void sensor_tcal_unlock(void) { assert(tcal_lock_depth); tcal_lock_depth--; }
 void sensor_tcal_refresh_model(void) { assert(tcal_lock_depth); model_updates++; }
 void sensor_tcal_mark_measured_bias(void) { assert(tcal_lock_depth); measured_bias_marks++; }
 void update_tcal_state(void) { assert(warm_depth && !tcal_lock_depth); state_updates++; }
-int sensor_calibration_commit_bias(const float a[3], const float g[3], bool persist,
+int sensor_calibration_commit_bias(const float g[3], bool persist,
                                   uint16_t op, struct led_token feedback, int prior_error,
                                   uint32_t generation) {
     assert(pending_phase == CAL_PHASE_APPLY_PENDING && ends == 0 && warm_depth);
     commits++;
-    memcpy(pending_accel_bias, a, sizeof(pending_accel_bias));
     memcpy(pending_gyro_bias, g, sizeof(pending_gyro_bias));
     pending_persist_gyro = persist; pending_operation = op;
     pending_feedback = feedback; pending_prior_error = prior_error; pending_generation = generation;
@@ -323,9 +321,8 @@ static void reset_case(void) {
     tcal_current_direction=TCAL_DIR_UNKNOWN; tcal_direction_ref_temp=NAN;
     tcal_lock_depth=model_updates=measured_bias_marks=state_updates=0;
     tcal_auto_enabled=true; measured_temp=25.0f;
-    const float accel[3]={.125f,-.25f,.5f}, gyro[3]={2.0f,-4.0f,.5f};
-    memcpy(measured_accel,accel,sizeof(accel)); memcpy(measured_gyro,gyro,sizeof(gyro));
-    memset(pending_accel_bias,0,sizeof(pending_accel_bias));
+    const float gyro[3]={2.0f,-4.0f,.5f};
+    memcpy(measured_gyro,gyro,sizeof(gyro));
     memset(pending_gyro_bias,0,sizeof(pending_gyro_bias));
     pending_persist_gyro=false; pending_prior_error=0; pending_generation=0;
     pending_feedback=(struct led_token){0}; generation_valid_result=true;
@@ -468,7 +465,6 @@ static void test_imu_tcal_preserves_measured_candidate(void) {
         assert(commits==1 && ends==0 && token_reads==1);
         assert(pending_operation==current_operation && pending_feedback.session==current_operation);
         assert(pending_generation==1 && !pending_persist_gyro && pending_prior_error==0);
-        expect_vector(pending_accel_bias,measured_accel);
         expect_vector(pending_gyro_bias,measured_gyro); /* Captured before the worker blends its local vector. */
         expect_vector(retained->tempCalPoints[TEMP_TO_IDX(measured_temp)].bias,cases[i].blended);
         assert(tcal_current_direction==cases[i].direction && tcal_direction_ref_temp==measured_temp);

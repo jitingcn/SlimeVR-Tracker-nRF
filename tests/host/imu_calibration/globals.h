@@ -5,7 +5,6 @@
 #include <stdint.h>
 
 struct host_retained {
-	float accelBias[3];
 	float gyroBias[3];
 	float accBAinv[4][3];
 	struct {

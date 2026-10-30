@@ -21,7 +21,7 @@ void sensor_tcal_clear_doffset(void)
 }
 static int storage_result;
 static unsigned storage_writes;
-static unsigned accel_bias_writes, gyro_bias_writes;
+static unsigned gyro_bias_writes;
 static unsigned retained_updates;
 static unsigned error_logs;
 static int logged_error;
@@ -29,7 +29,7 @@ static const float zero[3];
 
 int sys_write(uint16_t id, void *ptr, const void *data, size_t len)
 {
-	accel_bias_writes += id == MAIN_ACCEL_BIAS_ID;
+	assert(id != MAIN_ACCEL_BIAS_ID);
 	gyro_bias_writes += id == MAIN_GYRO_BIAS_ID;
 	/* Match production's eager retained update even when persistence fails. */
 	memcpy(ptr, data, len);
@@ -229,7 +229,6 @@ static void vector_equal(const float actual[3], const float expected[3])
 
 static void snapshot_equal(const sensor_imu_calibration_t *actual, const sensor_imu_calibration_t *expected)
 {
-	vector_equal(actual->accel_bias, expected->accel_bias);
 	vector_equal(actual->gyro_bias, expected->gyro_bias);
 	for (unsigned row = 0; row < 4; row++) {
 		vector_equal(actual->accel_matrix[row], expected->accel_matrix[row]);
@@ -251,7 +250,7 @@ static void apply_and_ack(enum sensor_calibration_effect expected)
 	assert(sensor_calibration_fusion_stale());
 	sensor_calibration_fusion_applied();
 	assert(sensor_calibration_fusion_stale());
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 	sensor_calibration_persist_pending();
 	assert(!sensor_calibration_fusion_stale());
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_SAVE_FUSION);
@@ -320,20 +319,17 @@ static void test_startup_and_load_once(void)
 	float identity[4][3];
 	sensor_calibration_identity_accel(identity);
 	assert(!sensor_calibration_imu_ready());
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == -EAGAIN);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == -EAGAIN);
 	assert(sensor_calibration_commit_accel(identity, 0, (struct led_token){0}, false, 0) == -EAGAIN);
 	assert(!sensor_calibration_fusion_stale());
 	assert(storage_writes == 0);
 
-	const float accel_bias[3] = {0.1f, -0.1f, 0.2f};
 	const float gyro_bias[3] = {1.0f, -2.0f, 3.0f};
-	memcpy(retained->accelBias, accel_bias, sizeof(accel_bias));
 	memcpy(retained->gyroBias, gyro_bias, sizeof(gyro_bias));
 	memcpy(retained->accBAinv, identity, sizeof(identity));
 	sensor_calibration_imu_load();
 	assert(sensor_calibration_imu_ready());
 	sensor_imu_calibration_t loaded = snapshot();
-	vector_equal(loaded.accel_bias, accel_bias);
 	vector_equal(loaded.gyro_bias, gyro_bias);
 	for (unsigned row = 0; row < 4; row++) {
 		vector_equal(loaded.accel_matrix[row], identity[row]);
@@ -348,7 +344,6 @@ static void test_startup_and_load_once(void)
 static void check_invalid_startup(bool nonfinite)
 {
 	sensor_calibration_identity_accel(retained->accBAinv);
-	retained->accelBias[0] = nonfinite ? NAN : 0.5f;
 	retained->gyroBias[0] = 1.0f;
 	retained->accBAinv[1][0] = nonfinite ? INFINITY : 1.5f;
 	retained->bootCalState.doffset_valid = true;
@@ -360,7 +355,6 @@ static void check_invalid_startup(bool nonfinite)
 	sensor_calibration_imu_load();
 	assert(sensor_calibration_imu_ready());
 	sensor_imu_calibration_t healed = snapshot();
-	vector_equal(healed.accel_bias, zero);
 	const float valid_gyro[3] = {1.0f, 0.0f, 0.0f};
 	vector_equal(healed.gyro_bias, valid_gyro);
 	float identity[4][3];
@@ -369,12 +363,11 @@ static void check_invalid_startup(bool nonfinite)
 		vector_equal(healed.accel_matrix[row], identity[row]);
 		vector_equal(retained->accBAinv[row], identity[row]);
 	}
-	vector_equal(retained->accelBias, zero);
 	vector_equal(retained->gyroBias, valid_gyro);
 	assert(retained->bootCalState.doffset_valid);
 	const float valid_offset[3] = {1.0f, 2.0f, 3.0f};
 	vector_equal(retained->bootCalState.doffset, valid_offset);
-	assert(accel_bias_writes == 1 && gyro_bias_writes == 0);
+	assert(gyro_bias_writes == 0 && storage_writes == 1);
 	assert(retained->fusion_id == 7);
 	assert(!sensor_calibration_fusion_stale());
 	float accel[3] = {1.0f, 2.0f, 3.0f};
@@ -398,37 +391,30 @@ static void test_out_of_bounds_startup(void)
 	check_invalid_startup(false);
 }
 
-static void check_invalid_gyro_startup(bool nonfinite, bool invalid_accel)
+static void check_invalid_gyro_startup(bool nonfinite)
 {
 	sensor_calibration_identity_accel(retained->accBAinv);
-	const float valid_accel[3] = {0.1f, -0.2f, 0.3f};
-	memcpy(retained->accelBias, valid_accel, sizeof(valid_accel));
-	if (invalid_accel) retained->accelBias[0] = NAN;
 	retained->gyroBias[0] = nonfinite ? INFINITY : 50.0f;
 	retained->bootCalState.doffset_valid = true;
 	retained->bootCalState.doffset[0] = 1.0f;
 	sensor_calibration_imu_load();
 	sensor_imu_calibration_t healed = snapshot();
-	vector_equal(healed.accel_bias, invalid_accel ? zero : valid_accel);
-	vector_equal(retained->accelBias, invalid_accel ? zero : valid_accel);
 	vector_equal(healed.gyro_bias, zero);
 	vector_equal(retained->gyroBias, zero);
 	assert(!retained->bootCalState.doffset_valid);
 	vector_equal(retained->bootCalState.doffset, zero);
-	assert(accel_bias_writes == (unsigned)invalid_accel && gyro_bias_writes == 1);
+	assert(gyro_bias_writes == 1 && storage_writes == 1);
 }
 
-static void test_nonfinite_gyro_startup(void) { check_invalid_gyro_startup(true, false); }
-static void test_out_of_bounds_gyro_startup(void) { check_invalid_gyro_startup(false, false); }
-static void test_both_invalid_startup(void) { check_invalid_gyro_startup(true, true); }
+static void test_nonfinite_gyro_startup(void) { check_invalid_gyro_startup(true); }
+static void test_out_of_bounds_gyro_startup(void) { check_invalid_gyro_startup(false); }
 
 static void test_pending_bias_atomic_application_and_busy(void)
 {
 	baseline();
 	sensor_imu_calibration_t before = snapshot();
-	const float accel_bias[3] = {0.1f, 0.2f, 0.3f};
 	const float gyro_bias[3] = {1.0f, 2.0f, 3.0f};
-	assert(sensor_calibration_commit_bias(accel_bias, gyro_bias, false, 41, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_bias, false, 41, (struct led_token){0}, 0, 0) == 0);
 	assert(event_count == 0);
 	assert(sensor_calibration_fusion_stale());
 	sensor_imu_calibration_t pending = snapshot();
@@ -437,7 +423,7 @@ static void test_pending_bias_atomic_application_and_busy(void)
 	const float original_gyro[3] = {10.0f, 20.0f, 30.0f};
 	sensor_calibration_subtract_gyro_bias(gyro);
 	vector_equal(gyro, original_gyro);
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 	assert(sensor_calibration_commit_accel(before.accel_matrix, 0, (struct led_token){0}, false, 0) == -EBUSY);
 	/* Rescan must preserve the first accepted transaction as well as the old view. */
 	sensor_calibration_imu_load();
@@ -445,7 +431,6 @@ static void test_pending_bias_atomic_application_and_busy(void)
 	assert(event_count == 1);
 	assert_event(0, 41, CAL_EVENT_END, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	sensor_imu_calibration_t expected = before;
-	memcpy(expected.accel_bias, accel_bias, sizeof(accel_bias));
 	memcpy(expected.gyro_bias, gyro_bias, sizeof(gyro_bias));
 	sensor_imu_calibration_t after = snapshot();
 	snapshot_equal(&after, &expected);
@@ -465,13 +450,10 @@ static void test_invalid_candidates_leave_applied_unchanged(void)
 	baseline();
 	sensor_imu_calibration_t before = snapshot();
 	const float nonfinite[3] = {NAN, 0.0f, 0.0f};
-	const float accel_limit[3] = {0.5f, 0.0f, 0.0f};
 	const float gyro_limit[3] = {0.0f, 50.0f, 0.0f};
-	assert(sensor_calibration_commit_bias(NULL, zero, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
-	assert(sensor_calibration_commit_bias(nonfinite, zero, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
-	assert(sensor_calibration_commit_bias(zero, nonfinite, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
-	assert(sensor_calibration_commit_bias(accel_limit, zero, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
-	assert(sensor_calibration_commit_bias(zero, gyro_limit, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
+	assert(sensor_calibration_commit_bias(NULL, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
+	assert(sensor_calibration_commit_bias(nonfinite, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
+	assert(sensor_calibration_commit_bias(gyro_limit, true, 0, (struct led_token){0}, 0, 0) == -EINVAL);
 	float matrix[4][3];
 	memcpy(matrix, before.accel_matrix, sizeof(matrix));
 	matrix[1][1] = INFINITY;
@@ -497,9 +479,8 @@ static void test_invalid_candidates_leave_applied_unchanged(void)
 static void test_matrix_commit_sample_boundary(void)
 {
 	baseline();
-	const float accel_bias[3] = {0.1f, 0.2f, 0.0f};
 	const float gyro_bias[3] = {1.0f, 2.0f, 3.0f};
-	assert(sensor_calibration_commit_bias(accel_bias, gyro_bias, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 	apply_and_ack(SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_imu_calibration_t before = snapshot();
 	const float matrix[4][3] = {
@@ -534,7 +515,7 @@ static void test_matrix_commit_sample_boundary(void)
 	snapshot_equal(&reset_pending, &after);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_COEFFICIENTS_CHANGED);
 	assert(!sensor_calibration_fusion_stale());
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 	sensor_calibration_persist_pending();
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
 	sensor_imu_calibration_t reset = snapshot();
@@ -566,7 +547,7 @@ static void test_led_bias_token_completes_after_frame_and_storage(void)
 	baseline();
 	const float gyro_bias[3] = {1.0f, 2.0f, 3.0f};
 	struct led_token token = owner_token(LED_OWNER_IMU);
-	assert(sensor_calibration_commit_bias(zero, gyro_bias, true, 0, token, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_bias, true, 0, token, 0, 0) == 0);
 	assert_led_results(0); /* Queueing is never completion. */
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	assert_led_results(0);
@@ -586,7 +567,7 @@ static void test_led_storage_failure_reports_applied_not_saved(void)
 	const float gyro_bias[3] = {4.0f, 5.0f, 6.0f};
 	struct led_token token = owner_token(LED_OWNER_IMU);
 	storage_result = -ENOSPC;
-	assert(sensor_calibration_commit_bias(zero, gyro_bias, true, 0, token, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_bias, true, 0, token, 0, 0) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_calibration_fusion_applied();
 	sensor_calibration_persist_pending();
@@ -599,7 +580,7 @@ static void test_led_prior_storage_error_is_not_reported_as_success(void)
 {
 	baseline();
 	struct led_token token = owner_token(LED_OWNER_IMU);
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, token, -EIO, 0) == 0);
+	assert(sensor_calibration_commit_bias(zero, true, 0, token, -EIO, 0) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_calibration_fusion_applied();
 	sensor_calibration_persist_pending();
@@ -613,7 +594,7 @@ static void test_led_bookkeeping_error_before_first_frame_is_retained(void)
 	const float gyro_bias[3] = {1.0f, 2.0f, 3.0f};
 	const uint32_t generation = sensor_calibration_current_generation();
 	struct led_token token = owner_token(LED_OWNER_IMU);
-	assert(sensor_calibration_commit_bias(zero, gyro_bias, true, 0, token, 0, generation) == 0);
+	assert(sensor_calibration_commit_bias(gyro_bias, true, 0, token, 0, generation) == 0);
 	sensor_calibration_record_storage_error(generation, -EIO);
 	assert_led_results(0); /* Bookkeeping can finish before the first frame. */
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
@@ -651,13 +632,13 @@ static void test_led_frame_receipt_survives_reopened_admission(void)
 	const float gyro_a[3] = {1.0f, 2.0f, 3.0f};
 	const float gyro_b[3] = {4.0f, 5.0f, 6.0f};
 	struct led_token a = owner_token(LED_OWNER_IMU);
-	assert(sensor_calibration_commit_bias(zero, gyro_a, true, 0, a, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_a, true, 0, a, 0, 0) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_calibration_persist_pending();
 	assert_led_results(0); /* Storage alone cannot acknowledge the frame. */
 	struct led_token b = owner_token(LED_OWNER_IMU);
 	assert(b.session != a.session);
-	assert(sensor_calibration_commit_bias(zero, gyro_b, true, 0, b, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_b, true, 0, b, 0, 0) == 0);
 	sensor_calibration_fusion_applied();
 	assert_led_results(1);
 	assert_led_result(0, a, LED_SUCCESS);
@@ -676,13 +657,13 @@ static void test_led_frame_receipt_keeps_failed_storage(void)
 	const float gyro_b[3] = {4.0f, 5.0f, 6.0f};
 	struct led_token a = owner_token(LED_OWNER_IMU);
 	storage_result = -ENOSPC;
-	assert(sensor_calibration_commit_bias(zero, gyro_a, true, 0, a, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_a, true, 0, a, 0, 0) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_calibration_persist_pending();
 	assert_led_results(0);
 	storage_result = 0;
 	struct led_token b = owner_token(LED_OWNER_IMU);
-	assert(sensor_calibration_commit_bias(zero, gyro_b, true, 0, b, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_b, true, 0, b, 0, 0) == 0);
 	sensor_calibration_fusion_applied();
 	assert_led_results(1);
 	assert_led_result(0, a, LED_APPLIED_NOT_SAVED);
@@ -710,7 +691,7 @@ static void test_led_stale_generation_candidate_is_refused(void)
 	assert(!sensor_calibration_generation_valid(stale));
 	assert(sensor_calibration_generation_valid(sensor_calibration_current_generation()));
 	struct led_token token_a = owner_token(LED_OWNER_IMU);
-	assert(sensor_calibration_commit_bias(zero, gyro_a, true, 0, token_a, 0, stale) == -ECANCELED);
+	assert(sensor_calibration_commit_bias(gyro_a, true, 0, token_a, 0, stale) == -ECANCELED);
 	assert_led_results(0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
 	assert(storage_writes == 0);
@@ -718,7 +699,7 @@ static void test_led_stale_generation_candidate_is_refused(void)
 	assert(retained->bootCalState.doffset_valid);
 	assert(retained->bootCalState.doffset[0] == 5.0f);
 	struct led_token token_b = owner_token(LED_OWNER_IMU);
-	assert(sensor_calibration_commit_bias(zero, gyro_b, true, 0, token_b, 0,
+	assert(sensor_calibration_commit_bias(gyro_b, true, 0, token_b, 0,
 					      sensor_calibration_current_generation()) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	/* Only the accepted current-generation candidate clears the boot offset. */
@@ -754,7 +735,7 @@ static void test_power_close_is_permanent_and_fusion_ack(void)
 {
 	baseline();
 	const float gyro_bias[3] = {4.0f, -5.0f, 6.0f};
-	assert(sensor_calibration_commit_bias(zero, gyro_bias, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_bias, true, 0, (struct led_token){0}, 0, 0) == 0);
 	retained->fusion_id = 9;
 	sensor_calibration_prepare_power_down();
 	sensor_imu_calibration_t applied = snapshot();
@@ -762,7 +743,7 @@ static void test_power_close_is_permanent_and_fusion_ack(void)
 	vector_equal(retained->gyroBias, gyro_bias);
 	assert(storage_writes == 1);
 	assert(retained->fusion_id == 0);
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == -ESHUTDOWN);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == -ESHUTDOWN);
 	assert(sensor_calibration_commit_accel(applied.accel_matrix, 0, (struct led_token){0}, false, 0) == -ESHUTDOWN);
 	assert(sensor_calibration_fusion_stale());
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_FRAME_CHANGED);
@@ -774,7 +755,7 @@ static void test_power_close_is_permanent_and_fusion_ack(void)
 	/* The unacknowledged FRAME_CHANGED above must not consume the save request. */
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_SAVE_FUSION);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_UNCHANGED);
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == -ESHUTDOWN);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == -ESHUTDOWN);
 	assert(sensor_calibration_reset_accel() == -ESHUTDOWN);
 }
 
@@ -783,7 +764,7 @@ static void test_storage_failure_keeps_applied_ram_and_reports_error(void)
 	baseline();
 	const float gyro_bias[3] = {7.0f, 8.0f, 9.0f};
 	storage_result = -ENOSPC;
-	assert(sensor_calibration_commit_bias(zero, gyro_bias, true, 42, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro_bias, true, 42, (struct led_token){0}, 0, 0) == 0);
 	assert(event_count == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	assert(event_count == 1);
@@ -791,7 +772,7 @@ static void test_storage_failure_keeps_applied_ram_and_reports_error(void)
 	assert(storage_writes == 0);
 	assert(error_logs == 0);
 	vector_equal(retained->gyroBias, zero);
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == -EBUSY);
 	sensor_imu_calibration_t applied = snapshot();
 	vector_equal(applied.gyro_bias, gyro_bias);
 	float gyro[3] = {10.0f, 10.0f, 10.0f};
@@ -838,7 +819,6 @@ int main(void)
 	run_isolated(test_out_of_bounds_startup);
 	run_isolated(test_nonfinite_gyro_startup);
 	run_isolated(test_out_of_bounds_gyro_startup);
-	run_isolated(test_both_invalid_startup);
 	test_startup_and_load_once();
 	test_pending_bias_atomic_application_and_busy();
 	test_invalid_candidates_leave_applied_unchanged();

@@ -239,7 +239,7 @@ static void test_clear_queued_bias(void)
 	led_results[LED_SUCCESS] = 0;
 	led_results[LED_APPLIED_NOT_SAVED] = 0;
 	struct led_token token = led_begin(LED_OWNER_IMU, led_request_id());
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 51, token, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro, true, 51, token, 0, 0) == 0);
 	assert(event_count == 0);
 	assert(sensor_calibration_reset_imu() == -EBUSY);
 	/* Confirmation is owned by the console; this call is already authorized. */
@@ -253,7 +253,7 @@ static void test_clear_queued_bias(void)
 	assert(led_results[LED_SUCCESS] == 0 && led_results[LED_APPLIED_NOT_SAVED] == 0);
 	/* It also invalidates every collector accepted before the barrier. */
 	assert(led_invalidations >= 1);
-	assert(sensor_calibration_commit_bias(zero, zero, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(zero, true, 0, (struct led_token){0}, 0, 0) == 0);
 }
 
 static void test_clear_applied_matrix(void)
@@ -291,7 +291,7 @@ static void *clear_thread(void *unused)
 
 static void test_clear_waits_for_persisting_transaction(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	assert(sensor_calibration_apply_pending() == SENSOR_CALIBRATION_BIAS_CHANGED);
 	sensor_calibration_fusion_applied();
 	hold_write = true;
@@ -322,7 +322,7 @@ static void test_failed_clear_reports_error_and_releases_barrier(void)
 {
 	clear_error = -EIO;
 	retained->gyroBias[0] = 8.0f;
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	assert(sys_clear() == -EIO);
 	assert(errors == 1 && clears == 0);
 	assert(retained->gyroBias[0] == 8.0f);
@@ -348,7 +348,7 @@ static void test_unavailable_consumer_and_recovery(void)
 	sensor_suspend_owner = k_current_get();
 	main_ok = true;
 	main_imu_resume();
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	/* Accepted before consumer loss: preserve until successful recovery/drain,
 	 * but report unavailable rather than indefinitely returning busy. */
 	sensor_calibration_set_consumer_ready(false);
@@ -365,7 +365,7 @@ static void test_unavailable_consumer_and_recovery(void)
 
 static void test_nonowner_resume_cannot_reopen_terminal_gate(void)
 {
-	assert(sensor_calibration_commit_bias(zero, gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
+	assert(sensor_calibration_commit_bias(gyro, true, 0, (struct led_token){0}, 0, 0) == 0);
 	sensor_calibration_prepare_power_down();
 	assert(retained->gyroBias[0] == 4.0f);
 	assert(retained->fusion_id == 0);
