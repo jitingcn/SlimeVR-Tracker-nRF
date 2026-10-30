@@ -343,10 +343,8 @@ void update_tcal_state(void)
 
 	if (retained->tempCalState.valid) {
 		LOG_INF("T-Cal: MLS state refreshed with %u points", retained->tempCalState.count);
-		printk("T-Cal: MLS data refreshed successfully.\n");
 	} else {
 		LOG_INF("T-Cal: No points available");
-		printk("T-Cal: No points available.\n");
 	}
 
 	/* Warm: retained now; NVS on sys_flush_warm (WoM / reboot / system-off).
