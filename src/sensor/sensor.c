@@ -879,6 +879,9 @@ static bool sensor_motion_observe(
 }
 
 static int sensor_scan(void);
+static void sensor_scan_read(void);
+static void sensor_scan_write(void);
+static void sensor_scan_clear(void);
 static int sensor_init(void);
 static void sensor_loop(void);
 static struct k_thread sensor_thread_id;
@@ -963,7 +966,7 @@ const char *sensor_get_sensor_fusion_name(void)
 	return fusion_names[fusion_id];
 }
 
-void sensor_scan_thread(void)
+static void sensor_scan_thread(void)
 {
 	/* The sensor loop only registers WDT_CHANNEL_SENSOR after sensor_init()
 	 * succeeds; discovery/init itself was previously unmonitored. Cover this
@@ -1431,7 +1434,7 @@ int sensor_request_scan(bool force, bool user_feedback)
 	return err;
 }
 
-void sensor_scan_read(void) // TODO: move some of this to sys?
+static void sensor_scan_read(void) // TODO: move some of this to sys?
 {
 	if (retained->imu_addr != 0) {
 		sensor_imu_dev.addr = retained->imu_addr;
@@ -1456,7 +1459,7 @@ void sensor_scan_read(void) // TODO: move some of this to sys?
 #endif
 }
 
-void sensor_scan_write(void) // TODO: move some of this to sys?
+static void sensor_scan_write(void) // TODO: move some of this to sys?
 {
 	retained->imu_addr = sensor_imu_dev.addr;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -1469,7 +1472,7 @@ void sensor_scan_write(void) // TODO: move some of this to sys?
 	retained_update();
 }
 
-void sensor_scan_clear(void) // TODO: move some of this to sys?
+static void sensor_scan_clear(void) // TODO: move some of this to sys?
 {
 	retained->imu_addr = 0x00;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -2166,7 +2169,7 @@ static void sensor_update_sensor_state(bool resting)
 	sys_power_policy_unlock();
 }
 
-int sensor_init(void)
+static int sensor_init(void)
 {
 	sys_cancel_WOM();
 	tracker_events_sensor_invalidate(TRACKER_REST_INITIALIZING);
@@ -3631,7 +3634,7 @@ static void sensor_loop_wait(int64_t time_begin)
 	sensor_life_mark_busy();
 }
 
-void sensor_loop(void)
+static void sensor_loop(void)
 {
 	/* The gate precedes even initialization: main_running is not yet true
 	 * when this thread first becomes eligible to access the bus. */

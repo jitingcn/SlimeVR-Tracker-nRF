@@ -292,7 +292,7 @@ uint16_t lsm6dsm_fifo_read(uint8_t *data, uint16_t capacity_bytes)
 	return total_packets;
 }
 
-int lsm6dsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
+static int lsm6dsm_fifo_process(uint16_t index, uint8_t *data, float a[3], float g[3])
 {
 	const uint16_t packet_offset = index * PACKET_SIZE;
 	const uint8_t *packet = &data[packet_offset];

@@ -100,7 +100,7 @@ static int lfclk_start_source(nrf_clock_lfclk_t source)
 }
 
 // Safely switch LF clock source
-void clock_switch(nrf_clock_lfclk_t source)
+static void clock_switch(nrf_clock_lfclk_t source)
 {
 	LOG_INF("clock_switch: requesting source=%d", source);
 

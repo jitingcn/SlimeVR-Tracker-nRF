@@ -39,10 +39,6 @@ void sensor_gyro_report_discontinuity(void);
 /* Suspended sensors may be queried when already initialized, but not rescanned. */
 int sensor_request_scan(bool force, bool user_feedback);
 
-void sensor_scan_read(void);
-void sensor_scan_write(void);
-void sensor_scan_clear(void);
-
 void sensor_retained_write(void);
 void sensor_record_wom_sleep(void);
 
