@@ -44,4 +44,5 @@ const sensor_mag_t sensor_mag_ist8306 = {
 	ist8306_mag_process,
 	7,
 	7,
+	.cached_poll_safe = false,
 };

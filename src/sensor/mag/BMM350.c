@@ -557,4 +557,5 @@ const sensor_mag_t sensor_mag_bmm350
 	   bmm3_temp_read,
 	   bmm3_mag_process,
 	   3,
-	   15};
+	   15,
+	   .cached_poll_safe = false};

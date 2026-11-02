@@ -66,6 +66,9 @@ typedef struct sensor_ext_ssi {
 	/* Reads repeat in the background without the driver observing them, so a
 	 * read-clear status bit cannot mark new data. */
 	bool ext_free_running;
+	/* Optional pure hint: an unread periodic frame is available. No I/O,
+	 * waiting, or consumption; ext_read_frame remains responsible for reading. */
+	bool (*ext_frame_ready)(void);
 } sensor_ext_ssi_t;
 
 void sensor_interface_register_sensor_imu_spi(struct spi_dt_spec *dev);
@@ -87,6 +90,8 @@ const sensor_ext_ssi_t *sensor_interface_ext_get(void);
 int sensor_interface_ext_set_prefetch(bool enabled);
 /* True when magnetometer reads may repeat unobserved, consuming read-clear status. */
 bool sensor_interface_mag_free_running(void);
+/* True only for a currently selected EXT backend with a cached frame ready. */
+bool sensor_interface_mag_frame_ready(void);
 #endif
 enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev);
 

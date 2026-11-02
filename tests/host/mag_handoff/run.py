@@ -574,8 +574,9 @@ static struct {void (*init)(float,float,float); void (*rebase_mag)(float,float);
 };
 static typeof(backend) *sensor_fusion=&backend;
 static bool read_mag(float *out) { assert(hardware_on); mag_reads++; out[0]=7; return true; }
-static struct {bool (*mag_read)(float *);} mag_driver={read_mag};
+static struct {bool (*mag_read)(float *); bool cached_poll_safe;} mag_driver={.mag_read=read_mag};
 static typeof(mag_driver) *sensor_mag=&mag_driver;
+static bool sensor_interface_mag_frame_ready(void) { return false; }
 static int64_t k_uptime_ticks(void) { return 10; }
 typedef struct {float raw_m[3]; bool new_mag_data;} sensor_loop_frame_t;
 ''' + extract_block(sensor, r'^struct fusion_periods\s*\{', semicolon=True) + '\n' + \
@@ -671,6 +672,102 @@ int main(void) {
     puts("PM mode and retained fusion gates survive failure, recovery and absent hardware");
 }
 '''
+# Exercise the production acquire block with a replaceable, single-owner cache
+# and a duplicate-rejecting mag driver. Values identify publications.
+pacing_test = preamble + r'''
+static bool mag_available=true, mag_enabled=true, hardware_on=true;
+static bool cache_ready, hint_enabled=true;
+static int cache_id, last_admitted, mag_reads, ready_probes;
+static int64_t now_ticks, next_mag_read_ticks, mag_read_period_ticks=10;
+static bool sensor_interface_mag_frame_ready(void) { ready_probes++; return hint_enabled && cache_ready; }
+static int64_t k_uptime_ticks(void) { return now_ticks; }
+static bool read_mag(float *out) {
+    assert(hardware_on);
+    mag_reads++;
+    if (!cache_ready) return false;
+    cache_ready=false;
+    if (cache_id==last_admitted) return false;
+    last_admitted=cache_id; out[0]=(float)cache_id; return true;
+}
+static struct {bool (*mag_read)(float *); bool cached_poll_safe;} mag_driver={
+    .mag_read=read_mag, .cached_poll_safe=true
+};
+static typeof(mag_driver) *sensor_mag=&mag_driver;
+typedef struct {float raw_m[3]; bool new_mag_data;} sensor_loop_frame_t;
+static void publish(int id) { cache_id=id; cache_ready=true; }
+''' + 'static void acquire(sensor_loop_frame_t *frame) {\n' + sensor[mag_acquire_start:mag_acquire_end] + '\n}\n' + r'''
+int main(void) {
+    sensor_loop_frame_t frame={0};
+    /* Frame 2 arrives early and would be replaced by frame 3 before the old
+     * timer fired. Both must reach the consumer exactly once. */
+    now_ticks=100; publish(1); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==1 && next_mag_read_ticks==110 && mag_reads==1);
+    now_ticks=106; publish(2); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==2 && next_mag_read_ticks==116 && mag_reads==2);
+    now_ticks=107; acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==2);
+    now_ticks=112; publish(3); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==3 && next_mag_read_ticks==122 && mag_reads==3);
+    now_ticks=121; acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==3);
+
+    /* A due but empty read and a duplicate must not postpone recovery. */
+    now_ticks=122; acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==4 && next_mag_read_ticks==122);
+    now_ticks=123; publish(3); acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==5 && next_mag_read_ticks==122);
+    now_ticks=124; publish(4); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==4 && next_mag_read_ticks==132);
+    now_ticks=155; acquire(&frame);
+    assert(!frame.new_mag_data && next_mag_read_ticks==132);
+    now_ticks=156; publish(5); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==5 && next_mag_read_ticks==166);
+
+    /* An early success resynchronizes to now, even for a far-future deadline;
+     * repeated early successes cannot walk that deadline into the future. */
+    now_ticks=200; next_mag_read_ticks=1000; publish(6); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==6 && next_mag_read_ticks==210);
+    now_ticks=201; publish(6); acquire(&frame);
+    assert(!frame.new_mag_data && next_mag_read_ticks==210);
+    int reads=mag_reads;
+    now_ticks=209; acquire(&frame); assert(!frame.new_mag_data && mag_reads==reads);
+    now_ticks=210; acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==reads+1 && next_mag_read_ticks==210);
+    now_ticks=211; publish(7); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==7 && next_mag_read_ticks==220);
+    now_ticks=212; publish(8); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==8 && next_mag_read_ticks==222);
+    now_ticks=213; publish(9); acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==9 && next_mag_read_ticks==223);
+
+    /* Opt-out keeps its original cadence even if a cached hint is true. */
+    now_ticks=300; next_mag_read_ticks=310; mag_driver.cached_poll_safe=false;
+    reads=mag_reads; int probes=ready_probes; publish(10); acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==reads && ready_probes==probes);
+    now_ticks=305; publish(11); acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==reads && ready_probes==probes);
+    now_ticks=310; acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==11 && next_mag_read_ticks==320);
+
+    /* A direct/synchronous bus has no hint and still follows the timer. */
+    mag_driver.cached_poll_safe=true; hint_enabled=false;
+    now_ticks=321; next_mag_read_ticks=330; publish(12); reads=mag_reads; acquire(&frame);
+    assert(!frame.new_mag_data && mag_reads==reads);
+    now_ticks=330; acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==12 && next_mag_read_ticks==340);
+
+    /* Disabled or unavailable hardware is neither probed nor read. */
+    hint_enabled=true; now_ticks=331; publish(13); mag_enabled=false; hardware_on=false;
+    reads=mag_reads; probes=ready_probes; acquire(&frame);
+    assert(!frame.new_mag_data && cache_ready && mag_reads==reads && ready_probes==probes);
+    mag_enabled=true; mag_available=false; acquire(&frame);
+    assert(!frame.new_mag_data && cache_ready && mag_reads==reads && ready_probes==probes);
+    mag_available=true; hardware_on=true; acquire(&frame);
+    assert(frame.new_mag_data && frame.raw_m[0]==13 && next_mag_read_ticks==341);
+    acquire(&frame); assert(!frame.new_mag_data && mag_reads==reads+1);
+    puts("Cached magnetometer pacing, recovery, opt-out and hardware gating");
+}
+'''
 with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
     tmp = Path(tmp)
     cc = shlex.split(os.environ.get('CC', 'cc'))
@@ -679,6 +776,7 @@ with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
     for n in (1, 4):
         jobs.append((f'transition{n}', transition_test,
                      [f'-DCONFIG_SENSOR_GYRO_OVERSAMPLING={n}', f'-DCONFIG_SENSOR_ACCEL_OVERSAMPLING={n}']))
+    jobs.append(('pacing', pacing_test, []))
     for index, axes in enumerate(('mx,my,mz','my,-mx,-mz','my,mx,mz','-mx,my,mz')):
         jobs.append((f'gravity{index}', gravity_test, ['-DSENSOR_MAGNETOMETER_AXES_ALIGNMENT='+axes]))
     for name, text, extra in jobs:

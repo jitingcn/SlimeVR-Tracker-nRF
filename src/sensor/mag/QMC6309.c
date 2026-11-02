@@ -292,4 +292,5 @@ const sensor_mag_t sensor_mag_qmc6309
 
 	   qmc_mag_process,
 	   6,
-	   6};
+	   6,
+	   .cached_poll_safe = false};

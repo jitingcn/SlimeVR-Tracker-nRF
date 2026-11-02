@@ -172,5 +172,6 @@ const sensor_mag_t sensor_mag_none
 
 	   *mag_none_mag_process,
 	   UINT8_MAX,
-	   UINT8_MAX};
+	   UINT8_MAX,
+	   .cached_poll_safe = false};
 #endif

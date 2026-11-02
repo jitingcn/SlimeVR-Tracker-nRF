@@ -214,4 +214,5 @@ const sensor_mag_t sensor_mag_ak09940
 
 	   *ak_mag_process,
 	   12,
-	   12};
+	   12,
+	   .cached_poll_safe = false};

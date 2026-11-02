@@ -242,6 +242,62 @@ static void reset_counts(void)
 	memset(ext_read_lengths, 0, sizeof(ext_read_lengths));
 }
 
+static bool ready_cache;
+static unsigned ready_probes, ready_reads;
+
+static bool cached_frame_ready(void)
+{
+	ready_probes++;
+	return ready_cache;
+}
+
+static int cached_frame_read(uint8_t addr, uint8_t reg, uint8_t dummy, uint8_t word,
+	uint8_t *buf, uint8_t len)
+{
+	if (addr != 0x14 || reg != 0x08 || dummy != 0 || word != 1 || len != 1 || !buf)
+		return -EINVAL;
+	ready_reads++;
+	if (!ready_cache)
+		return -EAGAIN;
+	ready_cache = false;
+	*buf = 0x39;
+	return 0;
+}
+
+static int test_ready_cache_bus_ownership(void)
+{
+	const sensor_ext_ssi_t proxy = {
+		.ext_write = ext_write,
+		.ext_write_read = ext_write_read,
+		.ext_burst = 8,
+		.ext_read_frame = cached_frame_read,
+		.ext_frame_ready = cached_frame_ready,
+	};
+	uint8_t result = 0;
+	ready_cache = false;
+	ready_probes = ready_reads = 0;
+	sensor_interface_ext_configure(&proxy);
+	CHECK(sensor_interface_register_sensor_mag_ext(0x14, 1, 1) == 0);
+	CHECK(!sensor_interface_mag_frame_ready());
+	ready_cache = true;
+	CHECK(sensor_interface_mag_frame_ready() && sensor_interface_mag_frame_ready());
+	CHECK(ready_cache && ready_probes == 3 && ready_reads == 0);
+	/* Merely retaining the EXT backend pointer cannot advertise its cache
+	 * after switching the magnetometer to either direct bus. */
+	sensor_interface_register_sensor_mag_i2c(NULL);
+	CHECK(!sensor_interface_mag_frame_ready() && ready_probes == 3);
+	sensor_interface_register_sensor_mag_spi(NULL);
+	CHECK(!sensor_interface_mag_frame_ready() && ready_probes == 3);
+	CHECK(sensor_interface_register_sensor_mag_ext(0x14, 1, 1) == 0);
+	CHECK(sensor_interface_mag_frame_ready());
+	CHECK(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x08, 0, 1, &result, 1) == 0);
+	CHECK(result == 0x39 && ready_reads == 1 && !sensor_interface_mag_frame_ready());
+	CHECK(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x08, 0, 1, &result, 1) == -EAGAIN);
+	CHECK(ready_reads == 2);
+	sensor_interface_ext_configure(NULL);
+	return EXIT_SUCCESS;
+}
+
 static int test_seven_byte_frame_and_prefetch(void)
 {
 	const sensor_ext_ssi_t proxy = {
@@ -661,6 +717,7 @@ int main(void)
 		"controller=imu-spi", 0x14, 0x40, -1));
 
 	CHECK(test_seven_byte_frame_and_prefetch() == EXIT_SUCCESS);
+	CHECK(test_ready_cache_bus_ownership() == EXIT_SUCCESS);
 
 	const sensor_ext_ssi_t word_proxy = {
 		.ext_write = ext_write,

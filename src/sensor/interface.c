@@ -256,6 +256,12 @@ bool sensor_interface_mag_free_running(void)
 	return sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] == SENSOR_INTERFACE_SPEC_EXT && ext_ssi != NULL
 		&& ext_ssi->ext_free_running;
 }
+
+bool sensor_interface_mag_frame_ready(void)
+{
+	return sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_MAG] == SENSOR_INTERFACE_SPEC_EXT && ext_ssi != NULL
+		&& ext_ssi->ext_read_frame != NULL && ext_ssi->ext_frame_ready != NULL && ext_ssi->ext_frame_ready();
+}
 #endif
 
 enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev)

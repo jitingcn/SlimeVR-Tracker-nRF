@@ -323,5 +323,6 @@ const sensor_mag_t sensor_mag_ict153xx = {
 	*ict153xx_mag_process,
 	/* The logical eight-byte frame is latched until 0x0F is read. SSI splits
 	 * it into 7+1 bytes on LSM6DSV without speculative reads between chunks. */
-	1, 8
+	1, 8,
+	.cached_poll_safe = false,
 };

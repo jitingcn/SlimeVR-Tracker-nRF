@@ -317,5 +317,6 @@ const sensor_mag_t sensor_mag_mmc5603nj = {
 
 	*mmc5603_mag_process,
 	6,
-	9 // if only reading 6 bytes, the data will be lower precision
+	9, // if only reading 6 bytes, the data will be lower precision
+	.cached_poll_safe = true,
 };

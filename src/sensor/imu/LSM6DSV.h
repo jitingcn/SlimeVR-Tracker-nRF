@@ -93,9 +93,11 @@
 #define LSM6DSV_SLAVE0_NACK 0x08
 #define LSM6DSV_WR_ONCE_DONE 0x80
 #define LSM6DSV_SHUB_ODR_240HZ 0xA0
+#define LSM6DSV_SHUB_BATCH_EXT_SENS 0x08 // Batch each configured slave into the FIFO.
 #define LSM6DSV_SLV1_CONFIG_FIXED 0x10 // DS13476 SLV1_CONFIG: bit 4 must be set to 1.
 #define LSM6DSV_SHUB_SLOTS 4
 #define LSM6DSV_SHUB_SLOT_BYTES 7 // NUMOP is three bits; bit 3 is FIFO batching.
+#define LSM6DSV_SHUB_FIFO_SLOT_BYTES 6 // Each batched slave has one six-byte FIFO payload.
 #define LSM6DSV_SHUB_OUTPUT_BYTES 18
 
 // Same for XL and G

@@ -269,4 +269,5 @@ const sensor_mag_t sensor_mag_qmc5883l
 
 	   qmc5883l_mag_process,
 	   6,
-	   6};
+	   6,
+	   .cached_poll_safe = false};

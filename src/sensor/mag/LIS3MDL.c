@@ -250,4 +250,5 @@ const sensor_mag_t sensor_mag_lis3mdl
 
 	   *lis3_mag_process,
 	   7,
-	   7};
+	   7,
+	   .cached_poll_safe = false};

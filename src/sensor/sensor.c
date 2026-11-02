@@ -165,7 +165,7 @@ static int force_scan_request_count = 0;
 #define RETAINED_SAVE_INTERVAL_MS 5000
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-/* Magnetometer reads share one deadline regardless of the selected bus backend. */
+/* Nominal deadline is the fallback; safe cached frames may be consumed early. */
 static int64_t mag_read_period_ticks = 1;
 static int64_t next_mag_read_ticks;
 /* Wall-clock tick of the most recent successful fusion feed. */
@@ -3057,10 +3057,14 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 	frame->new_mag_data = false;
 	if (mag_available && mag_enabled) {
 		int64_t now_ticks = k_uptime_ticks();
-		if (next_mag_read_ticks == 0 || now_ticks >= next_mag_read_ticks) {
+		if (next_mag_read_ticks == 0 || now_ticks >= next_mag_read_ticks ||
+			(sensor_mag->cached_poll_safe && sensor_interface_mag_frame_ready())) {
 			frame->new_mag_data = sensor_mag->mag_read(frame->raw_m);
 			if (frame->new_mag_data) {
-				if (next_mag_read_ticks != 0 && now_ticks - next_mag_read_ticks < mag_read_period_ticks) {
+				/* Preserve phase only for a due read less than one period late;
+				 * early cached reads must rebase rather than advance a future deadline. */
+				if (next_mag_read_ticks != 0 && now_ticks >= next_mag_read_ticks &&
+					now_ticks - next_mag_read_ticks < mag_read_period_ticks) {
 					next_mag_read_ticks += mag_read_period_ticks;
 				} else {
 					next_mag_read_ticks = now_ticks + mag_read_period_ticks;

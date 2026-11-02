@@ -227,6 +227,9 @@ typedef struct sensor_mag {
 	void (*mag_process)(uint8_t *raw_mag, float mag[3]);
 	uint8_t ext_min_burst; // minimum external-interface read transaction length
 	uint8_t ext_burst;     // preferred full burst length
+	/* Opt in to consuming an available cached frame before its ODR deadline.
+	 * mag_read must still enforce the driver's freshness admission policy. */
+	bool cached_poll_safe;
 } sensor_mag_t;
 
 #endif

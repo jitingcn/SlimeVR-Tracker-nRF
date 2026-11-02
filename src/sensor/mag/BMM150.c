@@ -368,5 +368,6 @@ const sensor_mag_t sensor_mag_bmm150 = {
 
 	*bmm1_mag_process,
 	6,
-	8 // rhall does not get read by limited external interface
+	8, // rhall does not get read by limited external interface
+	.cached_poll_safe = false,
 };
