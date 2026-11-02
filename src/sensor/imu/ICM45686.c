@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <math.h>
+#include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -48,12 +49,15 @@ static bool ext_read_ahead_active = false;
 static uint8_t ext_read_ahead_addr = 0;
 static uint8_t ext_read_ahead_reg = 0;
 static uint8_t ext_read_ahead_len = 0;
+static int64_t ext_read_ahead_deadline_ms = 0;
 static bool ext_scanning_mode = true;
 static bool ext_prefetch_enabled = true;
 static int icm45_ext_drain_read_ahead(enum ssi_reporting reporting);
 
 // A 15-byte read is about 0.4 ms at 400 kHz; poll BUSY instead of a nominal delay.
 #define ICM45686_I2CM_POLL_US 50
+#define ICM45686_I2CM_TIMEOUT_MS 10
+#define ICM45686_I2CM_MAX_READ 15
 #endif
 
 // Cache the mean temperature of accepted-header packets in the latest FIFO read.
@@ -849,7 +853,7 @@ fail:
 /** Capture the terminal STATUS once: DONE is cleared by a STATUS read. */
 static int icm45_i2cm_wait_done(uint8_t *status, enum ssi_reporting reporting)
 {
-	int64_t deadline = k_uptime_get() + 10;
+	int64_t deadline = k_uptime_get() + ICM45686_I2CM_TIMEOUT_MS;
 	for (;;) {
 		int err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, status, reporting);
 		if (err) {
@@ -868,14 +872,9 @@ static int icm45_i2cm_wait_done(uint8_t *status, enum ssi_reporting reporting)
 	}
 }
 
-/** Wait and validate one transaction without re-reading either read-clear status. */
-static int icm45_i2cm_complete(void)
+/** Validate a captured terminal STATUS without re-reading its read-clear bits. */
+static int icm45_i2cm_validate(uint8_t status)
 {
-	uint8_t status;
-	int err = icm45_i2cm_wait_done(&status, SSI_UNREPORTED);
-	if (err) {
-		return err;
-	}
 	if (status & ICM45686_BIT_I2CM_STATUS_TIMEOUT_ERR) {
 		return -ETIMEDOUT;
 	}
@@ -887,11 +886,37 @@ static int icm45_i2cm_complete(void)
 	}
 
 	uint8_t dev_status;
-	err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status, SSI_UNREPORTED);
+	int err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_EXT_DEV_STATUS, &dev_status, SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
 	return (dev_status & 0x01) ? -ENXIO : 0;
+}
+
+static int icm45_i2cm_complete(void)
+{
+	uint8_t status;
+	int err = icm45_i2cm_wait_done(&status, SSI_UNREPORTED);
+	return err ? err : icm45_i2cm_validate(status);
+}
+
+/** Poll a pending acquisition once; terminal status wins over the deadline. */
+static int icm45_i2cm_poll_complete(int64_t deadline, bool *pending)
+{
+	*pending = false;
+	uint8_t status;
+	int err = icm45_bank_read_byte(ICM45686_IPREG_TOP1, ICM45686_I2CM_STATUS, &status, SSI_UNREPORTED);
+	if (err) {
+		return err;
+	}
+	if (status & ICM45686_BIT_I2CM_STATUS_BUSY) {
+		if (k_uptime_get() >= deadline) {
+			return -ETIMEDOUT;
+		}
+		*pending = true;
+		return 0;
+	}
+	return icm45_i2cm_validate(status);
 }
 
 /** Drain even an uncertain GO before changing its command; discarded data is never reused. */
@@ -911,16 +936,53 @@ static int icm45_ext_set_prefetch(bool enabled)
 	return err;
 }
 
+static int icm45_i2cm_go(void)
+{
+	return icm45_bank_write_byte(
+		ICM45686_IPREG_TOP1,
+		ICM45686_I2CM_CONTROL,
+		ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
+		SSI_UNREPORTED
+	);
+}
+
+static int icm45_i2cm_configure_read(uint8_t addr, uint8_t reg, uint8_t len)
+{
+	uint8_t dev_profile[2] = {reg, addr};
+	int err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2, SSI_UNREPORTED);
+	if (err) {
+		return err;
+	}
+	return icm45_bank_write_byte(
+		ICM45686_IPREG_TOP1,
+		ICM45686_I2CM_COMMAND_0,
+		ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | len,
+		SSI_UNREPORTED
+	);
+}
+
+static int icm45_ext_arm_read_ahead(uint8_t addr, uint8_t reg, uint8_t len)
+{
+	// GO may reach the device even when its transport reports failure.
+	ext_read_ahead_active = false;
+	int64_t deadline = k_uptime_get() + ICM45686_I2CM_TIMEOUT_MS;
+	int err = icm45_i2cm_go();
+	if (err) {
+		return err;
+	}
+	ext_read_ahead_addr = addr;
+	ext_read_ahead_reg = reg;
+	ext_read_ahead_len = len;
+	ext_read_ahead_deadline_ms = deadline;
+	ext_read_ahead_active = true;
+	return 0;
+}
+
 int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 {
 	if (num_bytes == 0 || num_bytes > 6 || buf == NULL) {
 		return -EINVAL;
 	}
-
-	bool had_read_ahead = ext_prefetch_enabled && ext_read_ahead_active;
-	uint8_t saved_addr = ext_read_ahead_addr;
-	uint8_t saved_reg = ext_read_ahead_reg;
-	uint8_t saved_len = ext_read_ahead_len;
 
 	int err = icm45_ext_drain_read_ahead(SSI_UNREPORTED);
 	if (err) {
@@ -945,12 +1007,7 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 	if (err) {
 		return err;
 	}
-	err = icm45_bank_write_byte(
-		ICM45686_IPREG_TOP1,
-		ICM45686_I2CM_CONTROL,
-		ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
-		SSI_UNREPORTED
-	);
+	err = icm45_i2cm_go();
 	if (err) {
 		return err;
 	}
@@ -959,114 +1016,119 @@ int icm45_ext_write(const uint8_t addr, const uint8_t *buf, uint32_t num_bytes)
 		return err; // Never replay a write whose side effects may already have happened.
 	}
 
-	// Restore one-ahead reads only for sensors that permit background acquisition.
-	if (had_read_ahead && ext_prefetch_enabled) {
-		uint8_t rd_profile[2] = {saved_reg, saved_addr};
-		err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, rd_profile, 2, SSI_UNREPORTED);
-		if (err) {
-			return err;
-		}
-		err = icm45_bank_write_byte(
-			ICM45686_IPREG_TOP1,
-			ICM45686_I2CM_COMMAND_0,
-			ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | saved_len,
-			SSI_UNREPORTED
-		);
-		if (err) {
-			return err;
-		}
-		err = icm45_bank_write_byte(
-			ICM45686_IPREG_TOP1,
-			ICM45686_I2CM_CONTROL,
-			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
-			SSI_UNREPORTED
-		);
-		if (err) {
-			return err;
-		}
-		ext_read_ahead_active = true;
-		ext_read_ahead_addr = saved_addr;
-		ext_read_ahead_reg = saved_reg;
-		ext_read_ahead_len = saved_len;
-	}
 	return 0;
 }
 
-int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
+/* Periodic frames poll the previous GO without waiting; ordinary register
+ * reads always acquire synchronously, even for an identical profile. */
+static int icm45_ext_read(uint8_t addr, uint8_t reg, uint8_t len, uint8_t *buf, bool periodic)
 {
-	if (num_write != 1 || num_read < 1 || num_read > 15 || write_buf == NULL || read_buf == NULL) {
-		return -EINVAL;
-	}
+	bool had_read_ahead = ext_prefetch_enabled && ext_read_ahead_active;
+	uint8_t saved_addr = ext_read_ahead_addr;
+	uint8_t saved_reg = ext_read_ahead_reg;
+	uint8_t saved_len = ext_read_ahead_len;
+	bool same_profile = had_read_ahead && addr == saved_addr && reg == saved_reg && len == saved_len;
+	bool asynchronous = periodic && !ext_scanning_mode && ext_prefetch_enabled;
+	bool matching = asynchronous && same_profile;
 
-	uint8_t reg_addr = ((const uint8_t *)write_buf)[0];
-	bool matching = ext_prefetch_enabled && ext_read_ahead_active && addr == ext_read_ahead_addr
-				 && reg_addr == ext_read_ahead_reg && num_read == ext_read_ahead_len;
-	// Consume cache ownership before any fallible I/O, including terminal status.
+	// Revoke ownership before any fallible I/O, including terminal status.
 	ext_read_ahead_active = false;
 	int err;
-	if (!matching) {
+	if (matching) {
+		bool pending;
+		err = icm45_i2cm_poll_complete(ext_read_ahead_deadline_ms, &pending);
+		if (err) {
+			return err;
+		}
+		if (pending) {
+			ext_read_ahead_active = true;
+			return -EAGAIN;
+		}
+	} else {
+		// Also drains a GO whose transport failed and may have reached hardware.
 		err = icm45_ext_drain_read_ahead(SSI_UNREPORTED);
 		if (err) {
 			return err;
 		}
-		uint8_t dev_profile[2] = {reg_addr, addr};
-		err = icm45_bank_write(ICM45686_IPREG_TOP1, ICM45686_DEV_PROFILE_0, dev_profile, 2, SSI_UNREPORTED);
+		if (!same_profile) {
+			err = icm45_i2cm_configure_read(addr, reg, len);
+			if (err) {
+				return err;
+			}
+		}
+		if (asynchronous) {
+			err = icm45_ext_arm_read_ahead(addr, reg, len);
+			return err ? err : -EAGAIN;
+		}
+		err = icm45_i2cm_go();
 		if (err) {
 			return err;
 		}
-		err = icm45_bank_write_byte(
-			ICM45686_IPREG_TOP1,
-			ICM45686_I2CM_COMMAND_0,
-			ICM45686_I2CM_CMD_ENDFLAG | ICM45686_I2CM_CMD_RW_READ_REG | num_read,
-			SSI_UNREPORTED
-		);
-		if (err) {
-			return err;
-		}
-		err = icm45_bank_write_byte(
-			ICM45686_IPREG_TOP1,
-			ICM45686_I2CM_CONTROL,
-			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
-			SSI_UNREPORTED
-		);
+		err = icm45_i2cm_complete();
 		if (err) {
 			return err;
 		}
 	}
 
-	err = icm45_i2cm_complete();
+	err = icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, buf, len, SSI_UNREPORTED);
 	if (err) {
 		return err;
 	}
-	err = icm45_bank_read(ICM45686_IPREG_TOP1, ICM45686_I2CM_RD_DATA_0, read_buf, num_read, SSI_UNREPORTED);
-	if (err) {
-		return err;
+	if (asynchronous) {
+		return icm45_ext_arm_read_ahead(addr, reg, len);
+	}
+	if (ext_scanning_mode || !ext_prefetch_enabled || !had_read_ahead) {
+		return 0;
 	}
 
-	if (!ext_scanning_mode && ext_prefetch_enabled) {
-		err = icm45_bank_write_byte(
-			ICM45686_IPREG_TOP1,
-			ICM45686_I2CM_CONTROL,
-			ICM45686_I2CM_CONTROL_RESTART_EN | ICM45686_I2CM_CONTROL_GO,
-			SSI_UNREPORTED
-		);
-		// A failed GO may have reached hardware. Report it and drain on the next call.
+	// Incidental reads may restore only the periodic acquisition active on entry.
+	if (!same_profile) {
+		err = icm45_i2cm_configure_read(saved_addr, saved_reg, saved_len);
 		if (err) {
 			return err;
 		}
-		ext_read_ahead_active = true;
-		ext_read_ahead_addr = addr;
-		ext_read_ahead_reg = reg_addr;
-		ext_read_ahead_len = num_read;
 	}
-	return 0;
+	return icm45_ext_arm_read_ahead(saved_addr, saved_reg, saved_len);
+}
+
+int icm45_ext_write_read(const uint8_t addr, const void *write_buf, size_t num_write, void *read_buf, size_t num_read)
+{
+	if (num_write != 1 || num_read < 1 || num_read > ICM45686_I2CM_MAX_READ || write_buf == NULL || read_buf == NULL) {
+		return -EINVAL;
+	}
+	return icm45_ext_read(addr, ((const uint8_t *)write_buf)[0], num_read, read_buf, false);
+}
+
+static int icm45_ext_read_frame(
+	const uint8_t addr, uint8_t reg, uint8_t dummy_bytes, uint8_t word_bytes, uint8_t *buf, uint8_t num_bytes
+)
+{
+	if (!buf || num_bytes == 0 || word_bytes == 0) {
+		return -EINVAL;
+	}
+	// Larger shapes use SSI's existing whole-word segmented synchronous path.
+	if (dummy_bytes >= ICM45686_I2CM_MAX_READ || word_bytes > ICM45686_I2CM_MAX_READ - dummy_bytes
+		|| num_bytes > ICM45686_I2CM_MAX_READ - dummy_bytes) {
+		return -E2BIG;
+	}
+	if (dummy_bytes == 0) {
+		return icm45_ext_read(addr, reg, num_bytes, buf, true);
+	}
+
+	uint8_t raw[ICM45686_I2CM_MAX_READ];
+	int err = icm45_ext_read(addr, reg, dummy_bytes + num_bytes, raw, true);
+	if (!err) {
+		memcpy(buf, raw + dummy_bytes, num_bytes);
+	}
+	return err;
 }
 
 const sensor_ext_ssi_t sensor_ext_icm45686 = {
 	.ext_write = icm45_ext_write,
 	.ext_write_read = icm45_ext_write_read,
-	.ext_burst = 15,
+	.ext_burst = ICM45686_I2CM_MAX_READ,
 	.ext_set_prefetch = icm45_ext_set_prefetch,
+	.ext_read_frame = icm45_ext_read_frame,
 };
 
 int icm45_ext_setup(enum sensor_ext_mode mode)
@@ -1148,5 +1210,7 @@ const sensor_imu_t sensor_imu_icm45686 = {
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	.ext_setup = icm45_ext_setup,
+#else
+	.ext_setup = NULL,
 #endif
 };

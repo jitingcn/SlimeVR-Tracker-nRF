@@ -10,12 +10,19 @@
 /* DS-000577 host/IREG model. The complete production driver is linked, not
  * extracted or reimplemented. AUX completion captures the external registers;
  * STATUS.DONE and EXT_DEV_STATUS are read-clear, RD_DATA is cleared by GO.
- * FIFO uses a deliberately small capacity, not a physical depth/timing model.
- * DS-000577 section 17.28 models stop-on-full as rejecting writes while full;
- * reads release space. AN-000364 v1.5 section 2.16 models streaming read-empty
- * corruption. This is host-model coverage, not hardware proof of recovery,
- * electrical behavior or actual sensor conversion accuracy. */
+ * An opt-in MMC5603-like peripheral also clears its measurement-ready bit when
+ * magnetic data is read. A synthetic per-transaction dummy prefix exercises SSI
+ * framing. FIFO uses a deliberately small capacity, not a physical depth/timing
+ * model. DS-000577 section 17.28 models stop-on-full as rejecting writes while
+ * full; reads release space. AN-000364 v1.5 section 2.16 models streaming
+ * read-empty corruption. This is host-model coverage, not hardware proof of
+ * recovery, electrical behavior or actual sensor conversion accuracy. */
 #define TOP(reg) ((uint16_t)(0xa200u | (reg)))
+#define MMC_XOUT 0x00
+#define MMC_STATUS 0x18
+#define MMC_CONTROL_0 0x1b
+#define MMC_MEAS_M_DONE 0x40
+#define MMC_TAKE_MEAS_M 0x01
 enum bus_kind { ADDRESS, READ, WRITE };
 struct bus_record {
 	enum bus_kind kind;
@@ -26,15 +33,18 @@ struct bus_record {
 static struct {
 	uint8_t host[256], ireg[65536], external[256];
 	uint8_t external_address; /* Address of the modeled external peripheral. */
+	uint8_t external_dummy_prefix;
+	bool external_read_clear_done;
 	uint8_t fifo[8][20];
 	unsigned fifo_count, fifo_capacity, fifo_reads, fifo_events, count_reads;
+	unsigned usleep_calls;
 	bool fifo_corrupt, stale_count;
 	uint16_t pointer;
 	uint64_t now, last_ireg_end, complete_at, go_at;
 	uint32_t latency, duration;
 	bool accessed_ireg, busy, stuck, omit_done;
 	uint8_t terminal_error, nack, pending_command, pending_sub;
-	unsigned go_count, writes, data_reads, nack_reads, done_reads;
+	unsigned go_count, writes, data_reads, nack_reads, done_reads, status_reads;
 	struct bus_record records[32768];
 	unsigned record_count, failure_index;
 	struct {
@@ -58,9 +68,20 @@ static void settle(void)
 	if (!hw.nack && !hw.terminal_error) {
 		unsigned len = hw.pending_command & 0x0f;
 		if ((hw.pending_command & 0x30) == ICM45686_I2CM_CMD_RW_READ_REG) {
-			for (unsigned i = 0; i < len; i++)
-				hw.ireg[TOP(ICM45686_I2CM_RD_DATA_0) + i] =
-					hw.external[(uint8_t)(hw.pending_sub + i)];
+			bool read_magnetic_data = false;
+			for (unsigned i = 0; i < len; i++) {
+				uint8_t value;
+				if (i < hw.external_dummy_prefix) {
+					value = 0xdd; /* A dummy is generated on every physical read. */
+				} else {
+					uint8_t reg = (uint8_t)(hw.pending_sub + i - hw.external_dummy_prefix);
+					value = hw.external[reg];
+					read_magnetic_data |= reg < MMC_XOUT + 9;
+				}
+				hw.ireg[TOP(ICM45686_I2CM_RD_DATA_0) + i] = value;
+			}
+			if (hw.external_read_clear_done && read_magnetic_data)
+				hw.external[MMC_STATUS] &= ~MMC_MEAS_M_DONE;
 		} else {
 			/* Count commands, not final register value: replaying a SINGLE
 			 * trigger or FIFO pop cannot be made safe by writing the same byte. */
@@ -82,7 +103,7 @@ static void advance(uint64_t us)
 int64_t host_k_uptime_get(void) { return hw.now / 1000; }
 void host_k_busy_wait(uint32_t us) { advance(us); }
 void host_k_msleep(int32_t ms) { assert(ms >= 0); advance((uint64_t)ms * 1000); }
-void host_k_usleep(int32_t us) { assert(us >= 0); advance(us); }
+void host_k_usleep(int32_t us) { assert(us >= 0); hw.usleep_calls++; advance(us); }
 
 static int transaction(enum bus_kind kind, uint16_t address, bool ireg)
 {
@@ -197,6 +218,7 @@ int ssi_reg_read_byte(enum sensor_interface_dev dev, uint8_t reg, uint8_t *out)
 	if (ireg) {
 		hw.pointer++;
 		if (address == TOP(ICM45686_I2CM_STATUS)) {
+			hw.status_reads++;
 			if (*out & ICM45686_BIT_I2CM_STATUS_DONE)
 				hw.done_reads++;
 			hw.ireg[address] &= ~ICM45686_BIT_I2CM_STATUS_DONE;
@@ -298,7 +320,22 @@ static void reset_model(bool prefetch)
 
 static int read_sample(uint8_t sub, uint8_t *out, size_t len)
 {
-	return hw.ext->ext_write_read(0x1e, &sub, 1, out, len);
+	assert(hw.ext->ext_read_frame && len <= UINT8_MAX);
+	/* Advance the modeled peripheral, not the production callback, between
+	 * retries. Direct calls below separately assert the nonblocking contract. */
+	for (unsigned attempts = 0; attempts < 1024; attempts++) {
+		int err = hw.ext->ext_read_frame(hw.external_address, sub, 0, 1, out, (uint8_t)len);
+		if (err != -EAGAIN)
+			return err;
+		advance(hw.duration);
+	}
+	assert(false); /* A frame must either complete or time out. */
+	return -ETIMEDOUT;
+}
+
+static int read_register(uint8_t sub, uint8_t *out, size_t len)
+{
+	return hw.ext->ext_write_read(hw.external_address, &sub, 1, out, len);
 }
 
 static void set_sample(uint8_t value)
@@ -354,6 +391,178 @@ static void test_prefetch_snapshot(void)
 		hw.go_count - go);
 }
 
+/* This witness is also runnable alone against the frozen pre-change driver.
+ * The old driver has no periodic callback, so its former generic-read path is
+ * used solely to establish the same pending XYZ profile in that comparison. */
+static void test_mmc_read_clear_after_command(void)
+{
+	reset_model(true);
+	hw.external_read_clear_done = true;
+	uint8_t out[9];
+	for (unsigned i = 0; i < sizeof(out); i++)
+		hw.external[MMC_XOUT + i] = 0x20 + i;
+	int err = hw.ext->ext_read_frame ? read_sample(MMC_XOUT, out, sizeof(out))
+		: read_register(MMC_XOUT, out, sizeof(out));
+	assert(err == 0);
+	expect_sample(out, 0x20, sizeof(out));
+
+	const uint8_t command[] = {MMC_CONTROL_0, MMC_TAKE_MEAS_M};
+	assert(hw.ext->ext_write(hw.external_address, command, sizeof(command)) == 0);
+	assert(hw.writes == 1);
+
+	/* A conversion completes while the owner is preempted after the command.
+	 * Any speculative XYZ read in this interval clears the real ready bit. */
+	for (unsigned i = 0; i < sizeof(out); i++)
+		hw.external[MMC_XOUT + i] = 0x50 + i;
+	hw.external[MMC_STATUS] |= MMC_MEAS_M_DONE;
+	advance(hw.duration);
+	uint8_t status = 0;
+	assert(read_register(MMC_STATUS, &status, 1) == 0);
+	assert((status & MMC_MEAS_M_DONE) != 0);
+	assert(!hw.busy);
+	assert(read_register(MMC_STATUS, &status, 1) == 0);
+	assert((status & MMC_MEAS_M_DONE) != 0 && !hw.busy);
+
+	/* Polls are fresh, not snapshots left behind by an incidental status read. */
+	hw.external[MMC_STATUS] &= ~MMC_MEAS_M_DONE;
+	advance(hw.duration);
+	assert(read_register(MMC_STATUS, &status, 1) == 0);
+	assert((status & MMC_MEAS_M_DONE) == 0 && !hw.busy);
+	hw.external[MMC_STATUS] |= MMC_MEAS_M_DONE;
+	assert(read_register(MMC_STATUS, &status, 1) == 0);
+	assert((status & MMC_MEAS_M_DONE) != 0 && !hw.busy);
+
+	/* This peripheral, not the host, acknowledges DONE on a magnetic read. */
+	assert(read_register(MMC_XOUT, out, sizeof(out)) == 0);
+	expect_sample(out, 0x50, sizeof(out));
+	assert(read_register(MMC_STATUS, &status, 1) == 0);
+	assert((status & MMC_MEAS_M_DONE) == 0 && !hw.busy);
+	assert(hw.writes == 1);
+
+	/* A new explicit frame request, not the command or polling, rearms it. */
+	assert(read_sample(MMC_XOUT, out, sizeof(out)) == 0);
+	for (unsigned i = 0; i < sizeof(out); i++)
+		hw.external[MMC_XOUT + i] = 0x70 + i;
+	advance(hw.duration);
+	for (unsigned i = 0; i < sizeof(out); i++)
+		hw.external[MMC_XOUT + i] = 0x90 + i;
+	assert(read_sample(MMC_XOUT, out, sizeof(out)) == 0);
+	expect_sample(out, 0x70, sizeof(out));
+}
+
+static void test_incidental_read_restores_active_periodic(void)
+{
+	reset_model(true);
+	uint8_t out[3], status;
+	set_sample(0x20);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	set_sample(0x40);
+	hw.external[0x30] = 0x35;
+	assert(read_register(0x30, &status, 1) == 0 && status == 0x35);
+
+	/* The restored XYZ request owns a historical snapshot, not the later data. */
+	set_sample(0x60);
+	advance(hw.duration);
+	set_sample(0x80);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	expect_sample(out, 0x60, sizeof(out));
+
+	/* Even a generic read matching XYZ is synchronous and must be fresh. */
+	set_sample(0x90);
+	advance(hw.duration);
+	set_sample(0xb0);
+	assert(read_register(0x08, out, sizeof(out)) == 0);
+	expect_sample(out, 0xb0, sizeof(out));
+	set_sample(0xc0);
+	advance(hw.duration);
+	set_sample(0xd0);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	expect_sample(out, 0xc0, sizeof(out));
+}
+
+static void test_command_failure_leaves_periodic_dormant(void)
+{
+	reset_model(true);
+	uint8_t out[3];
+	set_sample(0x20);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	const uint8_t command[] = {MMC_CONTROL_0, MMC_TAKE_MEAS_M};
+	/* The failed host transfer may nevertheless have issued the command. */
+	fail_on(WRITE, TOP(ICM45686_I2CM_CONTROL), 0, true);
+	assert(hw.ext->ext_write(hw.external_address, command, sizeof(command)) == -EIO);
+	expect_failure_stopped();
+	advance(hw.duration);
+	assert(hw.writes == 1);
+	hw.external[MMC_STATUS] = 0x31;
+	assert(read_register(MMC_STATUS, out, 1) == 0 && out[0] == 0x31 && !hw.busy);
+	hw.external[MMC_STATUS] = 0x72;
+	advance(hw.duration);
+	assert(read_register(MMC_STATUS, out, 1) == 0 && out[0] == 0x72 && !hw.busy);
+	assert(hw.writes == 1);
+	set_sample(0x50);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	expect_sample(out, 0x50, sizeof(out));
+}
+
+static void test_failed_incidental_read_does_not_restore(void)
+{
+	reset_model(true);
+	hw.external_read_clear_done = true;
+	uint8_t out[9], status = 0xa5;
+	assert(read_sample(MMC_XOUT, out, sizeof(out)) == 0);
+	/* The status GO may have reached hardware despite the transport error. */
+	fail_on(WRITE, TOP(ICM45686_I2CM_CONTROL), 0, true);
+	assert(read_register(MMC_STATUS, &status, 1) == -EIO);
+	expect_failure_stopped();
+	assert(status == 0xa5);
+	advance(hw.duration);
+	hw.external[MMC_STATUS] = MMC_MEAS_M_DONE;
+	advance(hw.duration);
+	assert(read_register(MMC_STATUS, &status, 1) == 0);
+	assert((status & MMC_MEAS_M_DONE) != 0 && !hw.busy);
+}
+
+static void test_frame_boundaries(void)
+{
+	reset_model(false);
+	assert(hw.ext->ext_read_frame);
+	hw.external_dummy_prefix = 2;
+	for (unsigned i = 0; i < 16; i++)
+		hw.external[0x40 + i] = 0x30 + i;
+	uint8_t out[16];
+	memset(out, 0xa5, sizeof(out));
+	unsigned go = hw.go_count;
+	/* Two dummy bytes plus 13 data bytes fill the physical 15-byte limit.
+	 * A partial final word is legal; only chunk boundaries must be aligned. */
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x40, 2, 2, out, 13) == 0);
+	expect_sample(out, 0x30, 13);
+	assert(out[13] == 0xa5 && hw.go_count == go + 1 && !hw.busy);
+
+	memset(out, 0xa5, sizeof(out));
+	go = hw.go_count;
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x40, 2, 2, out, 14) == -E2BIG);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x40, 14, 2, out, 1) == -E2BIG);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x40, 0, 0, out, 1) == -EINVAL);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x40, 0, 1, out, 0) == -EINVAL);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x40, 0, 1, NULL, 1) == -EINVAL);
+	for (unsigned i = 0; i < sizeof(out); i++)
+		assert(out[i] == 0xa5);
+	assert(hw.go_count == go && !hw.busy);
+
+	/* Rejected shapes cannot disturb an already-owned periodic snapshot. */
+	reset_model(true);
+	set_sample(0x20);
+	assert(read_sample(0x08, out, 3) == 0);
+	set_sample(0x40);
+	advance(hw.duration);
+	set_sample(0x60);
+	go = hw.go_count;
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x40, 2, 2, out, 14) == -E2BIG);
+	assert(hw.go_count == go);
+	assert(read_sample(0x08, out, 3) == 0);
+	expect_sample(out, 0x40, 3);
+}
+
 static void test_disabled_prefetch_lifecycle(void)
 {
 	reset_model(false);
@@ -377,6 +586,30 @@ static void test_disabled_prefetch_lifecycle(void)
 	assert(read_sample(0x08, out, sizeof(out)) == 0);
 	expect_sample(out, 0x71, sizeof(out));
 	assert(hw.go_count == 4 && !hw.busy);
+}
+
+static void test_prefetch_policy_toggle(void)
+{
+	reset_model(true);
+	uint8_t out[3];
+	set_sample(0x20);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	assert(hw.ext->ext_set_prefetch(false) == 0);
+	set_sample(0x40);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	expect_sample(out, 0x40, sizeof(out));
+	assert(!hw.busy);
+	assert(hw.ext->ext_set_prefetch(true) == 0);
+	set_sample(0x60);
+	assert(read_register(0x08, out, sizeof(out)) == 0);
+	expect_sample(out, 0x60, sizeof(out));
+	assert(!hw.busy);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	set_sample(0x80);
+	advance(hw.duration);
+	set_sample(0xa0);
+	assert(read_sample(0x08, out, sizeof(out)) == 0);
+	expect_sample(out, 0x80, sizeof(out));
 }
 
 static void test_error_completions(void)
@@ -514,7 +747,7 @@ static void test_write_faults(void)
 		advance(hw.duration);
 		assert(hw.writes == (i >= 5));
 		uint8_t out;
-		assert(read_sample(0x04, &out, 1) == 0);
+		assert(read_register(0x04, &out, 1) == 0);
 		assert(out == (i >= 5 ? 0x02 : 0));
 		assert(hw.writes == (i >= 5));
 	}
@@ -699,6 +932,109 @@ static void expect_frame(uint8_t *data, unsigned index, unsigned id)
 	assert(a[0] == (float)id);
 	assert(a[1] == 0 && a[2] == 0);
 	assert(g[0] == 0 && g[1] == 0 && g[2] == 0);
+}
+
+static void test_periodic_pending_does_not_block_fifo(void)
+{
+	reset_model(true);
+	hw.duration = 5000;
+	set_sample(0x20);
+	uint8_t out[3] = {0xa5, 0xa5, 0xa5};
+	unsigned sleeps = hw.usleep_calls, go = hw.go_count;
+	uint64_t started = hw.now;
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, out, sizeof(out)) == -EAGAIN);
+	assert(hw.busy && hw.go_count == go + 1 && hw.usleep_calls == sleeps);
+	assert(hw.now - started < hw.duration);
+	for (unsigned id = 1; id <= 3; id++) {
+		uint64_t before = hw.now;
+		unsigned snapshots = hw.status_reads;
+		assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, out, sizeof(out)) == -EAGAIN);
+		assert(hw.status_reads == snapshots + 1); /* One read-clear STATUS snapshot. */
+		assert(hw.usleep_calls == sleeps && hw.now - before < hw.duration);
+		assert(out[0] == 0xa5 && out[1] == 0xa5 && out[2] == 0xa5);
+		assert(hw.go_count == go + 1 && hw.busy);
+		/* A slow external transaction must not stop 20-byte inertial FIFO work. */
+		uint8_t fifo[20];
+		append_frame(id);
+		assert(icm45_fifo_read(fifo, sizeof(fifo)) == 1);
+		expect_frame(fifo, 0, id);
+		advance(1000);
+	}
+	set_sample(0x40);
+	advance(hw.duration);
+	set_sample(0x60);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, out, sizeof(out)) == 0);
+	expect_sample(out, 0x40, sizeof(out));
+	assert(hw.go_count == go + 2 && hw.usleep_calls == sleeps);
+}
+
+static void test_periodic_deadline_and_terminal_precedence(void)
+{
+	reset_model(true);
+	hw.duration = 5000;
+	hw.stuck = true;
+	uint8_t out = 0xa5;
+	unsigned sleeps = hw.usleep_calls, go = hw.go_count;
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -EAGAIN);
+	advance(8000);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -EAGAIN);
+	advance(3000);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -ETIMEDOUT);
+	assert(out == 0xa5 && hw.busy && hw.go_count == go + 1 && hw.usleep_calls == sleeps);
+	/* A timed-out but possibly still running GO must be drained, not reused. */
+	hw.stuck = false;
+	advance(hw.duration);
+	set_sample(0x70);
+	assert(read_sample(0x08, &out, 1) == 0 && out == 0x70);
+	assert(hw.go_count == go + 3);
+
+	/* BUSY observed before the deadline is not enough: a slow STATUS
+	 * transfer can cross the deadline before the result reaches the caller. */
+	reset_model(true);
+	hw.duration = 5000;
+	hw.stuck = true;
+	out = 0xa5;
+	sleeps = hw.usleep_calls;
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -EAGAIN);
+	hw.latency = 700;
+	advance(9000);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -ETIMEDOUT);
+	assert(out == 0xa5 && hw.usleep_calls == sleeps);
+	hw.stuck = false;
+	advance(hw.duration);
+
+	/* A terminal status takes precedence over elapsed time: a late NACK is
+	 * reported as NACK, and a late successful snapshot is still consumable. */
+	reset_model(true);
+	hw.duration = 11000;
+	hw.nack = 1;
+	out = 0xa5;
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -EAGAIN);
+	advance(hw.duration);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -ENXIO);
+	assert(out == 0xa5);
+
+	reset_model(true);
+	hw.duration = 11000;
+	set_sample(0x31);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -EAGAIN);
+	advance(hw.duration);
+	set_sample(0x51);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == 0);
+	assert(out == 0x31);
+
+	/* Failed STATUS transport takes precedence and invalidates ownership. */
+	reset_model(true);
+	hw.duration = 5000;
+	out = 0xa5;
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -EAGAIN);
+	fail_on(READ, TOP(ICM45686_I2CM_STATUS), 0, false);
+	assert(hw.ext->ext_read_frame(hw.external_address, 0x08, 0, 1, &out, 1) == -EIO);
+	expect_failure_stopped();
+	assert(out == 0xa5);
+	advance(hw.duration);
+	set_sample(0x75);
+	assert(read_sample(0x08, &out, 1) == 0 && out == 0x75);
 }
 
 static void test_icm45686_fifo_lone_frame(void)
@@ -903,8 +1239,13 @@ static void test_icm45686_hires_vectors(void)
 	assert(a[0] == 77 && g[0] == 88);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+	if (argc == 2 && strcmp(argv[1], "--read-clear-witness") == 0) {
+		test_mmc_read_clear_after_command();
+		puts("MMC read-clear ownership witness passed");
+		return 0;
+	}
 	test_icm45686_direct_units();
 	test_icm45686_fifo_lone_frame();
 	test_icm45686_fifo_bounded_reads();
@@ -914,8 +1255,16 @@ int main(void)
 	test_icm45686_temperature_sentinel();
 	test_icm45686_header_flags();
 	test_icm45686_hires_vectors();
+	test_periodic_pending_does_not_block_fifo();
+	test_periodic_deadline_and_terminal_precedence();
 	test_prefetch_snapshot();
+	test_mmc_read_clear_after_command();
+	test_incidental_read_restores_active_periodic();
+	test_command_failure_leaves_periodic_dormant();
+	test_failed_incidental_read_does_not_restore();
+	test_frame_boundaries();
 	test_disabled_prefetch_lifecycle();
+	test_prefetch_policy_toggle();
 	test_error_completions();
 	test_transfer_faults();
 	test_write_faults();

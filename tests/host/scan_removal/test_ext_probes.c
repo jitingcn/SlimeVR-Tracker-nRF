@@ -452,6 +452,90 @@ static void test_ssi_group_and_dummy_boundaries(void)
 }
 #endif
 
+#if defined(PROBE_ICM)
+static void test_icm_frame_fallback(void)
+{
+	prepare();
+	assert(real_ext->ext_read_frame);
+	hw.external_dummy_prefix = 2;
+	for (unsigned i = 0; i < 16; i++)
+		hw.external[0x40 + i] = 0x10 + i;
+	uint8_t out[16];
+	memset(out, 0xa5, sizeof(out));
+	/* In scan mode, a full 15-byte transaction remains synchronous. */
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x40, 2, 2, out, 13) == 0);
+	expect_sample(out, 0x10, 13);
+	assert(out[13] == 0xa5 && hw.go_count == 1 && host_log_error_count() == 0);
+	expect_quiescent();
+
+	prepare();
+	hw.external_dummy_prefix = 1;
+	for (unsigned i = 0; i < 16; i++)
+		hw.external[0x40 + i] = 0x30 + i;
+	memset(out, 0xa5, sizeof(out));
+	/* 16 data bytes plus the dummy cannot fit. The real SSI consumer falls
+	 * back to two reads at whole-word boundaries, each with its own dummy. */
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x40, 1, 2, out, sizeof(out)) == 0);
+	expect_sample(out, 0x30, sizeof(out));
+	assert(hw.go_count == 2 && host_log_error_count() == 0);
+	expect_quiescent();
+
+	prepare();
+	initialize(); /* Runtime mode permits periodic read-ahead. */
+	set_sample(0x20);
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x08, 0, 1, out, 3) == -EAGAIN);
+	assert(host_log_error_count() == 0);
+	advance(hw.duration);
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x08, 0, 1, out, 3) == 0);
+	expect_sample(out, 0x20, 3);
+	for (unsigned i = 0; i < sizeof(out); i++)
+		hw.external[0x40 + i] = 0x70 + i;
+	/* An oversized runtime frame falls back synchronously without losing the
+	 * periodic profile that was already active on entry. */
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x40, 0, 2, out, sizeof(out)) == 0);
+	expect_sample(out, 0x70, sizeof(out));
+	set_sample(0x60);
+	advance(hw.duration);
+	set_sample(0x80);
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x08, 0, 1, out, 3) == 0);
+	expect_sample(out, 0x60, 3);
+	assert(host_log_error_count() == 0);
+
+	prepare();
+	hw.external_dummy_prefix = 1;
+	for (unsigned i = 0; i < 16; i++)
+		hw.external[0x40 + i] = 0x50 + i;
+	memset(out, 0xa5, sizeof(out));
+	/* The second GO can reach silicon even when its host transfer fails. No
+	 * segment may be retried and the unread part of the destination is intact. */
+	fail_on(WRITE, TOP(ICM45686_I2CM_CONTROL), 1, true);
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x40, 1, 2, out, sizeof(out)) == -EIO);
+	expect_failure_stopped();
+	expect_sample(out, 0x50, 14);
+	assert(out[14] == 0xa5 && out[15] == 0xa5);
+	advance(hw.duration);
+	assert(hw.go_count == 2 && host_log_error_count() == 1);
+	expect_quiescent();
+
+	prepare();
+	memset(out, 0xa5, sizeof(out));
+	hw.nack = 1;
+	/* Errors other than -E2BIG propagate, rather than triggering fallback. */
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x40, 0, 2, out, 4) == -ENXIO);
+	assert(hw.go_count == 1 && host_log_error_count() == 1);
+	for (unsigned i = 0; i < 4; i++)
+		assert(out[i] == 0xa5);
+	expect_quiescent();
+
+	prepare();
+	memset(out, 0xa5, sizeof(out));
+	/* The fallback must report an impossible whole-word shape without GO. */
+	assert(ssi_burst_read_frame(SENSOR_INTERFACE_DEV_MAG, 0x40, 14, 2, out, 1) == -1);
+	assert(out[0] == 0xa5 && hw.go_count == 0 && host_log_error_count() == 1);
+	expect_quiescent();
+}
+#endif
+
 static void test_qmc5883l_ff_identity(void)
 {
 	uint16_t addr;
@@ -483,6 +567,9 @@ int main(void)
 	test_qmc6309_identity();
 #if defined(PROBE_DSV)
 	test_ssi_group_and_dummy_boundaries();
+#endif
+#if defined(PROBE_ICM)
+	test_icm_frame_fallback();
 #endif
 	test_absent_and_nested_scan();
 	test_ict_probe_retry();
