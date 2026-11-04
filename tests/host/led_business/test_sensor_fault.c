@@ -7,6 +7,8 @@
  * existing host backend; interleaving happens at the real snapshot boundary. */
 typedef _Atomic int atomic_t;
 static int atomic_get(const atomic_t *state) { return atomic_load(state); }
+static int atomic_set(atomic_t *state, int value) { return atomic_exchange(state, value); }
+static atomic_t sensor_progress, sensor_recovery_pending;
 static void atomic_or(atomic_t *state, int mask) { (void)atomic_fetch_or(state, mask); }
 static void atomic_and(atomic_t *state, int mask) { (void)atomic_fetch_and(state, mask); }
 static bool status_locked;
@@ -75,6 +77,8 @@ static void reset(void)
     sensor_sensor_init = false;
     scan_clears = retained_writes = reboot_requests = 0;
     reboot_result = 0;
+    atomic_store(&sensor_progress, 0);
+    atomic_store(&sensor_recovery_pending, 0);
     packet_errors = 0;
     no_packets_since_ms = 0;
     no_packets_timeout_logged = sensor_int_during_loop = false;
@@ -188,13 +192,16 @@ static void runtime_faults_preserve_recovery_policy(void)
     assert(get_status(SYS_STATUS_SENSOR_ERROR) == 0 && reboot_requests == 0);
     reboot_result = -EBUSY;
     host_sensor_packet_check(&invalid);
-    assert(packet_errors == 9 && reboot_requests == 1 && retained_writes == 1);
+    assert(packet_errors == 10 && atomic_get(&sensor_recovery_pending) == 1);
+    assert(reboot_requests == 0 && retained_writes == 0);
     publish();
     assert(engine.winner.semantic == LED_SENSOR_FAULT);
     reboot_result = 0;
     host_sensor_packet_check(&invalid);
-    assert(packet_errors == 10 && reboot_requests == 2 && retained_writes == 2);
+    assert(packet_errors == 11 && atomic_get(&sensor_recovery_pending) == 1);
+    assert(reboot_requests == 0 && retained_writes == 0);
     host_sensor_packet_check(&good);
+    assert(atomic_get(&sensor_progress) == 1);
     assert(get_status(SYS_STATUS_SENSOR_ERROR) != 0);
 }
 static void mixed_records_reset_no_progress(void)

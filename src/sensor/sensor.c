@@ -607,17 +607,10 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 
 #include "system/nrf_gpio_util.h" /* after LOG_MODULE_REGISTER: pin log helpers */
 
-#define SENSOR_SCAN_COLD_POWER_UP_DELAY_MS 50
+/* 10 % above the 50 ms the IMUs need: one Smol missed its IMU on most boots. */
+#define SENSOR_SCAN_COLD_POWER_UP_DELAY_MS 55
 
 static int sensor_scan_last_power_up_delay_ms = SENSOR_SCAN_COLD_POWER_UP_DELAY_MS;
-
-static int sensor_scan_retry_delay_ms(void)
-{
-	if (sensor_scan_last_power_up_delay_ms < SENSOR_SCAN_COLD_POWER_UP_DELAY_MS) {
-		return SENSOR_SCAN_COLD_POWER_UP_DELAY_MS - sensor_scan_last_power_up_delay_ms;
-	}
-	return 5;
-}
 
 static uint16_t sensor_fifo_setup_threshold(void)
 {
@@ -887,20 +880,49 @@ static void sensor_loop(void);
 static struct k_thread sensor_thread_id;
 static K_THREAD_STACK_DEFINE(sensor_thread_id_stack, 2048);
 
+/* Only the sensor worker reports progress. The monitor never touches the bus
+ * until the existing lifecycle has quiesced and joined that worker. */
+static atomic_t sensor_progress;
+static atomic_t sensor_recovery_pending;
+
 static void sensor_startup_thread(void *arg1, void *arg2, void *arg3)
 {
 	ARG_UNUSED(arg1);
 	ARG_UNUSED(arg2);
 	ARG_UNUSED(arg3);
+	unsigned delay_ms = 2000;
+	unsigned stalled = 0;
 	int err = sensor_request_scan(true, false);
-	if (err) {
-		LOG_ERR("Startup sensor scan failed: %d", err);
+	for (;;) {
+		if (err) {
+			LOG_WRN("Sensor discovery failed; retry in %u ms", delay_ms);
+			k_msleep(delay_ms);
+			delay_ms = delay_ms < 16000 ? delay_ms * 2 : 30000;
+		} else {
+			delay_ms = 2000;
+			k_msleep(1000);
+			/* Suspended sensors deliberately produce no data. Also reset the
+			 * grace interval after resume, calibration or a successful scan. */
+			if (atomic_get(&main_suspended) || atomic_set(&sensor_progress, 0)) {
+				stalled = 0;
+				continue;
+			}
+			if (++stalled < 3 && !atomic_get(&sensor_recovery_pending)) {
+				continue;
+			}
+			LOG_WRN("Sensor data stalled; requesting full rescan");
+			atomic_set(&sensor_recovery_pending, 1);
+		}
+		err = sensor_request_scan(true, false);
+		stalled = 0;
 	}
 }
 
+/* Peak use is ~330 B; an interrupt taken there also stacks an extended FP
+ * frame (~104 B), which overflowed 384 B on nRF54L15. */
 K_THREAD_DEFINE(
 	sensor_init_thread_id,
-	384,
+	1024,
 	sensor_startup_thread,
 	NULL,
 	NULL,
@@ -1060,12 +1082,13 @@ int sensor_scan(void)
 	}
 
 	int imu_id = sensor_scan_imu_once();
-	if (imu_id < 0) {
-		int retry_delay_ms = sensor_scan_retry_delay_ms();
-		if (retry_delay_ms > 0) {
-			k_msleep(retry_delay_ms);
-		}
-		LOG_INF("Retrying sensor detection");
+	/* Failed boot probes need a real power-up retry, not another 5 ms.
+	 * Keep the successful fast path unchanged. Both full rescans fit well
+	 * within the existing 10 s scan watchdog and run only after failure. */
+	for (unsigned retry = 0; imu_id < 0 && retry < 2; retry++) {
+		unsigned delay_ms = retry ? 1000U : 250U;
+		LOG_WRN("No IMU found; retrying full scan in %u ms", delay_ms);
+		k_msleep(delay_ms);
 		sensor_imu_dev.addr = 0x00;
 		sensor_imu_dev_reg = 0xFF;
 		imu_id = sensor_scan_imu_once();
@@ -1270,7 +1293,7 @@ static int sensor_request_scan_locked(bool force, bool user_feedback)
 	// section of an iteration. When the loop is waiting for FIFO/interrupt, `main_running`
 	// becomes false even though the loop may be perfectly healthy. Using it here creates a
 	// race where forced scans can still slip through.
-	if (force && sensor_sensor_init && main_ok && packet_errors == 0 && !no_packets_timeout_logged && !atomic_get(&main_suspended)) {
+	if (force && !atomic_get(&sensor_recovery_pending) && sensor_sensor_init && main_ok && packet_errors == 0 && !no_packets_timeout_logged && !atomic_get(&main_suspended)) {
 		int64_t now = k_uptime_get();
 		bool allow_force_scan = false;
 
@@ -1360,6 +1383,8 @@ static int sensor_request_scan_locked(bool force, bool user_feedback)
 	atomic_clear(&main_suspended);
 	sensor_sensor_init = false;
 	main_ok = false;
+	sensor_imu_id = -1;
+	sensor_refresh_sensor_ids();
 	if (force) {
 		sensor_imu_dev.addr = 0x00;
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -1407,6 +1432,10 @@ static int sensor_request_scan_locked(bool force, bool user_feedback)
 		LOG_INF("Started sensor loop");
 	}
 	int result = join_err ? join_err : (sensor_sensor_init ? 0 : -EIO);
+	if (!result) {
+		atomic_clear(&sensor_recovery_pending);
+		atomic_set(&sensor_progress, 1);
+	}
 	if (user_feedback) {
 		sensor_calibration_result(feedback, result ? LED_FAILED : LED_SUCCESS);
 	} else if (result) {
@@ -3257,15 +3286,10 @@ static void sensor_loop_check_packets(sensor_loop_frame_t *frame, int64_t time_b
 		if (!sensor_int_during_loop && ++packet_errors == 10) {
 			LOG_ERR("Packet error threshold exceeded");
 			set_sensor_fault(SYS_SENSOR_FAULT_OTHER);
-			if (frame->packets) {
-				sensor_retained_write(); // keep the fusion state
-				if (sys_request_system_reboot() < 0) {
-					/* Keep the threshold armed if another power request owns the slot. */
-					packet_errors--;
-				}
-			}
+			atomic_set(&sensor_recovery_pending, 1);
 		}
 	} else if (frame->processed_packets > 0) {
+		atomic_set(&sensor_progress, 1);
 		packet_errors = 0;
 		no_packets_since_ms = 0;
 		no_packets_timeout_logged = false;

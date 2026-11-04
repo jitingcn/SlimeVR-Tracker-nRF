@@ -45,6 +45,7 @@ PROBE_HEADERS := $(wildcard ../../../src/sensor/*.h ../../../src/sensor/imu/*.h)
 
 check: test_full test_minimal_mixed test_minimal_group_a test_minimal_group_b \
 	test_ext_dso test_ext_dsv test_ext_icm
+	python3 test_scan_retry.py
 	./test_full
 	./test_minimal_mixed
 	./test_minimal_group_a

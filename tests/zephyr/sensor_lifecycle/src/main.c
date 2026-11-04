@@ -10,7 +10,7 @@
 
 /* These are firmware configuration/input choices, not altered function bodies.
  * No magnetometer, heater, or motion-history support; TWIM timeout is the 25 ms
- * selected in tracker prj.conf. Cold scan delay is the production 50 ms. */
+ * selected in tracker prj.conf. Cold scan delay is the production 55 ms. */
 #define CONFIG_DYNAMIC_ACTIVE_TIMEOUT 0
 #define CONFIG_SENSOR_USE_MAGNETOMETER 0
 #define CONFIG_SENSOR_TCAL_HEATED 0
@@ -22,8 +22,8 @@
 #define STATUS_INTERVAL_MS 10000
 #define SENSOR_IMU_SPI_EXISTS 0
 #define SENSOR_IMU_EXISTS 1
-#define SENSOR_SCAN_COLD_POWER_UP_DELAY_MS 50
-#define CONFIG_SENSOR_RETAINED_SCAN_POWER_UP_DELAY_MS 5
+#define SENSOR_SCAN_COLD_POWER_UP_DELAY_MS 55
+#define CONFIG_SENSOR_RETAINED_SCAN_POWER_UP_DELAY_MS 6
 #define I2C_TRANSFER_TIMEOUT_MSEC K_MSEC(25)
 #define SCAN_ADDR_START 8
 #define SCAN_ADDR_STOP 0x7e
