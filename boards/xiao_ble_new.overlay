@@ -1,0 +1,33 @@
+/*
+ * Optional nRF54L15-aligned external-sensor wiring for XIAO nRF52840.
+ * Select with FILE_SUFFIX=new; the ordinary build keeps its legacy wiring.
+ *
+ * D0: sensor power enable (active high)
+ * D1: external 32.768 kHz oscillator enable (active high, not a clock output)
+ * D2: IMU CS (active low), D3: IMU INT
+ * D4/D5: I2C SDA/SCL, D8/D9/D10: SPI SCK/MISO/MOSI
+ * D6/P1.11: custom sw0, normally-open switch to GND; D7 remains spare.
+ */
+#include "xiao_ble.overlay"
+
+/ {
+	zephyr,user {
+		pwr-gpios = <&xiao_d 0 GPIO_ACTIVE_HIGH>;
+		clk-gpios = <&xiao_d 1 GPIO_ACTIVE_HIGH>;
+		int0-gpios = <&xiao_d 3 GPIO_ACTIVE_HIGH>;
+	};
+
+	aliases {
+		sw0 = &button0;
+	};
+};
+
+/* UART0 is deleted by the base overlay, leaving D6 available for the button. */
+&button0 {
+	gpios = <&xiao_d 6 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+	label = "User button";
+};
+
+&spi3 {
+	cs-gpios = <&xiao_d 2 GPIO_ACTIVE_LOW>;
+};

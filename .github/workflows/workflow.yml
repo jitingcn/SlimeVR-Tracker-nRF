@@ -199,6 +199,7 @@ jobs:
                   {boardname: "xiao_nrf54l15/nrf54l15/cpuapp", filename: "SlimeNRF_XIAO_nRF54L15_ExtAnt_Tracker", file_suffix: "ext_ant"},
                   {boardname: "xiao_nrf54l15/nrf54l15/cpuapp", filename: "SlimeNRF_XIAO_nRF54L15_Sense_ExtAnt_Tracker", file_suffix: "sense_ext_ant"},
                   {boardname: "xiao_ble/nrf52840", filename: "SlimeNRF_XIAO_Tracker"},
+                  {boardname: "xiao_ble/nrf52840", filename: "SlimeNRF_XIAO_New_Tracker", file_suffix: "new"},
                   {boardname: "xiao_ble/nrf52840/sense", filename: "SlimeNRF_XIAO_Sense_Tracker"},
                   {boardname: "promicro_uf2/nrf52840/i2c", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_I2C"},
                   {boardname: "promicro_uf2/nrf52840/spi", filename: "SlimeNRF_ProMicro_StackedSmol_Tracker_SPI"},
@@ -402,3 +403,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release-artifacts/**/*.uf2
+            release-artifacts/**/*.hex
