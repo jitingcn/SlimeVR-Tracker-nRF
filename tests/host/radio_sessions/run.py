@@ -114,7 +114,8 @@ for name in ("esb_wom_reset", "esb_wom_receive", "esb_wom_process",
              "esb_wom_prepare_ping", "esb_get_ping_ack_flag", "esb_get_ping_request_data"):
     commands.append(function(esb, name))
 registry = block(esb, r"^static const struct esb_remote_cmd esb_remote_cmds\[\] = \{", True)
-actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start", "esb_remote_cmd_set_channel", "esb_remote_cmd_ota_query_info", "esb_remote_cmd_ota_abort")
+actual_handlers = ("esb_remote_cmd_shutdown", "esb_remote_cmd_data_collect_refuse_private",
+                   "esb_remote_cmd_data_collect_on", "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off", "esb_remote_cmd_tcal_heated_start", "esb_remote_cmd_set_channel", "esb_remote_cmd_ota_query_info", "esb_remote_cmd_ota_abort")
 for name in actual_handlers:
     commands.append(function(esb, name))
 for name in sorted(set(re.findall(r", (esb_remote_cmd_\w+)\}", registry)) - set(actual_handlers)):
@@ -321,7 +322,8 @@ int main(void) {
             matrix_parts[matrix_parts.index(stub)] = body
         # The raw handlers already present in commands need the same outer
         # compilation boundary as their source translation unit.
-        for name in ("esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off"):
+        for name in ("esb_remote_cmd_data_collect_refuse_private", "esb_remote_cmd_data_collect_on",
+                     "esb_remote_cmd_data_collect_batch_on", "esb_remote_cmd_data_collect_batch_off"):
             body = function(esb, name)
             matrix_parts[matrix_parts.index(body)] = f"#if CONFIG_CONNECTION_RAW_COLLECTION\n{body}\n#endif"
         ingress_start = esb.index("\n\t\t\tdefault:\n") + len("\n\t\t\tdefault:\n")

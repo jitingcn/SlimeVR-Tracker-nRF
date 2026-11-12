@@ -776,12 +776,30 @@ static void esb_remote_cmd_tcal_boot_off(void)
 }
 
 #if CONFIG_CONNECTION_RAW_COLLECTION
-static void esb_remote_cmd_data_collect_on(void)
+/* The relay v3 profile sends everything NoACK and single-target collection
+ * holds the radio, so collection needs the receiver to leave relay v3 first.
+ * The refusal (-EBUSY) is final for the request, like a batch rate refusal. */
+static int esb_remote_cmd_data_collect_refuse_private(const char *name)
 {
+	if (!tdma_profile_get()) {
+		return 0;
+	}
+	LOG_WRN("Remote command: %s refused in relay v3 profile; turn relay v3 off first", name);
+	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_REJECTED);
+	return -EBUSY;
+}
+
+static int esb_remote_cmd_data_collect_on(void)
+{
+	int err = esb_remote_cmd_data_collect_refuse_private("DATA_COLLECT_ON");
+	if (err) {
+		return err;
+	}
 	LOG_INF("Executing remote command: DATA_COLLECT_ON");
 	connection_set_data_collection(true);
 	test_mode_set(true);  // Prevent sleep during data collection
 	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_SUCCESS);
+	return 0;
 }
 
 static void esb_remote_cmd_data_collect_off(void)
@@ -794,8 +812,12 @@ static void esb_remote_cmd_data_collect_off(void)
 
 static int esb_remote_cmd_data_collect_batch_on(void)
 {
+	int err = esb_remote_cmd_data_collect_refuse_private("DATA_COLLECT_BATCH_ON");
+	if (err) {
+		return err;
+	}
 	LOG_INF("Executing remote command: DATA_COLLECT_BATCH_ON at %u Hz", executing_batch_rate_hz);
-	int err = connection_set_data_collection_batch(true, executing_batch_rate_hz);
+	err = connection_set_data_collection_batch(true, executing_batch_rate_hz);
 	if (err) {
 		led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_REJECTED);
 		return err;
@@ -881,7 +903,7 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_TEST_MODE_ON, "TEST_MODE_ON", esb_remote_cmd_test_mode_on},
 	{ESB_PONG_FLAG_TEST_MODE_OFF, "TEST_MODE_OFF", esb_remote_cmd_test_mode_off},
 #if CONFIG_CONNECTION_RAW_COLLECTION
-	{ESB_PONG_FLAG_DATA_COLLECT_ON, "DATA_COLLECT_ON", esb_remote_cmd_data_collect_on},
+	{ESB_PONG_FLAG_DATA_COLLECT_ON, "DATA_COLLECT_ON", NULL},
 	{ESB_PONG_FLAG_DATA_COLLECT_OFF, "DATA_COLLECT_OFF", esb_remote_cmd_data_collect_off},
 	{ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON, "DATA_COLLECT_BATCH_ON", NULL},
 	{ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF, "DATA_COLLECT_BATCH_OFF", esb_remote_cmd_data_collect_batch_off},
@@ -1060,6 +1082,9 @@ static int esb_remote_command_execute(uint8_t cmd)
 		return esb_remote_cmd_shutdown();
 	}
 #if CONFIG_CONNECTION_RAW_COLLECTION
+	if (cmd == ESB_PONG_FLAG_DATA_COLLECT_ON) {
+		return esb_remote_cmd_data_collect_on();
+	}
 	if (cmd == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON) {
 		return esb_remote_cmd_data_collect_batch_on();
 	}
@@ -4645,8 +4670,12 @@ static void esb_thread(void)
 				key = irq_lock();
 				if (executing_generation == remote_command_generation) {
 					/* A batch rate refusal is final for this request. The PING
-					 * still echoes the actual rate, never the rejected rate. */
-					bool consumed = err == 0 || (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON && err == -EBUSY);
+					 * still echoes the actual rate, never the rejected rate.
+					 * A collection start refused in the relay v3 profile is
+					 * final too, so it cannot start later on its own. */
+					bool consumed = err == 0 || (err == -EBUSY
+						&& (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON
+						    || executing_command == ESB_PONG_FLAG_DATA_COLLECT_ON));
 					remote_command_rejected = !consumed;
 					if (consumed) {
 						acked_remote_command = executing_command;
