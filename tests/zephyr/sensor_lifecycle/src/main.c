@@ -297,6 +297,7 @@ static int set_sensor_clock(bool enabled, int rate, float *actual)
 { ARG_UNUSED(enabled); ARG_UNUSED(rate); *actual = 0; return 0; }
 static void sensor_interface_register_sensor_imu_i2c(struct i2c_dt_spec *dev) { ARG_UNUSED(dev); }
 static void sensor_refresh_sensor_ids(void) {}
+static void sensor_retained_write(void) {}
 static int sensor_scan_imu(struct i2c_dt_spec *dev, uint8_t *reg)
 {
     static const uint8_t addresses[] = {1, 0x20}, regs[] = {1, 0x0f}, ids[] = {1, 0x00};
