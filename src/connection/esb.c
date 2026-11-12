@@ -2509,7 +2509,11 @@ bool esb_relay_control_window(uint32_t start)
 				if (!relay_radio_stop()) { esb_relay_clock(false); return false; }
 				esb_raw_rx_end();
 				accepted = esb_relay_control_receive(&frame);
-				if (!accepted && relay_geometry_current()->second_b && frame.data[0] != 0xecU) {
+				/* Only a rejected last B copy ends the window. Ordinary pipe 1
+				 * traffic (a direct slot ending near B) or the first of two B
+				 * copies keeps listening until the original deadline. */
+				if (!accepted && frame.data[0] != RELAY_CONTROL_REPEAT
+				    && (relay_geometry_current()->second_b || frame.data[0] != RELAY_CONTROL_V3)) {
 					key = irq_lock();
 					bool claimed_again = esb_raw_rx_begin();
 					bool resumed
@@ -2528,29 +2532,27 @@ bool esb_relay_control_window(uint32_t start)
 				esb_relay_clock(false);
 				return accepted;
 			}
-			if (relay_geometry_current()->second_b) {
-				if (!relay_radio_stop()) {
-					esb_relay_clock(false);
-					return false;
-				}
-				esb_raw_rx_end();
-				key = irq_lock();
-				bool claimed_again = esb_raw_rx_begin();
-				bool resumed
-					= claimed_again && relay_radio_prepare(radio_channel, BIT(1), true) && relay_radio_receive();
-				irq_unlock(key);
-				if (resumed) {
-					continue;
-				}
-				(void)relay_radio_stop();
-				if (claimed_again) {
-					esb_raw_rx_end();
-				}
-				control_missed++;
+			/* A corrupt or unusable frame: keep listening for B. */
+			if (!relay_radio_stop()) {
 				esb_relay_clock(false);
 				return false;
 			}
-			break;
+			esb_raw_rx_end();
+			key = irq_lock();
+			bool claimed_again = esb_raw_rx_begin();
+			bool resumed
+				= claimed_again && relay_radio_prepare(radio_channel, BIT(1), true) && relay_radio_receive();
+			irq_unlock(key);
+			if (resumed) {
+				continue;
+			}
+			(void)relay_radio_stop();
+			if (claimed_again) {
+				esb_raw_rx_end();
+			}
+			control_missed++;
+			esb_relay_clock(false);
+			return false;
 		}
 		k_busy_wait(1);
 	}

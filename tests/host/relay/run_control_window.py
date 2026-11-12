@@ -24,6 +24,10 @@ prefix = r'''
 static struct relay_geometry geometry={11,5,16,120,4096,15,0};
 const struct relay_geometry *relay_geometry_active=&geometry;
 static unsigned two_case,copy_index;
+/* Non-two cases: frames the radio completes, one END per frame, each at a tick. */
+static unsigned frames_total=1,taken;
+static uint32_t frame_tick[2];
+static uint8_t frame_type[2]={0xe8,0xe8};
 static struct relay_runtime_anchor relay_direct_anchor={.valid=true,.third_start=1000,.direct=11,.slot_ticks=16};
 #define BIT(n) (1U<<(n))
 #define MAX(a,b) ((a)>(b)?(a):(b))
@@ -63,12 +67,12 @@ static bool relay_radio_prepare(unsigned channel,unsigned pipes,bool rx){
 static bool relay_radio_receive(void){assert(prepared && claimed && depth && tick>=100);if(setup_work)assert(tick==100);started++;return true;}
 static inline __attribute__((unused)) bool relay_radio_start(unsigned channel,unsigned pipes,bool rx){return relay_radio_prepare(channel,pipes,rx) && relay_radio_receive();}
 static bool esb_get_network_clock(struct esb_network_clock *c){if(completed_late && started)tick=125;c->receiver_ticks=tick;return true;}
-static bool relay_radio_ended(void){if(two_case){unsigned at=copy_index==0?111:111+(geometry.second_b==1?16:(geometry.repairs+1)*16);return copy_index<2 && tick>=at && two_case!=3;}return !timeout;}
-static bool relay_radio_take(struct relay_rx_frame *f){if(two_case){f->data[0]=copy_index++?0xec:0xe8;return true;}(void)f;return !take_fail;}
+static bool relay_radio_ended(void){if(two_case){unsigned at=copy_index==0?111:111+(geometry.second_b==1?16:(geometry.repairs+1)*16);return copy_index<2 && tick>=at && two_case!=3;}return !timeout && taken<frames_total && tick>=frame_tick[taken];}
+static bool relay_radio_take(struct relay_rx_frame *f){if(two_case){f->data[0]=copy_index++?0xec:0xe8;return true;}unsigned i=taken++;f->data[0]=frame_type[i];return !(take_fail && i==0);}
 static void relay_radio_peek(uint8_t *len,bool *crc,uint8_t *rssi){*len=1;*crc=false;*rssi=0;}
 static bool relay_radio_stop(void){assert(prepared && !depth);stopped++;return true;}
 static void esb_raw_rx_end(void){assert(claimed);claimed=0;}
-static bool esb_relay_control_receive(struct relay_rx_frame *f){if(completed_late)assert(f->end_kernel_ticks==111);assert(!depth && !claimed);return two_case ? (two_case!=3 && (two_case!=2 || f->data[0]==0xec)) : !reject;}
+static bool esb_relay_control_receive(struct relay_rx_frame *f){if(completed_late)assert(f->end_kernel_ticks==111);assert(!depth && !claimed);return two_case ? (two_case!=3 && (two_case!=2 || f->data[0]==0xec)) : f->data[0]==0xe8 && !reject;}
 static bool relay_radio_addressed(void){return false;}
 '''
 cases = r'''
@@ -78,6 +82,9 @@ int main(int argc,char **argv){
  timeout=!strcmp(c,"no-end") || !strcmp(c,"scan") || !strcmp(c,"scan-delay");
  if(!strcmp(c,"scan") || !strcmp(c,"scan-delay"))relay_direct_anchor.valid=false;take_fail=!strcmp(c,"crc");stamp_fail=!strcmp(c,"stamp");reject=!strcmp(c,"reject");
  if(!strcmp(c,"busy"))busy_attempts=2;
+ /* An ordinary pipe-1 packet ends just before B; B must still be taken. */
+ bool ordinary=!strcmp(c,"ordinary-then-b");
+ if(ordinary){frames_total=2;frame_type[0]=0x01;frame_tick[1]=105;}
  if(!strcmp(c,"deadline") || !strcmp(c,"no-clock"))busy_attempts=100;
  edge_wait_fail=!strcmp(c,"wait-edge");prepare_irq=!strcmp(c,"prepare-irq") || !strcmp(c,"scan-delay");setup_work=!strcmp(c,"setup-work");
  network_fail=!strcmp(c,"no-clock");completed_late=!strcmp(c,"completed-late");
@@ -93,7 +100,10 @@ int main(int argc,char **argv){
  bool result=esb_relay_control_window(100);
  assert(result==!(early||timeout||take_fail||stamp_fail||reject));
  assert(!depth && !claimed && !clock_users);
- assert(started==!early && stopped==prepared);
+ /* A corrupt, unstamped or ordinary frame re-arms RX once. */
+ unsigned rearms=(take_fail||stamp_fail||ordinary)?1:0;
+ assert(started==(early?0:1+rearms) && stopped==prepared);
+ if(ordinary)assert(result && taken==2 && !control_missed);
  if(edge_wait_fail)assert(prepared && !started);
  if(!strcmp(c,"prepare-irq"))assert(prepared && started && tick==118);
  if(!strcmp(c,"busy"))assert(attempts==3 && delay_calls==2);
@@ -115,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix='relay-control-', dir='/tmp') as tmp:
         '-std=c11', '-Wall', '-Wextra', '-Werror', '-g', '-O1',
         '-fsanitize=address,undefined', '-I', str(ROOT / 'src/connection'),
         str(path), '-o', str(binary)], check=True)
-    for case in sys.argv[1:] or ('setup-work','scan-delay','wait-edge','prepare-irq','completed-late','scan','valid','busy','deadline','no-clock','clock','init','wait','no-end','crc','stamp','reject'):
+    for case in sys.argv[1:] or ('setup-work','scan-delay','wait-edge','prepare-irq','completed-late','scan','valid','busy','deadline','no-clock','clock','init','wait','no-end','crc','stamp','reject','ordinary-then-b'):
         subprocess.run([str(binary), case], check=True)
 
     for case in ('two-adjacent','two-tail','two-reject-adjacent','two-reject-tail','two-both-adjacent','two-both-tail','two-short-tail','two-both-short-tail'):
