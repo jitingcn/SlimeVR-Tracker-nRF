@@ -202,6 +202,7 @@ static bool no_packets_timeout_logged, sensor_wom_fast_wake_resume_pending;
 static int packet_errors, force_scan_request_count, sensor_scan_last_power_up_delay_ms;
 static int64_t force_scan_request_times[FORCE_SCAN_THRESHOLD], last_sensor_send_time;
 static atomic_t main_suspended, output_ready, sensor_loop_stop, loop_active, loop_starts;
+static atomic_t sensor_progress, sensor_recovery_pending;
 static struct led_token initialization_feedback;
 static struct k_event sensor_life_events;
 static struct k_mutex sensor_lifecycle_lock, sensor_activity_lock;
@@ -294,7 +295,6 @@ static void sensor_scan_clear(void) {}
 static bool sensor_consume_wom_fast_wake_hint(void) { return false; }
 static int set_sensor_clock(bool enabled, int rate, float *actual)
 { ARG_UNUSED(enabled); ARG_UNUSED(rate); *actual = 0; return 0; }
-static int sensor_scan_retry_delay_ms(void) { return 5; }
 static void sensor_interface_register_sensor_imu_i2c(struct i2c_dt_spec *dev) { ARG_UNUSED(dev); }
 static void sensor_refresh_sensor_ids(void) {}
 static int sensor_scan_imu(struct i2c_dt_spec *dev, uint8_t *reg)
