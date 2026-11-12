@@ -203,6 +203,7 @@ static int wom_timeout_set_minutes(uint16_t minutes)
     wom_minutes = minutes ? minutes : wom_default_minutes;
     return 0;
 }
+#include "relay_off.h"
 #include "commands.inc"
 
 static void run_shutdown(unsigned rejected)

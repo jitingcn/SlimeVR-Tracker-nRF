@@ -64,6 +64,7 @@ static void stats_log(const char *format, ...)
 #define LOG_DBG(...) debug_log(__VA_ARGS__)
 #define LOG_WRN(...) warning_log(__VA_ARGS__)
 #define LOG_INF(...) stats_log(__VA_ARGS__)
+#include "relay_off.h"
 #include "tx_failures.inc"
 
 static void reset(void)

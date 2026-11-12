@@ -70,7 +70,7 @@ void esb_deinitialize(void);
 /* Quiesce TX then re-init PTX (channel/NVS already applied in esb_initialize). */
 int esb_reinitialize(void);
 /* Channel control holds this boundary across storage and radio reinit. */
-void esb_channel_control_begin(void);
+int esb_channel_control_begin(void);
 void esb_channel_control_end(void);
 /* Connection-owner rendezvous service; true reserves this iteration. */
 bool esb_channel_search_poll(bool blocked);
@@ -88,9 +88,60 @@ int esb_user_set_enabled(bool enabled);
 
 void esb_process_ota_rx_queue(void);
 int esb_write(uint8_t *data, bool no_ack, size_t data_length);
+/* One connection-thread source transaction. Setup and sleeping precede the
+ * unchanged fresh-pose wake; capture through TX submission is IRQ guarded. */
+struct esb_source_guard { unsigned key; bool active;
+#ifdef CONFIG_RELAY_IRQ_DIAGNOSTICS
+    uint32_t irq_start, irq_target;
+    unsigned irq_length;
+#endif
+};
+bool esb_source_begin(struct esb_source_guard *guard, uint32_t target);
+int esb_source_write(struct esb_source_guard *guard, uint8_t *data, size_t length);
+void esb_source_end(struct esb_source_guard *guard);
 /* Start the clock before guarded admission; -EAGAIN defers with HFXO warm.
  * force_resync bypasses admission for unslotted startup recovery. */
 int esb_write_ping(uint8_t *data, bool force_resync);
+/* Profile 1: the PING in R0-R1 when B named this tracker; -EAGAIN if late. */
+int esb_write_maintenance(uint8_t *data);
+
+/* ---- Receiver-presence supervision and peer relay (relay.c) ---- */
+#include "link_supervision.h"
+struct relay_rx_frame;
+enum link_state esb_link_state(void);
+bool esb_link_wants_presence(void);
+/* Raw RX arbitration: begin succeeds only while ESB is idle, no writer owns
+ * the air and no lifecycle path blocks it; end must follow every begin. */
+bool esb_raw_rx_begin(void);
+void esb_raw_rx_end(void);
+/* Success owns a block token, released by resume. Refusal owns none. */
+int esb_raw_rx_quiesce(void);
+void esb_raw_rx_resume(void);
+/* Hold/release one HF clock reference for relay windows. */
+int esb_relay_clock(bool hold);
+uint8_t esb_get_radio_channel(void);
+/* The last own PONG carried a relay trailer (relay-aware receiver). */
+bool esb_receiver_relay_aware(void);
+bool esb_layout_granted(void);
+/* V3 only: caller supplies its current network-clock snapshot. */
+bool esb_relay_granted_at(uint32_t receiver_ticks);
+/* Whether v3 control has been lost. */
+bool esb_relay_profile_lost(void);
+#if defined(CONFIG_CONNECTION_RELAY)
+bool esb_relay_control_window(uint32_t start);
+#else
+static inline bool esb_relay_control_window(uint32_t start)
+{
+	(void)start;
+	return false;
+}
+#endif
+bool esb_relay_control_receive(const struct relay_rx_frame *frame);
+/* Overheard PONG from a presence window; true for any CRC-valid PONG. */
+bool esb_presence_frame(const struct relay_rx_frame *frame);
+void esb_print_link_status(void);
+/* Relay-only bundle in the forwarding slot (or own slot without one). */
+int esb_write_relay(void);
 
 /**
  * Coherent, read-only status clock snapshot (both output pointers required).

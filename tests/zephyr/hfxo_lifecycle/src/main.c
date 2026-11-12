@@ -79,11 +79,12 @@ static void esb_disable(void) { }
 static int esb_reinitialize(void) { return -ENOTSUP; }
 static int tdma_wait_for_ping_window(void) { return 0; }
 static int esb_send_pair_step(int step);
-static int esb_write_clocked(uint8_t *data, bool no_ack, size_t length)
+static int esb_write_clocked(uint8_t *data, bool no_ack, size_t length, bool stream_source)
 {
     ARG_UNUSED(data);
     ARG_UNUSED(no_ack);
     ARG_UNUSED(length);
+    ARG_UNUSED(stream_source);
     if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING) { return -EACCES; }
     radio_payload_queued = true;
     return -ENODATA;

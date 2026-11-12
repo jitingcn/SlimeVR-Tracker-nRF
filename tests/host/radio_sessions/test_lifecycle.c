@@ -1,3 +1,4 @@
+#include <errno.h>
 /* Full production connection_thread plus real collection setters; hardware,
  * packet encoding and scheduler leaves are replaced with deterministic doubles. */
 #define main collection_existing_main
@@ -17,6 +18,16 @@
 #define SYS_STATUS_CONNECTION_ERROR 2
 #define COMPOSITE_LOOKAHEAD_MS 10
 #include "snapshot_types.inc"
+struct tdma_layout {uint8_t profile,slot_index;};
+static int esb_relay_clock(bool hold) { (void)hold;return 0; }
+static uint8_t tdma_profile_get(void) { return 0; }
+static bool esb_relay_profile_lost(void) { return false; }
+static void tdma_profile_drop(void) {}
+static bool tdma_stream_next(uint32_t *t,bool *b) { (void)t;(void)b;return false; }
+static bool esb_relay_control_window(uint32_t t) { (void)t;return false; }
+static bool tdma_wait_network_tick(uint32_t t) { (void)t;return true; }
+static bool tdma_layout_get(struct tdma_layout *l) { (void)l;return false; }
+
 static jmp_buf iteration_done;
 static unsigned iterations, test_stops, search_calls, ping_calls, ota_calls;
 static bool disconnected, searching, radio_available, hid_available, ota_active, test_enabled;
@@ -30,7 +41,7 @@ static int sensor_data_snapshot;
 static bool sensor_ids_set;
 static int64_t last_mag_time, last_info_time, last_status_time, last_runtime_time;
 static struct { unsigned tps; bool mag_turn; } test_rate_schedule;
-struct composite_builder { uint8_t types[5]; unsigned n; };
+struct composite_builder { uint8_t types[5]; unsigned n, sub_max; };
 static bool atomic_cas(atomic_t *p, int old, int value) { if (*p != old) return false; *p = value; return true; }
 static uint32_t k_uptime_get_32(void) { return now_ms; }
 static uint64_t k_uptime_ticks(void) { return (uint64_t)now_ms * 1000; }
@@ -59,6 +70,7 @@ static uint32_t ping_server_phase_delay_ms(uint32_t interval) { return 0; }
 uint8_t connection_get_id(void) { return tracker_id; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
 static void esb_get_ping_request_data(uint8_t *data) {}
+static int esb_write_maintenance(uint8_t *data) { (void)data; return -EAGAIN; }
 static int esb_write_ping(uint8_t *data, bool force)
 {
     assert(data[0] == ESB_PING_TYPE && data[1] == tracker_id && data[7] == 0);
@@ -103,13 +115,34 @@ static uint8_t composite_type_mask(const struct composite_builder *builder)
     for (unsigned i = 0; i < builder->n; ++i) mask |= 1u << builder->types[i];
     return mask;
 }
-static uint8_t send_composite_or_single(struct composite_builder *builder, const sensor_data_capture_t *capture)
+static void composite_prepare_event(struct composite_builder *builder) { (void)builder; }
+struct esb_source_guard { unsigned key; bool active; };
+static bool esb_source_begin(struct esb_source_guard *g, uint32_t target) { (void)g; return tdma_wait_network_tick(target-4U); }
+static void esb_source_end(struct esb_source_guard *g) { (void)g; }
+static uint8_t send_composite_or_single(struct composite_builder *builder, const sensor_data_capture_t *capture, uint32_t ledger_tick, struct esb_source_guard *source)
 {
     return composite_type_mask(builder);
 }
 static unsigned connection_send_retry_ms(void) { return 1; }
 static void connection_idle_wait(int64_t now) {}
+#include "relay_off.h"
+/* Relay off: no forwarding records and no diagnostic frames are ever due. */
+static int esb_write_relay(void) { assert(!"relay forwarding with relay off"); return -EAGAIN; }
+static int esb_write(uint8_t *data, bool no_ack, size_t length)
+{
+    (void)data; (void)no_ack; (void)length;
+    assert(!"relay diagnostic with relay off");
+    return -EAGAIN;
+}
+static uint8_t composite_pose_type(const struct composite_builder *builder,
+                                  bool precise, bool info_wanted, bool stream);
 #include "lifecycle.inc"
+static uint8_t composite_pose_type(const struct composite_builder *builder,
+                                  bool precise, bool info_wanted, bool stream)
+{
+    assert(!stream); /* This fixture exercises legacy lifecycle transitions. */
+    return !precise && info_wanted ? SUB_PACKET_COMPACT_QUAT : SUB_PACKET_QUAT_ACCEL;
+}
 
 static void tick(int64_t now)
 {

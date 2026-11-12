@@ -1,3 +1,5 @@
+#include "frame_ledger.h"
+#include "connection/relay_protocol.h"
 #include "globals.h"
 #include "system/system.h"
 #include "system/battery_tracker.h"
@@ -18,6 +20,7 @@
 #endif
 #include "connection/esb.h"
 #include "connection/connection.h"
+#include "connection/relay.h"
 #include "connection/channel_control.h"
 #include "connection/tdma.h"
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
@@ -1433,6 +1436,9 @@ static void print_help(void)
 	printk("  pair                       Enter pairing mode\n");
 	printk("  clear                      Clear pairing data\n");
 	printk("  tdma <on|off>              Enable/disable TDMA scheduling\n");
+#if CONFIG_CONNECTION_RELAY
+	printk("  relay                      Link supervision and relay head status\n");
+#endif
 	printk("  radio <on|off>             Stop/restart ESB radio (diagnostic A/B for IMU noise)\n");
 	printk("\n");
 	printk("  channel <0-100>            Set RF channel (saved to NVS)\n");
@@ -2324,6 +2330,15 @@ static void console_cmd_ping(size_t argc, char **argv)
 	cmd_ping_start();
 }
 
+#if CONFIG_CONNECTION_RELAY
+static void console_cmd_relay(size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+	relay_print_status();
+}
+#endif
+
 static void console_cmd_nvs(size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -2601,6 +2616,9 @@ static const struct console_cmd console_cmds[] = {
 #endif
 	{"ping", console_cmd_ping, CONSOLE_MIXED, 1, 2, "Usage: ping [stats]\n"},
 	{"nvs", console_cmd_nvs, CONSOLE_QUERY, 1, 7, NULL},
+#if CONFIG_CONNECTION_RELAY
+	{"relay", console_cmd_relay, CONSOLE_QUERY, 1, 3, NULL},
+#endif
 	{"meow", console_cmd_meow, CONSOLE_QUERY, 1, 7, NULL},
 	{"debug", console_cmd_debug, CONSOLE_MUTATION, 1, 2, NULL},
 #if CONFIG_THREAD_ANALYZER

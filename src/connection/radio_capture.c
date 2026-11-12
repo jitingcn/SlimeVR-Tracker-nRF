@@ -36,6 +36,8 @@ BUILD_ASSERT((CAPTURE_QUEUE_SIZE & (CAPTURE_QUEUE_SIZE - 1U)) == 0,
 
 struct capture_metric {
 	uint32_t samples;
+	uint32_t success;
+	uint32_t completion_lag_max_us;
 	uint32_t address_samples;
 	uint32_t ready_to_end[DURATION_BUCKETS];
 	uint32_t address_to_end[DURATION_BUCKETS];
@@ -79,6 +81,8 @@ struct capture_record {
 	uint64_t ready_us;
 	uint64_t address_us;
 	uint64_t end_us;
+	uint64_t observed_us;
+	bool success;
 	uint8_t payload_length;
 };
 
@@ -328,6 +332,31 @@ int radio_capture_init(void)
 	return err;
 }
 
+bool radio_capture_rx_end(uint32_t *kernel_ticks)
+{
+	struct capture_record record;
+	/* Pair the TIMER age with kernel time without an interrupt between
+	 * them. Otherwise ISR latency is added to the hardware END timestamp. */
+	unsigned key = irq_lock();
+	if (!capture_initialized || !capture_platform_read(&record)) {
+		irq_unlock(key);
+		return false;
+	}
+	uint64_t now = capture_platform_now();
+	uint32_t ticks = (uint32_t)k_uptime_ticks();
+	irq_unlock(key);
+#if defined(CONFIG_SOC_SERIES_NRF52)
+	uint32_t age = (uint32_t)now - (uint32_t)record.end_us;
+#else
+	uint64_t age = now - record.end_us;
+#endif
+	if (age > 1000U) {
+		return false;
+	}
+	*kernel_ticks = ticks - k_us_to_ticks_floor32(age);
+	return true;
+}
+
 void radio_capture_deinit(void)
 {
 	if (!capture_initialized) {
@@ -412,6 +441,8 @@ void radio_capture_record(
 		.payload_length = payload_length,
 	};
 	bool complete = capture_platform_read(&record);
+	record.observed_us = capture_platform_now();
+	record.success = success;
 	if (!no_ack) {
 		if (packet_type != ESB_PING_TYPE) {
 			return;
@@ -571,6 +602,9 @@ void radio_capture_process(void)
 		k_mutex_lock(&capture_metrics_lock, K_FOREVER);
 		struct capture_metric *metric = &metrics[index];
 		metric->samples++;
+		metric->success += record.success;
+		uint32_t completion_lag = (uint32_t)(record.observed_us - record.end_us);
+		metric->completion_lag_max_us = MAX(metric->completion_lag_max_us, completion_lag);
 		metric->ready_to_end[duration_bucket(ready_to_end_us)]++;
 		metric->ready_to_end_max_us = MAX(metric->ready_to_end_max_us, ready_to_end_us);
 		if (record.address_us != 0) {
@@ -610,6 +644,9 @@ void radio_capture_print_stats(void)
 			metric->address_samples, address_p50_us, address_p99_us, metric->address_to_end_max_us,
 			ready_p50, ready_p99, end_p99, metric->crossed_slot_end
 		);
+		LOG_INF("RADIO completion %s success=%u failed=%u lag_max_us=%u",
+			names[i], metric->success, metric->samples - metric->success,
+			metric->completion_lag_max_us);
 		k_mutex_unlock(&capture_metrics_lock);
 	}
 	int32_t ping_start_p50
