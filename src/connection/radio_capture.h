@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 int radio_capture_init(void);
+bool radio_capture_rx_end(uint32_t *kernel_ticks);
 void radio_capture_deinit(void);
 void radio_capture_set_enabled(bool enabled);
 int radio_capture_user_set_enabled(bool enabled);

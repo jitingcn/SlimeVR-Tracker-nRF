@@ -32,7 +32,7 @@ snapshot_types = (
 header = (SRC / "connection/esb.h").read_text()
 constants = "\n".join(re.findall(r"^#define (?:ESB_|PING_INTERVAL_MS)[^\n]*", header, re.MULTILINE))
 wom_state = block(esb, r"^static struct \{(?=\n\tuint16_t minutes, token;)") + " wom_command;"
-payload = constants + "\n" + "\n".join(re.findall(r"^static struct esb_payload tx_payload = .*;", esb, re.MULTILINE))
+payload = "static unsigned char profile; static unsigned char tdma_profile_get(void) { return profile; }\n" + constants + "\n" + "\n".join(re.findall(r"^static struct esb_payload tx_payload = .*;", esb, re.MULTILINE))
 payload += "\n" + wom_state + "\n" + function(esb, "esb_wom_reset")
 payload += "\n" + function(esb, "esb_wom_prepare_ping")
 # Keep the whole production clock section so stop/start share its actual state
@@ -55,6 +55,7 @@ payload += "\n" + function(esb, "esb_queue_ping")
 payload += "\n" + function(esb, "esb_prepare_ping")
 clocked_writer = re.search(r"^static int esb_write_clocked\(", esb, re.MULTILINE)
 if clocked_writer:
+    payload += "\n" + function(esb, "esb_submit_guarded")
     payload += "\n" + function(esb, "esb_write_clocked")
 payload += "\n" + function(esb, "esb_write")
 if re.search(r"^int esb_write_ping\(", esb, re.MULTILINE):
@@ -155,12 +156,12 @@ collection.append("static int batch_request(bool enable, uint16_t rate) { " + ("
 status = (SOURCE / "system/status.c").read_text()
 start = pong.index("\t\tuint8_t rx_id = payload->data[1];")
 end = pong.index("\n\t\tuint32_t ping_rx_ticks", start)
-recovery = constants + "\n" + function(status, "get_status")
+recovery = "static unsigned char tdma_profile_get(void) { return 0; }\nstatic unsigned maintenance_pong;\n" + constants + "\n" + function(status, "get_status")
 recovery += "\n" + function(esb, "esb_pong_is_legacy")
 recovery += "\n" + "\n".join(re.findall(r"^#define PING_RECOVERY_THRESHOLD[^\n]*", esb, re.MULTILINE))
 recovery += "\nstatic void receive_valid_pong(void) {\nconst struct esb_payload *payload = &rx_payload;\n" + pong[start:end] + "\n(void)rx_ctr;\n}\n"
 
-channels = constants + "\n" + block(esb, r"^static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS\[\] = \{", True)
+channels = "static unsigned char tdma_profile_get(void) { return 0; }\nstatic unsigned maintenance_pong;\n" + constants + "\n" + block(esb, r"^static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS\[\] = \{", True)
 channels += "\n#define ESB_ALLOWED_CHANNELS_COUNT (sizeof(ESB_ALLOWED_CHANNELS))\n"
 clock_users = re.search(r"^static atomic_t tx_clock_users;", esb, re.MULTILINE)
 channels += "\n" + (clock_users.group() if clock_users else "static atomic_t tx_clock_users;") + "\n"
@@ -194,7 +195,7 @@ start = pong.index("\tif (payload->data[0] == ESB_PONG_TYPE)")
 end = pong.index("\n\t\tuint32_t ping_rx_ticks", start)
 channels += "\n#define PING_RECOVERY_THRESHOLD 1\nstatic bool pong_admitted;\nstatic void receive_pong_prefix(void) {\nconst struct esb_payload *payload = &rx_payload;\n" + pong[start:end] + "\n(void)rx_ctr;\npong_admitted = true;\n}\n}\n"
 channels += "\nstatic bool accept_pong(void) { pong_admitted = false; if (rx_payload.length == ESB_PONG_LEN) receive_pong_prefix(); return pong_admitted; }\n"
-start = pong.index("\t\t/* NORMAL retains the legacy slot/total layout.")
+start = pong.index("\t\t/* NORMAL stages layouts; profile 1 keeps its own schedule.")
 end = pong.index("\n\n\t\tif (pong_flags == ESB_PONG_FLAG_WOM_CONTROL)", start)
 channels += "\nstatic void receive_schedule(uint8_t pong_flags) {\nconst struct esb_payload *payload = &rx_payload;\n" + pong[start:end] + "\n}\n"
 channels += "\n" + function(esb, "esb_send_pair_step")
@@ -208,7 +209,7 @@ channels += "static unsigned host_receiver_restart(void) {\n"
 channels += "unsigned detections = 0, continued = 0;\nhost_receiver_restart_body(&detections, &continued);\n"
 channels += "return detections + 256 * continued;\n}\n"
 start = esb.index("\t\tif (!paired_addr[0]) // zero, not paired")
-end = esb.index("\n\t\t} else {\n\t\t\tswitch (rx_payload.length)", start)
+end = esb.index("\n\t\t} else {\n\t\t\t", start)  # paired-branch RX (relay PONG check, then switch)
 channels += "\nstatic void receive_pair(void) { do {\n" + esb[start:end] + "\n}\n} while (0); }\n"
 
 with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
@@ -221,7 +222,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     lifecycle = connection[suppression_start:suppression_end]
     lifecycle += "\n" + "\n".join(function(connection, name) for name in (
         "connection_set_ota_suppressed", "connection_get_ota_suppressed",
-        "connection_ota_suppression_active", "connection_service_ping", "connection_thread"))
+        "connection_ota_suppression_active", "ping_build", "connection_service_ping", "connection_thread"))
     suppression = connection[suppression_start:suppression_end]
     suppression += "\n" + "\n".join(function(connection, name) for name in (
         "connection_set_ota_suppressed", "connection_get_ota_suppressed",

@@ -27,6 +27,9 @@ static inline int k_sem_take(struct k_sem *sem, int timeout)
 	--sem->count;
 	return 0;
 }
+static uint32_t direct_fail[3];
+static bool stream_waited;
+static unsigned withdraw_on_check;
 static int esb_radio_lock;
 static void k_mutex_lock(int *lock, int timeout) { ++*lock; }
 static void k_mutex_unlock(int *lock) { assert(*lock > 0); --*lock; }
@@ -192,7 +195,9 @@ static uint64_t net_ticks_from_kernel64(uint64_t ticks)
 }
 static bool tdma_is_enabled(void)
 {
-	return tdma_enabled;
+	bool enabled = tdma_enabled;
+	if (withdraw_on_check && !--withdraw_on_check) tdma_enabled = false;
+	return enabled;
 }
 static int esb_get_sync_age_ms(void)
 {
@@ -207,12 +212,19 @@ static void tdma_note_radio_busy(void)
 }
 static bool tdma_wait_for_slot(uint8_t size)
 {
+	stream_waited = true;
 	if (finish_during_wait) {
 		finish_during_wait = false;
 		host_tx_success();
 	}
 	interleave(1);
 	return !deny_admission;
+}
+static bool tdma_admit_stream_source(uint8_t size)
+{
+	assert(irq_depth); /* Injected IRQ work cannot run during admission. */
+	stream_waited = true;
+	return tdma_enabled && !deny_admission;
 }
 static enum tdma_ping_admission tdma_wait_for_ping_window(void)
 {
@@ -234,6 +246,7 @@ static uint32_t k_cycle_get_32(void)
 }
 static void k_usleep(uint32_t us)
 {
+	assert(!irq_depth);
 	interleave(2);
 }
 static void k_msleep(int ms)
@@ -305,6 +318,7 @@ static void irq_unlock(unsigned key)
 		coherent_pong = true;
 	}
 }
+#include "relay_off.h"
 #include "payload.inc"
 
 static void reset(void)
@@ -657,6 +671,19 @@ int main(void)
 		return 0;
 	}
 	uint8_t ordinary[] = {1, 2, 3, 4, 5, 6};
+	/* A staged withdrawal can be promoted after the early grant gate.
+	 * Prepared source submission must refuse without a legacy sleep. */
+	reset();
+	profile = 1;
+	tdma_enabled = true;
+	withdraw_on_check = 1;
+	unsigned source_key = irq_lock();
+	assert(esb_write_clocked(ordinary, true, sizeof(ordinary), true) == -EAGAIN);
+	irq_unlock(source_key);
+	assert(!queued_count && !irq_depth);
+	withdraw_on_check = 0;
+	profile = 0;
+
 	for (int site = 1; site <= 2; site++) {
 		reset();
 		hook_site = site;
@@ -687,6 +714,19 @@ int main(void)
 	assert(ping_history[index].counter == 7 && ping_ctr_sent == 7);
 	assert(ping_history[index].ping_ticks != 0 && ping_history_idx == index + 1);
 	puts("payload: TDMA, jitter, FIFO retry, duplicate and PING history remain call-local");
+	reset();
+	profile = 1;
+	tdma_enabled = true;
+	assert(esb_write(ordinary, true, sizeof(ordinary)) == 0);
+	assert(stream_waited && queued_count == 1 && irq_depth == 0);
+	assert_original(0, ordinary, sizeof(ordinary), true);
+	reset();
+	tdma_enabled = true;
+	deny_admission = true;
+	assert(esb_write(ordinary, true, sizeof(ordinary)) == -EAGAIN);
+	assert(!queued_count && irq_depth == 0);
+	profile = 0;
+	deny_admission = false;
 	clock_lifetime();
 	cold_ping();
 	clock_errors();

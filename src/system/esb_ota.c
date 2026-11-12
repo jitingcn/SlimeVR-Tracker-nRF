@@ -1072,6 +1072,10 @@ static void ota_launch_ram_engine(void)
 
 	/* Stop ESB driver. */
 	LOG_WRN("OTA: Stopping ESB driver");
+	if (esb_raw_rx_quiesce()) {
+		LOG_ERR("OTA: raw RX still owns radio");
+		return;
+	} /* never resumed: the RAM engine owns the radio now */
 	esb_disable();
 	k_msleep(50);
 

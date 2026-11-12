@@ -1,3 +1,4 @@
+#include "frame_ledger.h"
 /*
 	SlimeVR Code is placed under the MIT license
 	Copyright (c) 2025 SlimeVR Contributors
@@ -29,6 +30,10 @@
 #include "connection.h"
 #include "util.h"
 #include "esb.h"
+#include "relay.h"
+#ifdef CONFIG_RELAY_LEDGER_TIMING
+#include "relay_timing.h"
+#endif
 #include "network_ticks.h"
 #include "sensor_data_snapshot.h"
 #include "tracker_events.h"
@@ -236,7 +241,11 @@ static int fill_sub_info(uint8_t *buf, const sensor_data_capture_t *capture)
 	buf[2] = sensor_temp;
 	buf[3] = FW_BOARD;
 	buf[4] = FW_MCU;
+#if defined(CONFIG_CONNECTION_RELAY)
+	buf[5] = relay_info_caps(); /* receiver strips capability flags before HID */
+#else
 	buf[5] = 0; /* resv */
+#endif
 	buf[6] = imu_id;
 	buf[7] = mag_id;
 	sys_put_le16(((BUILD_YEAR - 2020) & 127) << 9 | (BUILD_MONTH & 15) << 5 | (BUILD_DAY & 31), &buf[8]);
@@ -312,9 +321,10 @@ struct composite_builder {
 	uint8_t types[5];
 	int64_t *last_times[5];
 	int64_t stamps[5];
+	uint8_t sub_max; /* sub-packet bytes; v3 lowers it to the slot's payload cap - 4 */
 	int n;
 	int used;
-	bool has_event;
+	bool has_event, event_checked;
 	struct tracker_event_tx event;
 };
 
@@ -374,6 +384,17 @@ static void fill_normal_packet(uint8_t type, uint8_t data[16], const sensor_data
 }
 
 #if CONFIG_CONNECTION_OVER_HID
+static bool connection_hid_write_normal(const uint8_t data[16])
+{
+	if (data[0] != SUB_PACKET_INFO) {
+		return hid_write_packet_n(data);
+	}
+	uint8_t info[16];
+	memcpy(info, data, sizeof(info));
+	info[RELAY_INFO_CAPS_INDEX] = 0;
+	return hid_write_packet_n(info);
+}
+
 static uint8_t write_hid_composite_as_normal_packets(const uint8_t *encoded, int business_count)
 {
 	uint8_t accepted = 0;
@@ -388,7 +409,7 @@ static uint8_t write_hid_composite_as_normal_packets(const uint8_t *encoded, int
 		if (d->pad_byte15) {
 			data[15] = 0;
 		}
-		if (connection_hid_output_ready() && hid_write_packet_n(data)) {
+		if (connection_hid_output_ready() && connection_hid_write_normal(data)) {
 			accepted |= (uint8_t)(1u << type);
 		}
 		pos += d->data_len;
@@ -477,7 +498,11 @@ void connection_update_sensor_data(float *q, float *a)
 
 	bool precise = q_epsilon(q, sensor_last_q, 0.005f);
 	memcpy(sensor_last_q, q, sizeof(sensor_last_q));
-	sensor_data_snapshot_publish_qa(&sensor_data_snapshot, q, a, precise);
+#ifdef CONFIG_RELAY_PRODUCER_DIAGNOSTICS
+	sensor_data_snapshot_publish_qa(&sensor_data_snapshot, q, a, precise, k_uptime_get_32());
+#else
+	sensor_data_snapshot_publish_qa(&sensor_data_snapshot, q, a, precise, 0);
+#endif
 	connection_signal_wake();
 }
 
@@ -1411,13 +1436,22 @@ static uint64_t test_rate_delay_us(uint64_t now_us)
 #define COMPOSITE_LOOKAHEAD_MS 10
 
 /* Max sub-packet payload in a composite: ESB_MAX_PAYLOAD_LEN - 3 (header) - 1 (sequence) */
+#if defined(CONFIG_CONNECTION_RELAY)
+/* Every ordinary composite must fit as a record in a relay-only bundle.
+ * A deferred event or metadata record remains pending for another packet. */
+#define COMPOSITE_MAX_SUB_DATA (MIN(ESB_MAX_PAYLOAD_LEN, RELAY_RECORD_MAX_LEN) - 4)
+#else
 #define COMPOSITE_MAX_SUB_DATA (ESB_MAX_PAYLOAD_LEN - 4)
+#endif
 
 static void composite_builder_reset(struct composite_builder *builder)
 {
+	builder->sub_max = COMPOSITE_MAX_SUB_DATA;
 	builder->n = 0;
 	builder->used = 0;
 	builder->has_event = false;
+	builder->event_checked = false;
+	builder->event.token = 0;
 	memset(builder->last_times, 0, sizeof(builder->last_times));
 }
 
@@ -1429,7 +1463,7 @@ static bool composite_try_add(struct composite_builder *builder, uint8_t type)
 {
 	int need = 1 + sub_data_len(type); /* 1 for type byte + data */
 	if (!sub_packet_get(type) || builder->n >= ARRAY_SIZE(builder->types)
-		|| builder->used + need > COMPOSITE_MAX_SUB_DATA) {
+		|| builder->used + need > builder->sub_max) {
 		return false;
 	}
 	builder->types[builder->n] = type;
@@ -1473,7 +1507,31 @@ static void composite_commit_timestamps(const struct composite_builder *builder,
 	}
 }
 
-static uint8_t send_composite_or_single(struct composite_builder *builder, const sensor_data_capture_t *capture)
+/* Avoid the compact quaternion's transcendental encoding when v3 has room
+ * for the ordinary pose plus info. D10 still needs the compact representation. */
+static uint8_t composite_pose_type(const struct composite_builder *builder,
+                                  bool precise, bool info_wanted, bool stream)
+{
+	bool full_fits = builder->sub_max >= SUB_DATA_LEN_QUAT + SUB_DATA_LEN_INFO + 2U;
+	return !precise && info_wanted && (!stream || !full_fits)
+		? SUB_PACKET_COMPACT_QUAT : SUB_PACKET_QUAT_ACCEL;
+}
+
+/* Selection scans pending event queues. Do it before the fresh-pose wake;
+ * reserve no payload bytes until the completed pose builder proves it fits. */
+static void composite_prepare_event(struct composite_builder *builder)
+{
+	builder->event_checked = true;
+	builder->event.token = 0;
+	if (esb_ready() && !esb_ota_is_active() && !get_status(SYS_STATUS_CONNECTION_ERROR)) {
+		if (!tracker_events_select(k_uptime_get_32(), tracker_id, &builder->event)) {
+			builder->event.token = 0;
+		}
+	}
+}
+
+static uint8_t send_composite_or_single(struct composite_builder *builder, const sensor_data_capture_t *capture,
+                                      uint32_t ledger_tick, struct esb_source_guard *source)
 {
 	if (builder->n <= 0 || builder->n > ARRAY_SIZE(builder->types)) {
 		return 0;
@@ -1486,19 +1544,29 @@ static uint8_t send_composite_or_single(struct composite_builder *builder, const
 		}
 		business_len += 1 + d->data_len;
 	}
-	if (business_len + (builder->has_event ? 16 : 0) > COMPOSITE_MAX_SUB_DATA) {
+	if (business_len + (builder->has_event ? 16 : 0) > builder->sub_max) {
 		return 0;
 	}
 
 	bool radio_selected = esb_ready();
+	if (source && !radio_selected) {
+		esb_source_end(source);
+		return 0;
+	}
 	if (!radio_selected && !connection_hid_output_ready()) {
 		return 0;
 	}
-	if (radio_selected && !builder->has_event && business_len + 16 <= COMPOSITE_MAX_SUB_DATA
+	if (radio_selected && !builder->has_event && business_len + 16 <= builder->sub_max
 		&& !esb_ota_is_active() && !get_status(SYS_STATUS_CONNECTION_ERROR)) {
-		builder->has_event = tracker_events_select(k_uptime_get_32(), tracker_id, &builder->event);
+		if (!builder->event_checked) {
+			composite_prepare_event(builder);
+		}
+		builder->has_event = builder->event.token != 0;
 	}
 
+#ifdef CONFIG_RELAY_LEDGER_TIMING
+	ledger_source_encode_cycles = relay_cycle_now();
+#endif
 	uint8_t buf[ESB_MAX_PAYLOAD_LEN];
 	bool composite = builder->n > 1 || builder->has_event;
 	int pos;
@@ -1525,7 +1593,64 @@ static uint8_t send_composite_or_single(struct composite_builder *builder, const
 
 	uint8_t accepted = 0;
 	if (radio_selected) {
-		int err = esb_write(buf, no_ack, pos);
+#ifdef CONFIG_RELAY_PRODUCER_DIAGNOSTICS
+		static uint32_t attempted, queued, repeated, age_max;
+		static uint64_t last_generation;
+#endif
+        /* Attribute the result to the selected source opportunity. Another
+         * clock projection here consumes the short submission window. */
+        (void)ledger_tick;
+#ifdef CONFIG_RELAY_LEDGER_TIMING
+		ledger_source_target_tick = ledger_tick;
+		ledger_source_tx_start = -32768;
+		ledger_source_write_cycles = relay_cycle_now();
+#endif
+        int err = source ? esb_source_write(source, buf, pos) : esb_write(buf, no_ack, pos);
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+        relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE, err);
+        relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_WAIT_LATE, ledger_source_wait_lateness);
+#ifdef CONFIG_RELAY_LEDGER_TIMING
+        if (ledger_tick) {
+            relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_TX_START, ledger_source_tx_start);
+            relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_BUILD_CYCLES,
+                MIN(ledger_source_encode_cycles - ledger_source_wake_cycles, 32767U));
+            relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_ENCODE_CYCLES,
+                MIN(ledger_source_write_cycles - ledger_source_encode_cycles, 32767U));
+            relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_ADMIT_CYCLES,
+                MIN(ledger_source_admit_cycles - ledger_source_write_cycles, 32767U));
+            relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_SETUP_CYCLES,
+                MIN(ledger_source_setup_cycles - ledger_source_write_cycles, 32767U));
+            if (ledger_source_wait_cycles)
+                relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_WAIT_CYCLES,
+                    MIN(ledger_source_wait_cycles - ledger_source_admit_cycles, 32767U));
+            if (ledger_source_final_cycles)
+                relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_FINAL_CYCLES,
+                    MIN(ledger_source_final_cycles - ledger_source_wait_cycles, 32767U));
+            if (ledger_source_start_cycles)
+                relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_START_CYCLES,
+                    MIN(ledger_source_start_cycles - ledger_source_wake_cycles, 32767U));
+        }
+#endif
+        if (err == -EAGAIN) {
+            relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_REFUSAL, ledger_source_refusal);
+            relay_ledger_tick(ledger_tick, tracker_id, LEDGER_SOURCE_WINDOW, ledger_window_detail);
+        }
+#endif
+#ifdef CONFIG_RELAY_PRODUCER_DIAGNOSTICS
+		/* Producer accounting does not belong in the slot submission budget. */
+		uint32_t age = k_uptime_get_32() - capture->qa_published_ms;
+		if (age > age_max) {
+			age_max = age;
+		}
+		repeated += capture->qa_generation == last_generation;
+		last_generation = capture->qa_generation;
+		attempted++;
+		queued += err == 0;
+		if (attempted % 1000U == 0) {
+			LOG_INF("PRODUCER generation=%llu attempted=%u queued=%u repeat=%u age_max_ms=%u",
+				capture->qa_generation, attempted, queued, repeated, age_max);
+		}
+#endif
 		if (builder->has_event) {
 			tracker_events_complete(builder->event.token, err == 0, k_uptime_get_32());
 		}
@@ -1539,7 +1664,7 @@ static uint8_t send_composite_or_single(struct composite_builder *builder, const
 			if (composite) {
 				write_hid_composite_as_normal_packets(buf, builder->n);
 			} else {
-				hid_write_packet_n(buf);
+				connection_hid_write_normal(buf);
 			}
 		}
 #endif
@@ -1547,7 +1672,7 @@ static uint8_t send_composite_or_single(struct composite_builder *builder, const
 #if CONFIG_CONNECTION_OVER_HID
 		if (composite) {
 			accepted = write_hid_composite_as_normal_packets(buf, builder->n);
-		} else if (hid_write_packet_n(buf)) {
+		} else if (connection_hid_write_normal(buf)) {
 			accepted = (uint8_t)(1u << builder->types[0]);
 		}
 #endif
@@ -1564,6 +1689,11 @@ static uint8_t send_composite_or_single(struct composite_builder *builder, const
 	}
 	composite_commit_timestamps(builder, accepted);
 	return accepted;
+}
+
+void connection_relay_wake(void)
+{
+	connection_signal_wake();
 }
 
 static void connection_signal_wake(void)
@@ -1694,6 +1824,15 @@ static void connection_idle_wait(int64_t now)
 	(void)k_sem_take(&connection_wake_sem, K_MSEC(wait_ms));
 }
 
+static void ping_build(uint8_t ping[ESB_PING_LEN])
+{
+	memset(ping, 0, ESB_PING_LEN);
+	ping[0] = ESB_PING_TYPE;
+	ping[1] = connection_get_id();
+	ping[7] = esb_get_ping_ack_flag();
+	esb_get_ping_request_data(&ping[8]);
+}
+
 static bool connection_service_ping(int64_t now)
 {
 	/* Synchronized operation derives the next PING directly from server
@@ -1728,11 +1867,8 @@ static bool connection_service_ping(int64_t now)
 		|| (guarded_schedule ? ping_window_delay_ms == 0
 			: (int32_t)((uint32_t)now - ping_deadline) >= 0);
 	if (ping_due) {
-		uint8_t ping[ESB_PING_LEN] = {0};
-		ping[0] = ESB_PING_TYPE;
-		ping[1] = connection_get_id();
-		ping[7] = esb_get_ping_ack_flag();
-		esb_get_ping_request_data(&ping[8]);
+		uint8_t ping[ESB_PING_LEN];
+		ping_build(ping);
 		int err = esb_write_ping(ping, force_resync);
 		if (err == -EAGAIN) {
 			uint32_t retry_delay_ms = 0;
@@ -1769,6 +1905,7 @@ static bool connection_service_ping(int64_t now)
 
 static void connection_thread(void)
 {
+	bool stream_clock_held = false;
 	/* Register connection thread with watchdog */
 	if (watchdog_register_thread(WDT_CHANNEL_CONNECTION, 0) < 0) {
 		LOG_ERR("Connection watchdog registration failed");
@@ -1781,6 +1918,12 @@ static void connection_thread(void)
 	);
 
 	while (1) {
+		/* Profile 1 uses the radio twice per 8.3 ms frame and HFXO start-up
+		 * outlasts the lead before B, so the clock stays up for the profile. */
+		if (stream_clock_held && !tdma_profile_get()) {
+			esb_relay_clock(false);
+			stream_clock_held = false;
+		}
 		/* Recovery must progress even without transport or while PING/search
 		 * paths keep bypassing the OTA polling branch. It may sleep, so sample
 		 * scheduler time only after servicing it. */
@@ -1838,8 +1981,70 @@ static void connection_thread(void)
 		radio_capture_process();
 #endif
 
+		if (radio_ready && esb_relay_profile_lost()) {
+			tdma_profile_drop();
+		}
+		bool stream = radio_ready && tdma_profile_get();
+		uint32_t stream_target = 0;
+		if (stream && !stream_clock_held) {
+			if (esb_relay_clock(true) != 0) {
+				continue;
+			}
+			stream_clock_held = true;
+		}
+		if (stream) {
+			uint32_t target;
+			bool broadcast;
+			if (!tdma_stream_next(&target, &broadcast)) {
+				k_msleep(1);
+				continue;
+			}
+
+			if (broadcast) {
+				if (esb_relay_control_window(target)) {
+					/* B completion is the grant event. Service it before any
+					 * producer work or selection of the next direct target. */
+					uint32_t at;
+					if (relay_next_maintenance(&at)) {
+						uint8_t ping[ESB_PING_LEN];
+						ping_build(ping);
+						atomic_inc(&ping_sched_stats.due);
+						atomic_inc(&ping_sched_stats.attempts);
+						ping_stats_attempt((uint32_t)now);
+						atomic_inc(esb_write_maintenance(ping) == 0
+							? &ping_sched_stats.queue_ok : &ping_sched_stats.queue_fail);
+					}
+					uint8_t slot;
+					while (relay_next_repair(&at, &slot)) {
+						if (esb_write_relay() != 0) {
+							uint8_t next_slot;
+							/* An empty grant is consumed during preparation;
+							 * keep servicing later grants. Stop on no progress. */
+							if (!relay_next_repair(&at, &next_slot) || next_slot == slot) {
+								break;
+							}
+						}
+					}
+				}
+				relay_control_serviced();
+				/* Without a B grant tdma_stream_next() returns "now" on
+				 * every retry. A full-frame busy RX, or an immediate radio
+				 * refusal, otherwise keeps this priority-4 thread runnable
+				 * indefinitely and starves boot/POWER/ESB owners. Release
+				 * the radio and helper handoff before giving them CPU time.
+				 * Granted streaming retains its existing slot timing. */
+				if (!esb_layout_granted()) {
+					k_msleep(1);
+				}
+				continue;
+			}
+			stream_target = target;
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+			relay_ledger_tick(target, tracker_id, LEDGER_TARGET, 0);
+#endif
+		}
 		if (radio_ready) {
-			if (connection_service_ping(now)) {
+			if (!stream && connection_service_ping(now)) {
 				continue;
 			}
 
@@ -1865,6 +2070,12 @@ static void connection_thread(void)
 			/* Disconnected radios must not send collection or sensor data. */
 			if (get_status(SYS_STATUS_CONNECTION_ERROR)) {
 				k_msleep(100);
+				continue;
+			}
+
+			/* Admission yields if the next own opportunity comes first. */
+			if (relay_forward_slot() >= 0 && relay_records_pending()
+			    && esb_write_relay() == 0) {
 				continue;
 			}
 
@@ -1906,7 +2117,7 @@ static void connection_thread(void)
 		}
 		uint64_t now_us = k_ticks_to_us_near64(k_uptime_ticks());
 		bool test_send_due = in_test_mode && test_rate_due(now_us);
-		bool quat_ready = in_test_mode ? test_send_due : pending;
+		bool quat_ready = stream || (in_test_mode ? test_send_due : pending);
 		/* In test mode all low-frequency data rides the next target-rate
 		 * packet. Standalone sends would violate the configured ceiling. */
 #if CONFIG_SENSOR_USE_MAGNETOMETER
@@ -1926,9 +2137,35 @@ static void connection_thread(void)
 		    || mag_due
 #endif
 		) {
+			struct composite_builder builder;
+			composite_builder_reset(&builder);
+			if (stream) {
+				struct tdma_layout layout;
+				if (!tdma_layout_get(&layout)) {
+					continue;
+				}
+				builder.sub_max = relay_direct_payload_max(layout.profile, layout.slot_index) - 4U;
+			}
+
+			if (stream) {
+				composite_prepare_event(&builder);
+			}
+
+			/* Do transport and due-field bookkeeping before the fresh-pose
+			 * wake. Only snapshot capture and packet construction follow it. */
+			struct esb_source_guard source = {0};
+			if (stream && !esb_source_begin(&source, stream_target)) {
+				continue;
+			}
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+            ledger_source_wait_lateness = ledger_wait_lateness;
+#ifdef CONFIG_RELAY_LEDGER_TIMING
+            ledger_source_wake_cycles = relay_cycle_now();
+#endif
+#endif
 			sensor_data_capture_t capture;
 			sensor_data_snapshot_capture(&sensor_data_snapshot, &capture);
-			quat_ready = in_test_mode ? test_send_due : (capture.pending & SENSOR_STREAM_QA) != 0;
+			quat_ready = stream || (in_test_mode ? test_send_due : (capture.pending & SENSOR_STREAM_QA) != 0);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 			mag_due = !in_test_mode && (capture.pending & SENSOR_STREAM_M)
 				&& (now - last_mag_time >= 100);
@@ -1942,23 +2179,17 @@ static void connection_thread(void)
 			bool mag_wanted = mag_due || mag_soon;
 			bool pose_conflict = in_test_mode && (capture.pending & SENSOR_STREAM_QA) && mag_wanted;
 #endif
-			struct composite_builder builder;
-			composite_builder_reset(&builder);
 
 			if (quat_ready) {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-				bool mag_primary = in_test_mode && mag_wanted
+				bool mag_primary = !stream && in_test_mode && mag_wanted
 					&& (!(capture.pending & SENSOR_STREAM_QA) || test_rate_schedule.mag_turn);
 				if (mag_primary) {
 					composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
 				} else
 #endif
-				if (!capture.precise && info_wanted) {
-					/* Compact pose omits the sensor IDs, so info remains independently due. */
-					composite_try_add(&builder, SUB_PACKET_COMPACT_QUAT);
-				} else {
-					composite_try_add(&builder, SUB_PACKET_QUAT_ACCEL);
-				}
+				composite_try_add(&builder,
+					composite_pose_type(&builder, capture.precise, info_wanted, stream));
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 				if (!in_test_mode) {
 					composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, mag_wanted, &last_mag_time, now);
@@ -1981,7 +2212,9 @@ static void connection_thread(void)
 			}
 
 			uint8_t primary = builder.types[0];
-			uint8_t accepted = send_composite_or_single(&builder, &capture);
+			uint8_t accepted = send_composite_or_single(&builder, &capture, stream_target, stream ? &source : NULL);
+			/* Also releases preparation if packet construction rejected the pose. */
+			if (stream) esb_source_end(&source);
 			if (in_test_mode && (accepted & (1u << primary))) {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 				test_rate_schedule.mag_turn = pose_conflict && primary != SUB_PACKET_QUAT_MAG;
@@ -1994,6 +2227,18 @@ static void connection_thread(void)
 			continue;
 		}
 		if (connection_send_tracker_event()) {
+			continue;
+		}
+		if (radio_ready) {
+			uint8_t diag[RELAY_DIAG_LEN];
+			size_t diag_length = relay_diag_build(diag, sizeof(diag), tracker_id);
+			if (diag_length) {
+				(void)esb_write(diag, true, diag_length);
+				continue;
+			}
+		}
+		/* Head without own data due: forward children in the own slot. */
+		if (radio_ready && relay_records_pending() && esb_write_relay() != -EAGAIN) {
 			continue;
 		}
 

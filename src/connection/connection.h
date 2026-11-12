@@ -29,6 +29,8 @@ uint32_t get_ping_interval_ms(void);
 void connection_print_ping_stats(void);
 /** Force the next PING to run immediately without old receiver-time slot gating. */
 void connection_request_ping_resync(void);
+/* Relay thread: a child frame is waiting to be forwarded. */
+void connection_relay_wake(void);
 /** Wake the single connection owner for newly due event work. */
 void connection_tracker_event_wake(void);
 /* Recompute maintenance facts after applied raw/debug/bench/capture changes. */

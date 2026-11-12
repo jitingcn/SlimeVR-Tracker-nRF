@@ -43,6 +43,8 @@ prefix = r'''
 #define TDMA_SLOT_TICKS 22
 #define TDMA_FRAME_TICKS (TDMA_NUM_TRACKERS * TDMA_SLOT_TICKS)
 #define K_NO_WAIT 0
+#define CONFIG_SYS_CLOCK_TICKS_PER_SEC 1000000U
+#define K_TIMEOUT_ABS_TICKS(t) ((uint64_t)(t) | (1ULL << 63))
 #define K_USEC(x) ((uint64_t)(x))
 #define K_MSEC(x) ((uint64_t)(x) * 1000)
 typedef int64_t atomic_t;
@@ -83,9 +85,11 @@ static uint64_t k_ticks_to_ms_floor64(uint64_t ticks) { return ticks / 1000; }
 static uint64_t net_ticks_from_kernel64(uint64_t ticks) { return ticks * 32768 / 1000000; }
 static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks; }
 static void k_sleep(uint64_t us) {
+    bool absolute = us >> 63;
+    if (absolute) { us &= ~(1ULL << 63); us = us > virtual_us ? us - virtual_us : 0; }
     if (sleep_calls++ == 0) first_sleep_us = us;
     /* Ceil timeout conversion plus one kernel tick models phase uncertainty. */
-    uint64_t kticks = (us * kernel_hz + 999999) / 1000000 + 1;
+    uint64_t kticks = (us * kernel_hz + 999999) / 1000000 + !absolute;
     if (!freeze_clock) virtual_us += (kticks * 1000000 + kernel_hz - 1) / kernel_hz;
     if (invalidate_on_sleep) sync_age = -1;
     if (change_layout_on_sleep) tdma_cfg_pack ^= 1UL << 24;
@@ -543,7 +547,7 @@ case = sys.argv[1] if len(sys.argv) > 1 else "all"
 with tempfile.TemporaryDirectory(prefix="slimenrf-deadline-smoke-") as directory:
     temp = Path(directory)
     source = temp / "deadline.c"
-    source.write_text("\n\n".join(parts))
+    source.write_text(('#include "' + str(root / "src/connection/relay_protocol.h") + '"\n') + "\nstatic bool esb_layout_granted(void) { return true; } static bool esb_relay_granted_at(uint32_t tick) { (void)tick; return true; }\n" + "\n\n".join(parts))
     binary = temp / "deadline"
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",
