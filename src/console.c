@@ -1699,6 +1699,10 @@ static void console_cmd_uptime(size_t argc, char **argv)
 	ARG_UNUSED(argv);
 	uint64_t uptime = k_uptime_ticks();
 	print_uptime(uptime, "Uptime");
+	sys_print_last_fatal();
+	printk("Reset reason: 0x%08x; watchdog total=%u channel=%u at_ms=%u\n",
+		sys_get_reset_reason(), retained->watchdog_state.total_wdt_resets,
+		retained->watchdog_state.last_failed_channel, retained->watchdog_state.last_reset_uptime);
 	print_uptime(uptime - retained->uptime_latest + retained->uptime_sum, "Accumulated");
 }
 

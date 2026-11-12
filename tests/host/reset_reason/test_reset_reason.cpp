@@ -127,7 +127,11 @@ static unsigned int irq_lock()
 	return 0;
 }
 static void irq_unlock(unsigned int) { assert(locked); locked = false; }
-struct arch_esf {};
+struct arch_esf { struct { uint32_t pc; } basic; };
+#define __noinit
+static void __DMB() {}
+static void retained_dsb() {}
+#define printk(...) ((void)0)
 struct rebooted {};
 static unsigned barriers, panics;
 #define ARG_UNUSED(x) (void)(x)
