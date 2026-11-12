@@ -1375,6 +1375,9 @@ static int sensor_request_scan_locked(bool force, bool user_feedback)
 		}
 		sensor_thread_role = SENSOR_THREAD_NONE;
 		atomic_clear(&sensor_loop_stop);
+		/* The loop owned live fusion and saves it only every few seconds.
+		 * Keep its current state for the loop started after this scan. */
+		sensor_retained_write();
 	}
 	tracker_events_sensor_invalidate(TRACKER_REST_RESET);
 	tracker_events_notify();
