@@ -2227,8 +2227,10 @@ void esb_pair(void)
 		struct led_token pairing = led_begin(LED_OWNER_RADIO, pairing_request ? pairing_request : led_request_id());
 		pairing_request = 0;
 		pairing_search_active = true;
+		#if USER_SHUTDOWN_ENABLED
 		bool timeout_reported = false;
 		int64_t pair_start_time = k_uptime_get();
+		#endif
 		uint8_t pair_home = radio_channel;
 		unsigned pair_index = 0;
 		unsigned pair_bursts = 0;
