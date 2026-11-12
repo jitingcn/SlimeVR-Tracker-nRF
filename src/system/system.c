@@ -50,10 +50,31 @@ LOG_MODULE_REGISTER(system, LOG_LEVEL_INF);
 /* Architecture hook used by the NCS fatal handler as well. */
 extern void sys_arch_reboot(int type);
 
+/* Preserve the last fatal without flash writes in the exception path. */
+static __noinit struct {
+	uint32_t magic, reason, pc, check;
+} fatal_record;
+#define FATAL_RECORD_MAGIC 0x46544c36U
+
+void sys_print_last_fatal(void)
+{
+	if (fatal_record.magic == FATAL_RECORD_MAGIC &&
+	    fatal_record.check == (FATAL_RECORD_MAGIC ^ fatal_record.reason ^ fatal_record.pc)) {
+		printk("Last fatal: reason=%u pc=0x%08x\n", fatal_record.reason, fatal_record.pc);
+	} else {
+		printk("Last fatal: no valid retained record\n");
+	}
+}
+
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 {
-	ARG_UNUSED(reason);
-	ARG_UNUSED(esf);
+	fatal_record.magic = 0;
+	fatal_record.reason = reason;
+	fatal_record.pc = esf ? esf->basic.pc : 0;
+	fatal_record.check = FATAL_RECORD_MAGIC ^ fatal_record.reason ^ fatal_record.pc;
+	__DMB();
+	fatal_record.magic = FATAL_RECORD_MAGIC;
+	__DSB();
 #if ADAFRUIT_FAULT_RECOVERY
 	NRF_POWER->GPREGRET = sys_bootloader_supports_recovery() ?
 		ADAFRUIT_FATAL_RECOVERY : ADAFRUIT_DFU_MAGIC_UF2_RESET;

@@ -78,7 +78,8 @@ for name in ("saved_gpregret", "last_reset_was_wdt"):
         parts.append(declaration.group())
 parts += [function(watchdog, "watchdog_early_check"),
           registration(watchdog, "watchdog_early_check"), "#endif"]
-parts.append(function(system, "k_sys_fatal_error_handler"))
+parts += [system[system.index('/* Preserve the last fatal'):system.index('void k_sys_fatal_error_handler')]]
+parts.append(function(system, "k_sys_fatal_error_handler").replace("fatal_record.magic = FATAL_RECORD_MAGIC;\n\t__DSB();", "fatal_record.magic = FATAL_RECORD_MAGIC;\n\tretained_dsb();"))
 parts.append("#if ADAFRUIT_FAULT_RECOVERY")
 parts += ["#if CONFIG_TASK_WDT", "static bool boot_success_marked;", "#endif"]
 for name in ("watchdog_get_reset_count", "watchdog_clear_reset_count", "watchdog_mark_boot_success"):
