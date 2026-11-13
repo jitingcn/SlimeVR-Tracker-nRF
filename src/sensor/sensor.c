@@ -901,9 +901,11 @@ static void sensor_startup_thread(void *arg1, void *arg2, void *arg3)
 		} else {
 			delay_ms = 2000;
 			k_msleep(1000);
-			/* Suspended sensors deliberately produce no data. Also reset the
-			 * grace interval after resume, calibration or a successful scan. */
-			if (atomic_get(&main_suspended) || atomic_set(&sensor_progress, 0)) {
+			/* Suspended sensors deliberately produce no data. Without a pending
+			 * recovery, progress resets the grace interval after resume,
+			 * calibration or a successful scan. */
+			if (atomic_get(&main_suspended) ||
+			    (atomic_set(&sensor_progress, 0) && !atomic_get(&sensor_recovery_pending))) {
 				stalled = 0;
 				continue;
 			}

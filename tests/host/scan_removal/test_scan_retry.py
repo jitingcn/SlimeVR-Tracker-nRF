@@ -18,6 +18,7 @@ static int atomic_get(atomic_t *p) { return *p; }
 static int atomic_set(atomic_t *p, int v) { int old=*p; *p=v; return old; }
 static jmp_buf done;
 static unsigned sleeps, stop_after, healthy, suspend;
+static unsigned pending_at, resume_at;
 #define LOG_ERR(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
 static struct { unsigned addr; } sensor_imu_dev;
@@ -25,8 +26,13 @@ static unsigned sensor_imu_dev_reg, calls, delay, succeed;
 static void k_msleep(unsigned ms) {
  delay += ms;
  if (stop_after && ++sleeps == stop_after) longjmp(done, 1);
+ if (resume_at && sleeps == resume_at) {
+  assert(main_suspended && sensor_recovery_pending && sensor_progress);
+  suspend = 0;
+ }
  if (healthy) sensor_progress = 1;
  main_suspended = suspend;
+ if (pending_at && sleeps == pending_at) sensor_recovery_pending = 1;
 }
 static int sensor_scan_imu_once(void) {
  assert(sensor_imu_dev.addr == 0 && sensor_imu_dev_reg == 255);
@@ -40,6 +46,7 @@ static unsigned scan_calls, scan_success;
 static int scan_error = -EIO;
 static int sensor_request_scan(bool force, bool feedback) {
  assert(force && !feedback);
+ assert(!main_suspended);
  if (++scan_calls >= scan_success) { sensor_progress = 1; sensor_recovery_pending = 0; return 0; }
  return scan_error;
 }
@@ -62,6 +69,19 @@ int main(void) {
  delay = scan_calls = sleeps = 0; scan_success = 8; healthy = 1; stop_after = 20;
  if (!setjmp(done)) startup();
  assert(scan_calls == 8);
+ /* Pending recovery cannot be starved by continuing decoded data. */
+ delay = scan_calls = sleeps = 0; scan_success = 1; healthy = 1; suspend = 0;
+ sensor_progress = sensor_recovery_pending = main_suspended = 0;
+ pending_at = 3; resume_at = 0; stop_after = 12;
+ if (!setjmp(done)) startup();
+ assert(scan_calls == 2 && !sensor_recovery_pending);
+ /* Recovery waits through suspension, then runs once after resume. */
+ delay = scan_calls = sleeps = 0; scan_success = 1; healthy = 1; suspend = 1;
+ sensor_progress = sensor_recovery_pending = main_suspended = 0;
+ pending_at = 3; resume_at = 7; stop_after = 12;
+ if (!setjmp(done)) startup();
+ assert(scan_calls == 2 && !sensor_recovery_pending);
+ pending_at = resume_at = 0;
  /* Stalled decoded data invokes the same full scan repeatedly. */
  delay = scan_calls = sleeps = 0; scan_success = 1; healthy = 0; stop_after = 12;
  sensor_progress = sensor_recovery_pending = 0;
@@ -78,4 +98,4 @@ with tempfile.TemporaryDirectory() as d:
  p = Path(d); (p/'test.c').write_text(code)
  subprocess.run([os.environ.get('CC','cc'), '-std=c11','-Wall','-Wextra','-Werror',str(p/'test.c'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)
-print('Scan recovery: bounded probes, indefinite capped retry, late discovery, stall and suspension passed')
+print('Scan recovery: bounded probes, indefinite capped retry, late discovery, pending recovery, stall and suspension passed')
