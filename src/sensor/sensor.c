@@ -29,6 +29,7 @@
 #include "system/watchdog.h"
 #include "util.h"
 #include "connection/connection.h"
+#include "connection/tdma.h"
 #include "connection/tracker_events.h"
 #include "calibration/calibration.h"
 #include "calibration/imu_calibration.h"
@@ -2101,7 +2102,7 @@ static void sensor_update_sensor_state(bool resting)
 #if CONFIG_SENSOR_TCAL_HEATED
 	calibrating = calibrating || sensor_tcal_heated_busy();
 #endif
-	bool in_test_mode = test_mode_get();
+	bool in_test_mode = test_mode_get() || tdma_profile_get();
 	bool ota_suppressed_now = esb_ota_is_active() || connection_get_ota_suppressed();
 	bool suspended = atomic_get(&main_suspended);
 	int64_t now_ms = k_uptime_get();
@@ -3451,7 +3452,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	int64_t min_interval = test_mode_min_send_interval_ms();
 	bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
-	if (send_quat_data || send_lin_accel_data || force_send_by_time) {
+	if (tdma_profile_get() || send_quat_data || send_lin_accel_data || force_send_by_time) {
 		float dq_dot = fabsf(q[0] * last_q[0] + q[1] * last_q[1] + q[2] * last_q[2] + q[3] * last_q[3]);
 		if (dq_dot > 1.0f) {
 			dq_dot = 1.0f;

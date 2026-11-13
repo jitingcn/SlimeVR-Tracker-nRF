@@ -5,6 +5,9 @@
 #define CONSOLE_THREAD_PRIORITY 6
 #define HID_THREAD_PRIORITY 6
 #define USB_INIT_THREAD_PRIORITY 6
+/* Relay RX windows are timed to other trackers' slots; they must preempt the
+ * connection owner (which sleeps in TDMA admission) and the sensor loop. */
+#define RELAY_THREAD_PRIORITY 3
 #define CONNECTION_THREAD_PRIORITY 4
 #define ESB_THREAD_PRIORITY 5
 #define CLOCKS_START_THREAD_PRIORITY 5

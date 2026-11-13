@@ -12,6 +12,7 @@
 
 static struct { uint8_t data[64], length; } rx_payload;
 static void esb_ota_process_rx_packet(const uint8_t *data, size_t length);
+#include "relay_off.h"
 #include "ota_queue.inc"
 
 #define PACKET_COUNT 100000

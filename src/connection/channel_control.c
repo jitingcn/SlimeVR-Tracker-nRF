@@ -12,7 +12,11 @@ static K_MUTEX_DEFINE(channel_control_lock);
 static int channel_control_apply(uint8_t stored)
 {
 	k_mutex_lock(&channel_control_lock, K_FOREVER);
-	esb_channel_control_begin();
+	int begin_error = esb_channel_control_begin();
+	if (begin_error) {
+		k_mutex_unlock(&channel_control_lock);
+		return begin_error;
+	}
 	int storage_error = sys_write(RF_CHANNEL_ID, &retained->rf_channel, &stored, sizeof(stored));
 	int radio_error = esb_reinitialize();
 	esb_channel_control_end();

@@ -249,10 +249,18 @@ static bool tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8
     return true;
 }
 static void connection_request_ping_resync(void) {}
+/* The base fixture had no enabled gate: an adopted schedule stays enabled. */
+#define TDMA_MAX_TRACKERS 16
+static bool tdma_is_enabled(void) { return true; }
+static uint32_t sys_get_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
 void set_status(enum sys_status status, bool value) {
     if (value) status_state |= status; else status_state &= ~status;
 }
 int get_status(enum sys_status status) { return status_state & status; }
+#include "relay_off.h"
 #include "channels.inc"
 /* Model the production stop guard; the native clock tests exercise the real
  * onoff manager and ISR path. */
@@ -567,7 +575,8 @@ static void pong_age(void) {
 }
 static void visit(uint8_t target) {
     assert(esb_channel_search_poll(false));
-    for (unsigned i = 0; radio_channel != target && i < channel_candidate_count(search_home); ++i) {
+    /* Home revisits (LINK_SEARCH_HOME_EVERY) stretch one candidate wrap. */
+    for (unsigned i = 0; radio_channel != target && i < 2U * channel_candidate_count(search_home); ++i) {
         now = search_deadline; assert(esb_channel_search_poll(false));
     }
     assert(radio_channel == target && writes == 0);
@@ -1080,21 +1089,27 @@ static void scan_sequences(void) {
         for (unsigned ch = 0; ch <= 100; ++ch)
             assert(seen[ch] == (!(ch & 1) || ch == home));
 
-        /* Observe actual owner PING submissions through two complete wraps. */
+        /* Observe actual owner PING submissions over two candidate wraps.
+         * Every LINK_SEARCH_HOME_EVERY-th probe revisits home (a body over
+         * the receiver looks exactly like a channel move); the others walk
+         * the candidate list in order. */
         reset(home);
         for (unsigned i = 0; i <= count * 2; ++i) {
             if (i) now = search_deadline;
             unsigned before = probes;
+            unsigned index = link_search_step_is_home(i) ? 0
+                : link_search_step_candidate(i, count);
             assert(esb_channel_search_poll(false));
-            assert(probes == before + 1 && last_probe_channel == expected[i % count]);
-            assert(search_index == i % count);
+            assert(probes == before + 1 && last_probe_channel == expected[index]);
+            assert(search_index == index);
         }
         assert(changes == count * 2 && !writes && !address_writes);
         /* OTA freezes the active sweep, including an explicit odd home. */
         ota_active = true; now = search_deadline;
         unsigned old_probes = probes, old_changes = changes;
+        uint8_t frozen = radio_channel;
         assert(!esb_channel_search_poll(false));
-        assert(probes == old_probes && changes == old_changes && radio_channel == home);
+        assert(probes == old_probes && changes == old_changes && radio_channel == frozen);
 
         /* Actual discovery sends three bursts per candidate; model no peer
          * and interrupt via the existing lifecycle generation after two wraps. */

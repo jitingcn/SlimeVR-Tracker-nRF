@@ -85,6 +85,7 @@ void tdma_init(uint8_t tracker_id);
  * bounded and return false when the clock, layout, or opportunity changes.
  */
 bool tdma_wait_for_slot(uint8_t payload_length);
+bool tdma_admit_stream_source(uint8_t payload_length);
 
 /** Result of attempting the current deterministic guarded PING window. */
 enum tdma_ping_admission {
@@ -156,5 +157,62 @@ bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
  * Get the current config epoch (for change detection in PONG processing).
  */
 uint8_t tdma_get_config_epoch(void);
+
+/* Staged layout activation (relay_protocol.h). Stage a receiver-announced
+ * layout that becomes current at activation_ticks (receiver time); slot
+ * TDMA_SLOT_UNASSIGNED stages leaving the layout. Returns false if invalid. */
+#define TDMA_SLOT_UNASSIGNED 0xFFU
+bool tdma_stage_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch,
+	uint32_t activation_ticks);
+void tdma_stage_clear(void);
+/* A staged "no slot" layout became current: keep data off the air. */
+bool tdma_layout_withdrawn(void);
+
+/** Snapshot of the receiver-assigned layout (valid only while TDMA is enabled). */
+uint8_t tdma_profile_get(void);
+void tdma_profile_drop(void);
+struct relay_control;
+void tdma_stream_anchor(uint32_t preamble, uint32_t frame);
+void tdma_stream_control(const struct relay_control *control);
+bool tdma_stream_next(uint32_t *target, bool *broadcast);
+
+struct tdma_layout {
+	uint8_t profile;
+	uint8_t slot_index;
+	uint8_t total_slots;
+	uint8_t slot_ticks;
+	uint16_t frame_ticks;
+	uint8_t epoch;
+};
+bool tdma_layout_get(struct tdma_layout *layout);
+
+/** Current receiver time while synchronized under the active layout. */
+bool tdma_network_now(uint32_t *ticks);
+
+/**
+ * Start tick of the next frame, strictly after @p after, in which @p slot's
+ * owner may send ordinary data (skips PING guards and the rollover frames).
+ */
+bool tdma_slot_data_window(uint8_t slot, uint32_t after, uint32_t *start);
+
+/**
+ * Next guarded PING window of @p slot strictly after @p after. @p length
+ * covers both window slots, the target offset and the late tolerance.
+ */
+bool tdma_slot_ping_window(uint8_t slot, uint32_t after, uint32_t *start, uint16_t *length);
+
+/**
+ * Admission into a receiver-assigned forwarding slot (relay head only): same
+ * guard, one-packet-per-frame and PING-deferral rules as the own slot, with
+ * its own admitted-frame record.
+ */
+bool tdma_wait_for_forward_slot(uint8_t slot, uint8_t payload_length);
+/* Revalidate a consumed admission immediately before queue/start. Caller may
+ * hold irq_lock through this check and the nonblocking ESB submission. */
+bool tdma_slot_tx_valid(uint8_t payload_length);
+bool tdma_forward_tx_valid(uint8_t slot, uint8_t payload_length);
+
+/** Bounded sleep/spin until receiver time reaches @p target. */
+bool tdma_wait_network_tick(uint32_t target);
 
 #endif

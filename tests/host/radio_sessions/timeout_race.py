@@ -59,6 +59,8 @@ static unsigned get_ping_interval_ms(void) { return 1000; }
 static void warning(const char *fmt, ...) { (void)fmt; assert(!locked); ++logs; }
 #define LOG_WRN(...) warning(__VA_ARGS__)
 '''
+# Relay compiled out: no receiver presence or relayed confirmations.
+fixture += '#include "' + str(Path(__file__).resolve().parent / 'relay_off.h') + '"\n'
 fixture += '\n' + timeout + r'''
 static void reset(unsigned which) {
     ping_pending = true; ping_failed = accepted = false;

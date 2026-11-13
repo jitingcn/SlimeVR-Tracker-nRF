@@ -871,6 +871,23 @@ config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
     bool "Enable RC oscillator calibration for K32SRC"
     default y if CLOCK_USE_LF_SYNTH && CONNECTION_TDMA
 
+config CONNECTION_RELAY
+    bool "Receiver-coordinated peer relay and presence supervision"
+    default y
+    depends on CONNECTION_TDMA
+    depends on ESB_MAX_PAYLOAD_LENGTH >= 72
+    # sdk-nrf without the ESB RX metadata option: relay is compiled out.
+    depends on ESB_HAS_RX_METADATA
+    select ESB_RX_METADATA
+    help
+        Advertise relay capability, keep slot and time sync from overheard
+        receiver PONGs while the own uplink fails (instead of channel
+        searching), and act as a relay head when the receiver assigns
+        children: listen in their TDMA slots and forward their pose frames.
+        Profile 0 retains own-PONG assignments and bundled forwarding.
+        Profile 1 uses v3 B watch assignments and granted repairs from a
+        three-frame cache. Both require a 72-byte ESB payload buffer.
+
 menu "TDMA diagnostics"
 
 config TDMA_DIAGNOSTICS
@@ -883,8 +900,11 @@ config TDMA_DIAGNOSTICS
         and removes the capture hook from the ESB transmit path.
         TDMA scheduling itself stays fully functional without this
         option; only measurement instrumentation is removed at compile
-        time. The admission/guard counters shown by "tdma stats" are
-        also compiled out with this option.
+        time. Basic admission/refusal, B error and repair funnel counters
+        remain available in production. Detailed DWT probes require
+        RELAY_CYCLE_DIAGNOSTICS; frame ledgers and detailed ledger timing
+        have their own separate options. Hardware RX END timestamps remain
+        enabled where relay clock and capture correctness require them.
 
 endmenu
 
@@ -901,3 +921,28 @@ rsource "Kconfig.sensors_drivers"
 rsource "Kconfig.heater"
 
 source "Kconfig.zephyr"
+
+config RELAY_CYCLE_DIAGNOSTICS
+    bool "Detailed relay CPU cycle diagnostics"
+    depends on CPU_CORTEX_M_HAS_DWT
+    default n
+    help
+        Measure relay processing with DWT. Production omits these probes.
+
+config RELAY_PRODUCER_DIAGNOSTICS
+    bool "Relay producer generation and age diagnostics"
+    default n
+    help
+        Count attempted, queued and repeated snapshots and log their age.
+
+config RELAY_IRQ_DIAGNOSTICS
+    bool "Whole relay IRQ lock duration probes"
+    depends on CPU_CORTEX_M_HAS_DWT
+    default n
+    help
+        Diagnostic-only DWT maxima for complete source or coordinator locks.
+        Retains all production guards. Never enable for acceptance images.
+
+config RELAY_RUNTIME_LAYOUT
+    bool
+    default y

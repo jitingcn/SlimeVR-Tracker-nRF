@@ -39,7 +39,7 @@ if not legacy:
               function(flash, "esb_ota_flash_copy_and_reset")]
 with tempfile.TemporaryDirectory(prefix="radio-ota-findings-") as directory:
     temporary = Path(directory)
-    (temporary / "production.inc").write_text("\n\n".join(parts))
+    (temporary / "production.inc").write_text("static bool control_seen;\n" + "\n\n".join(parts))
     for diagnostics in (0, 1):
         binary = temporary / f"test-{diagnostics}"
         command = shlex.split(os.environ.get("CC", "cc")) + [

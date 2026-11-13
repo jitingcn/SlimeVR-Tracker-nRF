@@ -40,7 +40,7 @@ static void radio_capture_deinit(void) { capture_live = 0; }
 static int esb_radio_lock, lock_depth;
 static void k_mutex_lock(int *lock, int timeout) { lock_depth++; }
 static void k_mutex_unlock(int *lock) { assert(lock_depth > 0); lock_depth--; }
-static bool esb_initialized, own_pong_seen, channel_search, channel_wait_normal;
+static bool esb_initialized, own_pong_seen, channel_search, channel_wait_normal, layout_confirm_seen;
 static atomic_t channel_found, channel_heard, channel_redirect_pending;
 static bool ping_pending, pair_provisional, pair_ack_pending, pairing_search_active;
 static bool channel_confirm_capable, channel_confirmed, channel_legacy_peer, ping_channel_confirm_sent;
@@ -64,6 +64,12 @@ static void esb_disable(void) { assert(driver_live); driver_live = false; disabl
 static void set_status(int mask, bool value) { connection_error = value; }
 static void esb_clear_time_sync_state(void) {}
 static void tdma_set_enabled(bool enabled) {}
+static void tdma_stage_clear(void) {}
+/* Relay raw-RX arbitration and presence state (relay.c) are leaves here. */
+static int raw_rx_blocked_depth;
+static int esb_raw_rx_quiesce(void) { raw_rx_blocked_depth++; return 0; }
+static void esb_raw_rx_resume(void) { assert(raw_rx_blocked_depth > 0); raw_rx_blocked_depth--; }
+static void esb_presence_reset(void) {}
 static int64_t now_ms;
 static int64_t k_uptime_get(void) { return now_ms; }
 static atomic_t next_ping_deadline_ms;
