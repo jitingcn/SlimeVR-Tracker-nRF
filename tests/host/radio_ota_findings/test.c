@@ -17,7 +17,7 @@ static void irq_unlock(unsigned key) { (void)key; }
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define ESB_DEFAULT_CONFIG {0}
 #define ESB_PROTOCOL_ESB_DPL 1
-#define ESB_BITRATE_2MBPS 2
+#define ESB_BITRATE_2MBPS_BLE 4
 #define ESB_TXMODE_MANUAL_START 3
 #define ESB_MODE_PRX 4
 #define CONFIG_RADIO_TX_POWER 0

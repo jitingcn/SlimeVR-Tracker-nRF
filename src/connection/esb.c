@@ -1963,6 +1963,7 @@ int esb_initialize(bool tx)
 	int err;
 
 	struct esb_config config = ESB_DEFAULT_CONFIG;
+	config.bitrate = ESB_BITRATE_2MBPS_BLE;
 
 	if (tx) {
 		config.protocol = ESB_PROTOCOL_ESB_DPL;
@@ -1970,7 +1971,6 @@ int esb_initialize(bool tx)
 #if defined(CONFIG_TDMA_DIAGNOSTICS)
 		config.tx_capture_handler = radio_capture_record;
 #endif
-		config.bitrate = ESB_BITRATE_2MBPS;
 		config.tx_output_power = CONFIG_RADIO_TX_POWER;
 		config.retransmit_delay = RADIO_RETRANSMIT_DELAY;
 		config.retransmit_count = 1;
