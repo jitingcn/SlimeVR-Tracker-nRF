@@ -13,7 +13,7 @@
  *   - in a forwarding slot the receiver appends to the frame for that head
  *     when one bundle per frame cannot carry its children.
  * No tracker ever forwards receiver traffic back to a child: the receiver's
- * downlink (+28 dBm with FEM) is far stronger than any tracker uplink, so a
+ * downlink (about +22 dBm through a FEM) is far stronger than any tracker uplink, so a
  * child keeps time sync and delivery feedback from PONGs it overhears.
  *
  * Profile-0 bundle (head -> receiver, head's own or forwarding slot, head's pipe, NoACK):
