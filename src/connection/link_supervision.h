@@ -1,6 +1,6 @@
 /* Receiver-presence link supervision.
  *
- * The receiver transmits PONGs at +28 dBm through a front-end module while a
+ * The receiver transmits PONGs at about +22 dBm through a front-end module while a
  * tracker transmits at +8 dBm, so on a body the downlink survives obstructions
  * that break the uplink. The old rule (three lost own PINGs or 4.5 s without
  * an own PONG) treated every uplink fade as "receiver moved": it discarded time

@@ -28,7 +28,7 @@ with up to 3 **children** (`RELAY_MAX_HEADS`, `RELAY_MAX_CHILDREN`).
     head, when one bundle per frame cannot carry the children. Forwarding
     capacity is granted on demand: a head asks with
     `RELAY_CAP_FORWARD_REQUEST`, or the receiver sees overflowing bundles.
-- **No back channel.** The receiver's downlink (+28 dBm with its FEM) is far
+- **No back channel.** The receiver's downlink (about +22 dBm through its FEM) is far
   stronger than any tracker uplink (+8 dBm). A child therefore keeps its time
   sync, layout and delivery confirmation from PONGs it overhears; heads never
   forward receiver traffic to children.
