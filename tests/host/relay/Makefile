@@ -12,6 +12,7 @@ check:
 	$(CC) $(CFLAGS) test_link.c -o $(TMP)/test_link
 	$(TMP)/test_link
 	CC="$(CC)" python3 run_tdma.py
+	CC="$(CC)" python3 run_staged_reference.py
 	CC="$(CC)" python3 run_schedule_equivalence.py
 	CC="$(CC)" python3 run_runtime.py
 	CC="$(CC)" python3 run_presence.py

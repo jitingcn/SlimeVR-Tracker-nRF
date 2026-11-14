@@ -21,7 +21,7 @@ esb_header = (root / "src/connection/esb.h").read_text()
 
 
 def function(source, name):
-    return extract_block(source, rf"^(?:static )?(?:inline )?(?:enum tdma_ping_admission|void|bool|int64_t|uint64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
+    return extract_block(source, rf"^(?:static )?(?:inline )?(?:enum tdma_ping_admission|void|bool|int64_t|int32_t|uint64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
 
 prefix = r'''
 #include <assert.h>
@@ -71,6 +71,8 @@ struct esb_sync_filter {
 	int32_t skew_ppb;
 	uint32_t update_count;
 	bool initialized;
+	int8_t receiver_lag;
+	int16_t ack_delay16;
 };
 static struct esb_sync_filter sync_filter;
 
@@ -120,6 +122,10 @@ parts = [prefix, function(network_ticks, "net_ticks_to_us_ceil64"),
          function(network_ticks, "net_ticks_to_ms_floor32"), extract_block(esb_header, r"^struct esb_network_clock \{", True),
          function(esb, "esb_project_network_ticks"),
          function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms"),
+         # Promotion into profile 1 moves the clock to receiver time, and out of
+         # it back to the ACK RX reference.
+         *(function(esb, name) for name in ("esb_adopt_receiver_time", "esb_restore_ack_reference")
+           if f"\nint32_t {name}(void)\n{{" in esb),
          tdma[tdma.index("#define TDMA_ENABLED_BIT"):tdma.index("\nvoid tdma_init(")],
          tdma[tdma.index("#define TDMA_LEN17_RESERVE_TICKS"):tdma.index("\nvoid tdma_note_radio_busy")],
          function(tdma, "tdma_admission_stalled"), function(tdma, "tdma_update_config"),

@@ -23,7 +23,13 @@ network_ticks = (root / "src/connection/network_ticks.h").read_text()
 
 
 def function(source, name):
-    return extract_block(source, rf"^(?:static )?(?:inline )?(?:enum tdma_ping_admission|void|bool|int64_t|uint64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
+    return extract_block(source, rf"^(?:static )?(?:inline )?(?:enum tdma_ping_admission|void|bool|int64_t|int32_t|uint64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
+
+
+# Promotion into profile 1 moves the clock to receiver time, and out of it back
+# to the ACK RX reference (each absent before it existed).
+ADOPT = "\n".join(function(esb, name) for name in ("esb_adopt_receiver_time", "esb_restore_ack_reference")
+                  if f"\nint32_t {name}(void)\n{{" in esb)
 
 
 PREFIX = r'''
@@ -64,6 +70,8 @@ static int64_t g_last_sync_timestamp;
 struct esb_sync_filter {
 	uint32_t offset; uint32_t last_local_ticks; uint32_t reference_offset;
 	uint32_t reference_local_ticks; int32_t skew_ppb; uint32_t update_count; bool initialized;
+	int8_t receiver_lag;
+	int16_t ack_delay16;
 };
 static struct esb_sync_filter sync_filter;
 static uint64_t k_uptime_ticks(void) { g_last_sync_timestamp = (int64_t)(virtual_us / 1000); return virtual_us; }
@@ -89,6 +97,7 @@ def main():
              extract_block(tdma_header, r"^struct tdma_layout \{", True),
              function(esb, "esb_project_network_ticks"),
              function(esb, "esb_get_network_clock"),
+             ADOPT,
              tdma[tdma.index("#define TDMA_ENABLED_BIT"):tdma.index("\nvoid tdma_init(")],
              tdma[tdma.index("#define TDMA_LEN17_RESERVE_TICKS"):tdma.index("\nvoid tdma_note_radio_busy")],
              re.search(r"^#define TDMA_SLOT_UNASSIGNED[^\n]*", tdma_header, re.MULTILINE)[0],

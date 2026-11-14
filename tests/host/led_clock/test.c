@@ -26,6 +26,8 @@ struct esb_sync_filter {
 	int32_t skew_ppb;
 	uint32_t update_count;
 	bool initialized;
+	int8_t receiver_lag;
+	int16_t ack_delay16;
 };
 static struct esb_sync_filter sync_filter;
 

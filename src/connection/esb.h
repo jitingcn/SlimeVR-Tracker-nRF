@@ -127,6 +127,11 @@ bool esb_layout_granted(void);
 bool esb_relay_granted_at(uint32_t receiver_ticks);
 /* Whether v3 control has been lost. */
 bool esb_relay_profile_lost(void);
+/* Profile-1 activation: move the clock to receiver time; returns the shift. */
+int32_t esb_adopt_receiver_time(void);
+/* Leaving profile 1: move the clock back to the ACK RX reference; returns
+ * the shift. */
+int32_t esb_restore_ack_reference(void);
 #if defined(CONFIG_CONNECTION_RELAY)
 bool esb_relay_control_window(uint32_t start);
 #else

@@ -60,7 +60,7 @@ static unsigned esb_conn_state=1,channel_redirect_pending,tracker_id=2,channel_f
 static unsigned presence_epoch=7,own_pong_length=23,receiver_heard_time,g_last_rx_raw_ticks=100000;
 static unsigned g_last_sync_timestamp,receiver_restart_detections,recovery_requests,filter_updates;
 static bool tdma_enabled=true;
-static struct {uint32_t offset,last_local_ticks;int32_t skew_ppb;bool initialized;} sync_filter={.initialized=true};
+static struct {uint32_t offset,last_local_ticks;int32_t skew_ppb;bool initialized;int8_t receiver_lag;} sync_filter={.initialized=true};
 static struct {unsigned pongs,sync_accepted,sync_rejected,layout_stale,layout_followed,relayed_confirms;} presence_stats;
 static int atomic_get(unsigned *p){return *p;}
 static void atomic_set(unsigned *p,unsigned n){*p=n;}

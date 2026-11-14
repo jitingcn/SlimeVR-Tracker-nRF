@@ -979,6 +979,12 @@ struct esb_sync_filter {
 	int32_t skew_ppb;
 	uint32_t update_count;
 	bool initialized;
+	/* Ticks the offset's reference lagged receiver time (PING TX END to PING
+	 * RX) at the last own PONG; profile 0 keeps the ACK RX reference. */
+	int8_t receiver_lag;
+	/* Smoothed ACK delay (PING TX END to ACK RX) in 1/16 tick, 0 until
+	 * measured: how far the ACK RX reference lags receiver time. */
+	int16_t ack_delay16;
 };
 static struct esb_sync_filter sync_filter;
 
@@ -1251,6 +1257,36 @@ static void esb_clear_time_sync_state(void)
 	sync_filter.reference_local_ticks = 0;
 	g_min_rtt_ticks = 10;
 	sync_filter.update_count = 0;
+	sync_filter.receiver_lag = 0;
+	sync_filter.ack_delay16 = 0;
+}
+
+/* A staged profile 1 activates: B and the profile-1 schedule run on receiver
+ * time, so the filter leaves the profile-0 reference. Returns the shift. */
+int32_t esb_adopt_receiver_time(void)
+{
+	unsigned key = irq_lock();
+	int32_t lag = sync_filter.receiver_lag;
+	sync_filter.receiver_lag = 0;
+	sync_filter.offset += (uint32_t)lag;
+	sync_filter.reference_offset += (uint32_t)lag;
+	irq_unlock(key);
+	return lag;
+}
+
+/* Profile 1 ends: every member returns to the ACK RX reference at the same
+ * activation tick, rather than one by one at its next own PONG (a still
+ * warming filter moved most of the way and its neighbours not at all).
+ * Returns the shift. */
+int32_t esb_restore_ack_reference(void)
+{
+	unsigned key = irq_lock();
+	int32_t lag = (sync_filter.ack_delay16 + 8) >> 4;
+	sync_filter.receiver_lag = (int8_t)lag;
+	sync_filter.offset -= (uint32_t)lag;
+	sync_filter.reference_offset -= (uint32_t)lag;
+	irq_unlock(key);
+	return -lag;
 }
 
 
@@ -1632,9 +1668,12 @@ static void esb_stage_from_trailer(const struct relay_pong_trailer *trailer, uin
 		return;
 	}
 	int slot = relay_member_slot(trailer->pending_member_mask, tracker_id);
+	/* Place a profile-1 activation on our profile-0 clock: the quiet zone
+	 * and promotion then fall on the receiver's activation tick. */
+	uint32_t lag = (trailer->pending_total & 0x80U) ? (uint32_t)(int32_t)sync_filter.receiver_lag : 0U;
 	(void)tdma_stage_config(slot >= 0 ? (uint8_t)slot : TDMA_SLOT_UNASSIGNED,
 		trailer->pending_total, trailer->pending_slot_ticks, trailer->pending_epoch,
-		t2 + (uint32_t)trailer->activation_units * RELAY_ACTIVATION_UNIT_TICKS);
+		t2 + (uint32_t)trailer->activation_units * RELAY_ACTIVATION_UNIT_TICKS - lag);
 }
 
 uint8_t esb_get_radio_channel(void)
@@ -2048,17 +2087,21 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				uint32_t server_offset_ticks = ping_rx_ticks - t4_net_ticks;
 				/* A v3 join needs receiver time, not the ACK-delay-biased
 				 * legacy reference. Match PING TX END to receiver PING RX;
-				 * the SDK retains the successful attempt across retries. */
+				 * the SDK retains the successful attempt across retries.
+				 * A tracker still scheduling a profile-0 layout keeps its
+				 * peers' reference (it may keep that layout through a staged
+				 * 0->1 switch) and adopts receiver time at activation. */
 #if CONFIG_CONNECTION_RELAY
+				uint32_t tx_end = (uint32_t)net_ticks_from_kernel64(
+					kernel_ticks_extend32(esb_last_ack_tx_end_ticks));
 				struct relay_geometry bootstrap;
-				if (own_trailer_valid && own_trailer.pending
+				if ((!tdma_is_enabled() || channel_wait_normal)
+					&& own_trailer_valid && own_trailer.pending
 					&& relay_geometry_from_bootstrap(
 						own_trailer.pending_total,
 						own_trailer.pending_slot_ticks,
 						&bootstrap
 					)) {
-					uint32_t tx_end = (uint32_t)net_ticks_from_kernel64(
-						kernel_ticks_extend32(esb_last_ack_tx_end_ticks));
 					server_offset_ticks = ping_rx_ticks - tx_end;
 					/* Do not mix the legacy ACK reference into this sample. */
 					sync_filter.initialized = false;
@@ -2074,6 +2117,15 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				bool initialized = sync_filter.initialized;
 				uint32_t old_offset = sync_filter.offset;
 				int64_t innovation = esb_sync_filter_update(&sync_filter, &sample);
+#if CONFIG_CONNECTION_RELAY
+				int64_t lag = net_tick_difference(ping_rx_ticks - tx_end, sync_filter.offset);
+				sync_filter.receiver_lag = lag == (int8_t)lag ? (int8_t)lag : 0;
+				int32_t ack16 = (int32_t)(t4_net_ticks - tx_end) * 16;
+				if (ack16 > 0 && ack16 < 32 * 16) {
+					int32_t old16 = sync_filter.ack_delay16;
+					sync_filter.ack_delay16 = (int16_t)(old16 ? old16 + (ack16 - old16) / 4 : ack16);
+				}
+#endif
 				if (!initialized) {
 					LOG_DBG("Server offset initialized: %u ticks", sample.offset);
 				} else if (innovation > 32000 || innovation < -32000) {
@@ -2125,11 +2177,19 @@ static void esb_receive_pong(const struct esb_payload *payload)
 																 )
 															  ? &bootstrap
 															  : NULL;
+			/* A running member told of a staged 0->1 switch: the tuple still
+			 * confirms the profile-0 layout it runs (a running profile repeats
+			 * its own epoch instead). Keep that layout until the activation
+			 * quiet zone; promotion drops the v3 anchor, so profile 1 waits
+			 * for B as before. */
+			bool keep_current = private_geometry && !tdma_profile_get() && !layout_stale
+				&& !channel_wait_normal && tdma_is_enabled()
+				&& tdma_epoch == tdma_get_config_epoch() && tdma_epoch != own_trailer.pending_epoch;
 			if (private_geometry) {
 				/* Acquisition gets a fresh lease even after a slow boot. This
 				 * timestamp does not grant poses; only B validates the anchor. */
 				layout_confirm_time = k_uptime_get_32();
-				if (!tdma_profile_get()) {
+				if (!tdma_profile_get() && !keep_current) {
 					layout_stale = true;
 				}
 			}
@@ -2160,7 +2220,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 					atomic_set(&channel_found, true);
 				}
 			}
-			if (!private_geometry && tdma_epoch == tdma_get_config_epoch()) {
+			if ((!private_geometry || keep_current) && tdma_epoch == tdma_get_config_epoch()) {
 				layout_stale = false;
 				/* Only a trailer-bearing PONG confirms: it would also have
 				 * carried any pending layout, so a grant never outlives an
@@ -2348,6 +2408,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	 * prediction run off by 8-15 ticks within a second on an RC LFCLK. */
 	sync_filter.offset = offset;
 	sync_filter.last_local_ticks = preamble_local;
+	sync_filter.receiver_lag = 0;
 	g_last_sync_timestamp = k_uptime_get();
 	g_last_rx_raw_ticks = control.preamble_ticks;
 	control_session = control.session;

@@ -198,6 +198,15 @@ static void tdma_promote_staged(void)
 		/* Every activation begins a new geometry timeline. B supplies the
 		 * authoritative frame number and two announced future starts. */
 		tdma_profile_origin = (uint32_t)atomic_get(&tdma_staged_activation);
+		if (staged & TDMA_PROFILE_BIT) {
+			/* Staged on the profile-0 clock (esb_stage_from_trailer). */
+			tdma_profile_origin += (uint32_t)esb_adopt_receiver_time();
+		} else if (((uint32_t)atomic_get(&tdma_cfg_pack) & TDMA_PROFILE_BIT)
+			   && !(staged & TDMA_STAGED_UNASSIGNED)) {
+			/* 1->0: staged on receiver time, but profile 0 runs on the
+			 * ACK RX reference. Every member shifts at this tick. */
+			tdma_profile_origin += (uint32_t)esb_restore_ack_reference();
+		}
 		tdma_anchor_frame = 0;
 		tdma_anchor_start = tdma_profile_origin;
 		relay_timeline_clear(&relay_timeline_active);
@@ -1000,7 +1009,11 @@ void tdma_profile_drop(void)
 	relay_timeline_clear(&relay_timeline_active);
 	relay_direct_anchor.valid = false;
 	unsigned key = irq_lock();
-	atomic_set(&tdma_cfg_pack, (atomic_val_t)((uint32_t)atomic_get(&tdma_cfg_pack) & ~TDMA_PROFILE_BIT));
+	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
+	if (pack & TDMA_PROFILE_BIT) {
+		(void)esb_restore_ack_reference();
+	}
+	atomic_set(&tdma_cfg_pack, (atomic_val_t)(pack & ~TDMA_PROFILE_BIT));
 	irq_unlock(key);
 }
 

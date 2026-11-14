@@ -956,6 +956,41 @@ static void legacy_compatibility(void) {
     assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
 }
 
+/* A running profile-0 member told of a staged 0->1 switch keeps sending on its
+ * current layout until activation. Before this, every own PONG in the 3.5 s
+ * announcement marked the layout stale and the fleet's uplink stopped. */
+static void staged_profile_keeps_layout(void) {
+    struct {
+        uint8_t tuple_epoch, pending_epoch; bool stale_before, wait_normal, keep;
+    } cases[] = {
+        {41, 42, false, false, true},  /* staged 0->1: keep the current layout */
+        {42, 42, false, false, false}, /* running-profile join announcement */
+        {40, 42, false, false, false}, /* tuple names a layout we do not run */
+        {41, 42, true, false, false},  /* already stale stays stale */
+        {41, 42, false, true, false},  /* acquisition is unchanged */
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        reset(84); ping_failures = 0; server_time_synced = true;
+        epoch = 41; layout_stale = cases[i].stale_before;
+        channel_wait_normal = cases[i].wait_normal;
+        layout_confirm_seen = false;
+        normal_packet(2, 11); rx_payload.data[11] = cases[i].tuple_epoch; packet_crc();
+        own_trailer = (struct relay_pong_trailer){.epoch = cases[i].tuple_epoch,
+            .forward_slot = 255, .member_mask = 0x7ff, .pending = true,
+            .pending_epoch = cases[i].pending_epoch,
+            .pending_total = relay_geometry_code(11, 5), .pending_slot_ticks = 16,
+            .pending_member_mask = 0x7ff, .activation_units = 100};
+        own_trailer_valid = true;
+        unsigned updates = schedule_updates;
+        receive_schedule(ESB_PONG_FLAG_NORMAL);
+        assert(layout_stale == !cases[i].keep);
+        assert(layout_confirm_seen == cases[i].keep);
+        assert(schedule_updates == updates && epoch == 41);
+    }
+    own_trailer_valid = false; layout_stale = false;
+    puts("channels: staged 0->1 switch keeps the profile-0 layout until activation PASS");
+}
+
 static void ota_status_abort(void) {
     for (unsigned pending = 0; pending < 2; ++pending) {
         for (unsigned invalid = 0; invalid < 5; ++invalid) {
@@ -1150,6 +1185,7 @@ int main(void) {
     advertised_channels();
     proof_during_channel_hold();
     legacy_compatibility();
+    staged_profile_keeps_layout();
     ota_status_abort();
     restart_same_epoch();
     owner_command_arguments();

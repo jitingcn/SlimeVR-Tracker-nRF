@@ -78,6 +78,7 @@ def build_source(ref, new):
         m.extract_block(th, r"^struct tdma_layout \{", True),
         m.function(esb, "esb_project_network_ticks"),
         m.function(esb, "esb_get_network_clock"),
+        m.ADOPT,
         tdma[tdma.index("#define TDMA_ENABLED_BIT") : tdma.index("\nvoid tdma_init(")],
         tdma[
             tdma.index("#define TDMA_LEN17_RESERVE_TICKS") : tdma.index(
