@@ -122,7 +122,7 @@ with tempfile.TemporaryDirectory(prefix='relay-control-', dir='/tmp') as tmp:
     path.write_text(prefix + window + cases)
     binary = Path(tmp) / 'control'
     subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
-        '-std=c11', '-Wall', '-Wextra', '-Werror', '-g', '-O1',
+        '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-misleading-indentation', '-g', '-O1',
         '-fsanitize=address,undefined', '-I', str(ROOT / 'src/connection'),
         str(path), '-o', str(binary)], check=True)
     for case in sys.argv[1:] or ('setup-work','scan-delay','wait-edge','prepare-irq','completed-late','scan','valid','busy','deadline','no-clock','clock','init','wait','no-end','crc','stamp','reject','ordinary-then-b'):

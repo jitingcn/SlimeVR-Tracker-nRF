@@ -497,7 +497,7 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 		}
 		int slot = relay_member_slot(trailer->member_mask, child);
 		uint32_t start;
-		if (slot < 0 || slot >= layout->total_slots || slot == layout->slot_index
+		if (slot < 0 || (unsigned)slot >= layout->total_slots || slot == layout->slot_index
 		    || !tdma_slot_data_window((uint8_t)slot, after, &start)) {
 			continue;
 		}
@@ -520,7 +520,7 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	uint32_t capture_end = best_start + layout->slot_ticks;
 	uint32_t tail_end = capture_end + RELAY_V3_CAPTURE_TAIL_TICKS;
 	if (layout->profile &&
-	    relay_member_slot(trailer->member_mask, best_child) == RELAY_V3_DIRECT_SLOTS - 1U) {
+	    (unsigned)relay_member_slot(trailer->member_mask, best_child) == RELAY_V3_DIRECT_SLOTS - 1U) {
 		/* The control frame owns the radio from its existing RX lead, including when
 		 * D10 cannot acquire the radio or never receives an END. */
 		capture_end -= RELAY_RX_LEAD_TICKS;

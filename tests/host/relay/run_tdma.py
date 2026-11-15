@@ -59,7 +59,8 @@ static int64_t atomic_get(const atomic_t *p) { return *p; }
 static int64_t atomic_set(atomic_t *p, int64_t v) { int64_t old = *p; *p = v; return old; }
 enum tdma_ping_admission { TDMA_PING_UNAVAILABLE, TDMA_PING_DEFERRED, TDMA_PING_ADMITTED };
 static atomic_t tdma_cfg_pack;
-static uint64_t virtual_us;
+/* volatile: GCC may otherwise cache now_ticks() across set_ticks() calls. */
+static volatile uint64_t virtual_us;
 static uint32_t sleeps, sleep_entry_delay;
 #define CONFIG_SYS_CLOCK_TICKS_PER_SEC 1000000U
 #define K_TIMEOUT_ABS_TICKS(t) ((uint64_t)(t) | (1ULL << 63))
