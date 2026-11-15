@@ -23,6 +23,7 @@ check:
 	CC="$(CC)" python3 run_submission.py
 	CC="$(CC)" python3 run_source_guard.py
 	CC="$(CC)" python3 run_producer.py
+	CC="$(CC)" python3 run_review3.py
 	python3 budget.py
 	python3 check_protocol_sync.py
 

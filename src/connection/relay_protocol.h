@@ -413,7 +413,8 @@ RELAY_LAYOUT_INLINE const struct relay_geometry *relay_geometry_current(void)
 #define RELAY_V3_GRID_TICKS RELAY_HOST_NUMERATOR
 #define RELAY_V3_GRID_FRAMES RELAY_HOST_DENOMINATOR
 #endif
-#define RELAY_V3_TOTAL_SLOTS (RELAY_V3_DIRECT_SLOTS + 1U + RELAY_V3_REPAIR_SLOTS)
+#define RELAY_V3_TOTAL_SLOTS \
+	(RELAY_V3_DIRECT_SLOTS + 1U + RELAY_V3_REPAIR_SLOTS + relay_second_b_slots(relay_geometry_current()->second_b))
 
 #define RELAY_TIMELINE_FRAMES 8U
 struct relay_timeline {

@@ -68,8 +68,9 @@ static uint32_t sys_get_be32(const uint8_t *p){return (uint32_t)p[0]<<24|(uint32
 static uint8_t crc8_ccitt(uint8_t v,const uint8_t *p,unsigned n){return relay_crc8(v,p,n);}
 static uint64_t kernel_ticks_extend32(uint32_t v){return v;}
 static uint64_t net_ticks_from_kernel64(uint64_t v){return v;}
-static uint32_t k_uptime_get_32(void){return 3000;}
-static uint32_t k_uptime_get(void){return 3000;}
+static uint32_t now_ms=3000;
+static uint32_t k_uptime_get_32(void){return now_ms;}
+static uint32_t k_uptime_get(void){return now_ms;}
 static int64_t net_tick_difference(uint32_t a,uint32_t b){return (int32_t)(a-b);}
 static uint32_t relayed_confirm_time;
 struct esb_sync_sample{uint32_t local_ticks,offset;};
@@ -95,6 +96,7 @@ static uint32_t control_first_received, control_repeat_received, control_repeat_
 static uint32_t control_reject[6];
 static int32_t control_err_min, control_err_max, control_err_last;
 static uint32_t control_session, control_frame, control_tick, current_tick;
+static uint8_t control_member_history;
 struct esb_network_clock { uint32_t receiver_ticks; };
 static bool esb_get_network_clock(struct esb_network_clock *c){c->receiver_ticks=current_tick;return true;}
 static bool esb_receiver_relay_aware(void){return true;}
@@ -116,6 +118,17 @@ static bool tdma_stage_config(uint8_t slot,uint8_t total,uint8_t width,uint8_t e
  return true;
 }
 static void tdma_stage_clear(void){staged.clears++;}
+'''
+timeout = extract_block(esb, r'^static void esb_ping_timeout\([^;{]*\)\s*\{')
+inputs = extract_block(esb, r'^static struct link_inputs esb_link_inputs_locked\([^;{]*\)\s*\{')
+PREFIX += r'''
+#define LOG_WRN(...) ((void)0)
+#define TX_ERROR_THRESHOLD 300
+static uint32_t own_pong_time;
+static bool own_pong_seen,ping_failed;
+static int64_t ping_send_time;
+static unsigned get_ping_interval_ms(void){return 997;}
+static uint32_t esb_age_ms(uint32_t now,uint32_t then,bool seen){return seen?now-then:LINK_AGE_NEVER;}
 '''
 CASES = r'''
 static struct relay_rx_frame pong_with(uint32_t t2,uint8_t epoch,uint16_t members,bool pending) {
@@ -198,6 +211,21 @@ int main(int argc,char **argv) {
   assert(!esb_relay_control_receive(&f) && sync_filter.last_local_ticks==100000); /* late delivery */
   f.end_kernel_ticks=100011;b.session++;relay_control_encode(f.data,&b);
   assert(!esb_relay_control_receive(&f) && !tdma_enabled && !control_seen);
+ } else if(!strcmp(argv[1],"history-health")) {
+  stream_profile=true;relay_geometry_make(&geometry,3,5,16,120);
+  struct relay_control b={.epoch=7,.repair_count=5,.session=42,.frame=10,
+   .preamble_ticks=100000,.members=7,.expected=7,.profile=1,.maintenance_owner=255};
+  for(unsigned i=0;i<5;i++) b.grants[i].owner=RELAY_OWNER_IDLE;
+  for(unsigned n=0;n<50000;n++) {
+   now_ms=3000+n*8;b.frame=10+n;b.preamble_ticks=100000+n*273;
+   b.missing[0]=b.missing[1]=7;b.missing[2]=3;
+   f=(struct relay_rx_frame){.pipe=1,.length=72,.end_kernel_ticks=b.preamble_ticks+11};
+   relay_control_encode(f.data,&b);assert(esb_relay_control_receive(&f));
+   if(n<2) assert(!relayed_confirm_seen); /* no invented pre-session receipt */
+   if(n%125==0){ping_pending=true;ping_send_time=now_ms-998;esb_ping_timeout(now_ms);}
+   assert(ping_failures<300 && esb_conn_state==ESB_ST_PAIRED && !status_error);
+  }
+  assert(relayed_confirm_time==now_ms && !ping_failures);
  } else if(!strcmp(argv[1],"profile")) {
   struct relay_pong_trailer tr={.epoch=7,.member_mask=7,.pending=true,
    .pending_epoch=8,.pending_total=0x95,.pending_slot_ticks=16,
@@ -216,12 +244,12 @@ int main(int argc,char **argv) {
 '''
 with tempfile.TemporaryDirectory(prefix="relay-presence-", dir="/tmp") as tmp:
     path = Path(tmp) / "presence.c"
-    path.write_text(PREFIX + constants + '\n' + note + '\n' + stage + '\n' + function + '\n' + control + '\n' + lease + '\n' + grant_at + '\n' + grant + CASES)
+    path.write_text(PREFIX + constants + '\n' + note + '\n' + stage + '\n' + function + '\n' + control + '\n' + inputs + '\n' + timeout + '\n' + lease + '\n' + grant_at + '\n' + grant + CASES)
     binary = Path(tmp) / "presence"
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-I", str(ROOT / "src/connection"),
         str(path), "-o", str(binary)], check=True)
     for case in sys.argv[1:] or ("reboot", "rejected", "valid", "grant", "pending", "invalid-tuple",
-                                  "relay-recovery", "control", "control-demand", "profile"):
+                                  "history-health", "relay-recovery", "control", "control-demand", "profile"):
         subprocess.run([str(binary), case], check=True)

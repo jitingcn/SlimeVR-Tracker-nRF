@@ -255,8 +255,13 @@ RECEIVE_LEAVES = r"""
 static bool control_seen, layout_confirm_seen, receiver_heard_seen, relayed_confirm_seen, layout_stale,
 	channel_wait_normal;
 static uint32_t control_first_received, control_repeat_received, control_repeat_seen, control_repeat_reject[6];
+static uint8_t control_member_history;
 static uint32_t control_session, control_frame, control_tick, control_received, control_reject[6], layout_confirm_time,
 	receiver_heard_time, relayed_confirm_time, g_last_rx_raw_ticks;
+/* Link-health escalation is covered by run_presence.py; retain its schedule leaf. */
+static void esb_note_trailer_locked(const struct relay_pong_trailer *t,uint32_t now) {
+ if(t->relayed_mask){relayed_confirm_time=now;relayed_confirm_seen=true;}
+}
 static int32_t control_err_last, control_err_min, control_err_max;
 static atomic_t channel_found;
 static uint8_t tracker_id;

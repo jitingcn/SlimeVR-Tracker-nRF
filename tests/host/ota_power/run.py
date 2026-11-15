@@ -79,6 +79,8 @@ flash_header = (SRC / "system/esb_ota_flash.h").read_text()
 parts.append(block(flash_header, r"^struct esb_ota_page_buf \{", True))
 parts.append("static int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb);")
 parts.append(block(ota, r"^static struct esb_ota_page_buf ota_page_buf_view\(void\)\n\{"))
+# Firmware-info scheduling has its own host regression in relay/run_review3.py.
+parts.append("static void ota_service_fw_info(void) {}")
 for name in ("esb_ota_is_active", "esb_ota_get_status", "ota_update_led", "esb_ota_handle_data",
              "esb_ota_handle_verify", "ota_activate_impl", "esb_ota_handle_activate",
              "esb_ota_request_abort", "ota_abort", "esb_ota_service",

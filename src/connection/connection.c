@@ -1920,7 +1920,7 @@ static void connection_thread(void)
 	while (1) {
 		/* Profile 1 uses the radio twice per 8.3 ms frame and HFXO start-up
 		 * outlasts the lead before B, so the clock stays up for the profile. */
-		if (stream_clock_held && !tdma_profile_get()) {
+		if (stream_clock_held && (!esb_ready() || !tdma_profile_get())) {
 			esb_relay_clock(false);
 			stream_clock_held = false;
 		}

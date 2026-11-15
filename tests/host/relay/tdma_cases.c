@@ -374,9 +374,35 @@ static void variable_repair_timeline(void)
 	puts("PASS variable R: two missed Bs, third-miss pose fence, acquisition scan and maintenance admission");
 }
 
+static void repeat_geometry(void)
+{
+ for(unsigned mode=0;mode<=2;mode++) {
+  configure(2,3);set_ticks(0);
+  assert(tdma_stage_config(2,relay_geometry_code(11,3),16,8,1000));
+  set_ticks(1000);assert(tdma_profile_get()==1);
+  struct relay_control c={.frame=1,.preamble_ticks=1178,.direct_count=11,
+   .repair_count=3,.slot_ticks=16,.tps_max=120,.second_b=mode};
+  relay_control_set_next_repairs(&c,3);relay_control_set_next2_repairs(&c,3);
+  tdma_stream_control(&c);
+  struct tdma_config cfg;assert(tdma_config_snapshot(&cfg));
+  unsigned first=12+(mode==1?2:0),total=15+relay_second_b_slots(mode);
+  assert(RELAY_V3_REPAIR_FIRST_SLOT==first);
+  assert(relay_direct_anchor.next_start-relay_direct_anchor.start>=total*16);
+  for(unsigned slot=first;slot<first+3;slot++) {
+   uint32_t at=relay_direct_anchor.start+slot*16+2;
+   set_ticks(at-4);assert(tdma_wait_for_forward_slot(slot,72));
+   assert(tdma_forward_tx_valid(slot,72));
+  }
+  assert(cfg.total_slots==total);
+  assert(!tdma_forward_tx_valid(total,72));
+ }
+ puts("PASS repeat geometry: all repair grants fit within frame for modes 0/1/2");
+}
+
 int main(void)
 {
 	(void)relay_geometry_make(&tdma_active_geometry, 11, 5, 16, 120);
+	repeat_geometry();
 	coarse_sleep_entry_delay();
 	frame_start_exact();
 	stream_profile();

@@ -159,6 +159,7 @@ static uint32_t layout_confirm_time;
 static bool layout_confirm_seen;
 static bool control_seen;
 static uint32_t control_session, control_frame, control_tick;
+static uint8_t control_member_history;
 static uint32_t control_received, control_missed;
 static uint32_t control_first_received, control_repeat_received, control_repeat_seen;
 static uint32_t control_repeat_reject[6];
@@ -2411,6 +2412,18 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	sync_filter.receiver_lag = 0;
 	g_last_sync_timestamp = k_uptime_get();
 	g_last_rx_raw_ticks = control.preamble_ticks;
+	/* Only confirm history whose session, frame and membership we observed.
+	 * A current-frame repair follows B and is acknowledged by a later B. */
+	uint32_t advance = control.frame - control_frame;
+	control_member_history = control_seen && control.session == control_session
+		&& advance < RELAY_CACHE_MAX_FRAMES ? (control_member_history << advance) | 1U : 1U;
+	bool delivered = false;
+	for (unsigned age = 0; age < relay_control_cache_frames(&control); age++) {
+		if ((control_member_history & BIT(age))
+		    && !(relay_control_missing(&control, age) & BIT(tracker_id))) {
+			delivered = true;
+		}
+	}
 	control_session = control.session;
 	control_frame = control.frame;
 	control_tick = control.preamble_ticks;
@@ -2424,9 +2437,9 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	layout_confirm_seen = true;
 	receiver_heard_time = layout_confirm_time;
 	receiver_heard_seen = true;
-	if (!(control.missing[0] & BIT(tracker_id))) {
-		relayed_confirm_time = layout_confirm_time;
-		relayed_confirm_seen = true;
+	if (delivered) {
+		struct relay_pong_trailer confirmation = {.relayed_mask = BIT(tracker_id)};
+		esb_note_trailer_locked(&confirmation, layout_confirm_time);
 	}
 	layout_stale = false;
 	irq_unlock(key);
