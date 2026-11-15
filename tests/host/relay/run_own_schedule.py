@@ -70,7 +70,7 @@ int main(int argc,char **argv){
    receive_schedule(&p,ESB_PONG_FLAG_NORMAL);
    assert(channel_found && stage_calls && updates==0 && resync==0);
    /* Boot took longer than one layout lease. Acquisition must remain alive
-    * without confirming any pose grant before the first B. */
+    * without confirming any pose grant before the primary control frame. */
    assert(layout_confirm_time==4242 && !layout_confirm_seen && layout_stale);
   }
  }else if(!strcmp(argv[1],"private-width")){

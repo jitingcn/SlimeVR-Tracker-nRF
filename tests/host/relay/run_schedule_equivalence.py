@@ -428,26 +428,26 @@ static void run(unsigned own)
 			row[n++] = relay_frame_start(tdma_profile_origin, f + 1);
 			row[n++] = relay_frame_near(tdma_anchor_frame, tdma_anchor_start, now_ticks());
 			row[n++] = tdma_stream_at(now_ticks(), own * 16 + 2);
-			uint32_t beacon = tdma_stream_at(now_ticks(), direct_count * 16 - 4);
-			row[n++] = beacon;
-			row[n++] = beacon + 4 + 16;
-			bool broadcast = false;
+			uint32_t control_start = tdma_stream_at(now_ticks(), direct_count * 16 - 4);
+			row[n++] = control_start;
+			row[n++] = control_start + 4 + 16;
+			bool control_frame = false;
 			uint32_t target = 0;
-			row[n++] = tdma_stream_next(&target, &broadcast);
+			row[n++] = tdma_stream_next(&target, &control_frame);
 			row[n++] = target;
-			row[n++] = broadcast;
+			row[n++] = control_frame;
 			uint64_t saved_us = virtual_us;
 			if (offset == 0 || offset == direct_count * 16 - 5 || offset == direct_count * 16 + 14) {
 				inject_B = false;
 				radio_open_tick = radio_close_tick = 0;
-				assert(!esb_relay_control_window(beacon));
+				assert(!esb_relay_control_window(control_start));
 				row[n++] = radio_open_tick;
 				row[n++] = radio_close_tick;
 				virtual_us = saved_us;
 				inject_B = true;
-				radio_end_at = beacon + 4 + 13;
+				radio_end_at = control_start + 4 + 13;
 				radio_open_tick = radio_close_tick = 0;
-				assert(esb_relay_control_window(beacon));
+				assert(esb_relay_control_window(control_start));
 				row[n++] = radio_open_tick;
 				row[n++] = radio_close_tick;
 				virtual_us = saved_us;
@@ -557,15 +557,15 @@ def trace_fields(direct, repairs):
         "next_frame_start",
         "frame_near",
         "direct_target",
-        "B_target_open",
-        "B_target_close",
+        "control_target_open",
+        "control_target_close",
         "next_ready",
         "next_target",
         "next_is_B",
-        "B_timeout_open",
-        "B_timeout_close",
-        "B_END_open",
-        "B_END_close",
+        "control_timeout_open",
+        "control_timeout_close",
+        "control_END_open",
+        "control_END_close",
         "helper_attempt",
         "helper_open",
         "helper_child",

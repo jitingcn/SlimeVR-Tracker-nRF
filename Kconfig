@@ -885,7 +885,7 @@ config CONNECTION_RELAY
         searching), and act as a relay head when the receiver assigns
         children: listen in their TDMA slots and forward their pose frames.
         Profile 0 retains own-PONG assignments and bundled forwarding.
-        Profile 1 uses v3 B watch assignments and granted repairs from a
+        Profile 1 uses v3 control frame watch assignments and granted repairs from a
         three-frame cache. Both require a 72-byte ESB payload buffer.
 
 menu "TDMA diagnostics"
@@ -900,7 +900,7 @@ config TDMA_DIAGNOSTICS
         and removes the capture hook from the ESB transmit path.
         TDMA scheduling itself stays fully functional without this
         option; only measurement instrumentation is removed at compile
-        time. Basic admission/refusal, B error and repair funnel counters
+        time. Basic admission/refusal, control frame error and repair funnel counters
         remain available in production. Detailed DWT probes require
         RELAY_CYCLE_DIAGNOSTICS; frame ledgers and detailed ledger timing
         have their own separate options. Hardware RX END timestamps remain

@@ -2,8 +2,8 @@
  * the topology and wire format, link_supervision.h for presence supervision.
  *
  * The relay thread (RELAY_THREAD_PRIORITY) owns peer and presence RX windows.
- * The connection thread owns v3 B control windows and repair submission.
- * Profile 1 keeps three capture frames and follows B watch/grant assignments.
+ * The connection thread owns v3 control frame windows and repair submission.
+ * Profile 1 keeps three capture frames and follows control frame watch/grant assignments.
  * Profile-0 compatibility:
  *   - head role: one short RX window in each assigned child's TDMA slot,
  *     keeping the child's latest pose frame until just before its next slot;

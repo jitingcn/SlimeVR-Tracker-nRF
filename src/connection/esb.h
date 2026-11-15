@@ -102,7 +102,7 @@ void esb_source_end(struct esb_source_guard *guard);
 /* Start the clock before guarded admission; -EAGAIN defers with HFXO warm.
  * force_resync bypasses admission for unslotted startup recovery. */
 int esb_write_ping(uint8_t *data, bool force_resync);
-/* Profile 1: the PING in R0-R1 when B named this tracker; -EAGAIN if late. */
+/* Profile 1: the PING in R0-R1 when control frame named this tracker; -EAGAIN if late. */
 int esb_write_maintenance(uint8_t *data);
 
 /* ---- Receiver-presence supervision and peer relay (relay.c) ---- */

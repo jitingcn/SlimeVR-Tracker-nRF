@@ -93,7 +93,7 @@ def main():
     receiver_ready = end + RAMP_US
     next_preamble = window + t["TDMA_SLOT_TARGET_OFFSET"] * TICK_US + RAMP_US
     check(receiver_ready <= next_preamble,
-          f"PING+{pong_ext}B PONG, 2 attempts: END {end:.0f} us, receiver RX ready {receiver_ready:.0f} us"
+          f"PING+{pong_ext}control frame PONG, 2 attempts: END {end:.0f} us, receiver RX ready {receiver_ready:.0f} us"
           f" <= next owner's earliest preamble {next_preamble:.0f} us")
     print(f"     remaining software/turnaround allowance: {next_preamble - receiver_ready:.0f} us;"
           " measure this on both MCUs, including IRQ load and the receiver FEM")
@@ -183,13 +183,13 @@ def main():
     earliest_b = (s3 + t["TDMA_SLOT_TARGET_OFFSET"] - SYNC_ERROR_TICKS) * TICK_US + RAMP_US
     for mcu, disable in (("nRF52840", 4), ("nRF54L15", 2)):
         check(latest32 + disable + RAMP_US + RX_SETTLE_US <= earliest_b,
-              f"v3 last direct->B {mcu}: {earliest_b - latest32 - disable - RAMP_US - RX_SETTLE_US:.3f} us slack")
-    b_end = t["TDMA_SLOT_TARGET_OFFSET"] * TICK_US + RAMP_US + airtime_us(72)
+              f"v3 last direct->control frame {mcu}: {earliest_b - latest32 - disable - RAMP_US - RX_SETTLE_US:.3f} us slack")
+    control_end = t["TDMA_SLOT_TARGET_OFFSET"] * TICK_US + RAMP_US + airtime_us(72)
     r0_preamble = (s3 + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US + RAMP_US
-    check(r0_preamble - b_end - SYNC_ERROR_TICKS * TICK_US >= TURNAROUND_US,
-          "v3 B->R0 leaves the receiver turnaround allowance after relative clock error")
+    check(r0_preamble - control_end - SYNC_ERROR_TICKS * TICK_US >= TURNAROUND_US,
+          "v3 control frame->R0 leaves the receiver turnaround allowance after relative clock error")
     r0_admission = (s3 + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US
-    check(r0_admission - b_end >= 60, "v3 B decode and ownership transfer have 60 us")
+    check(r0_admission - control_end >= 60, "v3 control frame decode and ownership transfer have 60 us")
     worst = 0
     for phase in range(v3["RELAY_V3_GRID_FRAMES"]):
         start = lambda frame: (frame * v3["RELAY_V3_GRID_TICKS"]) // v3["RELAY_V3_GRID_FRAMES"]

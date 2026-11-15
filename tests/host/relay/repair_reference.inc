@@ -44,7 +44,7 @@ size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 	size_t length = RELAY_REPAIR_HEADER_LEN;
 	/* A newer pose must not obsolete an older repair held by another helper.
 	 * Fill consecutive missing ages in one packet; a gap waits for the next
-	 * B confirmation or the existing cache expiry, never a longer deadline. */
+	 * control frame confirmation or the existing cache expiry, never a longer deadline. */
 	uint16_t blocked = 0;
 	for (int age = RELAY_V3_CACHE_FRAMES - 1; age >= 0; age--) {
 		uint16_t included = 0;

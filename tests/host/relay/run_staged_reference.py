@@ -6,10 +6,10 @@ receiver time.
 A running member keeps its profile-0 layout until activation. Its own PONG
 announcing the switch must not move its clock off the reference its peers still
 use, or adjacent slots overlap on air. Activation must still fall on the
-receiver's tick, and promotion must leave the clock on receiver time for B.
+receiver's tick, and promotion must leave the clock on receiver time for the control frame.
 
 On exit, every member must return to that shared reference at the activation
-tick. A member whose filter is still in warm-up (it joined by acquisition, and B
+tick. A member whose filter is still in warm-up (it joined by acquisition, and control frame
 never advances update_count) must not be moved most of the way by its first own
 PONG while a neighbour that has not PONGed yet stays put: its retried PING would
 then reach the next unguarded owner's slot."""
@@ -151,7 +151,7 @@ static void staged_switch_keeps_one_reference(void)
 
 	/* Activation still falls on the receiver's tick: the quiet zone holds in
 	 * receiver time, promotion waits for it, and the clock is then on
-	 * receiver time, where B's +/-4-tick acceptance needs it. */
+	 * receiver time, where control frame's +/-4-tick acceptance needs it. */
 	uint32_t quiet_end = activation + TDMA_ACTIVATION_QUIET_TICKS;
 	(void)admissions(5, activation - 3 * FRAME - 5 * SLOT_TICKS, 3, quiet_end);
 	/* Those waits may cross the activation; stage again to see promotion. */
@@ -183,8 +183,8 @@ static void acquisition_takes_receiver_time(void)
 	puts("PASS acquisition adopts receiver time from the announcing PONG");
 }
 
-/* Profile-1 B: receiver time taken as is (esb_relay_control_receive). */
-static void b_accept(void)
+/* Profile-1 control frame: receiver time taken as is (esb_relay_control_receive). */
+static void control_accept(void)
 {
 	sync_filter.offset = K_TRUE;
 	sync_filter.last_local_ticks = now_ticks();
@@ -199,8 +199,8 @@ static int32_t clock_error(void)
 }
 
 /* A member that joined profile 1 by acquisition (the announcing PONG restarts
- * its filter on receiver time, and B never advances update_count, so the
- * filter stays in warm-up) and followed B up to a staged 1->0 exit. Returns
+ * its filter on receiver time, and control frame never advances update_count, so the
+ * filter stays in warm-up) and followed control frame up to a staged 1->0 exit. Returns
  * the exit's activation tick (receiver time). */
 static uint32_t profile1_member(uint8_t slot, uint32_t join)
 {
@@ -214,10 +214,10 @@ static uint32_t profile1_member(uint8_t slot, uint32_t join)
 	channel_wait_normal = false;
 	set_true(activation);
 	assert(tdma_profile_get() == RELAY_PROFILE_120HZ);
-	b_accept();
+	control_accept();
 	/* A NORMAL PONG trailer announces the exit about 3 s ahead. */
 	set_true(activation + 32768);
-	b_accept();
+	control_accept();
 	struct relay_pong_trailer exit = {.epoch = EPOCH + 1, .forward_slot = 255, .member_mask = 0x7ff,
 		.pending = true, .pending_epoch = EPOCH + 2, .pending_total = TOTAL,
 		.pending_slot_ticks = SLOT_TICKS, .pending_member_mask = 0x7ff,
@@ -227,11 +227,11 @@ static uint32_t profile1_member(uint8_t slot, uint32_t join)
 	return t2 + (uint32_t)exit.activation_units * RELAY_ACTIVATION_UNIT_TICKS;
 }
 
-/* Promotion at the exit tick with B followed to the end. */
+/* Promotion at the exit tick with control frame followed to the end. */
 static void promote_exit(uint32_t exit_tick)
 {
 	set_true(exit_tick - 1);
-	b_accept();
+	control_accept();
 	assert(tdma_profile_get() == RELAY_PROFILE_120HZ);
 	set_true(exit_tick);
 	assert(tdma_profile_get() == 0 && tdma_is_enabled());
@@ -342,7 +342,7 @@ static void exit_returns_to_one_reference(void)
 	assert(skew > -2000 && skew < 2000);
 	puts("PASS 1->0 exit returns every member to the ACK RX reference at the activation tick");
 
-	/* B lost in profile 1: the drop returns to the same reference, so a
+	/* The control frame lost in profile 1: the drop returns to the same reference, so a
 	 * warm-up filter's first PONG does not leave it part-way. */
 	(void)profile1_member(6, join);
 	tdma_profile_drop();

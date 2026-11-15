@@ -195,7 +195,7 @@ static void tdma_promote_staged(void)
 	}
 	unsigned key = irq_lock();
 	if ((uint32_t)atomic_get(&tdma_staged_pack) == staged) {
-		/* Every activation begins a new geometry timeline. B supplies the
+		/* Every activation begins a new geometry timeline. The control frame supplies the
 		 * authoritative frame number and two announced future starts. */
 		tdma_profile_origin = (uint32_t)atomic_get(&tdma_staged_activation);
 		if (staged & TDMA_PROFILE_BIT) {
@@ -506,13 +506,13 @@ void tdma_stream_anchor(uint32_t preamble, uint32_t frame)
 
 void tdma_stream_control(const struct relay_control *control)
 {
-	(void)relay_geometry_make_b(
+	(void)relay_geometry_make_control(
 		&tdma_active_geometry,
 		control->direct_count,
 		control->repair_count,
 		control->slot_ticks,
 		control->tps_max,
-		control->second_b
+		control->control_repeat_mode
 	);
 	relay_runtime_anchor_set(
 		&relay_direct_anchor,
@@ -525,13 +525,13 @@ void tdma_stream_control(const struct relay_control *control)
 		control->slot_ticks,
 		control->tps_max
 	);
-	relay_runtime_anchor_second_b(
+	relay_runtime_anchor_control_repeat(
 		&relay_direct_anchor,
 		control->repair_count,
 		relay_control_next_repairs(control),
 		relay_control_next2_repairs(control),
 		control->tps_max,
-		control->second_b
+		control->control_repeat_mode
 	);
 	relay_timeline_announce(&relay_timeline_active, &relay_direct_anchor);
 	tdma_stream_anchor(control->preamble_ticks, control->frame);
@@ -545,7 +545,7 @@ static uint32_t tdma_stream_at(uint32_t now, uint32_t offset)
 	return (int32_t)(at - now) < 0 ? relay_frame_start(tdma_profile_origin, frame + 1U) + offset : at;
 }
 
-bool tdma_stream_next(uint32_t *target, bool *broadcast)
+bool tdma_stream_next(uint32_t *target, bool *control_frame)
 {
 	if (!tdma_profile_get()) {
 		return false;
@@ -555,9 +555,9 @@ bool tdma_stream_next(uint32_t *target, bool *broadcast)
 		return false;
 	}
 	/* An exhausted announcement fences TX, but acquisition keeps listening.
-	 * It must not spend a PING interval silent after an ordinary B pair loss. */
+	 * It must not spend a PING interval silent after an ordinary control frame pair loss. */
 	if (!relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, clock.receiver_ticks)) {
-		*broadcast = true;
+		*control_frame = true;
 		*target = clock.receiver_ticks;
 		return true;
 	}
@@ -576,11 +576,11 @@ bool tdma_stream_next(uint32_t *target, bool *broadcast)
 	    pos <= (int32_t)(RELAY_V3_SLOT_TICKS - tdma_reserve_ticks(relay_direct_payload_max(RELAY_PROFILE_120HZ, slot)))) {
 		own = clock.receiver_ticks;
 	}
-	uint32_t beacon = tdma_stream_at(clock.receiver_ticks, RELAY_V3_B_START - RELAY_RX_LEAD_TICKS);
-	/* A joiner has no direct grant until its first B. Retrying an
-	 * ungranted own slot can repeatedly sleep across that B window. */
-	*broadcast = !esb_layout_granted() || (int32_t)(beacon - own) < 0;
-	*target = *broadcast ? beacon : own;
+	uint32_t control_start = tdma_stream_at(clock.receiver_ticks, RELAY_V3_CONTROL_START - RELAY_RX_LEAD_TICKS);
+	/* A joiner has no direct grant until its primary control frame. Retrying an
+	 * ungranted own slot can repeatedly sleep across that control frame window. */
+	*control_frame = !esb_layout_granted() || (int32_t)(control_start - own) < 0;
+	*target = *control_frame ? control_start : own;
 	return true;
 }
 
@@ -1254,7 +1254,7 @@ bool tdma_slot_data_window(uint8_t slot, uint32_t after, uint32_t *start)
 			candidate = known + slot * RELAY_V3_SLOT_TICKS;
 		}
 		/* A helper cannot infer f+3 from a stale fixed grid. Leave the
-		 * radio to B acquisition when both announced starts are spent. */
+		 * radio to control frame acquisition when both announced starts are spent. */
 		*start = candidate;
 		return !tdma_window_quiet(*start, RELAY_V3_SLOT_TICKS);
 	}

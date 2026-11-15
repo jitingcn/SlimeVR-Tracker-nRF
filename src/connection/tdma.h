@@ -174,7 +174,7 @@ void tdma_profile_drop(void);
 struct relay_control;
 void tdma_stream_anchor(uint32_t preamble, uint32_t frame);
 void tdma_stream_control(const struct relay_control *control);
-bool tdma_stream_next(uint32_t *target, bool *broadcast);
+bool tdma_stream_next(uint32_t *target, bool *control_frame);
 
 struct tdma_layout {
 	uint8_t profile;

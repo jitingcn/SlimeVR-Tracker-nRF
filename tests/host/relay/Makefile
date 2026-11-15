@@ -4,8 +4,8 @@ TMP := $(shell mktemp -d 2>/dev/null || echo /tmp/tracker-relay-host)
 
 .PHONY: check clean
 check:
-	$(CC) $(CFLAGS) test_b2_deadline.c -o $(TMP)/b2_deadline
-	$(TMP)/b2_deadline
+	$(CC) $(CFLAGS) test_control_repeat_deadline.c -o $(TMP)/control_repeat_deadline
+	$(TMP)/control_repeat_deadline
 	python3 run_peak.py
 	python3 run_layout_failure.py
 	CC="$(CC)" python3 run_quiesce.py

@@ -19,7 +19,7 @@ source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.MULTILINE)
 source += r'''
 static void test_store(uint8_t child, const struct relay_rx_frame *f, uint8_t epoch, uint32_t expiry) {
  struct tdma_layout l; if(!tdma_layout_get(&l))return;
- relay_store(child,f,epoch,expiry,&l,(uint16_t)relay_frame_near(control_plan.frame,control_plan.preamble_ticks-RELAY_V3_B_PREAMBLE,expiry-l.frame_ticks),relay_generation);
+ relay_store(child,f,epoch,expiry,&l,(uint16_t)relay_frame_near(control_plan.frame,control_plan.preamble_ticks-RELAY_V3_CONTROL_PREAMBLE,expiry-l.frame_ticks),relay_generation);
 }
 '''
 
@@ -215,7 +215,7 @@ static void cache_equivalence(void) {
 static void final_cache_gap(void) {
  for(unsigned repairs=1;repairs<=5;repairs++) {
   reset();test_layout.profile=RELAY_PROFILE_120HZ;
-  struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_V3_B_PREAMBLE,.members=7,.repair_count=repairs};
+  struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_V3_CONTROL_PREAMBLE,.members=7,.repair_count=repairs};
   relay_on_control(&c,0);
   uint32_t start=relay_frame_start(500,3)+RELAY_V3_SLOT_TICKS;
   now_ticks=start;incoming.data[16]=3;
@@ -239,7 +239,7 @@ static void fast_cache(void) {
  reset(); test_layout.profile=RELAY_PROFILE_120HZ;
  test_layout.total_slots=RELAY_V3_TOTAL_SLOTS;test_layout.slot_ticks=RELAY_V3_SLOT_TICKS;
  test_layout.frame_ticks=RELAY_V3_FRAME_TICKS_MAX;
- struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_V3_B_PREAMBLE,
+ struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_V3_CONTROL_PREAMBLE,
   .primary_valid=2,.members=7,.repair_count=5};
  relay_on_control(&c,0);
  for(unsigned f=1;f<=3;f++) {
@@ -247,7 +247,7 @@ static void fast_cache(void) {
   now_ticks=start;incoming.data[16]=f;
   test_store(1,&incoming,7,start+test_layout.frame_ticks);
  }
- c.frame=3;c.preamble_ticks=relay_frame_start(500,3)+RELAY_V3_B_PREAMBLE;
+ c.frame=3;c.preamble_ticks=relay_frame_start(500,3)+RELAY_V3_CONTROL_PREAMBLE;
  c.missing[0]=c.missing[1]=c.missing[2]=2;
  c.grants[0]=(struct relay_grant){.owner=0,.children=2};
  c.grants[1]=c.grants[2]=c.grants[0];
@@ -258,13 +258,13 @@ static void fast_cache(void) {
  unsigned forwarded_before=stats.forwarded;
  relay_repair_result(-EAGAIN);
  assert(stats.forwarded==forwarded_before);
- /* A refused submission may use a later grant in this same B frame. */
+ /* A refused submission may use a later grant in this same control frame. */
  n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+1);
  assert(relay_repair_decode(buf,n,&r) && r.count==3);
  assert(r.records[0].capture_frame==1 && r.records[2].capture_frame==3);
  relay_repair_result(0);
  assert(!relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+2));
- /* A later B can grant still-missing records again. */
+ /* A later control frame can grant still-missing records again. */
  relay_on_control(&c,0);assert(relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT));
  /* A gap must not let frame 3 obsolete frame 2 held by another helper. */
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)
@@ -274,7 +274,7 @@ static void fast_cache(void) {
  assert(relay_repair_decode(buf,n,&r) && r.count==1 && r.records[0].capture_frame==1);
  relay_repair_result(0);
  assert(!relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+1));
- /* A later B confirms the two older frames: the fresh record is now safe. */
+ /* A later control frame confirms the two older frames: the fresh record is now safe. */
  c.missing[1]=c.missing[2]=0;relay_on_control(&c,0);
  n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
  assert(relay_repair_decode(buf,n,&r) && r.count==1 && r.records[0].capture_frame==3);
@@ -297,11 +297,11 @@ static void fast_cache(void) {
  puts("PASS runtime: three-frame cache, grant selection, failed queue retention and confirmation");
 }
 
-static void d10_b_ownership(void) {
+static void d10_control_ownership(void) {
  for (unsigned busy=0; busy<2; busy++) {
  reset(); test_layout.profile=1; test_layout.total_slots=RELAY_V3_TOTAL_SLOTS;
  test_layout.slot_ticks=RELAY_V3_SLOT_TICKS;test_layout.frame_ticks=relay_frame_start(0,1);
- struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_V3_B_PREAMBLE,
+ struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_V3_CONTROL_PREAMBLE,
   .members=0x7ff,.repair_count=5,.survey=1U<<10};
  relay_on_control(&c,0);
  struct relay_pong_trailer tr;struct tdma_layout l;
@@ -311,10 +311,10 @@ static void d10_b_ownership(void) {
  assert(relay_assignment_get(&tr,&l,NULL));
  relay_clock(true);assert(relay_head_window(&tr,&l,relay_generation));
  assert(!radio_owned);
- assert(now_ticks <= test_layout.frame_ticks+RELAY_V3_B_START-RELAY_RX_LEAD_TICKS);
+ assert(now_ticks <= test_layout.frame_ticks+RELAY_V3_CONTROL_START-RELAY_RX_LEAD_TICKS);
  relay_clock(false);
  }
- puts("PASS runtime: missing or busy D10 yields at the unchanged B RX lead");
+ puts("PASS runtime: missing or busy D10 yields at the unchanged control frame RX lead");
 }
 
 static void reset_before_insert(void) { relay_reset();struct relay_control c={.session=42,.epoch=7};relay_on_control(&c,0); }
@@ -351,7 +351,7 @@ static void failed_store(void) {
 static void learned_reports(void) {
  reset(); test_layout.profile=1; test_layout.total_slots=RELAY_V3_TOTAL_SLOTS;
  test_layout.slot_ticks=RELAY_V3_SLOT_TICKS;test_layout.frame_ticks=RELAY_V3_FRAME_TICKS_MAX;
- struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_V3_B_PREAMBLE,
+ struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_V3_CONTROL_PREAMBLE,
   .members=0x7ff,.repair_count=5,.survey=7};
  relay_on_control(&c,0);
  struct relay_pong_trailer tr;struct tdma_layout l;
@@ -365,7 +365,7 @@ static void learned_reports(void) {
  assert(relay_head_window(&tr,&l,relay_generation));
  assert(peer_counts[2].expected==2 && peer_counts[2].heard==1);
  relay_clock(false);
- c.frame=2;c.preamble_ticks=relay_frame_start(0,2)+RELAY_V3_B_PREAMBLE;
+ c.frame=2;c.preamble_ticks=relay_frame_start(0,2)+RELAY_V3_CONTROL_PREAMBLE;
  c.grants[3]=(struct relay_grant){.owner=0,.children=0};
  for(unsigned slot=0;slot<5;slot++)if(slot!=3)c.grants[slot].owner=RELAY_OWNER_IDLE;
  relay_on_control(&c,0);
@@ -416,7 +416,7 @@ static void maintenance(void) {
  c.maintenance_owner=1;c.flags=0;relay_on_control(&c,1);
  assert(!relay_next_maintenance(&target));
  c.flags=RELAY_CONTROL_MAINTENANCE;relay_on_control(&c,1);
- uint32_t start=c.preamble_ticks-RELAY_V3_B_PREAMBLE+RELAY_V3_REPAIR_START;
+ uint32_t start=c.preamble_ticks-RELAY_V3_CONTROL_PREAMBLE+RELAY_V3_REPAIR_START;
  assert(relay_next_maintenance(&target) && target==start+RELAY_V3_TX_OFFSET);
  now_ticks=target;assert(relay_take_maintenance());assert(!relay_next_maintenance(&target));
  c.frame++;relay_on_control(&c,1);now_ticks=start+3;
@@ -449,7 +449,7 @@ static void control_accounting(void) {
  relay_control_serviced();assert(repair_diag[1].grants==before+3);
  c.frame++;relay_on_control(&c,0);relay_reset();relay_control_serviced();
  assert(repair_diag[1].grants==before+4);
- puts("PASS runtime: B accounting follows repair construction, runs once, and flushes on reset");
+ puts("PASS runtime: control frame accounting follows repair construction, runs once, and flushes on reset");
 }
 static void demand_cache(void) {
  reset();test_layout.profile=RELAY_PROFILE_120HZ;
@@ -485,7 +485,7 @@ int main(int argc,char **argv) {
     demand_cache();
     cache_equivalence();
     if(argc==1 || !strcmp(argv[1],"accounting")) control_accounting();
-    if(argc==1 || !strcmp(argv[1],"d10")) d10_b_ownership();
+    if(argc==1 || !strcmp(argv[1],"d10")) d10_control_ownership();
     if(argc==1 || !strcmp(argv[1],"learned")) {failed_store(); learned_reports();}
     if(argc==1 || !strcmp(argv[1],"maintenance")) maintenance();
     if(argc==1 || !strcmp(argv[1],"fast")) {fast_cache(); final_cache_gap();}

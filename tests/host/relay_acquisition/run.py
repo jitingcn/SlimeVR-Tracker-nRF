@@ -1,11 +1,11 @@
-"""Run the real connection broadcast branch through repeated grantless RX."""
+"""Run the real connection control_frame branch through repeated grantless RX."""
 from pathlib import Path
 import sys,os,shlex,subprocess,tempfile
 root=Path(os.environ.get('SOURCE_ROOT',Path(__file__).resolve().parents[3]))
 sys.path.insert(0,str(root/'tests/host/harness/python'))
 from c_extract import extract_block
 src=(root/'src/connection/connection.c').read_text();src=src[src.index('static void connection_thread(void)\n{'):]
-branch=extract_block(src,r'^\s*if \(broadcast\)\s*\{')
+branch=extract_block(src,r'^\s*if \(control_frame\)\s*\{')
 prefix=r'''
 #include <assert.h>
 #include <stdint.h>
@@ -31,7 +31,7 @@ static void k_msleep(unsigned ms) {
 static void run(unsigned count,unsigned grant,bool rx) {
  serviced=sleeps=workers=0;grant_at=grant;received=rx;
  for(iterations=1;iterations<=count;iterations++) {
-  bool broadcast=true;uint32_t target=0;int64_t now=0;
+  bool control_frame=true;uint32_t target=0;int64_t now=0;
 '''
 test=r'''
  }
@@ -40,12 +40,12 @@ test=r'''
 int main(void) {
  /* A joiner can fail indefinitely; every attempt must let other owners run. */
  run(20000,20001,false);assert(workers==20000 && sleeps==20000);
- /* A usable B can still exclude this member: acquisition must also rest. */
+ /* A usable control frame can still exclude this member: acquisition must also rest. */
  run(10,11,true);assert(sleeps==10);
- /* A failed normal B uses existing TDMA scheduling, without a new delay. */
+ /* A failed normal control frame uses existing TDMA scheduling, without a new delay. */
  run(10,1,false);assert(sleeps==0);
  run(10,1,true);assert(sleeps==0);
- /* The first granting B immediately restores ordinary timing. */
+ /* The first granting control frame immediately restores ordinary timing. */
  run(10,3,true);assert(sleeps==2);
  return 0;
 }

@@ -196,7 +196,7 @@ int main(int argc,char **argv) {
   f=(struct relay_rx_frame){.pipe=1,.length=72,.end_kernel_ticks=100011};
   relay_control_encode(f.data,&b);
   assert(!esb_layout_granted());
-  /* B sets the offset directly: preamble = END - B airtime. */
+  /* The control frame sets the offset directly: preamble = END - control frame airtime. */
   assert(esb_relay_control_receive(&f) && control_seen && sync_filter.last_local_ticks==100000);
   assert(layout_confirm_seen && receiver_heard_seen && relayed_confirm_seen);
   uint32_t cutoff=relay_direct_anchor.third_start+3U*16U;

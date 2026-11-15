@@ -2,13 +2,13 @@
 /*
  * Tracker side of receiver-coordinated peer relay. See relay.h.
  *
- * Profile 1 (v3) uses B watch assignments, a three-capture-frame cache and
+ * Profile 1 (v3) uses control frame watch assignments, a three-capture-frame cache and
  * granted repair slots. The relay thread owns peer windows; the connection
- * thread owns B windows and submits repairs within the unchanged deadline.
+ * thread owns control frame windows and submits repairs within the unchanged deadline.
  *
  * Profile-0 compatibility timing budget of one relayed frame (receiver ticks, 1 tick = 30.5 us,
  * slot width S >= 16, frame F = total_slots * S):
- *   child  TX admitted at slot pos [2, S - reserve], on air ~4 ticks (17 B)
+ *   child  TX admitted at slot pos [2, S - reserve], on air ~4 ticks (17 control frame)
  *   head   RX from slot start - RELAY_RX_LEAD_TICKS (40 us ramp), radio
  *          disables itself at the child's END; thread collects at slot end
  *          (+ RELAY_RX_TAIL_US if a frame is still arriving)
@@ -521,7 +521,7 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	uint32_t tail_end = capture_end + RELAY_V3_CAPTURE_TAIL_TICKS;
 	if (layout->profile &&
 	    relay_member_slot(trailer->member_mask, best_child) == RELAY_V3_DIRECT_SLOTS - 1U) {
-		/* B owns the radio from its existing RX lead, including when
+		/* The control frame owns the radio from its existing RX lead, including when
 		 * D10 cannot acquire the radio or never receives an END. */
 		capture_end -= RELAY_RX_LEAD_TICKS;
 		tail_end = capture_end;
@@ -753,7 +753,7 @@ static void relay_thread(void)
 				k_msleep(1);
 			} else if (layout.profile) {
 				/* After D10, let the lower-priority connection thread open
-				 * B before searching the next frame's helper assignments. */
+				 * control frame before searching the next frame's helper assignments. */
 				uint32_t now;
 				unsigned key = irq_lock();
 				uint32_t anchor_frame = control_plan.frame;
@@ -767,7 +767,7 @@ static void relay_thread(void)
 					if (phase >= (RELAY_V3_DIRECT_SLOTS - 1U) * RELAY_V3_SLOT_TICKS &&
 					    phase < RELAY_V3_REPAIR_START) {
 						/* Do not wake into the connection owner's R0 preparation.
-						 * It releases us after servicing its grants. A missing B
+						 * It releases us after servicing its grants. A missing control frame
 						 * still bounds this wait before the next direct frame. */
 						uint32_t ticks = relay_frame_start(origin, frame + 1U) - now -
 							RELAY_RX_LEAD_TICKS;
@@ -889,7 +889,7 @@ void relay_print_status(void)
 	bool valid = control_valid;
 	irq_unlock(key);
 	printk(
-		"relay B received: valid=%u frame=%u direct=%u R=%u next_R=%u next2_R=%u slot_ticks=%u tps_max=%u\n",
+		"relay control frame received: valid=%u frame=%u direct=%u R=%u next_R=%u next2_R=%u slot_ticks=%u tps_max=%u\n",
 		valid,
 		frame,
 		direct,
@@ -927,7 +927,7 @@ void relay_print_status(void)
 }
 
 /* Counters and ledger rows do not participate in grant or cache decisions.
- * Keep them out of the B-to-R0 path. Only the connection owner publishes B
+ * Keep them out of the control frame-to-R0 path. Only the connection owner publishes control frame
  * and services it; the snapshot also keeps reset/console readers harmless. */
 static void relay_control_account(void)
 {
@@ -983,7 +983,7 @@ __attribute__((optimize("O3")))
 #endif
 void relay_on_control(const struct relay_control *control, uint8_t helper)
 {
-	/* Preserve accounting if a caller publishes another B without service. */
+	/* Preserve accounting if a caller publishes another control frame without service. */
 	if (control_account_pending) {
 		relay_control_account();
 	}
@@ -1134,7 +1134,7 @@ size_t relay_build_repair(uint8_t *buf, uint8_t slot)
 	size_t length = RELAY_REPAIR_HEADER_LEN;
 	/* A newer pose must not obsolete an older repair held by another helper.
 	 * Fill consecutive missing ages in one packet; a gap waits for the next
-	 * B confirmation or the existing cache expiry, never a longer deadline. */
+	 * control frame confirmation or the existing cache expiry, never a longer deadline. */
 	/* Classify once instead of scanning all 48 records independently for
 	 * each cache age. Ascending record indices preserve packet ordering. */
 	uint64_t by_age[RELAY_CACHE_MAX_FRAMES] = {0}, high[RELAY_CACHE_MAX_FRAMES] = {0};

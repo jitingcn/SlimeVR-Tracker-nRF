@@ -164,9 +164,9 @@ static uint32_t control_received, control_missed;
 static uint32_t control_first_received, control_repeat_received, control_repeat_seen;
 static uint32_t control_repeat_reject[6];
 static uint32_t control_open_hist[16][2];
-/* B rejects by reason: decode, layout/profile, epoch, slot, session/order, sync. */
+/* The control frame rejects by reason: decode, layout/profile, epoch, slot, session/order, sync. */
 static uint32_t control_reject[6];
-/* B window failures: clock, wait/radio busy, capture init, take, stale END, no END. */
+/* The control frame window failures: clock, wait/radio busy, capture init, take, stale END, no END. */
 static uint32_t control_window_fail[6];
 static uint32_t direct_fail[3];
 static uint32_t control_open_late, control_open_lag_max;
@@ -1262,7 +1262,7 @@ static void esb_clear_time_sync_state(void)
 	sync_filter.ack_delay16 = 0;
 }
 
-/* A staged profile 1 activates: B and the profile-1 schedule run on receiver
+/* A staged profile 1 activates: control frame and the profile-1 schedule run on receiver
  * time, so the filter leaves the profile-0 reference. Returns the shift. */
 int32_t esb_adopt_receiver_time(void)
 {
@@ -1713,16 +1713,16 @@ void esb_print_link_status(void)
 	printk("link: maint granted=%u sent=%u pong=%u late=%u lag_max=%u\n",
 		relay_maintenance_granted, maintenance_sent, maintenance_pong, relay_maintenance_late, relay_maintenance_lag_max);
 #endif
-	printk("link: profile=%u B_received=%u B_missed=%u session=%u frame=%u\n",
+	printk("link: profile=%u control_received=%u control_missed=%u session=%u frame=%u\n",
 		tdma_profile_get(), control_received, control_missed, control_session, control_frame);
 	printk(
-		"link: B_copies first=%u second=%u repeat_seen=%u\n",
+		"link: control_copies first=%u second=%u repeat_seen=%u\n",
 		control_first_received,
 		control_repeat_received,
 		control_repeat_seen
 	);
 	printk(
-		"link: B2_reject decode=%u layout=%u epoch=%u slot=%u order=%u sync=%u\n",
+		"link: control_repeat_reject decode=%u layout=%u epoch=%u slot=%u order=%u sync=%u\n",
 		control_repeat_reject[0],
 		control_repeat_reject[1],
 		control_repeat_reject[2],
@@ -1730,24 +1730,24 @@ void esb_print_link_status(void)
 		control_repeat_reject[4],
 		control_repeat_reject[5]
 	);
-	printk("link: B_reject decode=%u layout=%u epoch=%u slot=%u order=%u sync=%u\n",
+	printk("link: control_reject decode=%u layout=%u epoch=%u slot=%u order=%u sync=%u\n",
 		control_reject[0], control_reject[1], control_reject[2], control_reject[3],
 		control_reject[4], control_reject[5]);
-	printk("link: B_thread late=%u lag_max=%u\n", control_open_late, control_open_lag_max);
+	printk("link: control_thread late=%u lag_max=%u\n", control_open_late, control_open_lag_max);
 	for (unsigned i = 0; i < ARRAY_SIZE(control_open_hist); i++) {
-		printk("link: B_open_lag=%u received=%u missed=%u\n", i,
+		printk("link: control_open_lag=%u received=%u missed=%u\n", i,
 			control_open_hist[i][0], control_open_hist[i][1]);
 	}
-	printk("link: B_rx no_address=%u address_timeout=%u crc_fail=%u\n",
+	printk("link: control_rx no_address=%u address_timeout=%u crc_fail=%u\n",
 		control_no_address, control_address_timeout, control_crc_fail);
 #if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS)
-	printk("link: cycles B_process_max=%u B_prepare_max=%u wait_tx_max=%u B_poll_max=%u\n",
+	printk("link: cycles control_process_max=%u control_prepare_max=%u wait_tx_max=%u control_poll_max=%u\n",
 		control_cycles_max, maintenance_prepare_cycles_max, direct_start_cycles_max, control_poll_cycles_max);
 #endif
-	printk("link: B_window clock=%u busy=%u capture=%u take=%u stale_end=%u no_end=%u\n",
+	printk("link: control_window clock=%u busy=%u capture=%u take=%u stale_end=%u no_end=%u\n",
 		control_window_fail[0], control_window_fail[1], control_window_fail[2],
 		control_window_fail[3], control_window_fail[4], control_window_fail[5]);
-	printk("link: B_err ticks last=%d min=%d max=%d\n", control_err_last, control_err_min, control_err_max);
+	printk("link: control_err ticks last=%d min=%d max=%d\n", control_err_last, control_err_min, control_err_max);
 	extern uint32_t tdma_stream_refused[5];
 	printk("link: TX_refused grant=%u quiet=%u early=%u late=%u dup=%u\n", tdma_stream_refused[0],
 		tdma_stream_refused[1], tdma_stream_refused[2], tdma_stream_refused[3], tdma_stream_refused[4]);
@@ -2078,7 +2078,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			if (rtt_threshold_us < 1000) {
 				rtt_threshold_us = 1000;
 			}
-			/* B owns profile-1 offset and skew; retain only PONG RTT statistics. */
+			/* The control frame owns profile-1 offset and skew; retain only PONG RTT statistics. */
 			if (!tdma_profile_get() && rtt_us < rtt_threshold_us) {
 				// Reference-point offset: T2 - T4
 				// The constant one-way delay bias is the same for
@@ -2182,13 +2182,13 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			 * confirms the profile-0 layout it runs (a running profile repeats
 			 * its own epoch instead). Keep that layout until the activation
 			 * quiet zone; promotion drops the v3 anchor, so profile 1 waits
-			 * for B as before. */
+			 * for the control frame as before. */
 			bool keep_current = private_geometry && !tdma_profile_get() && !layout_stale
 				&& !channel_wait_normal && tdma_is_enabled()
 				&& tdma_epoch == tdma_get_config_epoch() && tdma_epoch != own_trailer.pending_epoch;
 			if (private_geometry) {
 				/* Acquisition gets a fresh lease even after a slow boot. This
-				 * timestamp does not grant poses; only B validates the anchor. */
+				 * timestamp does not grant poses; only control frame validates the anchor. */
 				layout_confirm_time = k_uptime_get_32();
 				if (!tdma_profile_get() && !keep_current) {
 					layout_stale = true;
@@ -2383,12 +2383,12 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 		irq_unlock(key);
 		return false;
 	}
-	/* Hardware END is one B airtime after the preamble the receiver stamps. */
+	/* Hardware END is one control frame airtime after the preamble the receiver stamps. */
 	uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(frame->end_kernel_ticks));
 	uint32_t preamble_local = local - RELAY_V3_CONTROL_AIR_TICKS;
 	if (frame->data[0] == 0xecU) {
 		preamble_local
-			-= relay_second_b_offset(control.direct_count, control.repair_count, control.slot_ticks, control.second_b);
+			-= relay_control_repeat_offset(control.direct_count, control.repair_count, control.slot_ticks, control.control_repeat_mode);
 	}
 	uint32_t offset = control.preamble_ticks - preamble_local;
 	uint32_t elapsed = preamble_local - sync_filter.last_local_ticks;
@@ -2404,7 +2404,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 		irq_unlock(key);
 		return false;
 	}
-	/* B arrives every 8.3 ms, so take its offset as is. Feeding it to the
+	/* The control frame arrives every 8.3 ms, so take its offset as is. Feeding it to the
 	 * PONG filter (1 s skew estimate against a PONG-timed reference) let the
 	 * prediction run off by 8-15 ticks within a second on an RC LFCLK. */
 	sync_filter.offset = offset;
@@ -2413,7 +2413,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	g_last_sync_timestamp = k_uptime_get();
 	g_last_rx_raw_ticks = control.preamble_ticks;
 	/* Only confirm history whose session, frame and membership we observed.
-	 * A current-frame repair follows B and is acknowledged by a later B. */
+	 * A current-frame repair follows control frame and is acknowledged by a later control frame. */
 	uint32_t advance = control.frame - control_frame;
 	control_member_history = control_seen && control.session == control_session
 		&& advance < RELAY_CACHE_MAX_FRAMES ? (control_member_history << advance) | 1U : 1U;
@@ -2449,7 +2449,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	return true;
 }
 
-/* A three-B loss fences TX and broadens B acquisition below. Only a whole
+/* A three-control frame loss fences TX and broadens control frame acquisition below. Only a whole
  * layout lease without a usable private schedule returns to PING acquisition. */
 bool esb_relay_profile_lost(void)
 {
@@ -2493,7 +2493,7 @@ bool esb_relay_control_window(uint32_t start)
 		esb_relay_clock(false);
 		return false;
 	}
-	/* D10 may still be completing when B's early RX lead begins.
+	/* D10 may still be completing when control frame's early RX lead begins.
 	 * Keep a successful claim through RXEN atomic, but let D10 complete
 	 * between failed attempts. */
 	uint32_t now;
@@ -2530,7 +2530,7 @@ bool esb_relay_control_window(uint32_t start)
 	}
 	/* The wait validates the clock. Keep the successful claim's baseline
 	 * admission semantics: the deadline above applies to failed claims.
-	 * An additional post-setup cutoff would discard late but usable Bs. */
+	 * An additional post-setup cutoff would discard late but usable control frames. */
 	key = irq_lock();
 	if (!relay_radio_receive()) {
 		irq_unlock(key);
@@ -2550,14 +2550,14 @@ bool esb_relay_control_window(uint32_t start)
 	bool accepted = false;
 	bool ended = false;
 	uint32_t end = start + RELAY_RX_LEAD_TICKS + RELAY_V3_SLOT_TICKS;
-	if (relay_geometry_current()->second_b) {
-		end += relay_second_b_offset(
+	if (relay_geometry_current()->control_repeat_mode) {
+		end += relay_control_repeat_offset(
 			RELAY_V3_DIRECT_SLOTS,
 			4U,
 			RELAY_V3_SLOT_TICKS,
-			relay_geometry_current()->second_b
+			relay_geometry_current()->control_repeat_mode
 		);
-		/* A tail copy may use fewer R slots than the last received B. Cover
+		/* A tail copy may use fewer R slots than the last received control frame. Cover
 		 * the announced frame, but never listen across the next known D0. */
 		for (unsigned i = 1; i <= 3; i++) {
 			uint32_t next;
@@ -2570,7 +2570,7 @@ bool esb_relay_control_window(uint32_t start)
 			}
 		}
 	}
-	/* After three missed Bs the next R is unknown. Listen continuously for
+	/* After three missed control frames the next R is unknown. Listen continuously for
 	 * one maximum-length frame, with poses still fenced by the anchor.
 	 * This also acquires the cap when joining a private runtime layout. */
 	if (!relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, now)) {
@@ -2582,7 +2582,7 @@ bool esb_relay_control_window(uint32_t start)
 #if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS)
 	uint32_t poll_cycles = relay_cycle_now();
 #endif
-	/* A hardware-completed B retains its captured END time if this thread
+	/* A hardware-completed control frame retains its captured END time if this thread
 	 * was preempted past the window deadline. Drain that latched packet;
 	 * an expired window with no END still stops listening immediately. */
 	while (esb_get_network_clock(&clock) && ((int32_t)(end - clock.receiver_ticks) > 0 || relay_radio_ended())) {
@@ -2608,11 +2608,11 @@ bool esb_relay_control_window(uint32_t start)
 				if (!relay_radio_stop()) { esb_relay_clock(false); return false; }
 				esb_raw_rx_end();
 				accepted = esb_relay_control_receive(&frame);
-				/* Only a rejected last B copy ends the window. Ordinary pipe 1
-				 * traffic (a direct slot ending near B) or the first of two B
+				/* Only a rejected last control frame copy ends the window. Ordinary pipe 1
+				 * traffic (a direct slot ending near control frame) or the first of two control frame
 				 * copies keeps listening until the original deadline. */
 				if (!accepted && frame.data[0] != RELAY_CONTROL_REPEAT
-				    && (relay_geometry_current()->second_b || frame.data[0] != RELAY_CONTROL_V3)) {
+				    && (relay_geometry_current()->control_repeat_mode || frame.data[0] != RELAY_CONTROL_V3)) {
 					key = irq_lock();
 					bool claimed_again = esb_raw_rx_begin();
 					bool resumed
@@ -2631,7 +2631,7 @@ bool esb_relay_control_window(uint32_t start)
 				esb_relay_clock(false);
 				return accepted;
 			}
-			/* A corrupt or unusable frame: keep listening for B. */
+			/* A corrupt or unusable frame: keep listening for the control frame. */
 			if (!relay_radio_stop()) {
 				esb_relay_clock(false);
 				return false;
@@ -4001,7 +4001,7 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length)
 	return err;
 }
 
-/* R0-R1 is the existing two-attempt ACK exchange, with B owning its timing. */
+/* R0-R1 is the existing two-attempt ACK exchange, with control frame owning its timing. */
 int esb_write_maintenance(uint8_t *data)
 {
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
@@ -4539,7 +4539,7 @@ static uint32_t esb_project_network_ticks(
 {
 	uint32_t elapsed = local - reference;
 	int64_t product = (int64_t)skew_ppb * elapsed;
-	/* Truncation is exactly zero for the frequent B-to-B snapshots. Avoid
+	/* Truncation is exactly zero for the frequent control frame-to-control frame snapshots. Avoid
 	 * the software signed 64-bit divide on Cortex-M4 in that case. */
 	int64_t correction = product > -1000000000LL && product < 1000000000LL
 		? 0 : product / 1000000000LL;

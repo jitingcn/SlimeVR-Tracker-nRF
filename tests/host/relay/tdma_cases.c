@@ -205,9 +205,9 @@ static void stream_profile(void)
  assert(tdma_update_config(2,10,16,8));
  set_ticks(origin);assert(tdma_profile_get()==1);
  granted = false;
- uint32_t first; bool broadcast;
- assert(tdma_stream_next(&first, &broadcast) && broadcast);
- assert(first == origin); /* No B yet: continuous acquisition, no poses. */
+ uint32_t first; bool control_frame;
+ assert(tdma_stream_next(&first, &control_frame) && control_frame);
+ assert(first == origin); /* No control frame yet: continuous acquisition, no poses. */
  granted = true;
  struct tdma_layout layout;assert(tdma_layout_get(&layout));
  assert(layout.profile==1 && layout.total_slots==17 && layout.slot_index==2);
@@ -246,7 +246,7 @@ static void stream_profile(void)
 	 }
  }
  assert(relay_frame_start(origin,120)==origin+32768);
- puts("PASS profile bootstrap, 120 direct admissions and compulsory B deadlines");
+ puts("PASS profile bootstrap, 120 direct admissions and compulsory control frame deadlines");
 }
 
 static void stream_d0_boundary(void)
@@ -343,7 +343,7 @@ static void variable_repair_timeline(void)
 	uint32_t third = relay_direct_anchor.following_start;
 	uint32_t fourth = relay_direct_anchor.third_start;
 	assert(second == origin + 288 && third == second + 288 && fourth == third + 304);
-	/* Two lost Bs still leave the exact direct schedule, including the
+	/* Two lost control frames still leave the exact direct schedule, including the
 	 * two-slot maintenance bump in the interval between them. */
 	for (unsigned start_index = 0; start_index < 3; start_index++) {
 		uint32_t start = start_index == 0 ? second : start_index == 1 ? third : fourth;
@@ -353,15 +353,15 @@ static void variable_repair_timeline(void)
 	uint32_t peer_start;
 	assert(tdma_slot_data_window(9, fourth - 1U, &peer_start));
 	assert(peer_start == fourth + 9U * 16U);
-	/* No fourth future start may be invented after three lost Bs. */
+	/* No fourth future start may be invented after three lost control frames. */
 	assert(!tdma_slot_data_window(9, fourth + 9U * 16U, &peer_start));
 	uint32_t cutoff = fourth + 256;
 	set_ticks(cutoff);
 	assert(!tdma_wait_for_slot(17));
-	bool broadcast;
+	bool control_frame;
 	uint32_t target;
-	assert(tdma_stream_next(&target, &broadcast) && broadcast && target == now_ticks());
-	/* B reacquisition restores two physical repair slots despite the R1 pack. */
+	assert(tdma_stream_next(&target, &control_frame) && control_frame && target == now_ticks());
+	/* The control frame reacquisition restores two physical repair slots despite the R1 pack. */
 	c.frame = 9;
 	c.preamble_ticks = fourth + 258;
 	c.repair_count = 2;
@@ -371,7 +371,7 @@ static void variable_repair_timeline(void)
 	set_ticks(fourth + 18 * 16 + 2);
 	assert(tdma_wait_for_forward_slot(18, 72) && tdma_forward_tx_valid(18, 72));
 	assert(!tdma_wait_for_forward_slot(19, 72));
-	puts("PASS variable R: two missed Bs, third-miss pose fence, acquisition scan and maintenance admission");
+	puts("PASS variable R: two missed control frames, third-miss pose fence, acquisition scan and maintenance admission");
 }
 
 static void repeat_geometry(void)
@@ -381,11 +381,11 @@ static void repeat_geometry(void)
   assert(tdma_stage_config(2,relay_geometry_code(11,3),16,8,1000));
   set_ticks(1000);assert(tdma_profile_get()==1);
   struct relay_control c={.frame=1,.preamble_ticks=1178,.direct_count=11,
-   .repair_count=3,.slot_ticks=16,.tps_max=120,.second_b=mode};
+   .repair_count=3,.slot_ticks=16,.tps_max=120,.control_repeat_mode=mode};
   relay_control_set_next_repairs(&c,3);relay_control_set_next2_repairs(&c,3);
   tdma_stream_control(&c);
   struct tdma_config cfg;assert(tdma_config_snapshot(&cfg));
-  unsigned first=12+(mode==1?2:0),total=15+relay_second_b_slots(mode);
+  unsigned first=12+(mode==1?2:0),total=15+relay_control_repeat_slots(mode);
   assert(RELAY_V3_REPAIR_FIRST_SLOT==first);
   assert(relay_direct_anchor.next_start-relay_direct_anchor.start>=total*16);
   for(unsigned slot=first;slot<first+3;slot++) {

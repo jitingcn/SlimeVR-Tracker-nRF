@@ -279,55 +279,55 @@ switch defaults off. Every active member must advertise wire v3 and there may
 be at most eleven members. Entry uses the existing 3.5 s staged activation,
 with the 0x5C trailer. No repair or maintenance grants are issued yet.
 
-Profile 1 sends one pose every rational 120 Hz frame and listens for B on
+Profile 1 sends one pose every rational 120 Hz frame and listens for the control frame on
 paired pipe 1. The connection owner prepares before its direct deadline and
-waits outside the ESB lifecycle lock. B uses hardware END capture and renews
+waits outside the ESB lifecycle lock. The control frame uses hardware END capture and renews
 clock and presence only after epoch, membership, session and innovation
 validation. Three missed frames exhaust direct holdover. A changed session
 fences TX; phase 3 has no maintenance invitation for automatic re-entry.
 
 For a first bench test, use only the receiver and two upgraded paired trackers.
 Check `relay` on the receiver for both v3 capabilities, request v3, and wait
-at least four seconds. Receiver `relay` reports profile, B_sent and B_failed;
-tracker `relay` reports profile, B_received and B_missed. Compare counter
+at least four seconds. Receiver `relay` reports profile, control_sent and control_failed;
+tracker `relay` reports profile, control_received and control_missed. Compare counter
 changes over ten seconds with 1,200 broadcasts and direct poses per tracker.
 Receiver `stats 10` and tracker `tdma stats` expose the existing delivery and
-admission counters. Hardware timing, FEM gain, B reception and HID-drop
+admission counters. Hardware timing, FEM gain, control frame reception and HID-drop
 acceptance still require measurement.
 
 Keep membership, channel, OTA and raw collection fixed during this canary.
 To return to v2, issue receiver `relay v3 off`, wait four seconds, then restart
 the trackers. Maintenance and live layout/session recovery remain later work;
-loss of B or a receiver restart suppresses v3 TX rather than launching legacy
+loss of control frame or a receiver restart suppresses v3 TX rather than launching legacy
 recovery traffic into the protected slots.
 
 ### Phase 4: granted repairs
 
 Profile 1 now assigns primary and backup watchers by direct RSSI, excluding
 adjacent direct slots and limiting each helper to three watched children. This
-is a placeholder for phase 5's peer evidence. B advertises the next frame's
+is a placeholder for phase 5's peer evidence. The control frame advertises the next frame's
 watch plan; grants use the plan that actually applied to each cached frame.
 The coordinator grants oldest unresolved frames to primaries before spending
 remaining slots on backups, grouping up to three records per helper grant.
 
-The tracker extends the relay cache to three frames, confirms records from B,
+The tracker extends the relay cache to three frames, confirms records from the control frame,
 and retains records across failed queue submissions. The connection owner sends
 repair envelopes through the existing per-slot admission and final recheck.
-Missed B never reuses a repair grant. Peer capture uses the existing raw RX and
-hardware END capture, with D10 completion clipped before B ownership.
+Missed control frame never reuses a repair grant. Peer capture uses the existing raw RX and
+hardware END capture, with D10 completion clipped before the control frame ownership.
 
 The receiver validates session, epoch, physical repair slot, owner, child and
 capture age before unpacking records through the normal/composite HID paths.
 Frame-indexed delivery suppresses exact copies and historical poses, independent
 of native sequence wrap or restart heuristics. Direct receipts remain separate
-from any-path recovery. B watch selection is prepared early; missing masks and
+from any-path recovery. The control frame watch selection is prepared early; missing masks and
 grants freeze after D10. The shared CRC uses the same polynomial with nibble
-lookups to keep final B encoding bounded.
+lookups to keep final control frame encoding bounded.
 
 Bench: enable `relay v3 on` for an all-v3 fleet and wait for profile 1 activation.
 Use at least five trackers for non-adjacent primary/backup coverage, then
 `relay block <child-id> 100`. Confirm captures and accepted repair records rise
 while direct receipts stop. Keep the child blocked and physically obstruct the primary's uplink to exercise
 backup recovery. The console holds one block ID, so another block command replaces it. Clear each block with `relay block <id> 0`; disable with `relay v3 off`.
-Forced receiver drops test recovery behavior; peer RF coverage and D10/B/R0
+Forced receiver drops test recovery behavior; peer RF coverage and D10/control frame/R0
 turnaround still require measurements on both tracker boards.

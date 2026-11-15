@@ -1919,7 +1919,7 @@ static void connection_thread(void)
 
 	while (1) {
 		/* Profile 1 uses the radio twice per 8.3 ms frame and HFXO start-up
-		 * outlasts the lead before B, so the clock stays up for the profile. */
+		 * outlasts the lead before the control frame, so the clock stays up for the profile. */
 		if (stream_clock_held && (!esb_ready() || !tdma_profile_get())) {
 			esb_relay_clock(false);
 			stream_clock_held = false;
@@ -1994,15 +1994,15 @@ static void connection_thread(void)
 		}
 		if (stream) {
 			uint32_t target;
-			bool broadcast;
-			if (!tdma_stream_next(&target, &broadcast)) {
+			bool control_frame;
+			if (!tdma_stream_next(&target, &control_frame)) {
 				k_msleep(1);
 				continue;
 			}
 
-			if (broadcast) {
+			if (control_frame) {
 				if (esb_relay_control_window(target)) {
-					/* B completion is the grant event. Service it before any
+					/* The control frame completion is the grant event. Service it before any
 					 * producer work or selection of the next direct target. */
 					uint32_t at;
 					if (relay_next_maintenance(&at)) {
@@ -2027,7 +2027,7 @@ static void connection_thread(void)
 					}
 				}
 				relay_control_serviced();
-				/* Without a B grant tdma_stream_next() returns "now" on
+				/* Without a control frame grant tdma_stream_next() returns "now" on
 				 * every retry. A full-frame busy RX, or an immediate radio
 				 * refusal, otherwise keeps this priority-4 thread runnable
 				 * indefinitely and starves boot/POWER/ESB owners. Release
