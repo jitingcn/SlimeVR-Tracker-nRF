@@ -90,8 +90,8 @@ static uint32_t tdma_ping_missed_window;
 static uint32_t tdma_deferred_for_ping;
 static uint32_t tdma_last_admitted_frame = UINT32_MAX;
 /* Forwarding-slot admission keeps its own one-packet-per-frame record. */
-static uint32_t tdma_forward_admitted_frame = UINT32_MAX;
-static uint32_t tdma_forward_admitted_pack;
+static uint32_t tdma_repair_admitted_frame = UINT32_MAX;
+static uint32_t tdma_repair_admitted_pack;
 static uint32_t tdma_last_admitted_pack;
 static uint32_t tdma_stream_slots;
 static uint32_t tdma_last_ping_frame = UINT32_MAX;
@@ -104,7 +104,7 @@ void tdma_init(uint8_t tracker_id)
 	atomic_set(&tdma_cfg_pack,
 		   (atomic_val_t)TDMA_PACK(tdma_slot_index_init, TDMA_SLOT_TICKS, TDMA_NUM_TRACKERS, 0));
 	tdma_last_admitted_frame = UINT32_MAX;
-	tdma_forward_admitted_frame = UINT32_MAX;
+	tdma_repair_admitted_frame = UINT32_MAX;
 	tdma_last_admitted_pack = 0;
 	tdma_last_ping_frame = UINT32_MAX;
 	tdma_last_ping_pack = 0;
@@ -133,7 +133,7 @@ void tdma_init(uint8_t tracker_id)
 #define TDMA_LEN33_PLUS_RESERVE_TICKS 12
 #define TDMA_SLOT_TARGET_OFFSET 2
 #define TDMA_FRESH_SOURCE_HANDOFF_TICKS 4
-_Static_assert(TDMA_SLOT_TARGET_OFFSET == RELAY_V3_TX_OFFSET, "v3 TX target");
+_Static_assert(TDMA_SLOT_TARGET_OFFSET == RELAY_TX_OFFSET, "relay TX target");
 #define TDMA_PING_LATE_TOLERANCE_TICKS 6
 #define TDMA_MIN_SAFE_SLOT_TICKS 16
 #define TDMA_SYNC_STALE_MS (PING_INTERVAL_MS * 10)
@@ -173,7 +173,7 @@ static uint8_t tdma_reserve_ticks(uint8_t payload_length)
 static void tdma_reset_admission_locked(void)
 {
 	tdma_last_admitted_frame = UINT32_MAX;
-	tdma_forward_admitted_frame = UINT32_MAX;
+	tdma_repair_admitted_frame = UINT32_MAX;
 	tdma_last_admitted_pack = 0;
 	tdma_last_ping_frame = UINT32_MAX;
 	tdma_last_ping_pack = 0;
@@ -243,8 +243,8 @@ static bool tdma_config_snapshot(struct tdma_config *config)
 	config->frame_ticks = TDMA_UNPACK_FRAME(config->pack);
 	config->total_slots = TDMA_UNPACK_TOTAL(config->pack);
 	if (config->pack & TDMA_PROFILE_BIT) {
-		config->total_slots = RELAY_V3_TOTAL_SLOTS;
-		config->frame_ticks = RELAY_V3_FRAME_TICKS_MAX;
+		config->total_slots = RELAY_TOTAL_SLOTS;
+		config->frame_ticks = RELAY_FRAME_TICKS_MAX;
 	}
 	return (config->pack & TDMA_ENABLED_BIT) && config->total_slots != 0;
 }
@@ -563,20 +563,20 @@ bool tdma_stream_next(uint32_t *target, bool *control_frame)
 	}
 	uint8_t slot = TDMA_UNPACK_SLOT((uint32_t)atomic_get(&tdma_cfg_pack));
 	uint32_t own = tdma_stream_at(clock.receiver_ticks,
-		slot * RELAY_V3_SLOT_TICKS + TDMA_SLOT_TARGET_OFFSET);
+		slot * RELAY_SLOT_TICKS + TDMA_SLOT_TARGET_OFFSET);
 	/* Payload preparation can pass the target while admission is still
 	 * legal. Preserve this frame until its existing reserve expires. */
 	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
 	uint32_t frame = relay_frame_near(tdma_anchor_frame, tdma_anchor_start, clock.receiver_ticks);
-	uint32_t start = relay_frame_start(tdma_profile_origin, frame) + slot * RELAY_V3_SLOT_TICKS;
+	uint32_t start = relay_frame_start(tdma_profile_origin, frame) + slot * RELAY_SLOT_TICKS;
 	int32_t pos = clock.receiver_ticks - start;
 	bool consumed = tdma_last_admitted_pack == pack && tdma_last_admitted_frame == frame
 		&& (tdma_stream_slots & (1U << slot));
 	if (!consumed && pos >= TDMA_SLOT_TARGET_OFFSET &&
-	    pos <= (int32_t)(RELAY_V3_SLOT_TICKS - tdma_reserve_ticks(relay_direct_payload_max(RELAY_PROFILE_120HZ, slot)))) {
+	    pos <= (int32_t)(RELAY_SLOT_TICKS - tdma_reserve_ticks(relay_direct_payload_max(RELAY_PROFILE_120HZ, slot)))) {
 		own = clock.receiver_ticks;
 	}
-	uint32_t control_start = tdma_stream_at(clock.receiver_ticks, RELAY_V3_CONTROL_START - RELAY_RX_LEAD_TICKS);
+	uint32_t control_start = tdma_stream_at(clock.receiver_ticks, RELAY_CONTROL_START - RELAY_RX_LEAD_TICKS);
 	/* A joiner has no direct grant until its primary control frame. Retrying an
 	 * ungranted own slot can repeatedly sleep across that control frame window. */
 	*control_frame = !esb_layout_granted() || (int32_t)(control_start - own) < 0;
@@ -601,7 +601,7 @@ static bool tdma_stream_admit(uint8_t slot, uint8_t reserve, bool consume)
 		}
 		uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
 		uint32_t frame = relay_frame_near(tdma_anchor_frame, tdma_anchor_start, clock.receiver_ticks);
-		uint32_t start = relay_frame_start(tdma_profile_origin, frame) + slot * RELAY_V3_SLOT_TICKS;
+		uint32_t start = relay_frame_start(tdma_profile_origin, frame) + slot * RELAY_SLOT_TICKS;
 		int32_t pos = clock.receiver_ticks - start;
 		/* D0's existing target-minus-four handoff starts in the previous
 		 * frame. Treat those two ticks as early for the upcoming D0, not
@@ -621,14 +621,14 @@ static bool tdma_stream_admit(uint8_t slot, uint8_t reserve, bool consume)
 			k_busy_wait(5);
 			continue;
 		}
-		int reason = tdma_window_quiet(start, RELAY_V3_SLOT_TICKS) ? 1
+		int reason = tdma_window_quiet(start, RELAY_SLOT_TICKS) ? 1
 			: pos < TDMA_SLOT_TARGET_OFFSET ? 2
-			: pos > (int32_t)(RELAY_V3_SLOT_TICKS - reserve) ? 3 : -1;
+			: pos > (int32_t)(RELAY_SLOT_TICKS - reserve) ? 3 : -1;
 		bool same = tdma_last_admitted_pack == pack && tdma_last_admitted_frame == frame;
 		if (!consume) {
 #ifdef CONFIG_RELAY_FRAME_LEDGER
 			if (reason >= 0 || !same || !(tdma_stream_slots & (1U << slot)))
-				ledger_window_detail = reason == 3 ? MIN(pos - (RELAY_V3_SLOT_TICKS - reserve), 32767)
+				ledger_window_detail = reason == 3 ? MIN(pos - (RELAY_SLOT_TICKS - reserve), 32767)
 					: -100 - (reason < 0 ? 5 : reason);
 #endif
 			return reason < 0 && same && (tdma_stream_slots & (1U << slot));
@@ -642,7 +642,7 @@ static bool tdma_stream_admit(uint8_t slot, uint8_t reserve, bool consume)
 		if (reason >= 0) {
 			tdma_stream_refused[reason]++;
 #ifdef CONFIG_RELAY_FRAME_LEDGER
-			ledger_window_detail = reason == 3 ? MIN(pos - (RELAY_V3_SLOT_TICKS - reserve), 32767)
+			ledger_window_detail = reason == 3 ? MIN(pos - (RELAY_SLOT_TICKS - reserve), 32767)
 				: -100 - reason;
 #endif
 			return false;
@@ -785,14 +785,15 @@ bool tdma_admit_stream_source(uint8_t payload_length)
 		tdma_stream_admit(config.slot_index, reserve, true);
 }
 
-bool tdma_wait_for_forward_slot(uint8_t slot, uint8_t payload_length)
+bool tdma_wait_for_repair_slot(uint8_t slot, uint8_t payload_length)
 {
 	struct tdma_config config;
-	if (!tdma_config_snapshot(&config) || slot == config.slot_index) {
+	if (!tdma_config_snapshot(&config) || !(config.pack & TDMA_PROFILE_BIT)
+	    || slot < RELAY_REPAIR_FIRST_SLOT || slot == config.slot_index) {
 		return false;
 	}
 	return tdma_wait_for_admission(&config, slot, tdma_reserve_ticks(payload_length),
-		&tdma_forward_admitted_pack, &tdma_forward_admitted_frame);
+		&tdma_repair_admitted_pack, &tdma_repair_admitted_frame);
 }
 
 /* Callers already need the slot configuration. Reuse that snapshot so the
@@ -810,7 +811,7 @@ static bool tdma_tx_valid(const struct tdma_config *config, uint8_t slot, uint8_
 		return false;
 	}
 	if (tdma_profile_get()) {
-		return length <= (slot >= RELAY_V3_REPAIR_FIRST_SLOT
+		return length <= (slot >= RELAY_REPAIR_FIRST_SLOT
 				      ? RELAY_FRAME_MAX
 				      : relay_direct_payload_max(RELAY_PROFILE_120HZ, slot)) &&
 		       tdma_stream_admit(slot, tdma_reserve_ticks(length), false);
@@ -844,11 +845,12 @@ bool tdma_slot_tx_valid(uint8_t payload_length)
 /* Attribute provenance: Round 1 scheduling and round 10 final-validation cohorts measured this group, not this attribute alone. Retain pending isolated A/B. */
 __attribute__((optimize("O3")))
 #endif
-bool tdma_forward_tx_valid(uint8_t slot, uint8_t payload_length)
+bool tdma_repair_tx_valid(uint8_t slot, uint8_t payload_length)
 {
 	struct tdma_config config;
-	return tdma_config_snapshot(&config) && tdma_tx_valid(&config, slot, payload_length,
-		tdma_forward_admitted_pack, tdma_forward_admitted_frame);
+	return tdma_config_snapshot(&config) && (config.pack & TDMA_PROFILE_BIT)
+		&& slot >= RELAY_REPAIR_FIRST_SLOT && tdma_tx_valid(&config, slot, payload_length,
+		tdma_repair_admitted_pack, tdma_repair_admitted_frame);
 }
 
 bool tdma_ping_wake_delay_ms(uint32_t *delay_ms)
@@ -986,7 +988,7 @@ void tdma_set_enabled(bool enabled)
 		? pack | TDMA_ENABLED_BIT : pack & ~TDMA_ENABLED_BIT));
 	if (!prev && enabled) {
 		tdma_last_admitted_frame = UINT32_MAX;
-		tdma_forward_admitted_frame = UINT32_MAX;
+		tdma_repair_admitted_frame = UINT32_MAX;
 		tdma_last_admitted_pack = 0;
 	}
 	if ((prev != 0) != enabled) {
@@ -1110,7 +1112,7 @@ bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 	}
 
 	tdma_last_admitted_frame = UINT32_MAX;
-	tdma_forward_admitted_frame = UINT32_MAX;
+	tdma_repair_admitted_frame = UINT32_MAX;
 	tdma_last_admitted_pack = 0;
 	tdma_last_ping_frame = UINT32_MAX;
 	tdma_last_ping_pack = 0;
@@ -1215,7 +1217,7 @@ bool tdma_layout_get(struct tdma_layout *layout)
 		return false;
 	}
 	layout->slot_index = config.slot_index;
-	layout->total_slots = tdma_profile_get() ? RELAY_V3_TOTAL_SLOTS : config.total_slots;
+	layout->total_slots = tdma_profile_get() ? RELAY_TOTAL_SLOTS : config.total_slots;
 	layout->profile = tdma_profile_get();
 	layout->slot_ticks = config.slot_ticks;
 	layout->frame_ticks = config.frame_ticks;
@@ -1246,17 +1248,17 @@ bool tdma_slot_data_window(uint8_t slot, uint32_t after, uint32_t *start)
 		if (!relay_runtime_start(&relay_direct_anchor, frame, &known)) {
 			return false;
 		}
-		uint32_t candidate = known + slot * RELAY_V3_SLOT_TICKS;
+		uint32_t candidate = known + slot * RELAY_SLOT_TICKS;
 		if ((int32_t)(candidate - after) <= 0) {
 			if (!relay_runtime_start(&relay_direct_anchor, frame + 1U, &known)) {
 				return false;
 			}
-			candidate = known + slot * RELAY_V3_SLOT_TICKS;
+			candidate = known + slot * RELAY_SLOT_TICKS;
 		}
 		/* A helper cannot infer f+3 from a stale fixed grid. Leave the
 		 * radio to control frame acquisition when both announced starts are spent. */
 		*start = candidate;
-		return !tdma_window_quiet(*start, RELAY_V3_SLOT_TICKS);
+		return !tdma_window_quiet(*start, RELAY_SLOT_TICKS);
 	}
 	uint32_t frame = after / config.frame_ticks;
 	for (unsigned i = 0; i < TDMA_SEARCH_FRAMES + 1U; i++, frame = tdma_next_frame(frame, &config)) {

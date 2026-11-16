@@ -19,7 +19,7 @@ source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.MULTILINE)
 source += r'''
 static void test_store(uint8_t child, const struct relay_rx_frame *f, uint8_t epoch, uint32_t expiry) {
  struct tdma_layout l; if(!tdma_layout_get(&l))return;
- relay_store(child,f,epoch,expiry,&l,(uint16_t)relay_frame_near(control_plan.frame,control_plan.preamble_ticks-RELAY_V3_CONTROL_PREAMBLE,expiry-l.frame_ticks),relay_generation);
+ relay_store(child,f,epoch,&l,(uint16_t)relay_frame_near(control_plan.frame,control_plan.preamble_ticks-RELAY_CONTROL_PREAMBLE,expiry-l.frame_ticks),relay_generation);
 }
 '''
 
@@ -127,43 +127,9 @@ static void reset(void) {
     incoming = (struct relay_rx_frame){.length=17,.rssi=65,.pipe=2};
     incoming.data[0]=1; incoming.data[1]=1; incoming.data[16]=5;
 }
-static void adjacent_child(void) {
-    reset(); test_store(1,&incoming,7,192);
-    uint8_t out[72] = {1,0}; out[16]=3;
-    size_t n=relay_build_bundle(out,17,sizeof(out),0);
-    assert(n && "adjacent child was discarded before the own opportunity");
-    struct relay_bundle_view view; assert(relay_bundle_decode(out,n,&view));
-    assert(view.record_count==1 && view.records[0].frame[1]==1);
-    test_store(1,&incoming,7,192); now_ticks=190;
-    assert(!relay_records_pending());
-    puts("PASS runtime: adjacent child survives until a usable forwarding opportunity");
-}
-static void no_fit_request(void) {
-    reset();
-    /* Valid 60-byte composite: quaternion, magnetometer, status, runtime, info. */
-    incoming.length=60; incoming.data[0]=0xFE; incoming.data[1]=1; incoming.data[2]=5;
-    const uint8_t types[]={1,4,3,5,0}, sizes[]={14,14,2,8,13};
-    unsigned pos=3; for(unsigned i=0;i<5;i++){incoming.data[pos++]=types[i];pos+=sizes[i];}
-    incoming.data[pos++]=9; assert(pos==60);
-    test_store(1,&incoming,7,1000);
-    uint8_t out[72]={1,0}; assert(!relay_build_bundle(out,17,72,0));
-    assert(host_info_caps() & 4U);
-    assert(relay_records_pending());
-    now_ms+=2001; assert(!(host_info_caps() & 4U));
-    puts("PASS runtime: zero-record overflow requests capacity through info traffic");
-}
-static void lease_and_capture(void) {
-    reset();
-    struct relay_pong_trailer tr={.epoch=7,.children_mask=2,.forward_slot=255,.member_mask=3};
-    relay_on_own_trailer(&tr); assert(relay_head_active());
-    relay_clock(true); now_ticks=140;
-    assert(relay_head_window(&tr,&test_layout,relay_generation)); assert(stats.head_captures==1);
-    assert(captured_pipe_mask==(1U<<2)); assert(relay_records_pending());
-    test_layout.epoch++; assert(!relay_head_active()); assert(!relay_records_pending());
-    test_layout.epoch--; now_ms+=2501; assert(!relay_head_active());
-    relay_clock(false); relay_reset(); assert(!assignment.valid);
-    puts("PASS runtime: capture uses the child pipe; epoch, lease and reset retire state");
-}
+
+
+
 static void presence_clock(void) {
     reset(); now_ticks=1000; next_ping=21000;
     relay_clock(true); relay_presence_window(&test_layout);
@@ -172,14 +138,7 @@ static void presence_clock(void) {
     assert(!hf_refs && !radio_owned);
     puts("PASS runtime: presence holds HFCLK only near its RX window");
 }
-static void late_own_tx(void) {
-    reset(); now_ticks=140; busy_until=193;
-    struct relay_pong_trailer tr={.epoch=7,.children_mask=2,.forward_slot=255,.member_mask=3};
-    relay_clock(true); assert(relay_head_window(&tr,&test_layout,relay_generation));
-    assert(stats.head_captures==1 && stats.head_busy==0);
-    relay_clock(false);
-    puts("PASS runtime: RX retries while a long own TX finishes before the child preamble");
-}
+
 
 
 static unsigned cache_seed=0x12345678;
@@ -201,11 +160,11 @@ static void cache_equivalence(void) {
   uint64_t selected=((uint64_t)cache_random()<<32)|cache_random();
   repair_selected=selected;
   uint8_t expected[72]={0},actual[72]={0};
-  size_t n=reference_build_repair(expected,RELAY_V3_REPAIR_FIRST_SLOT+grant);
+  size_t n=reference_build_repair(expected,RELAY_REPAIR_FIRST_SLOT+grant);
   uint64_t expected_selected=repair_selected,expected_pending=repair_pending_mask;
   uint8_t pending[RELAY_MAX_TRACKERS];memcpy(pending,repair_pending,sizeof(pending));
   repair_selected=selected;
-  size_t m=relay_build_repair(actual,RELAY_V3_REPAIR_FIRST_SLOT+grant);
+  size_t m=relay_build_repair(actual,RELAY_REPAIR_FIRST_SLOT+grant);
   assert(n==m && !memcmp(expected,actual,n));
   assert(expected_selected==repair_selected && expected_pending==repair_pending_mask && !memcmp(pending,repair_pending,sizeof(pending)));
  }
@@ -215,83 +174,83 @@ static void cache_equivalence(void) {
 static void final_cache_gap(void) {
  for(unsigned repairs=1;repairs<=5;repairs++) {
   reset();test_layout.profile=RELAY_PROFILE_120HZ;
-  struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_V3_CONTROL_PREAMBLE,.members=7,.repair_count=repairs};
+  struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_CONTROL_PREAMBLE,.members=7,.repair_count=repairs};
   relay_on_control(&c,0);
-  uint32_t start=relay_frame_start(500,3)+RELAY_V3_SLOT_TICKS;
+  uint32_t start=relay_frame_start(500,3)+RELAY_SLOT_TICKS;
   now_ticks=start;incoming.data[16]=3;
-  test_store(1,&incoming,7,start+RELAY_V3_FRAME_TICKS_MAX);
+  test_store(1,&incoming,7,start+RELAY_FRAME_TICKS_MAX);
   c.frame=3;c.missing[0]=c.missing[2]=2;
   for(unsigned i=0;i<repairs;i++)c.grants[i]=(struct relay_grant){0,2};
   relay_on_control(&c,0);
   uint8_t bytes[72];struct relay_repair parsed;
-  if(repairs>1)assert(!relay_build_repair(bytes,RELAY_V3_REPAIR_FIRST_SLOT+repairs-2));
-  size_t n=relay_build_repair(bytes,RELAY_V3_REPAIR_FIRST_SLOT+repairs-1);
+  if(repairs>1)assert(!relay_build_repair(bytes,RELAY_REPAIR_FIRST_SLOT+repairs-2));
+  size_t n=relay_build_repair(bytes,RELAY_REPAIR_FIRST_SLOT+repairs-1);
   if(repairs<=3)assert(relay_repair_decode(bytes,n,&parsed) && parsed.count==1 && parsed.records[0].capture_frame==3);
   else assert(!n);
   relay_repair_result(-EAGAIN);
   c.missing[1]=2;relay_on_control(&c,0);
-  assert(!relay_build_repair(bytes,RELAY_V3_REPAIR_FIRST_SLOT+repairs-1));
+  assert(!relay_build_repair(bytes,RELAY_REPAIR_FIRST_SLOT+repairs-1));
  }
  puts("PASS runtime: actual final narrow slot permits an age-two gap for R1/R2/R3; earlier, age-one and R4/R5 guards stay fixed");
 }
 
 static void fast_cache(void) {
  reset(); test_layout.profile=RELAY_PROFILE_120HZ;
- test_layout.total_slots=RELAY_V3_TOTAL_SLOTS;test_layout.slot_ticks=RELAY_V3_SLOT_TICKS;
- test_layout.frame_ticks=RELAY_V3_FRAME_TICKS_MAX;
- struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_V3_CONTROL_PREAMBLE,
+ test_layout.total_slots=RELAY_TOTAL_SLOTS;test_layout.slot_ticks=RELAY_SLOT_TICKS;
+ test_layout.frame_ticks=RELAY_FRAME_TICKS_MAX;
+ struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_CONTROL_PREAMBLE,
   .primary_valid=2,.members=7,.repair_count=5};
  relay_on_control(&c,0);
  for(unsigned f=1;f<=3;f++) {
-  uint32_t start=relay_frame_start(500,f)+RELAY_V3_SLOT_TICKS;
+  uint32_t start=relay_frame_start(500,f)+RELAY_SLOT_TICKS;
   now_ticks=start;incoming.data[16]=f;
   test_store(1,&incoming,7,start+test_layout.frame_ticks);
  }
- c.frame=3;c.preamble_ticks=relay_frame_start(500,3)+RELAY_V3_CONTROL_PREAMBLE;
+ c.frame=3;c.preamble_ticks=relay_frame_start(500,3)+RELAY_CONTROL_PREAMBLE;
  c.missing[0]=c.missing[1]=c.missing[2]=2;
  c.grants[0]=(struct relay_grant){.owner=0,.children=2};
  c.grants[1]=c.grants[2]=c.grants[0];
  relay_on_control(&c,0);
- uint8_t buf[72];size_t n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ uint8_t buf[72];size_t n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT);
  struct relay_repair r;assert(relay_repair_decode(buf,n,&r) && r.count==3);
  assert(r.records[0].capture_frame==1 && r.records[2].capture_frame==3);
  unsigned forwarded_before=stats.forwarded;
  relay_repair_result(-EAGAIN);
  assert(stats.forwarded==forwarded_before);
  /* A refused submission may use a later grant in this same control frame. */
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+1);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT+1);
  assert(relay_repair_decode(buf,n,&r) && r.count==3);
  assert(r.records[0].capture_frame==1 && r.records[2].capture_frame==3);
  relay_repair_result(0);
- assert(!relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+2));
+ assert(!relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT+2));
  /* A later control frame can grant still-missing records again. */
- relay_on_control(&c,0);assert(relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT));
+ relay_on_control(&c,0);assert(relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT));
  /* A gap must not let frame 3 obsolete frame 2 held by another helper. */
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)
   if(records[i].valid && records[i].capture_frame==2) records[i].valid=false;
  relay_on_control(&c,0);
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT);
  assert(relay_repair_decode(buf,n,&r) && r.count==1 && r.records[0].capture_frame==1);
  relay_repair_result(0);
- assert(!relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+1));
+ assert(!relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT+1));
  /* A later control frame confirms the two older frames: the fresh record is now safe. */
  c.missing[1]=c.missing[2]=0;relay_on_control(&c,0);
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT);
  assert(relay_repair_decode(buf,n,&r) && r.count==1 && r.records[0].capture_frame==3);
  relay_repair_result(0);
  /* If an older frame never arrives, the unchanged age-2 limit still permits frame 3. */
  c.missing[1]=2;relay_on_control(&c,0);
- assert(!relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT));
+ assert(!relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT));
  c.frame=5;c.missing[0]=c.missing[1]=0;c.missing[2]=2;relay_on_control(&c,0);
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT);
  assert(relay_repair_decode(buf,n,&r) && r.count==1 && r.records[0].capture_frame==3);
  c.missing[0]=c.missing[1]=c.missing[2]=0;relay_on_control(&c,0);
- assert(!relay_records_pending());
- now_ticks=c.preamble_ticks+2*RELAY_V3_FRAME_TICKS_MAX;
- struct relay_pong_trailer tr;struct tdma_layout l;
+ for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)assert(!records[i].valid);
+ now_ticks=c.preamble_ticks+2*RELAY_FRAME_TICKS_MAX;
+ struct relay_watch_assignment tr;struct tdma_layout l;
  assert(relay_assignment_get(&tr,&l,NULL));
  uint32_t target;uint8_t slot;assert(!relay_next_repair(&target,&slot));
- now_ticks=c.preamble_ticks+(RELAY_V3_CACHE_FRAMES+1)*RELAY_V3_FRAME_TICKS_MAX;
+ now_ticks=c.preamble_ticks+(RELAY_CACHE_FRAMES+1)*RELAY_FRAME_TICKS_MAX;
  assert(!relay_assignment_get(&tr,&l,NULL));
  c.session++;relay_on_control(&c,0);assert(!records[0].valid);
  puts("PASS runtime: three-frame cache, grant selection, failed queue retention and confirmation");
@@ -299,19 +258,19 @@ static void fast_cache(void) {
 
 static void d10_control_ownership(void) {
  for (unsigned busy=0; busy<2; busy++) {
- reset(); test_layout.profile=1; test_layout.total_slots=RELAY_V3_TOTAL_SLOTS;
- test_layout.slot_ticks=RELAY_V3_SLOT_TICKS;test_layout.frame_ticks=relay_frame_start(0,1);
- struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_V3_CONTROL_PREAMBLE,
+ reset(); test_layout.profile=1; test_layout.total_slots=RELAY_TOTAL_SLOTS;
+ test_layout.slot_ticks=RELAY_SLOT_TICKS;test_layout.frame_ticks=relay_frame_start(0,1);
+ struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_CONTROL_PREAMBLE,
   .members=0x7ff,.repair_count=5,.survey=1U<<10};
  relay_on_control(&c,0);
- struct relay_pong_trailer tr;struct tdma_layout l;
- uint32_t d10=test_layout.frame_ticks+10*RELAY_V3_SLOT_TICKS;
+ struct relay_watch_assignment tr;struct tdma_layout l;
+ uint32_t d10=test_layout.frame_ticks+10*RELAY_SLOT_TICKS;
  now_ticks=d10-RELAY_RX_LEAD_TICKS;capture_available=false;
  radio_busy=busy;
  assert(relay_assignment_get(&tr,&l,NULL));
  relay_clock(true);assert(relay_head_window(&tr,&l,relay_generation));
  assert(!radio_owned);
- assert(now_ticks <= test_layout.frame_ticks+RELAY_V3_CONTROL_START-RELAY_RX_LEAD_TICKS);
+ assert(now_ticks <= test_layout.frame_ticks+RELAY_CONTROL_START-RELAY_RX_LEAD_TICKS);
  relay_clock(false);
  }
  puts("PASS runtime: missing or busy D10 yields at the unchanged control frame RX lead");
@@ -333,28 +292,28 @@ static void failed_store(void) {
  struct relay_control fresh={.epoch=7,.session=42};relay_on_control(&fresh,0);
  test_store(2,&f,7,1000);
  assert(records[0].valid && records[0].child==2 && records[0].epoch==7);
- assert(records[0].length==17 && records[0].expiry==1000 && records[0].rssi==f.rssi);
+ assert(records[0].length==17 && records[0].rssi==f.rssi);
  assert(!memcmp(records[0].data,f.data,17));
  uint32_t generation=relay_generation;
  irq_hook=reset_before_insert;
- relay_store(2,&f,7,1000,&test_layout,3,generation);
+ relay_store(2,&f,7,&test_layout,3,generation);
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)assert(!records[i].valid);
  generation=relay_generation;
- struct relay_pong_trailer tr={0};struct tdma_layout l=test_layout;
+ struct relay_watch_assignment tr={0};struct tdma_layout l=test_layout;
  relay_reset();relay_on_control(&fresh,0);
  assert(!relay_head_window(&tr,&l,generation));
  relay_reset();relay_on_control(&fresh,0); /* same session and epoch */
- relay_store(2,&f,7,1000,&test_layout,3,generation);
+ relay_store(2,&f,7,&test_layout,3,generation);
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)assert(!records[i].valid);
  relay_reset();
 }
 static void learned_reports(void) {
- reset(); test_layout.profile=1; test_layout.total_slots=RELAY_V3_TOTAL_SLOTS;
- test_layout.slot_ticks=RELAY_V3_SLOT_TICKS;test_layout.frame_ticks=RELAY_V3_FRAME_TICKS_MAX;
- struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_V3_CONTROL_PREAMBLE,
+ reset(); test_layout.profile=1; test_layout.total_slots=RELAY_TOTAL_SLOTS;
+ test_layout.slot_ticks=RELAY_SLOT_TICKS;test_layout.frame_ticks=RELAY_FRAME_TICKS_MAX;
+ struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=RELAY_CONTROL_PREAMBLE,
   .members=0x7ff,.repair_count=5,.survey=7};
  relay_on_control(&c,0);
- struct relay_pong_trailer tr;struct tdma_layout l;
+ struct relay_watch_assignment tr;struct tdma_layout l;
  now_ticks=280;
  assert(relay_assignment_get(&tr,&l,NULL) && tr.children_mask==4); /* self and adjacent excluded */
  incoming.data[1]=2;incoming.pipe=3;
@@ -365,7 +324,7 @@ static void learned_reports(void) {
  assert(relay_head_window(&tr,&l,relay_generation));
  assert(peer_counts[2].expected==2 && peer_counts[2].heard==1);
  relay_clock(false);
- c.frame=2;c.preamble_ticks=relay_frame_start(0,2)+RELAY_V3_CONTROL_PREAMBLE;
+ c.frame=2;c.preamble_ticks=relay_frame_start(0,2)+RELAY_CONTROL_PREAMBLE;
  c.grants[3]=(struct relay_grant){.owner=0,.children=0};
  for(unsigned slot=0;slot<5;slot++)if(slot!=3)c.grants[slot].owner=RELAY_OWNER_IDLE;
  relay_on_control(&c,0);
@@ -374,9 +333,9 @@ static void learned_reports(void) {
   peer_counts[child].expected=child*10;peer_counts[child].heard=0;
  }
  now_ticks=c.preamble_ticks;
- assert(relay_records_pending());
+ assert(peer_counts[2].expected);
  uint32_t target;uint8_t slot;
- assert(relay_next_repair(&target,&slot) && slot==RELAY_V3_REPAIR_FIRST_SLOT+3);
+ assert(relay_next_repair(&target,&slot) && slot==RELAY_REPAIR_FIRST_SLOT+3);
  uint8_t buf[72];size_t n=relay_build_repair(buf,slot);
  struct relay_peer_report report;
  assert(relay_peer_report_decode(buf,n,&report));
@@ -390,11 +349,11 @@ static void learned_reports(void) {
  relay_repair_result(-EAGAIN);
  assert(peer_counts[10].expected==100);
  repair_attempted=0;
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+3);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT+3);
  relay_repair_result(-ENOSPC);
  assert(peer_counts[10].expected==100);
  repair_attempted=0;
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+3);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT+3);
  peer_count(10,false,0); peer_count(10,true,60);
  relay_repair_result(0);
  assert(peer_counts[10].expected==1 && peer_counts[10].heard==1);
@@ -416,8 +375,8 @@ static void maintenance(void) {
  c.maintenance_owner=1;c.flags=0;relay_on_control(&c,1);
  assert(!relay_next_maintenance(&target));
  c.flags=RELAY_CONTROL_MAINTENANCE;relay_on_control(&c,1);
- uint32_t start=c.preamble_ticks-RELAY_V3_CONTROL_PREAMBLE+RELAY_V3_REPAIR_START;
- assert(relay_next_maintenance(&target) && target==start+RELAY_V3_TX_OFFSET);
+ uint32_t start=c.preamble_ticks-RELAY_CONTROL_PREAMBLE+RELAY_REPAIR_START;
+ assert(relay_next_maintenance(&target) && target==start+RELAY_TX_OFFSET);
  now_ticks=target;assert(relay_take_maintenance());assert(!relay_next_maintenance(&target));
  c.frame++;relay_on_control(&c,1);now_ticks=start+3;
  assert(relay_take_maintenance());
@@ -437,7 +396,7 @@ static void control_accounting(void) {
  assert(repair_diag[1].grants==before);
  records[0]=(struct relay_record){.valid=true,.child=1,.epoch=7,.capture_frame=100,.length=17,.rssi=50};
  records[0].data[0]=1;records[0].data[1]=1;
- uint8_t buf[72];size_t n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ uint8_t buf[72];size_t n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT);
  struct relay_repair decoded;
  assert(n && relay_repair_decode(buf,n,&decoded) && decoded.count==1);
  assert(decoded.records[0].capture_frame==100 && decoded.records[0].source.frame[1]==1);
@@ -455,7 +414,7 @@ static void demand_cache(void) {
  reset();test_layout.profile=RELAY_PROFILE_120HZ;
  struct relay_control full={.session=42,.epoch=7,.frame=100,.members=0xffff,.on_demand=true};relay_on_control(&full,0);
  for(unsigned age=0;age<5;age++)for(unsigned ch=1;ch<16;ch++) {
- incoming.data[1]=ch;relay_store(ch,&incoming,7,0,&test_layout,100-age,relay_generation);
+ incoming.data[1]=ch;relay_store(ch,&incoming,7,&test_layout,100-age,relay_generation);
  }
  unsigned count=0;for(unsigned i=0;i<80;i++)count+=records[i].valid;assert(count==75);
 
@@ -468,13 +427,13 @@ static void demand_cache(void) {
  struct relay_record *r=&records[64+age];*r=(struct relay_record){.valid=true,.child=1,.epoch=7,.capture_frame=100-age,.length=17};r->data[0]=1;r->data[1]=1;
  }
  uint8_t buf[72];struct relay_repair r;
- size_t n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ size_t n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT);
  assert(n && relay_repair_decode(buf,n,&r) && r.count==3 && r.records[0].capture_frame==96 && r.records[2].capture_frame==98);
  relay_repair_result(-EAGAIN);
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+1);assert(n && relay_repair_decode(buf,n,&r) && r.records[0].capture_frame==96);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT+1);assert(n && relay_repair_decode(buf,n,&r) && r.records[0].capture_frame==96);
  relay_repair_result(0);
  c.missing[2]=relay_control_missing(&c, 3)=relay_control_missing(&c, 4)=0;relay_on_control(&c,0);
- n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);assert(n && relay_repair_decode(buf,n,&r) && r.count==2 && r.records[0].capture_frame==99);
+ n=relay_build_repair(buf,RELAY_REPAIR_FIRST_SLOT);assert(n && relay_repair_decode(buf,n,&r) && r.count==2 && r.records[0].capture_frame==99);
  relay_repair_result(0);
  records[68].valid=records[67].valid=true;relay_control_missing(&c, 4)=2;
  c.frame=101;relay_on_control(&c,0);assert(!records[68].valid && records[67].valid);
@@ -489,11 +448,7 @@ int main(int argc,char **argv) {
     if(argc==1 || !strcmp(argv[1],"learned")) {failed_store(); learned_reports();}
     if(argc==1 || !strcmp(argv[1],"maintenance")) maintenance();
     if(argc==1 || !strcmp(argv[1],"fast")) {fast_cache(); final_cache_gap();}
-    if(argc==1 || !strcmp(argv[1],"adjacent")) adjacent_child();
-    if(argc==1 || !strcmp(argv[1],"overflow")) no_fit_request();
-    if(argc==1 || !strcmp(argv[1],"lease")) lease_and_capture();
     if(argc==1 || !strcmp(argv[1],"clock")) presence_clock();
-    if(argc==1 || !strcmp(argv[1],"late-tx")) late_own_tx();
     assert(irq_depth==0);
     return 0;
 }

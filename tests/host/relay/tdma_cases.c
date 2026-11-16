@@ -24,7 +24,7 @@ static void configure(uint8_t own, uint8_t total)
 	relay_timeline_clear(&relay_timeline_active);
 	relay_direct_anchor.valid = false;
 	assert(tdma_update_config(own, total, 16, 7));
-	tdma_last_admitted_frame = tdma_forward_admitted_frame = UINT32_MAX;
+	tdma_last_admitted_frame = tdma_repair_admitted_frame = UINT32_MAX;
 }
 
 static void data_windows(void)
@@ -63,37 +63,7 @@ static void ping_windows(void)
 	puts("PASS presence windows land on other trackers' PING exchanges");
 }
 
-static void forward_slot(void)
-{
-	/* 8 direct members + one forwarding slot (index 8): frame 144 ticks. */
-	configure(0, 9);
-	set_ticks(20 * 144 + 8 * 16 - 3);
-	uint32_t before = sleeps;
-	assert(tdma_wait_for_forward_slot(8, 72));
-	uint32_t pos = now_ticks() % 144;
-	assert(pos >= 8 * 16 + 2 && pos <= 8 * 16 + 16 - 12); /* 72-byte reserve */
-	assert(sleeps > before);
-	uint32_t frame = now_ticks() / 144;
-	/* One packet per frame: the next admission is a later frame. */
-	assert(!tdma_wait_for_forward_slot(8, 72));
-	assert(now_ticks() / 144 == frame); /* return before waiting across own slot */
-	assert(tdma_last_admitted_frame == UINT32_MAX);
-	assert(tdma_wait_for_slot(17));
-	assert(now_ticks() / 144 > frame);
-	assert(tdma_wait_for_forward_slot(8, 72));
-	/* The own slot is never a forwarding slot; the layout bounds it. */
-	assert(!tdma_wait_for_forward_slot(0, 72));
-	assert(!tdma_wait_for_forward_slot(9, 72));
-	/* Guard: slot 7 PINGs in frame 7*227/9 = 176 and spills into slot 8. */
-	uint32_t period = 32768 / 144;
-	uint32_t guard_frame = 7 * period / 9;
-	set_ticks(guard_frame * 144 + 8 * 16 - 1);
-	assert(!tdma_wait_for_forward_slot(8, 72));
-	assert(tdma_wait_for_slot(17));
-	assert(tdma_wait_for_forward_slot(8, 72));
-	assert(now_ticks() / 144 != guard_frame);
-	puts("PASS forwarding slot admission: reserve, one per frame, guards, independence");
-}
+
 
 
 static void final_admission_check(void)
@@ -236,13 +206,13 @@ static void stream_profile(void)
 	 control.frame = f;
 	 control.preamble_ticks = origin + (uint32_t)((uint64_t)f * 4096 / 15) + 178;
 	 tdma_stream_control(&control);
-	 for (unsigned slot = RELAY_V3_REPAIR_FIRST_SLOT; slot < RELAY_V3_TOTAL_SLOTS; slot++) {
-		 uint32_t tx_target = relay_frame_start(origin, f) + slot * RELAY_V3_SLOT_TICKS + RELAY_V3_TX_OFFSET;
+	 for (unsigned slot = RELAY_REPAIR_FIRST_SLOT; slot < RELAY_TOTAL_SLOTS; slot++) {
+		 uint32_t tx_target = relay_frame_start(origin, f) + slot * RELAY_SLOT_TICKS + RELAY_TX_OFFSET;
 		 set_ticks(tx_target - 4U);
-		 assert(tdma_wait_for_forward_slot(slot, 72));
+		 assert(tdma_wait_for_repair_slot(slot, 72));
 		 assert(now_ticks() >= tx_target && now_ticks() <= tx_target + 2U);
-		 assert(tdma_forward_tx_valid(slot, 72));
-		 assert(!tdma_wait_for_forward_slot(slot, 72));
+		 assert(tdma_repair_tx_valid(slot, 72));
+		 assert(!tdma_wait_for_repair_slot(slot, 72));
 	 }
  }
  assert(relay_frame_start(origin,120)==origin+32768);
@@ -276,7 +246,7 @@ static void stream_d0_boundary(void)
 	  assert(now_ticks() == start + TDMA_SLOT_TARGET_OFFSET);
 	  assert(tdma_slot_tx_valid(60));
 	  assert(!tdma_wait_for_slot(60));
-	  set_ticks(start + RELAY_V3_SLOT_TICKS - TDMA_LEN33_PLUS_RESERVE_TICKS + 1);
+	  set_ticks(start + RELAY_SLOT_TICKS - TDMA_LEN33_PLUS_RESERVE_TICKS + 1);
 	  assert(!tdma_slot_tx_valid(60)); /* Original final deadline remains exact. */
   }
  }
@@ -307,7 +277,7 @@ static void layout_full16(void)
 	assert(tdma_stage_config(10, relay_geometry_code(16, 3), 15, 9, 2000));
 	set_ticks(2000);
 	assert(tdma_profile_get() == 1);
-	assert(RELAY_V3_DIRECT_SLOTS == 16 && RELAY_V3_REPAIR_SLOTS == 3);
+	assert(RELAY_DIRECT_SLOTS == 16 && RELAY_REPAIR_SLOTS == 3);
 	for (unsigned f = 0; f < 10000; f++) {
 		uint32_t start = relay_frame_start(2000, f);
 		assert(start == 2000 + f * 300);
@@ -369,8 +339,8 @@ static void variable_repair_timeline(void)
 	relay_control_set_next2_repairs(&c, 1);
 	tdma_stream_control(&c);
 	set_ticks(fourth + 18 * 16 + 2);
-	assert(tdma_wait_for_forward_slot(18, 72) && tdma_forward_tx_valid(18, 72));
-	assert(!tdma_wait_for_forward_slot(19, 72));
+	assert(tdma_wait_for_repair_slot(18, 72) && tdma_repair_tx_valid(18, 72));
+	assert(!tdma_wait_for_repair_slot(19, 72));
 	puts("PASS variable R: two missed control frames, third-miss pose fence, acquisition scan and maintenance admission");
 }
 
@@ -386,15 +356,15 @@ static void repeat_geometry(void)
   tdma_stream_control(&c);
   struct tdma_config cfg;assert(tdma_config_snapshot(&cfg));
   unsigned first=12+(mode==1?2:0),total=15+relay_control_repeat_slots(mode);
-  assert(RELAY_V3_REPAIR_FIRST_SLOT==first);
+  assert(RELAY_REPAIR_FIRST_SLOT==first);
   assert(relay_direct_anchor.next_start-relay_direct_anchor.start>=total*16);
   for(unsigned slot=first;slot<first+3;slot++) {
    uint32_t at=relay_direct_anchor.start+slot*16+2;
-   set_ticks(at-4);assert(tdma_wait_for_forward_slot(slot,72));
-   assert(tdma_forward_tx_valid(slot,72));
+   set_ticks(at-4);assert(tdma_wait_for_repair_slot(slot,72));
+   assert(tdma_repair_tx_valid(slot,72));
   }
   assert(cfg.total_slots==total);
-  assert(!tdma_forward_tx_valid(total,72));
+  assert(!tdma_repair_tx_valid(total,72));
  }
  puts("PASS repeat geometry: all repair grants fit within frame for modes 0/1/2");
 }
@@ -412,7 +382,6 @@ int main(void)
 	stream_only_admission();
 	data_windows();
 	ping_windows();
-	forward_slot();
 	final_admission_check();
 	staged_activation();
 	staged_no_mixed_layouts();

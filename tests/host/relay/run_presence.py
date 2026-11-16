@@ -20,10 +20,10 @@ esb = (ROOT / "src/connection/esb.c").read_text()
 header = (ROOT / "src/connection/esb.h").read_text()
 constants = '\n'.join(re.findall(r'^#define ESB_(?:PING|PONG)\w*[^\n]*', header, re.MULTILINE))
 constants += '\n' + re.search(r'^#define RECEIVER_RESTART_BACKWARD_TICKS[^\n]*', esb, re.MULTILINE)[0]
-note = extract_block(esb, r'^static void esb_note_trailer_locked\([^;{]*\)\s*\{')
+note = extract_block(esb, r'^static void esb_note_delivery_locked\([^;{]*\)\s*\{')
 function = extract_block(esb, r'^bool esb_presence_frame\([^;{]*\)\s*\{')
 control = extract_block(esb, r'^bool esb_relay_control_receive\([^;{]*\)\s*\{')
-lease = extract_block(esb, r'^static inline bool esb_v3_lease_at\([^;{]*\)\s*\{')
+lease = extract_block(esb, r'^static inline bool esb_lease_at\([^;{]*\)\s*\{')
 grant_at = extract_block(esb, r'^bool esb_relay_granted_at\([^;{]*\)\s*\{')
 grant = extract_block(esb, r'^bool esb_layout_granted\([^;{]*\)\s*\{')
 stage = extract_block(esb, r'^static void esb_stage_from_trailer\([^;{]*\)\s*\{')
@@ -138,7 +138,7 @@ static struct relay_rx_frame pong_with(uint32_t t2,uint8_t epoch,uint16_t member
  f.data[3]=t2>>24;f.data[4]=t2>>16;f.data[5]=t2>>8;f.data[6]=t2;
  f.data[7]=ESB_PONG_FLAG_NORMAL;f.data[9]=3;f.data[10]=16;f.data[11]=epoch;
  f.data[12]=relay_crc8(7,f.data,12);
- struct relay_pong_trailer tr={.epoch=epoch,.forward_slot=255,.member_mask=members,.pending=pending,
+ struct relay_pong_trailer tr={.epoch=epoch,.member_mask=members,.pending=pending,
   .pending_epoch=9,.pending_total=4,.pending_slot_ticks=16,.pending_member_mask=0xF,.activation_units=100};
  f.length=13+relay_trailer_encode(f.data+13,&tr);return f;
 }
@@ -183,8 +183,7 @@ int main(int argc,char **argv) {
  } else if(!strcmp(argv[1],"relay-recovery")) {
   esb_conn_state=ESB_ST_RECOVERING;status_error=true;ping_failures=300;
   connection_error_start_time=100;shutdown_requested=true;
-  struct relay_pong_trailer tr={.relayed_mask=4};
-  esb_note_trailer_locked(&tr,3000);
+  esb_note_delivery_locked(3000);
   assert(!ping_failures && !status_error && !connection_error_start_time && !shutdown_requested);
   assert(esb_conn_state==ESB_ST_PAIRED);
  } else if(!strcmp(argv[1],"control") || !strcmp(argv[1],"control-demand")) {
@@ -205,7 +204,7 @@ int main(int argc,char **argv) {
   current_tick=cutoff;assert(!esb_layout_granted() && !esb_relay_granted_at(current_tick));
   relay_runtime_anchor_set(&relay_direct_anchor,10,0xfffffff0U,3,5,0,2,16,120);
   cutoff=relay_direct_anchor.third_start+3U*16U;
-  assert(esb_v3_lease_at(cutoff-1));assert(!esb_v3_lease_at(cutoff));
+  assert(esb_lease_at(cutoff-1));assert(!esb_lease_at(cutoff));
 
   assert(!esb_relay_control_receive(&f)); /* duplicate/stale frame */
   b.frame++; relay_control_encode(f.data,&b); f.end_kernel_ticks+=10;

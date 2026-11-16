@@ -321,7 +321,7 @@ struct composite_builder {
 	uint8_t types[5];
 	int64_t *last_times[5];
 	int64_t stamps[5];
-	uint8_t sub_max; /* sub-packet bytes; v3 lowers it to the slot's payload cap - 4 */
+	uint8_t sub_max; /* sub-packet bytes; relay lowers it to the slot's payload cap - 4 */
 	int n;
 	int used;
 	bool has_event, event_checked;
@@ -1507,7 +1507,7 @@ static void composite_commit_timestamps(const struct composite_builder *builder,
 	}
 }
 
-/* Avoid the compact quaternion's transcendental encoding when v3 has room
+/* Avoid the compact quaternion's transcendental encoding when relay has room
  * for the ordinary pose plus info. D10 still needs the compact representation. */
 static uint8_t composite_pose_type(const struct composite_builder *builder,
                                   bool precise, bool info_wanted, bool stream)
@@ -2073,11 +2073,6 @@ static void connection_thread(void)
 				continue;
 			}
 
-			/* Admission yields if the next own opportunity comes first. */
-			if (relay_forward_slot() >= 0 && relay_records_pending()
-			    && esb_write_relay() == 0) {
-				continue;
-			}
 
 #if CONFIG_CONNECTION_RAW_COLLECTION
 			/* Raw streams yield one admission to a due event; test mode may
@@ -2236,10 +2231,6 @@ static void connection_thread(void)
 				(void)esb_write(diag, true, diag_length);
 				continue;
 			}
-		}
-		/* Head without own data due: forward children in the own slot. */
-		if (radio_ready && relay_records_pending() && esb_write_relay() != -EAGAIN) {
-			continue;
 		}
 
 		connection_idle_wait(now);

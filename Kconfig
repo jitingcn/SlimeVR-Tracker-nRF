@@ -884,9 +884,9 @@ config CONNECTION_RELAY
         receiver PONGs while the own uplink fails (instead of channel
         searching), and act as a relay head when the receiver assigns
         children: listen in their TDMA slots and forward their pose frames.
-        Profile 0 retains own-PONG assignments and bundled forwarding.
-        Profile 1 uses v3 control frame watch assignments and granted repairs from a
-        three-frame cache. Both require a 72-byte ESB payload buffer.
+        Normal direct TDMA has no helper watch overhead. On demand, control
+        feedback assigns watch windows and grants bounded cached repairs.
+        Requires a 72-byte ESB payload buffer.
 
 menu "TDMA diagnostics"
 

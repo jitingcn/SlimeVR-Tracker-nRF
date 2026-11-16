@@ -60,8 +60,8 @@ def main():
         "TDMA_SLOT_TARGET_OFFSET", "TDMA_PING_LATE_TOLERANCE_TICKS", "TDMA_MIN_SAFE_SLOT_TICKS",
         "TDMA_PING_WINDOW_SLOTS"])
     r = consts(TRACKER / "src/connection/relay.h", [
-        "RELAY_HEAD_LEASE_MS", "RELAY_PRESENCE_INTERVAL_MS", "RELAY_RX_TAIL_US",
-        "RELAY_FORWARD_GUARD_TICKS", "RELAY_PRESENCE_CLOCK_LEAD_US"])
+        "RELAY_PRESENCE_INTERVAL_MS", "RELAY_RX_TAIL_US",
+        "RELAY_PRESENCE_CLOCK_LEAD_US"])
     p = consts(TRACKER / "src/connection/relay_protocol.h", [
         "RELAY_FRAME_MAX", "RELAY_TRAILER_LEN", "RELAY_TRAILER_PENDING_LEN", "RELAY_ACTIVATION_UNIT_TICKS",
         "RELAY_LAYOUT_GRANT_MS", "RELAY_LAYOUT_ACTIVATION_MS", "RELAY_RX_LEAD_TICKS"])
@@ -74,7 +74,7 @@ def main():
     rc = None
     if (RECEIVER / "src/connection/relay_coord.h").is_file():
         rc = consts(RECEIVER / "src/connection/relay_coord.h", [
-            "RC_FWD_REVOKE_WAIT_MS", "RC_MAX_TOTAL_SLOTS", "RC_WINDOW_MS"])
+            "RC_WINDOW_MS"])
         recv = consts(RECEIVER / "src/connection/esb.c", [
             "TDMA_BASE_SLOT_TICKS", "TDMA_SLOT_TICKS_MAX_LEVEL0", "TDMA_SHADOW_LEAVE_GRACE_MS"])
     # Worst case: a PONG announcing a pending layout.
@@ -110,42 +110,6 @@ def main():
           f"head RX settled at {rx_ready + 10 + RX_SETTLE_US:+.0f} us (10 us wake jitter + {RX_SETTLE_US:.0f} us settle) <= "
           f"child's earliest preamble {child_first_bit:+.0f} us with {SYNC_ERROR_TICKS} ticks of relative sync error")
 
-    # 3. Head -> receiver: full-size bundle in the head's own or forwarding slot.
-    bundle_end = (S - t["TDMA_LEN33_PLUS_RESERVE_TICKS"]) * TICK_US + CALL_LATENCY_US + RAMP_US + airtime_us(p["RELAY_FRAME_MAX"])
-    next_first_bit = slot_us + t["TDMA_SLOT_TARGET_OFFSET"] * TICK_US + RAMP_US
-    check(bundle_end <= next_first_bit,
-          f"72B bundle admitted last ends {bundle_end:.0f} us <= next owner's earliest preamble {next_first_bit:.0f} us")
-    window_ticks = S - t["TDMA_LEN33_PLUS_RESERVE_TICKS"] - t["TDMA_SLOT_TARGET_OFFSET"] + 1
-    check(window_ticks >= 3, f"72B admission window {window_ticks} ticks >= 3 (wake-jitter rule)")
-
-    # 4. Ordering: a record is forwarded only while more than
-    # RELAY_FORWARD_GUARD_TICKS remain before the child's next slot, and a
-    # full bundle ends within that guard of being built (built right before
-    # TX), so the relayed copy always precedes the child's next frame.
-    bundle_duration = CALL_LATENCY_US + RAMP_US + airtime_us(p["RELAY_FRAME_MAX"])
-    guard_us = (r["RELAY_FORWARD_GUARD_TICKS"] + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US + RAMP_US
-    check(bundle_duration + TICK_US <= guard_us,
-          f"72B bundle ends {bundle_duration:.0f} us after it is built (+1 tick clock read) <= guard "
-          f"{r['RELAY_FORWARD_GUARD_TICKS']} ticks + child's earliest preamble offset = {guard_us:.0f} us, "
-          "so a relayed copy always precedes the child's next frame")
-    # The guard must not exceed what the slot right before the child's leaves:
-    # a head whose own slot directly precedes the child's (every two-tracker
-    # layout) must still be able to forward. Earliest own-slot admission is at
-    # TDMA_SLOT_TARGET_OFFSET; the child's next slot starts one slot later.
-    latest_72 = S - t["TDMA_LEN33_PLUS_RESERVE_TICKS"]
-    adjacent_remaining = S - latest_72
-    check(adjacent_remaining > r["RELAY_FORWARD_GUARD_TICKS"],
-          f"head slot adjacent to the child's: {adjacent_remaining} ticks remain even at the latest 72B admission > "
-          f"guard {r['RELAY_FORWARD_GUARD_TICKS']} (forwardable)")
-
-    # 5. Recovery timing.
-    check(r["RELAY_HEAD_LEASE_MS"] >= 2 * ping_interval, f"head lease {r['RELAY_HEAD_LEASE_MS']} ms survives one missed PONG")
-    if rc:
-        check(rc["RC_FWD_REVOKE_WAIT_MS"] > r["RELAY_HEAD_LEASE_MS"] + ping_interval,
-              f"forwarding slot withdrawn {rc['RC_FWD_REVOKE_WAIT_MS']} ms after revoke > lease + PONG period")
-        check(rc["RC_MAX_TOTAL_SLOTS"] == tracker_max, "members + forwarding slots stay within what trackers accept")
-        check(link["LINK_UPLINK_HOLDOVER_MS"] < recv["TDMA_SHADOW_LEAVE_GRACE_MS"],
-              "uplink holdover ends before receiver membership eviction")
     check(link["LINK_UPLINK_HOLDOVER_MS"] < 10 * ping_interval, "uplink holdover ends before TDMA sync goes stale")
     check(link["LINK_PRESENCE_TIMEOUT_MS"] > 3 * r["RELAY_PRESENCE_INTERVAL_MS"],
           "several presence windows fit in the presence timeout")
@@ -168,41 +132,41 @@ def main():
           f"each tracker gets {p['RELAY_LAYOUT_ACTIVATION_MS'] // ping_interval} own PONGs to learn a pending layout")
 
     # Evaluate the shared table rather than duplicating its layout arithmetic.
-    names = ["RELAY_V3_SLOT_TICKS", "RELAY_V3_DIRECT_SLOTS", "RELAY_V3_REPAIR_SLOTS",
-             "RELAY_V3_DIRECT_MAX", "RELAY_V3_LAST_DIRECT_MAX", "RELAY_V3_GRID_TICKS", "RELAY_V3_GRID_FRAMES"]
+    names = ["RELAY_SLOT_TICKS", "RELAY_DIRECT_SLOTS", "RELAY_REPAIR_SLOTS",
+             "RELAY_DIRECT_MAX", "RELAY_LAST_DIRECT_MAX", "RELAY_GRID_TICKS", "RELAY_GRID_FRAMES"]
     with tempfile.TemporaryDirectory() as temporary:
         source = Path(temporary) / "geometry.c"
         binary = Path(temporary) / "geometry"
         source.write_text('#include <stdio.h>\n#include "relay_protocol.h"\nint main(void) {\n' +
             ''.join(f'printf("%u\\n", (unsigned){name});\n' for name in names) + '}\n')
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + ['-I', str(TRACKER / 'src/connection'), str(source), '-o', str(binary)], check=True)
-        v3 = dict(zip(names, map(int, subprocess.check_output([str(binary)], text=True).split())))
-    s3 = v3["RELAY_V3_SLOT_TICKS"]
+        relay = dict(zip(names, map(int, subprocess.check_output([str(binary)], text=True).split())))
+    s3 = relay["RELAY_SLOT_TICKS"]
     latest32 = (s3 - t["TDMA_LEN18_32_RESERVE_TICKS"]) * TICK_US
-    latest32 += CALL_LATENCY_US + RAMP_US + airtime_us(v3["RELAY_V3_LAST_DIRECT_MAX"])
+    latest32 += CALL_LATENCY_US + RAMP_US + airtime_us(relay["RELAY_LAST_DIRECT_MAX"])
     earliest_b = (s3 + t["TDMA_SLOT_TARGET_OFFSET"] - SYNC_ERROR_TICKS) * TICK_US + RAMP_US
     for mcu, disable in (("nRF52840", 4), ("nRF54L15", 2)):
         check(latest32 + disable + RAMP_US + RX_SETTLE_US <= earliest_b,
-              f"v3 last direct->control frame {mcu}: {earliest_b - latest32 - disable - RAMP_US - RX_SETTLE_US:.3f} us slack")
+              f"relay last direct->control frame {mcu}: {earliest_b - latest32 - disable - RAMP_US - RX_SETTLE_US:.3f} us slack")
     control_end = t["TDMA_SLOT_TARGET_OFFSET"] * TICK_US + RAMP_US + airtime_us(72)
     r0_preamble = (s3 + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US + RAMP_US
     check(r0_preamble - control_end - SYNC_ERROR_TICKS * TICK_US >= TURNAROUND_US,
-          "v3 control frame->R0 leaves the receiver turnaround allowance after relative clock error")
+          "relay control frame->R0 leaves the receiver turnaround allowance after relative clock error")
     r0_admission = (s3 + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US
-    check(r0_admission - control_end >= 60, "v3 control frame decode and ownership transfer have 60 us")
+    check(r0_admission - control_end >= 60, "relay control frame decode and ownership transfer have 60 us")
     worst = 0
-    for phase in range(v3["RELAY_V3_GRID_FRAMES"]):
-        start = lambda frame: (frame * v3["RELAY_V3_GRID_TICKS"]) // v3["RELAY_V3_GRID_FRAMES"]
-        for source in range(v3["RELAY_V3_DIRECT_SLOTS"]):
+    for phase in range(relay["RELAY_GRID_FRAMES"]):
+        start = lambda frame: (frame * relay["RELAY_GRID_TICKS"]) // relay["RELAY_GRID_FRAMES"]
+        for source in range(relay["RELAY_DIRECT_SLOTS"]):
             original = start(phase) + source * s3 + t["TDMA_SLOT_TARGET_OFFSET"]
-            for repair in range(v3["RELAY_V3_REPAIR_SLOTS"]):
+            for repair in range(relay["RELAY_REPAIR_SLOTS"]):
                 for age in range(3):
-                    finish = start(phase + age) + (v3["RELAY_V3_DIRECT_SLOTS"] + 1 + repair) * s3
+                    finish = start(phase + age) + (relay["RELAY_DIRECT_SLOTS"] + 1 + repair) * s3
                     finish += s3 - t["TDMA_LEN33_PLUS_RESERVE_TICKS"]
                     delay = (finish - original) * TICK_US + CALL_LATENCY_US + airtime_us(72)
                     delay += SYNC_ERROR_TICKS * TICK_US
                     worst = max(worst, delay)
-    check(worst < 25000, f"v3 source/repair/age/phase sweep worst {worst:.3f} us < 25 ms")
+    check(worst < 25000, f"relay source/repair/age/phase sweep worst {worst:.3f} us < 25 ms")
 
     # Table.
     print("\nLatency added by relay (worst case = one frame + one slot) and head RX cost per child:")

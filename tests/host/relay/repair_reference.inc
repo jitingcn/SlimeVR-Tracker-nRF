@@ -4,7 +4,7 @@ size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 	struct relay_repair repair
 		= {.helper = control_helper, .epoch = control_plan.epoch, .session = control_plan.session};
 	unsigned key = irq_lock();
-	unsigned grant = slot - RELAY_V3_REPAIR_FIRST_SLOT;
+	unsigned grant = slot - RELAY_REPAIR_FIRST_SLOT;
 	repair_pending_mask = 0;
 	pending_report.count = 0;
 #ifdef CONFIG_RELAY_FRAME_LEDGER
@@ -46,7 +46,7 @@ size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 	 * Fill consecutive missing ages in one packet; a gap waits for the next
 	 * control frame confirmation or the existing cache expiry, never a longer deadline. */
 	uint16_t blocked = 0;
-	for (int age = RELAY_V3_CACHE_FRAMES - 1; age >= 0; age--) {
+	for (int age = RELAY_CACHE_FRAMES - 1; age >= 0; age--) {
 		uint16_t included = 0;
 		for (unsigned i = 0; i < RELAY_CACHE_RECORDS && repair.count < RELAY_MAX_CHILDREN; i++) {
 			struct relay_record *r = &records[i];
@@ -86,7 +86,7 @@ size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 		 * so it must not suppress a younger copy held by this final owner.
 		 * Earlier grants and age-one gaps retain chronological blocking. */
 		bool final_expiring_gap = control_plan.repair_count >= 1 && control_plan.repair_count <= 3
-							   && grant == control_plan.repair_count - 1U && age == RELAY_V3_CACHE_FRAMES - 1;
+							   && grant == control_plan.repair_count - 1U && age == RELAY_CACHE_FRAMES - 1;
 		if (!final_expiring_gap) {
 			blocked |= control_plan.missing[age] & ~included;
 		}

@@ -65,7 +65,7 @@ int main(int argc,char **argv){
          && composite_try_add(&b,5) && composite_try_add(&b,0));
   assert(send_builder(&b)==(BIT(2)|BIT(4)|BIT(5)|BIT(0)));
   assert(sent_len<=RELAY_RECORD_MAX_LEN && "producer emitted an unrelayable composite");
- }else if(!strcmp(argv[1],"v3-size")){
+ }else if(!strcmp(argv[1],"relay-size")){
   for(unsigned slot=0;slot<11;slot++){
    reset();event_due=true;publish_a();publish_m();
    unsigned cap=relay_direct_payload_max(1,slot);
@@ -90,5 +90,5 @@ with tempfile.TemporaryDirectory(prefix="relay-producer-",dir="/tmp") as tmp:
         "-DCONFIG_CONNECTION_RELAY=1","-DCONFIG_CONNECTION_RAW_COLLECTION=1",
         "-DCONFIG_SENSOR_USE_MAGNETOMETER=1","-I",str(HERE.parent/"concurrency"),
         "-I",str(ROOT/"src"),str(path),"-lm","-o",str(binary)],check=True)
-    for case in sys.argv[1:] or ("hid","fresh-wake","event-prefetch","rates","record-size","v3-size"):
+    for case in sys.argv[1:] or ("hid","fresh-wake","event-prefetch","rates","record-size","relay-size"):
         subprocess.run([str(binary),case],check=True)

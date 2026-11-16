@@ -1,26 +1,6 @@
+/* Control feedback assigns helper watch windows and grants cached repairs. */
 #include "frame_ledger.h"
-/*
- * Tracker side of receiver-coordinated peer relay. See relay.h.
- *
- * Profile 1 (v3) uses control frame watch assignments, a three-capture-frame cache and
- * granted repair slots. The relay thread owns peer windows; the connection
- * thread owns control frame windows and submits repairs within the unchanged deadline.
- *
- * Profile-0 compatibility timing budget of one relayed frame (receiver ticks, 1 tick = 30.5 us,
- * slot width S >= 16, frame F = total_slots * S):
- *   child  TX admitted at slot pos [2, S - reserve], on air ~4 ticks (17 control frame)
- *   head   RX from slot start - RELAY_RX_LEAD_TICKS (40 us ramp), radio
- *          disables itself at the child's END; thread collects at slot end
- *          (+ RELAY_RX_TAIL_US if a frame is still arriving)
- *   record valid until the child's next slot start (capture window + F), and
- *          is forwarded only while a full bundle sent now ends before then
- *          (RELAY_FORWARD_GUARD_TICKS), so a relayed copy always reaches the
- *          receiver before the child's next frame and can never be mistaken
- *          for newer data
- *   head   forwards in its own slot (bundled, <= 1 frame later) or in its
- *          forwarding slot at the end of the same frame
- * Added latency is therefore below one frame (5.4 ms at 11 trackers, S = 16).
- */
+
 #include "relay.h"
 
 #include "relay_radio.h"
@@ -38,6 +18,11 @@
 
 LOG_MODULE_REGISTER(relay, LOG_LEVEL_INF);
 
+struct relay_watch_assignment {
+ uint8_t epoch;
+ uint16_t children_mask, member_mask;
+};
+
 struct relay_record {
 	uint8_t data[RELAY_RECORD_MAX_LEN];
 	uint8_t length;
@@ -45,18 +30,10 @@ struct relay_record {
 	uint8_t child;
 	uint8_t epoch;
 	uint16_t capture_frame;
-	uint32_t expiry; /* Profile 0: next child slot; v3 uses capture_frame age. */
 	bool valid;
 };
 
-/* Assignment from the own PONG trailer; written in ISR, read under irq_lock. */
-static struct {
-	struct relay_pong_trailer trailer;
-	int64_t received_ms;
-	bool valid;
-} assignment;
-
-#define RELAY_CACHE_RECORDS (RELAY_MAX_TRACKERS * RELAY_V3_CACHE_FRAMES)
+#define RELAY_CACHE_RECORDS (RELAY_MAX_TRACKERS * RELAY_CACHE_FRAMES)
 static struct relay_record records[RELAY_MAX_TRACKERS * RELAY_CACHE_MAX_FRAMES];
 static struct relay_control control_plan;
 static struct {
@@ -77,9 +54,6 @@ static uint8_t control_helper;
 static uint32_t repair_attempted;
 static uint64_t repair_selected, repair_pending_mask;
 static uint64_t repair_selected_high, repair_pending_high;
-
-static bool overflow_pending;
-static int64_t forward_needed_until_ms;
 
 static struct {
 	uint32_t head_windows;
@@ -108,8 +82,6 @@ static struct {
 } stats;
 
 /* Last own trailer that carried children (diagnostics). */
-static int64_t children_seen_ms;
-static bool children_seen;
 
 static K_SEM_DEFINE(relay_wake_sem, 0, 1);
 static K_SEM_DEFINE(relay_control_done, 0, 1);
@@ -121,23 +93,6 @@ void relay_control_serviced(void)
 	/* The connection owner has finished the unchanged repair deadlines. */
 	relay_control_account();
 	k_sem_give(&relay_control_done);
-}
-
-void relay_on_own_trailer(const struct relay_pong_trailer *trailer)
-{
-	unsigned key = irq_lock();
-	bool was_head = assignment.valid && assignment.trailer.children_mask;
-	assignment.trailer = *trailer;
-	assignment.received_ms = k_uptime_get();
-	assignment.valid = true;
-	if (trailer->children_mask) {
-		children_seen_ms = assignment.received_ms;
-		children_seen = true;
-	}
-	irq_unlock(key);
-	if (!was_head && trailer->children_mask) {
-		k_sem_give(&relay_wake_sem);
-	}
 }
 
 /* Caller holds IRQ lock. Invalid records never expose their old payload. */
@@ -155,14 +110,11 @@ void relay_reset(void)
 	}
 	unsigned key = irq_lock();
 	relay_generation++;
-	assignment.valid = false;
 	control_valid = false;
 	control_account_pending = false;
 	relay_cache_invalidate();
 	pending_report.count = 0;
 	memset(peer_counts, 0, sizeof(peer_counts));
-	overflow_pending = false;
-	forward_needed_until_ms = 0;
 	irq_unlock(key);
 }
 
@@ -172,7 +124,7 @@ void relay_reset(void)
 /* Attribute provenance: Capture handoff (0084d3a6) and repair-speed (dc676076) cohorts retained O3 as a group. No isolated attribute-only saving; retain pending A/B. */
 __attribute__((optimize("O3")))
 #endif
-static bool relay_assignment_locked(struct relay_pong_trailer *out, struct tdma_layout *layout)
+static bool relay_assignment_locked(struct relay_watch_assignment *out, struct tdma_layout *layout)
 {
 	if (!tdma_layout_get(layout)) {
 		return false;
@@ -181,7 +133,7 @@ static bool relay_assignment_locked(struct relay_pong_trailer *out, struct tdma_
 		uint32_t now;
 		if (!control_valid || control_plan.epoch != layout->epoch || !tdma_network_now(&now) ||
 		    (uint32_t)(now - control_plan.preamble_ticks) >
-			RELAY_V3_CACHE_FRAMES * RELAY_V3_FRAME_TICKS_MAX) {
+			RELAY_CACHE_FRAMES * RELAY_FRAME_TICKS_MAX) {
 			return false;
 		}
 		uint16_t children = 0;
@@ -197,33 +149,17 @@ static bool relay_assignment_locked(struct relay_pong_trailer *out, struct tdma_
 				children |= 1U << child;
 			}
 		}
-		*out = (struct relay_pong_trailer){.epoch = layout->epoch,
+		*out = (struct relay_watch_assignment){.epoch = layout->epoch,
 						   .children_mask = children,
 						   .member_mask = control_plan.members,
-						   .forward_slot = RELAY_NO_SLOT};
+						   };
 		return children != 0;
 	}
-	unsigned key = irq_lock();
-	bool valid = assignment.valid;
-	struct relay_pong_trailer trailer = assignment.trailer;
-	int64_t age = k_uptime_get() - assignment.received_ms;
-	if (valid && age > RELAY_HEAD_LEASE_MS) {
-		assignment.valid = false;
-		valid = false;
-		if (trailer.children_mask) {
-			stats.lease_expired++;
-		}
-	}
-	irq_unlock(key);
-	if (!valid || trailer.epoch != layout->epoch || !trailer.children_mask
-	    || esb_link_state() != LINK_HEALTHY) {
-		return false;
-	}
-	*out = trailer;
-	return true;
+
+	return false;
 }
 
-static bool relay_assignment_get(struct relay_pong_trailer *out, struct tdma_layout *layout, uint32_t *generation)
+static bool relay_assignment_get(struct relay_watch_assignment *out, struct tdma_layout *layout, uint32_t *generation)
 {
 	unsigned key = irq_lock();
 	bool valid = relay_assignment_locked(out, layout);
@@ -234,48 +170,30 @@ static bool relay_assignment_get(struct relay_pong_trailer *out, struct tdma_lay
 
 bool relay_head_active(void)
 {
-	struct relay_pong_trailer trailer;
+	struct relay_watch_assignment trailer;
 	struct tdma_layout layout;
 	return relay_assignment_get(&trailer, &layout, NULL);
-}
-
-int relay_forward_slot(void)
-{
-	struct relay_pong_trailer trailer;
-	struct tdma_layout layout;
-	if (!relay_assignment_get(&trailer, &layout, NULL) || trailer.forward_slot == RELAY_NO_SLOT) {
-		return -1;
-	}
-	/* A forwarding slot lies after every direct member's slot. Anything else
-	 * would collide with a tracker and is ignored (bundle in own slot). */
-	uint8_t direct = relay_mask_count(trailer.member_mask);
-	if (trailer.forward_slot < direct || trailer.forward_slot >= layout.total_slots
-	    || trailer.forward_slot == layout.slot_index) {
-		return -1;
-	}
-	return trailer.forward_slot;
 }
 
 #if defined(__GNUC__) && !defined(__clang__)
 /* Attribute provenance: Capture handoff (0084d3a6) and repair-speed (dc676076) cohorts retained O3 as a group. No isolated attribute-only saving; retain pending A/B. */
 __attribute__((optimize("O3")))
 #endif
-static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8_t epoch, uint32_t expiry,
+static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8_t epoch,
 	const struct tdma_layout *snapshot, uint16_t captured, uint32_t generation)
 {
 	unsigned key = irq_lock();
-	if (generation != relay_generation || (snapshot->profile &&
-	    (!control_valid || control_plan.epoch != epoch))) {
+	if (generation != relay_generation || !snapshot->profile ||
+	    !control_valid || control_plan.epoch != epoch) {
 		irq_unlock(key);
 		return;
 	}
-	const struct tdma_layout layout = *snapshot;
 	struct relay_record *slot = NULL;
 	for (unsigned i = 0;
-		 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+		 i < (RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan));
 		 i++) {
 		if (records[i].valid && records[i].child == child &&
-		    (!layout.profile || records[i].capture_frame == captured)) {
+		    records[i].capture_frame == captured) {
 			slot = &records[i];
 			stats.replaced++; /* not forwarded within a frame: superseded */
 			break;
@@ -283,7 +201,7 @@ static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8
 	}
 	for (unsigned i = 0;
 		 slot == NULL
-		 && i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+		 && i < (RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan));
 		 i++) {
 		if (!records[i].valid) {
 			slot = &records[i];
@@ -296,135 +214,13 @@ static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8
 		slot->child = child;
 		slot->epoch = epoch;
 		slot->capture_frame = captured;
-		slot->expiry = expiry;
 		slot->valid = true;
 		repair_diag[child].stored++;
 	}
 	irq_unlock(key);
 }
 
-/* Drop records that can no longer reach the receiver before their child's
- * next frame (RELAY_FORWARD_GUARD_TICKS), or that belong to another layout.
- * Caller holds irq_lock. */
-static void relay_expire_locked(uint32_t now, const struct tdma_layout *layout)
-{
-	uint16_t frame = layout->profile ? (uint16_t)relay_frame_at_tick(
-		relay_control_origin(control_plan.preamble_ticks, control_plan.frame), now) : 0;
-	for (unsigned i = 0;
-		 i < (layout->profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
-		 i++) {
-		if (!records[i].valid) {
-			continue;
-		}
-		int32_t remaining = (int32_t)(records[i].expiry - now);
-		if (records[i].epoch != layout->epoch || (!layout->profile && remaining <= (int32_t)RELAY_FORWARD_GUARD_TICKS)
-			|| (layout->profile
-				&& (uint16_t)(frame - records[i].capture_frame) >= relay_control_cache_frames(&control_plan))) {
-			records[i].valid = false;
-			stats.expired++;
-		}
-	}
-}
-
-bool relay_records_pending(void)
-{
-	struct tdma_layout layout;
-	uint32_t now;
-	if (!tdma_layout_get(&layout) || !tdma_network_now(&now)) {
-		return false;
-	}
-	bool pending = false;
-	if (layout.profile) {
-		uint32_t target;
-		uint8_t slot;
-		if (relay_next_repair(&target, &slot) &&
-		    !control_plan.grants[slot - RELAY_V3_REPAIR_FIRST_SLOT].children) {
-			for (unsigned c = 0; c < RELAY_MAX_TRACKERS; c++) {
-				pending |= peer_counts[c].expected != 0;
-			}
-		}
-	}
-	unsigned key = irq_lock();
-	relay_expire_locked(now, &layout);
-	for (unsigned i = 0;
-		 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
-		 i++) {
-		pending |= records[i].valid;
-	}
-	irq_unlock(key);
-	return pending;
-}
-
-uint8_t relay_info_caps(void)
-{
-	unsigned key = irq_lock();
-	bool needed = k_uptime_get() < forward_needed_until_ms;
-	irq_unlock(key);
-	return RELAY_INFO_CAPS | (needed ? RELAY_CAP_FORWARD_REQUEST : 0U);
-}
-
-size_t relay_build_bundle(uint8_t *buf, size_t own_len, size_t capacity, uint8_t head_id)
-{
-	struct tdma_layout layout;
-	uint32_t now;
-	if (!tdma_layout_get(&layout) || !tdma_network_now(&now)) {
-		return 0;
-	}
-	uint8_t own[RELAY_FRAME_MAX];
-	if (own_len > sizeof(own)) {
-		return 0;
-	}
-	memcpy(own, buf, own_len);
-	uint8_t out[RELAY_FRAME_MAX];
-	struct relay_bundle_builder builder;
-	size_t length = 0;
-	unsigned key = irq_lock();
-	relay_expire_locked(now, &layout);
-	if (relay_bundle_begin(&builder, out, capacity, head_id, own, (uint8_t)own_len, overflow_pending)) {
-		bool dropped = false;
-		for (unsigned i = 0;
-			 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
-			 i++) {
-			if (!records[i].valid) {
-				continue;
-			}
-			if (relay_bundle_add(&builder, records[i].data, records[i].length, records[i].rssi)) {
-				records[i].valid = false;
-			} else {
-				dropped = true;
-			}
-		}
-		length = relay_bundle_finish(&builder);
-		if (dropped) {
-			/* A zero-record bundle cannot carry its overflow flag. Advertise
-			 * the request in ordinary info traffic, which needs no spare room. */
-			overflow_pending = true;
-			forward_needed_until_ms = k_uptime_get() + 2000;
-			stats.overflow++;
-		}
-		if (length) {
-			stats.forwarded += builder.records;
-			/* Report a drop on the next bundle the receiver can see. */
-			overflow_pending = dropped;
-		}
-	} else {
-		for (unsigned i = 0;
-			 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
-			 i++) {
-			if (records[i].valid) {
-				overflow_pending = true;
-				forward_needed_until_ms = k_uptime_get() + 2000;
-				stats.overflow++;
-				break;
-			}
-		}
-	}
-	irq_unlock(key);
-	if (length) {
-		memcpy(buf, out, length);
-	}
-	return length;
-}
+uint8_t relay_info_caps(void) { return RELAY_INFO_CAPS; }
 
 /* ------------------------------------------------------------------------ */
 
@@ -472,14 +268,14 @@ static void peer_count(uint8_t child, bool heard, uint8_t rssi)
 /* Attribute provenance: Capture handoff (0084d3a6) and repair-speed (dc676076) cohorts retained O3 as a group. No isolated attribute-only saving; retain pending A/B. */
 __attribute__((optimize("O3")))
 #endif
-static bool relay_head_window(const struct relay_pong_trailer *trailer, const struct tdma_layout *layout, uint32_t generation)
+static bool relay_head_window(const struct relay_watch_assignment *trailer, const struct tdma_layout *layout, uint32_t generation)
 {
 	unsigned snapshot_key = irq_lock();
 	if (generation != relay_generation) { irq_unlock(snapshot_key); return false; }
 	uint32_t session = control_plan.session;
 	uint32_t control_frame = control_plan.frame;
 	uint32_t control_start = relay_control_start(control_plan.preamble_ticks);
-	bool valid = !layout->profile || (control_valid && control_plan.epoch == layout->epoch);
+	bool valid = layout->profile && control_valid && control_plan.epoch == layout->epoch;
 	irq_unlock(snapshot_key);
 	if (!valid) return false;
 	uint32_t now;
@@ -509,18 +305,17 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	if (best_child < 0) {
 		return false;
 	}
-	if (layout->profile) {
+	{
 		uint32_t f = relay_frame_near(control_frame, control_start, best_start);
-		if (f <= control_frame || f - control_frame > RELAY_V3_CACHE_FRAMES) {
+		if (f <= control_frame || f - control_frame > RELAY_CACHE_FRAMES) {
 			return false;
 		}
 	}
 	uint32_t rx_at = best_start - RELAY_RX_LEAD_TICKS;
 	uint8_t pipe = 1U + (uint8_t)best_child % 7U;
 	uint32_t capture_end = best_start + layout->slot_ticks;
-	uint32_t tail_end = capture_end + RELAY_V3_CAPTURE_TAIL_TICKS;
-	if (layout->profile &&
-	    (unsigned)relay_member_slot(trailer->member_mask, best_child) == RELAY_V3_DIRECT_SLOTS - 1U) {
+	uint32_t tail_end = capture_end + RELAY_CAPTURE_TAIL_TICKS;
+	if ((unsigned)relay_member_slot(trailer->member_mask, best_child) == RELAY_DIRECT_SLOTS - 1U) {
 		/* The control frame owns the radio from its existing RX lead, including when
 		 * D10 cannot acquire the radio or never receives an END. */
 		capture_end -= RELAY_RX_LEAD_TICKS;
@@ -532,9 +327,7 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 		return false;
 	}
 	stats.head_windows++;
-	/* A long own bundle can finish just after the next slot's RX lead.
-	 * Retry briefly: the child's earliest preamble is offset 2 + TX ramp,
-	 * so RXEN by offset 1 still leaves one tick of ramp/clock margin. */
+
 	bool acquired = false, have_now;
 	unsigned rx_key;
 #ifdef CONFIG_RELAY_FRAME_LEDGER
@@ -562,13 +355,13 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	if (!acquired) {
 		if (have_now && (int32_t)(now - rx_at) > (int32_t)stats.start_late_max)
 			stats.start_late_max = (uint16_t)MIN(now - rx_at, UINT16_MAX);
-		if (layout->profile) peer_count(best_child, false, 0);
+		peer_count(best_child, false, 0);
 		stats.head_busy++;
 		relay_ledger_tick(best_start, best_child, LEDGER_MISS, !have_now ? 6 : attempted ? 1 : 5);
 		(void)tdma_wait_network_tick(capture_end);
 		return true;
 	}
-	if (layout->profile) {
+	{
 		if (radio_capture_init() != 0) {
 			irq_unlock(rx_key);
 			peer_count(best_child, false, 0);
@@ -593,19 +386,17 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	uint32_t rx_started;
 	int16_t rx_start = tdma_network_now(&rx_started) ? (int32_t)(rx_started - best_start) : -32768;
 #endif
-	if (layout->profile) {
+	{
 		peer_count(best_child, false, 0);
 		while (!relay_radio_ended() && tdma_network_now(&now) && (int32_t)(capture_end - now) > 0) {
 			k_busy_wait(5);
 		}
-	} else {
-		(void)tdma_wait_network_tick(best_start + layout->slot_ticks);
 	}
 	for (uint32_t waited = 0;
 	     relay_radio_busy() &&
-	     waited < (layout->profile ? RELAY_V3_CAPTURE_TAIL_TICKS * 1000000U / 32768U : RELAY_RX_TAIL_US);
+	     waited < (RELAY_CAPTURE_TAIL_TICKS * 1000000U / 32768U);
 	     waited += 10) {
-		if (layout->profile && (!tdma_network_now(&now) || (int32_t)(tail_end - now) <= 0)) {
+		if ((!tdma_network_now(&now) || (int32_t)(tail_end - now) <= 0)) {
 			break;
 		}
 		k_busy_wait(10);
@@ -622,7 +413,7 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	uint16_t radio_observation = relay_radio_observation();
 #endif
 	bool captured = relay_radio_take(&frame);
-	if (captured && layout->profile) {
+	if (captured) {
 		captured = radio_capture_rx_end(&frame.end_kernel_ticks);
 	}
 	if (!relay_radio_stop()) { relay_clock(false); return true; }
@@ -651,10 +442,8 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	stats.capture_length = frame.length;
 	if (!relay_frame_is_pose(frame.data, frame.length, (uint8_t)best_child) ||
 	    frame.length >
-		(layout->profile
-		     ? relay_direct_payload_max(layout->profile,
-						(uint8_t)relay_member_slot(trailer->member_mask, best_child))
-		     : RELAY_RECORD_MAX_LEN)) {
+		relay_direct_payload_max(layout->profile,
+			(uint8_t)relay_member_slot(trailer->member_mask, best_child))) {
 		stats.head_foreign++;
 		return true;
 	}
@@ -662,15 +451,15 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 		stats.head_foreign++;
 		return true;
 	}
-	if (layout->profile && (!control_valid || session != control_plan.session)) {
+	if ((!control_valid || session != control_plan.session)) {
 		return true;
 	}
-	if (layout->profile) {
+	{
 		peer_count(best_child, true, frame.rssi);
 	}
 	relay_ledger_tick(best_start, best_child, LEDGER_CAPTURE, -(int16_t)frame.rssi);
 	stats.head_captures++;
-	relay_store((uint8_t)best_child, &frame, layout->epoch, best_start + layout->frame_ticks, layout,
+	relay_store((uint8_t)best_child, &frame, layout->epoch, layout,
 		(uint16_t)relay_frame_near(control_frame, control_start, best_start), generation);
 	connection_relay_wake();
 	return true;
@@ -743,7 +532,7 @@ static void relay_thread(void)
 {
 	int64_t next_presence = 0;
 	for (;;) {
-		struct relay_pong_trailer trailer;
+		struct relay_watch_assignment trailer;
 		struct tdma_layout layout;
 		uint32_t generation;
 		if (relay_assignment_get(&trailer, &layout, &generation)) {
@@ -764,8 +553,8 @@ static void relay_thread(void)
 				if (valid && tdma_network_now(&now)) {
 					uint32_t frame = relay_frame_near(anchor_frame, relay_control_start(anchor_preamble), now);
 					uint32_t phase = now - relay_frame_start(origin, frame);
-					if (phase >= (RELAY_V3_DIRECT_SLOTS - 1U) * RELAY_V3_SLOT_TICKS &&
-					    phase < RELAY_V3_REPAIR_START) {
+					if (phase >= (RELAY_DIRECT_SLOTS - 1U) * RELAY_SLOT_TICKS &&
+					    phase < RELAY_REPAIR_START) {
 						/* Do not wake into the connection owner's R0 preparation.
 						 * It releases us after servicing its grants. A missing control frame
 						 * still bounds this wait before the next direct frame. */
@@ -820,9 +609,9 @@ size_t relay_diag_build(uint8_t *buf, size_t capacity, uint8_t tracker_id)
 		return 0;
 	}
 	unsigned key = irq_lock();
-	struct relay_pong_trailer trailer = assignment.trailer;
-	bool lease = assignment.valid && now - assignment.received_ms <= RELAY_HEAD_LEASE_MS;
-	bool assigned = children_seen && now - children_seen_ms < 5000;
+	struct relay_watch_assignment trailer = {.epoch = control_plan.epoch, .member_mask = control_plan.members};
+	bool lease = control_valid && tdma_profile_get();
+	bool assigned = lease;
 	irq_unlock(key);
 	bool presence = stats.presence_windows != last_presence;
 	if (!assigned && !presence) {
@@ -832,7 +621,7 @@ size_t relay_diag_build(uint8_t *buf, size_t capacity, uint8_t tracker_id)
 	last_presence = stats.presence_windows;
 	struct tdma_layout layout = {0};
 	bool have_layout = tdma_layout_get(&layout);
-	struct relay_pong_trailer active;
+	struct relay_watch_assignment active;
 	struct tdma_layout unused;
 	bool head = relay_assignment_get(&active, &unused, NULL);
 	enum link_state link = esb_link_state();
@@ -899,14 +688,14 @@ void relay_print_status(void)
 		width,
 		cap
 	);
-	struct relay_pong_trailer trailer;
+	struct relay_watch_assignment trailer;
 	struct tdma_layout layout;
 	bool head = relay_assignment_get(&trailer, &layout, NULL);
 	static const char *const states[] = {"healthy", "degraded", "lost"};
 	enum link_state link = esb_link_state();
 	printk("relay: link=%s head=%s children=0x%04x fwd_slot=%d\n",
 		states[link], head ? "yes" : "no", head ? trailer.children_mask : 0,
-		relay_forward_slot());
+		-1);
 	printk("relay: no_end=%u address_timeout=%u\n", stats.head_no_end, stats.head_address_timeout);
 	printk("relay: windows=%u no_window=%u busy=%u rx_any=%u crc_fail=%u len_fail=%u captures=%u foreign=%u rssi fail=-%u capture=-%u\n",
 		stats.head_windows, stats.head_no_window, stats.head_busy, stats.head_rx_any,
@@ -1044,7 +833,7 @@ bool relay_next_maintenance(uint32_t *target)
 		relay_maintenance_late++;
 		return false;
 	}
-	uint32_t at = start + RELAY_V3_TX_OFFSET;
+	uint32_t at = start + RELAY_TX_OFFSET;
 	*target = (int32_t)(at - now) < 0 ? now : at;
 	return true;
 }
@@ -1070,11 +859,11 @@ bool relay_next_repair(uint32_t *target, uint8_t *slot)
 		return false;
 	}
 	for (uint8_t i = 0; i < control_plan.repair_count; i++) {
-		uint32_t at = relay_repair_start(control_plan.preamble_ticks, i) + RELAY_V3_TX_OFFSET;
-		if ((int32_t)(at + RELAY_V3_TX_OFFSET - now) >= 0 && !(repair_attempted & (1U << i)) &&
+		uint32_t at = relay_repair_start(control_plan.preamble_ticks, i) + RELAY_TX_OFFSET;
+		if ((int32_t)(at + RELAY_TX_OFFSET - now) >= 0 && !(repair_attempted & (1U << i)) &&
 		    control_plan.grants[i].owner == control_helper) {
 			*target = (int32_t)(at - now) < 0 ? now : at;
-			*slot = RELAY_V3_REPAIR_FIRST_SLOT + i;
+			*slot = RELAY_REPAIR_FIRST_SLOT + i;
 			return true;
 		}
 	}
@@ -1100,7 +889,7 @@ size_t relay_build_repair(uint8_t *buf, uint8_t slot)
 	struct relay_repair repair = {
 	    .helper = control_helper, .epoch = control_plan.epoch, .session = control_plan.session};
 	unsigned key = irq_lock();
-	unsigned grant = slot - RELAY_V3_REPAIR_FIRST_SLOT;
+	unsigned grant = slot - RELAY_REPAIR_FIRST_SLOT;
 	repair_pending_mask = repair_pending_high = 0;
 	pending_report.count = 0;
 	#ifdef CONFIG_RELAY_FRAME_LEDGER

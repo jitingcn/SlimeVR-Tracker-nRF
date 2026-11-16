@@ -105,6 +105,7 @@ def build_source(ref, new):
     parts.append(
         "static bool control_valid=true; static struct relay_control control_plan; static uint8_t control_helper,repair_attempted;"
     )
+    parts.append(m.extract_block(relay, r"^struct relay_watch_assignment \{", True))
     parts.append(m.function(relay, "relay_next_repair"))
     parts.append(WINDOW_LEAVES)
     if new:
@@ -147,7 +148,7 @@ def build_source(ref, new):
         + "}"
     )
     helper = m.function(relay, "relay_head_window")
-    cut = helper.index("\n\tif (layout->profile) {\n\t\tif (radio_capture_init() != 0)")
+    cut = helper.index("\n\t{\n\t\tif (radio_capture_init() != 0)")
     helper = (
         helper[:cut]
         + r"""
@@ -261,8 +262,8 @@ static bool get_status(int mask) { (void)mask; return false; }
 static uint32_t control_session, control_frame, control_tick, control_received, control_reject[6], layout_confirm_time,
 	receiver_heard_time, relayed_confirm_time, g_last_rx_raw_ticks;
 /* Link-health escalation is covered by run_presence.py; retain its schedule leaf. */
-static void esb_note_trailer_locked(const struct relay_pong_trailer *t,uint32_t now) {
- if(t->relayed_mask){relayed_confirm_time=now;relayed_confirm_seen=true;}
+static void esb_note_delivery_locked(uint32_t now) {
+ relayed_confirm_time=now;relayed_confirm_seen=true;
 }
 static int32_t control_err_last, control_err_min, control_err_max;
 static atomic_t channel_found;
@@ -462,7 +463,7 @@ static void run(unsigned own)
 			}
 			struct tdma_layout layout;
 			assert(tdma_layout_get(&layout));
-			struct relay_pong_trailer tr = {.member_mask = (uint16_t)((1U << direct_count) - 1U)};
+			struct relay_watch_assignment tr = {.member_mask = (uint16_t)((1U << direct_count) - 1U)};
 			for (unsigned child = 0; child < direct_count; child++) {
 				if (relay_can_overhear(tr.member_mask, own, child)) {
 					tr.children_mask |= 1U << child;
@@ -509,14 +510,14 @@ static void run(unsigned own)
 			}
 			for (unsigned r = 0; r < repairs; r++) {
 				virtual_us = saved_us;
-				tdma_last_admitted_pack = tdma_forward_admitted_pack = 0;
-				tdma_last_admitted_frame = tdma_forward_admitted_frame = UINT32_MAX;
+				tdma_last_admitted_pack = tdma_repair_admitted_pack = 0;
+				tdma_last_admitted_frame = tdma_repair_admitted_frame = UINT32_MAX;
 				tdma_stream_slots = 0;
-				bool admitted = tdma_wait_for_forward_slot(direct_count + 1 + r, 72);
+				bool admitted = tdma_wait_for_repair_slot(direct_count + 1 + r, 72);
 				row[n++] = admitted;
 				row[n++] = now_ticks();
-				row[n++] = admitted && tdma_forward_tx_valid(direct_count + 1 + r, 72);
-				row[n++] = tdma_wait_for_forward_slot(direct_count + 1 + r, 72);
+				row[n++] = admitted && tdma_repair_tx_valid(direct_count + 1 + r, 72);
+				row[n++] = tdma_wait_for_repair_slot(direct_count + 1 + r, 72);
 			}
 			virtual_us = saved_us;
 			assert(n < 96);

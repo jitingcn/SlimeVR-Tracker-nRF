@@ -554,7 +554,7 @@ int main(void)
     assert(!batch_active && test_mode_changes == 1);
 
 #ifndef HOST_CAPABILITY_MATRIX
-    /* A collection start refused in the relay v3 profile is consumed once
+    /* A collection start refused in the relay profile is consumed once
      * and does not start by itself after the profile ends. */
     receive_control(ESB_PONG_FLAG_NORMAL);
     receive_control(ESB_PONG_FLAG_DATA_COLLECT_ON);
@@ -564,7 +564,7 @@ int main(void)
     private_profile = 0; now_ms += 100; feeds = 0;
     if (setjmp(thread_stop) == 0) esb_thread();
     assert(!data_collect_calls && test_mode_changes == 1);
-    puts("commands: collection start refused in the relay v3 profile is final");
+    puts("commands: collection start refused in the relay profile is final");
 #endif
 
     /* A newer PONG may replace a refused shutdown during its next LED delay. */

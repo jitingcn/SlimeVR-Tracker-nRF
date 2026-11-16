@@ -201,16 +201,12 @@ bool tdma_slot_data_window(uint8_t slot, uint32_t after, uint32_t *start);
  */
 bool tdma_slot_ping_window(uint8_t slot, uint32_t after, uint32_t *start, uint16_t *length);
 
-/**
- * Admission into a receiver-assigned forwarding slot (relay head only): same
- * guard, one-packet-per-frame and PING-deferral rules as the own slot, with
- * its own admitted-frame record.
- */
-bool tdma_wait_for_forward_slot(uint8_t slot, uint8_t payload_length);
+/* Admission into a control-granted repair slot, retaining the final TX guards. */
+bool tdma_wait_for_repair_slot(uint8_t slot, uint8_t payload_length);
 /* Revalidate a consumed admission immediately before queue/start. Caller may
  * hold irq_lock through this check and the nonblocking ESB submission. */
 bool tdma_slot_tx_valid(uint8_t payload_length);
-bool tdma_forward_tx_valid(uint8_t slot, uint8_t payload_length);
+bool tdma_repair_tx_valid(uint8_t slot, uint8_t payload_length);
 
 /** Bounded sleep/spin until receiver time reaches @p target. */
 bool tdma_wait_network_tick(uint32_t target);

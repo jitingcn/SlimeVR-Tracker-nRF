@@ -101,9 +101,6 @@ static bool esb_ready(void) { return radio; }
 static bool esb_ota_is_active(void) { return ota; }
 /* This fixture covers the direct producer; relay scheduling is exercised in
  * tests/host/relay using its real worker and TDMA admission. */
-static int relay_forward_slot(void) { return -1; }
-static bool relay_records_pending(void) { return false; }
-static int esb_write_relay(void) { return -EAGAIN; }
 static size_t relay_diag_build(uint8_t *buf, size_t capacity, uint8_t id) { (void)buf; (void)capacity; (void)id; return 0; }
 static bool get_status(int x) { return x==SYS_STATUS_USB_CONNECTED ? usb : error; }
 static bool test_mode_get(void) { return test_enabled; }

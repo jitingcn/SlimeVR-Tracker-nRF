@@ -37,7 +37,7 @@ static unsigned maintenance_sent;
 static bool maintenance_valid=true;
 static bool prepared, waited, profile, repair_built, peer_report;
 static bool relay_next_maintenance(uint32_t *t){*t=194;return maintenance_valid;}
-static bool tdma_wait_network_tick(uint32_t t){assert(prepared && t==(profile ? 190 : 194));waited=true;return true;}
+static bool tdma_wait_network_tick(uint32_t t){assert(prepared && t==(repair_built ? 190 : 194));waited=true;return true;}
 #define ESB_ST_PAIRING 0
 #define ESB_CREATE_PAYLOAD(...) {0}
 struct esb_payload{uint8_t pipe,noack,length,data[72];};
@@ -63,25 +63,21 @@ static bool esb_ota_is_active(void){return false;}
 static bool connection_get_data_collection(void){return collection;}
 static bool tdma_is_enabled(void){return true;}
 static uint8_t tdma_profile_get(void){return profile;}
-static bool relay_next_repair(uint32_t *t,uint8_t *s){*t=194;*s=RELAY_V3_REPAIR_FIRST_SLOT;return profile;}
+static bool relay_next_repair(uint32_t *t,uint8_t *s){*t=194;*s=RELAY_REPAIR_FIRST_SLOT;return profile;}
 static void relay_repair_result(int result){(void)result;}
-static size_t relay_build_repair(uint8_t *p,uint8_t s){assert(s==RELAY_V3_REPAIR_FIRST_SLOT);p[0]=peer_report?RELAY_PEER_REPORT_V3:RELAY_REPAIR_V3;prepared=repair_built=true;return 22;}
+static size_t relay_build_repair(uint8_t *p,uint8_t s){assert(s==RELAY_REPAIR_FIRST_SLOT);p[0]=peer_report?RELAY_PEER_REPORT:RELAY_REPAIR;prepared=repair_built=true;return 22;}
 static bool relay_head_active(void){return true;}
-static bool relay_records_pending(void){return true;}
 static bool clock_status;
 static unsigned clock_starts;
 static int clocks_start(void){assert(tx_clock_users);clock_starts++;return 0;}
-static int relay_forward_slot(void){assert(!profile);return 5;}
-static bool tdma_wait_for_forward_slot(uint8_t s,uint8_t n){(void)s;(void)n;assert(!profile || (repair_built && waited && n==22));return granted;}
+static bool tdma_wait_for_repair_slot(uint8_t s,uint8_t n){(void)s;(void)n;assert(!profile || (repair_built && waited && n==22));return granted;}
 static bool tdma_wait_for_slot(uint8_t n){(void)n;return true;}
 static bool esb_is_idle(void){return true;}
-static bool tdma_forward_tx_valid(uint8_t s,uint8_t n){(void)s;(void)n;assert(irq_depth);return final_valid;}
+static bool tdma_repair_tx_valid(uint8_t s,uint8_t n){(void)s;(void)n;assert(irq_depth);return final_valid;}
 static bool tdma_slot_tx_valid(uint8_t n){(void)n;assert(irq_depth);return final_valid;}
-static size_t relay_build_bundle(uint8_t *p,size_t own,size_t cap,uint8_t id){
- (void)own;(void)cap;p[0]=RELAY_BUNDLE_TYPE;p[1]=id;return 22;
-}
+
 static int esb_write_payload(const struct esb_payload *p){
- assert(p->data[0]==(source_payload ? 0x77 : profile ? (peer_report ? RELAY_PEER_REPORT_V3 : RELAY_REPAIR_V3) : RELAY_BUNDLE_TYPE) && writer_air);if(queue_error)return queue_error;queued++;return 0;
+ assert(p->data[0]==(source_payload ? 0x77 : profile ? (peer_report ? RELAY_PEER_REPORT : RELAY_REPAIR) : RELAY_REPAIR) && writer_air);if(queue_error)return queue_error;queued++;return 0;
 }
 static bool relay_take_maintenance(void){assert(irq_depth && writer_air);return maintenance_valid;}
 static void esb_prepare_ping(uint8_t *p){p[2]=42;prepared=true;}
@@ -96,7 +92,7 @@ static void drop_failed_tx_payload_if_pending(void){popped++;}
 '''
 CASES=r'''
 int main(int argc,char **argv){
- assert(argc==2);
+ assert(argc==2);profile=true;
  if(!strncmp(argv[1],"source-",7)){
   struct esb_payload payload={.length=22,.data={0x77}};source_payload=true;
   inject_claim_irq=true;
@@ -117,7 +113,7 @@ int main(int argc,char **argv){
   clock_status=!strcmp(argv[1],"repair-warm");
   peer_report=!strcmp(argv[1],"peer-report");
   profile=true;assert(esb_write_relay()==0);
-  assert(last_tx.type==(peer_report?RELAY_PEER_REPORT_V3:RELAY_REPAIR_V3));assert(repair_built && waited && queued==1 && started==1);
+  assert(last_tx.type==(peer_report?RELAY_PEER_REPORT:RELAY_REPAIR));assert(repair_built && waited && queued==1 && started==1);
   assert(clock_starts==!clock_status);
  }else if(!strcmp(argv[1],"repair-ungranted")){
   profile=true;granted=false;assert(esb_write_relay()==-EAGAIN);

@@ -976,7 +976,7 @@ static void staged_profile_keeps_layout(void) {
         layout_confirm_seen = false;
         normal_packet(2, 11); rx_payload.data[11] = cases[i].tuple_epoch; packet_crc();
         own_trailer = (struct relay_pong_trailer){.epoch = cases[i].tuple_epoch,
-            .forward_slot = 255, .member_mask = 0x7ff, .pending = true,
+            .member_mask = 0x7ff, .pending = true,
             .pending_epoch = cases[i].pending_epoch,
             .pending_total = relay_geometry_code(11, 5), .pending_slot_ticks = 16,
             .pending_member_mask = 0x7ff, .activation_units = 100};

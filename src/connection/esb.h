@@ -123,9 +123,9 @@ uint8_t esb_get_radio_channel(void);
 /* The last own PONG carried a relay trailer (relay-aware receiver). */
 bool esb_receiver_relay_aware(void);
 bool esb_layout_granted(void);
-/* V3 only: caller supplies its current network-clock snapshot. */
+/* relay only: caller supplies its current network-clock snapshot. */
 bool esb_relay_granted_at(uint32_t receiver_ticks);
-/* Whether v3 control has been lost. */
+/* Whether relay control has been lost. */
 bool esb_relay_profile_lost(void);
 /* Profile-1 activation: move the clock to receiver time; returns the shift. */
 int32_t esb_adopt_receiver_time(void);

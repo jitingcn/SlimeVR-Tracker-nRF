@@ -53,7 +53,7 @@ static void reset_tracker(uint8_t slot)
 	tracker_id = slot;
 	relay_timeline_clear(&relay_timeline_active);
 	relay_direct_anchor.valid = false;
-	tdma_last_admitted_frame = tdma_forward_admitted_frame = UINT32_MAX;
+	tdma_last_admitted_frame = tdma_repair_admitted_frame = UINT32_MAX;
 	set_ticks(1000000);
 }
 
@@ -65,8 +65,7 @@ static uint32_t own_pong(bool pending, uint32_t activation)
 	uint32_t ping_rx = tx_end + K_TRUE;
 	esb_last_ack_tx_end_ticks = (uint32_t)virtual_us;
 	set_ticks(tx_end + ACK_LAG);
-	own_trailer = (struct relay_pong_trailer){.epoch = EPOCH, .forward_slot = 255,
-		.member_mask = 0x7ff, .pending = pending, .pending_epoch = EPOCH + 1,
+	own_trailer = (struct relay_pong_trailer){.epoch = EPOCH, .member_mask = 0x7ff, .pending = pending, .pending_epoch = EPOCH + 1,
 		.pending_total = relay_geometry_code(11, 5), .pending_slot_ticks = 16,
 		.pending_member_mask = 0x7ff,
 		.activation_units = pending ? (uint16_t)((activation - ping_rx) / RELAY_ACTIVATION_UNIT_TICKS) : 0};
@@ -218,7 +217,7 @@ static uint32_t profile1_member(uint8_t slot, uint32_t join)
 	/* A NORMAL PONG trailer announces the exit about 3 s ahead. */
 	set_true(activation + 32768);
 	control_accept();
-	struct relay_pong_trailer exit = {.epoch = EPOCH + 1, .forward_slot = 255, .member_mask = 0x7ff,
+	struct relay_pong_trailer exit = {.epoch = EPOCH + 1, .member_mask = 0x7ff,
 		.pending = true, .pending_epoch = EPOCH + 2, .pending_total = TOTAL,
 		.pending_slot_ticks = SLOT_TICKS, .pending_member_mask = 0x7ff,
 		.activation_units = 3 * 32768 / RELAY_ACTIVATION_UNIT_TICKS};

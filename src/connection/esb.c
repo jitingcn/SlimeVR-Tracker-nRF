@@ -272,7 +272,6 @@ static uint32_t ping_ctr_sent = 0;
 static uint8_t ping_counter = 0;
 static int64_t ping_send_time = 0;
 
-
 // Track send cycles for recent PINGs (circular buffer)
 #define PING_HISTORY_SIZE 10
 struct ping_history_entry {
@@ -416,7 +415,6 @@ static void esb_wom_prepare_ping(uint8_t *data)
 	}
 	irq_unlock(key);
 }
-
 
 typedef void (*esb_remote_cmd_fn)(void);
 
@@ -777,15 +775,15 @@ static void esb_remote_cmd_tcal_boot_off(void)
 }
 
 #if CONFIG_CONNECTION_RAW_COLLECTION
-/* The relay v3 profile sends everything NoACK and single-target collection
- * holds the radio, so collection needs the receiver to leave relay v3 first.
+/* The relay profile sends everything NoACK and single-target collection
+ * holds the radio, so collection needs the receiver to leave relay first.
  * The refusal (-EBUSY) is final for the request, like a batch rate refusal. */
 static int esb_remote_cmd_data_collect_refuse_private(const char *name)
 {
 	if (!tdma_profile_get()) {
 		return 0;
 	}
-	LOG_WRN("Remote command: %s refused in relay v3 profile; turn relay v3 off first", name);
+	LOG_WRN("Remote command: %s refused in relay profile; turn relay off first", name);
 	led_request_event(LED_OWNER_SENSOR, led_request_id(), led_event_id(), LED_REJECTED);
 	return -EBUSY;
 }
@@ -971,7 +969,6 @@ static inline uint64_t kernel_ticks_extend32(uint32_t short_ticks)
 	return candidate;
 }
 
-
 struct esb_sync_filter {
 	uint32_t offset;
 	uint32_t last_local_ticks;
@@ -1036,7 +1033,6 @@ static void remote_print_meow(void)
 	uint8_t suffix = ticks % ARRAY_SIZE(meow_suffixes);
 	LOG_INF("%s%s%s", meows[meow], meow_punctuations[punctuation], meow_suffixes[suffix]);
 }
-
 
 static bool esb_remote_command_supported(uint8_t cmd)
 {
@@ -1107,9 +1103,6 @@ static int esb_remote_command_execute(uint8_t cmd)
 	LOG_WRN("Unknown remote command: 0x%02X", cmd);
 	return -EINVAL;
 }
-
-
-
 
 static uint8_t tracker_id = 0;
 static void set_tracker_id(uint8_t id)
@@ -1244,7 +1237,6 @@ static int64_t esb_sync_filter_update(
 	return innovation;
 }
 
-
 static void esb_clear_time_sync_state(void)
 {
 	server_time_synced = false;
@@ -1289,8 +1281,6 @@ int32_t esb_restore_ack_reference(void)
 	irq_unlock(key);
 	return -lag;
 }
-
-
 
 uint32_t esb_get_ping_backoff_ms(void)
 {
@@ -1614,15 +1604,15 @@ bool esb_receiver_relay_aware(void)
 	return own_pong_seen && relay_pong_is_extended(own_pong_length);
 }
 
-/* Caller has already selected v3 and sampled the network clock. */
-static inline bool esb_v3_lease_at(uint32_t receiver_ticks)
+/* Caller has already selected relay and sampled the network clock. */
+static inline bool esb_lease_at(uint32_t receiver_ticks)
 {
 	return control_seen && relay_timeline_active.valid
 		&& relay_runtime_direct_granted(&relay_direct_anchor, receiver_ticks)
 		&& (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS;
 }
 
-/* V3 admission already has a network-clock sample. Validate its lease without
+/* relay admission already has a network-clock sample. Validate its lease without
  * projecting the same clock again inside the slot's final check. */
 #if defined(__GNUC__) && !defined(__clang__)
 /* Attribute provenance: Round 10 grant/source/repair cohorts and round 11 acceptance retained this group; no isolated
@@ -1631,7 +1621,7 @@ __attribute__((optimize("O3")))
 #endif
 bool esb_relay_granted_at(uint32_t receiver_ticks)
 {
-	return !tdma_layout_withdrawn() && tdma_profile_get() && esb_v3_lease_at(receiver_ticks);
+	return !tdma_layout_withdrawn() && tdma_profile_get() && esb_lease_at(receiver_ticks);
 }
 
 /* Data may use the current layout: not withdrawn, and with a relay-aware
@@ -1648,7 +1638,7 @@ bool esb_layout_granted(void)
 	}
 	if (tdma_profile_get()) {
 		struct esb_network_clock clock;
-		return control_seen && esb_get_network_clock(&clock) && esb_v3_lease_at(clock.receiver_ticks);
+		return control_seen && esb_get_network_clock(&clock) && esb_lease_at(clock.receiver_ticks);
 	}
 	if (!esb_receiver_relay_aware()) {
 		return true;
@@ -1763,7 +1753,6 @@ void esb_print_link_status(void)
 		presence_stats.relayed_confirms, presence_stats.air_timeouts);
 }
 
-
 static struct k_thread clocks_thread_id;
 static K_THREAD_STACK_DEFINE(clocks_thread_id_stack, 512);
 
@@ -1830,24 +1819,18 @@ static void esb_ping_timeout(int64_t now)
 }
 
 /* Caller holds irq_lock (or runs in the RX ISR). */
-static void esb_note_trailer_locked(const struct relay_pong_trailer *trailer, uint32_t now)
+static void esb_note_delivery_locked(uint32_t now)
 {
-	if (trailer->relayed_mask & (1U << (tracker_id & 0x0F))) {
-		relayed_confirm_time = now;
-		relayed_confirm_seen = true;
-		presence_stats.relayed_confirms++;
-		/* A fresh receiver confirmation proves an operational data path.
-		 * Freezing an already accumulated failure count would leave the
-		 * producer muted, or let the shutdown timer expire, while relayed. */
-		ping_failures = 0;
-		ping_success_streak = 0;
-		connection_error_start_time = 0;
-		shutdown_requested = false;
-		esb_conn_state = ESB_ST_PAIRED;
-		set_status(SYS_STATUS_CONNECTION_ERROR, false);
-	}
+	relayed_confirm_time = now;
+	relayed_confirm_seen = true;
+	presence_stats.relayed_confirms++;
+	ping_failures = 0;
+	ping_success_streak = 0;
+	connection_error_start_time = 0;
+	shutdown_requested = false;
+	esb_conn_state = ESB_ST_PAIRED;
+	set_status(SYS_STATUS_CONNECTION_ERROR, false);
 }
-
 
 static void esb_receive_pong(const struct esb_payload *payload)
 {
@@ -1910,10 +1893,6 @@ static void esb_receive_pong(const struct esb_payload *payload)
 		receiver_heard_time = own_pong_time;
 		receiver_heard_seen = true;
 		own_pong_length = (uint8_t)payload->length;
-		if (own_trailer_valid) {
-			esb_note_trailer_locked(&own_trailer, own_pong_time);
-			relay_on_own_trailer(&own_trailer);
-		}
 		atomic_set(&channel_heard, true);
 		uint8_t rx_ctr = payload->data[2];
 		// set ping valid first
@@ -2086,7 +2065,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				// Decoupling from min_rtt avoids noise injection when
 				// min_rtt ages/updates.
 				uint32_t server_offset_ticks = ping_rx_ticks - t4_net_ticks;
-				/* A v3 join needs receiver time, not the ACK-delay-biased
+				/* A relay join needs receiver time, not the ACK-delay-biased
 				 * legacy reference. Match PING TX END to receiver PING RX;
 				 * the SDK retains the successful attempt across retries.
 				 * A tracker still scheduling a profile-0 layout keeps its
@@ -2181,7 +2160,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			/* A running member told of a staged 0->1 switch: the tuple still
 			 * confirms the profile-0 layout it runs (a running profile repeats
 			 * its own epoch instead). Keep that layout until the activation
-			 * quiet zone; promotion drops the v3 anchor, so profile 1 waits
+			 * quiet zone; promotion drops the relay anchor, so profile 1 waits
 			 * for the control frame as before. */
 			bool keep_current = private_geometry && !tdma_profile_get() && !layout_stale
 				&& !channel_wait_normal && tdma_is_enabled()
@@ -2200,7 +2179,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			if (private_geometry && server_time_synced && channel_wait_normal) {
 				atomic_set(&channel_found, true);
 			}
-			bool private_width = (tdma_profile_get() && tdma_sticks == RELAY_V3_SLOT_TICKS)
+			bool private_width = (tdma_profile_get() && tdma_sticks == RELAY_SLOT_TICKS)
 							  || (private_geometry && tdma_sticks == private_geometry->slot_ticks
 								  && tdma_epoch == own_trailer.pending_epoch);
 			if (tdma_total == 0 || tdma_total > TDMA_MAX_TRACKERS || tdma_slot >= tdma_total
@@ -2347,7 +2326,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	bool repeat = frame->length && frame->data[0] == 0xecU;
 	control_repeat_seen += repeat;
 	if (frame->pipe != 1 || !relay_control_decode(frame->data, frame->length, &control)) {
-		if (frame->pipe == 1 && frame->length == RELAY_CONTROL_LEN && frame->data[0] == RELAY_CONTROL_V3) {
+		if (frame->pipe == 1 && frame->length == RELAY_CONTROL_LEN && frame->data[0] == RELAY_CONTROL) {
 			tdma_profile_drop();
 		}
 		control_reject[0]++;
@@ -2359,7 +2338,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 		control_repeat_reject[1] += repeat;
 		return false;
 	}
-	if (control.epoch != layout.epoch || control.direct_count != RELAY_V3_DIRECT_SLOTS
+	if (control.epoch != layout.epoch || control.direct_count != RELAY_DIRECT_SLOTS
 		|| control.slot_ticks != layout.slot_ticks) {
 		control_reject[2]++;
 		control_repeat_reject[2] += repeat;
@@ -2385,7 +2364,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	}
 	/* Hardware END is one control frame airtime after the preamble the receiver stamps. */
 	uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(frame->end_kernel_ticks));
-	uint32_t preamble_local = local - RELAY_V3_CONTROL_AIR_TICKS;
+	uint32_t preamble_local = local - RELAY_CONTROL_AIR_TICKS;
 	if (frame->data[0] == 0xecU) {
 		preamble_local
 			-= relay_control_repeat_offset(control.direct_count, control.repair_count, control.slot_ticks, control.control_repeat_mode);
@@ -2446,8 +2425,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 		relayed_confirm_time = layout_confirm_time;
 		relayed_confirm_seen = true;
 		if (ping_failures || get_status(SYS_STATUS_CONNECTION_ERROR)) {
-			struct relay_pong_trailer confirmation = {.relayed_mask = BIT(tracker_id)};
-			esb_note_trailer_locked(&confirmation, layout_confirm_time);
+			esb_note_delivery_locked(layout_confirm_time);
 		}
 	}
 	layout_stale = false;
@@ -2514,7 +2492,7 @@ bool esb_relay_control_window(uint32_t start)
 		}
 		irq_unlock(key);
 		if (!tdma_network_now(&now) ||
-		    (int32_t)(now - (start + RELAY_RX_LEAD_TICKS - RELAY_V3_TX_OFFSET)) >= 0) {
+		    (int32_t)(now - (start + RELAY_RX_LEAD_TICKS - RELAY_TX_OFFSET)) >= 0) {
 			control_window_fail[1]++;
 			esb_relay_clock(false);
 			return false;
@@ -2558,12 +2536,12 @@ bool esb_relay_control_window(uint32_t start)
 	}
 	bool accepted = false;
 	bool ended = false;
-	uint32_t end = start + RELAY_RX_LEAD_TICKS + RELAY_V3_SLOT_TICKS;
+	uint32_t end = start + RELAY_RX_LEAD_TICKS + RELAY_SLOT_TICKS;
 	if (relay_geometry_current()->control_repeat_mode) {
 		end += relay_control_repeat_offset(
-			RELAY_V3_DIRECT_SLOTS,
+			RELAY_DIRECT_SLOTS,
 			4U,
-			RELAY_V3_SLOT_TICKS,
+			RELAY_SLOT_TICKS,
 			relay_geometry_current()->control_repeat_mode
 		);
 		/* A tail copy may use fewer R slots than the last received control frame. Cover
@@ -2583,9 +2561,9 @@ bool esb_relay_control_window(uint32_t start)
 	 * one maximum-length frame, with poses still fenced by the anchor.
 	 * This also acquires the cap when joining a private runtime layout. */
 	if (!relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, now)) {
-		uint32_t longest = (RELAY_V3_DIRECT_SLOTS + 1U + RELAY_V3_REPAIR_MAX) * RELAY_V3_SLOT_TICKS;
+		uint32_t longest = (RELAY_DIRECT_SLOTS + 1U + RELAY_REPAIR_MAX) * RELAY_SLOT_TICKS;
 		longest = MAX(longest, (32768U + relay_geometry_current()->tps - 1U) / relay_geometry_current()->tps);
-		end = start + longest + RELAY_V3_SLOT_TICKS;
+		end = start + longest + RELAY_SLOT_TICKS;
 	}
 	struct esb_network_clock clock;
 #if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS)
@@ -2621,7 +2599,7 @@ bool esb_relay_control_window(uint32_t start)
 				 * traffic (a direct slot ending near control frame) or the first of two control frame
 				 * copies keeps listening until the original deadline. */
 				if (!accepted && frame.data[0] != RELAY_CONTROL_REPEAT
-				    && (relay_geometry_current()->control_repeat_mode || frame.data[0] != RELAY_CONTROL_V3)) {
+				    && (relay_geometry_current()->control_repeat_mode || frame.data[0] != RELAY_CONTROL)) {
 					key = irq_lock();
 					bool claimed_again = esb_raw_rx_begin();
 					bool resumed
@@ -2712,9 +2690,6 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 	presence_stats.pongs++;
 	receiver_heard_time = now;
 	receiver_heard_seen = true;
-	if (has_trailer) {
-		esb_note_trailer_locked(&trailer, now);
-	}
 	/* Only NORMAL PONGs carry T2 and the layout tuple; others repurpose them. */
 	if (flag == ESB_PONG_FLAG_NORMAL && server_time_synced && sync_filter.initialized) {
 		uint32_t rx_difference = t2 - g_last_rx_raw_ticks;
@@ -3641,7 +3616,7 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length, boo
 	no_ack = no_ack || is_batch_stream || tdma_profile_get();
 	bool drop_on_fifo_full = is_batch_stream || (no_ack && !is_raw);
 	bool guarded_noack = no_ack && !is_raw && tdma_is_enabled();
-	/* Guarded v3 data checks its live grant at admission and again under
+	/* Guarded relay data checks its live grant at admission and again under
 	 * irq_lock before queueing. Keep the early gate for all other traffic. */
 	bool admission_checks_grant = guarded_noack && tdma_profile_get();
 	if (stream_source && !admission_checks_grant) {
@@ -3654,11 +3629,6 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length, boo
 		return -EAGAIN;
 	}
 	if (!stream_source) drop_failed_tx_payload_if_pending();
-	/* Relay head without a forwarding slot: admit with the full-frame
-	 * reserve so child records captured meanwhile can still be appended. */
-	bool relay_bundle = !tdma_profile_get() && no_ack && !is_raw && tdma_is_enabled()
-		&& relay_frame_is_pose(data, (uint8_t)MIN(data_length, 255U), tracker_id)
-		&& relay_head_active() && relay_forward_slot() < 0;
 
 	struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0);
 	tx_payload.pipe = 1 + (tracker_id % 7);
@@ -3698,13 +3668,13 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length, boo
 #ifdef CONFIG_RELAY_LEDGER_TIMING
 				ledger_source_admit_cycles = relay_cycle_now();
 #endif
-				/* The v3 payload is ready and this wait only spins to the
+				/* The relay payload is ready and this wait only spins to the
 				 * existing slot edge. Defer IRQ work through final submission
 				 * so a preemption cannot consume its one-tick deadline margin. */
 				unsigned admission_key = admission_checks_grant ? irq_lock() : 0;
 				bool admitted = admission_checks_grant
 					? tdma_admit_stream_source((uint8_t)data_length)
-					: tdma_wait_for_slot(relay_bundle ? RELAY_FRAME_MAX : (uint8_t)data_length);
+					: tdma_wait_for_slot((uint8_t)data_length);
 #ifdef CONFIG_RELAY_LEDGER_TIMING
 				ledger_source_wait_cycles = relay_cycle_now();
 #endif
@@ -3719,7 +3689,7 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length, boo
 					wait_cycles = relay_cycle_now();
 				}
 #endif
-				/* V3 has no bundle to append. Enter the protected final path
+				/* Enter the protected final path
 				 * immediately, avoiding repeated idle checks and an unlocked
 				 * claim/relock interval after admission. */
 				if (admission_checks_grant) {
@@ -3747,16 +3717,9 @@ static int esb_write_clocked(uint8_t *data, bool no_ack, size_t data_length, boo
 
 	/* Own the air from here to TX start; a relay RX window in another
 	 * slot may still be closing. */
-	if ((!guarded_noack || relay_bundle) && esb_air_claim() != 0) {
+	if (!guarded_noack && esb_air_claim() != 0) {
 		direct_fail[1]++;
 		return -EBUSY;
-	}
-	if (relay_bundle) {
-		size_t bundle_length = relay_build_bundle(tx_payload.data, data_length,
-			sizeof(tx_payload.data), tracker_id);
-		if (bundle_length) {
-			tx_payload.length = bundle_length;
-		}
 	}
 
 	if (guarded_noack) {
@@ -4081,9 +4044,7 @@ int esb_write_ping(uint8_t *data, bool force_resync)
 	return err;
 }
 
-/* Relay-only bundle from the connection owner: in the forwarding slot when
- * the receiver assigned one, otherwise in the own slot (consuming that frame's
- * own opportunity). -EAGAIN when nothing is pending or no slot is admitted. */
+/* The connection owner submits a repair only in its live control grant. */
 #if defined(__GNUC__) && !defined(__clang__)
 /* Attribute provenance: Round 10 grant/source/repair cohorts and round 11 acceptance retained this group; no isolated attribute-only saving is established. Keep pending A/B. */
 __attribute__((optimize("O3")))
@@ -4104,12 +4065,11 @@ int esb_write_relay(void)
 	}
 	k_mutex_lock(&esb_radio_lock, K_FOREVER);
 	int err = -EAGAIN;
-	/* V3 admission and final validation both check the live grant. */
-	bool repair = tdma_profile_get() != 0;
+	/* relay admission and final validation both check the live grant. */
+
 	if (!esb_initialized || esb_conn_state == ESB_ST_PAIRING || radio_user_disabled ||
-	    channel_wait_normal || layout_stale || (!repair && !esb_layout_granted()) || esb_ota_is_active() ||
-	    connection_get_data_collection() || !tdma_is_enabled() ||
-	    (!tdma_profile_get() && (!relay_head_active() || !relay_records_pending()))) {
+	    channel_wait_normal || layout_stale || !tdma_profile_get() || esb_ota_is_active() ||
+	    connection_get_data_collection() || !tdma_is_enabled()) {
 		k_mutex_unlock(&esb_radio_lock);
 		return err;
 	}
@@ -4117,19 +4077,16 @@ int esb_write_relay(void)
 	drop_failed_tx_payload_if_pending();
 	err = clock_status ? 0 : clocks_start();
 	if (err == 0) {
-		/* V3 grants name their slot directly. The legacy lookup scans helper
-		 * assignments and projects the clock, consuming R0 preparation time. */
-		int forward_slot = repair ? -1 : relay_forward_slot();
+		/* Control grants name the repair slot directly. */
 		uint32_t repair_target;
 		uint8_t repair_slot;
-		if (repair) {
+		{
 			if (!relay_next_repair(&repair_target, &repair_slot)) {
 				LEDGER_REPAIR_REASON(LEDGER_REFUSAL_NO_TARGET);
 				esb_release_tx_clock(false);
 				k_mutex_unlock(&esb_radio_lock);
 				return -EAGAIN;
 			}
-			forward_slot = repair_slot;
 		}
 		struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0);
 		tx_payload.pipe = 1 + (tracker_id % 7);
@@ -4137,13 +4094,13 @@ int esb_write_relay(void)
 #ifdef CONFIG_RELAY_LEDGER_TIMING
 		uint32_t build_cycles = relay_cycle_now();
 #endif
-		size_t length = repair ? relay_build_repair(tx_payload.data, (uint8_t)forward_slot) : 0;
+		size_t length = relay_build_repair(tx_payload.data, repair_slot);
 #ifdef CONFIG_RELAY_LEDGER_TIMING
 		ledger_repair_build_cycles = relay_cycle_now() - build_cycles;
 #endif
 		/* Repair bytes are already final. Prepare diagnostics before admission,
 		 * leaving the unchanged final deadline for validation and submission. */
-		if (repair) {
+		{
 			tx_payload.length = length;
 			last_tx.type = tx_payload.data[0];
 			last_tx.noack = true;
@@ -4152,7 +4109,7 @@ int esb_write_relay(void)
 		}
 		/* Hand off before the target so admission's clock/config work does not
 		 * start at the TX edge. It still waits for the unchanged target offset. */
-		if (repair && (!length || !tdma_wait_network_tick(repair_target - 4U))) {
+		if (!length || !tdma_wait_network_tick(repair_target - 4U)) {
 			LEDGER_REPAIR_REASON(length ? LEDGER_REFUSAL_WAIT : LEDGER_REFUSAL_EMPTY);
 			relay_repair_result(-EAGAIN);
 			esb_release_tx_clock(false);
@@ -4162,9 +4119,7 @@ int esb_write_relay(void)
 #ifdef CONFIG_RELAY_FRAME_LEDGER
 		ledger_repair_wait_lateness = ledger_wait_lateness;
 #endif
-		bool admitted = forward_slot >= 0
-			? tdma_wait_for_forward_slot((uint8_t)forward_slot, repair ? (uint8_t)length : RELAY_FRAME_MAX)
-			: tdma_wait_for_slot(RELAY_FRAME_MAX);
+		bool admitted = tdma_wait_for_repair_slot(repair_slot, (uint8_t)length);
 #ifdef CONFIG_RELAY_LEDGER_TIMING
 		admitted_cycles = relay_cycle_now();
 #endif
@@ -4174,28 +4129,16 @@ int esb_write_relay(void)
 			err = esb_air_claim();
 		}
 		if (err == 0) {
-			if (!repair) {
-				length = relay_build_bundle(tx_payload.data, 0, sizeof(tx_payload.data), tracker_id);
-			}
 			if (length == 0) {
 				LEDGER_REPAIR_REASON(LEDGER_REFUSAL_EMPTY);
 				err = -EAGAIN;
 			} else {
-				if (!repair) {
-					tx_payload.length = length;
-					last_tx.type = RELAY_BUNDLE_TYPE;
-					last_tx.noack = true;
-					last_tx.length = length;
-					last_tx.timestamp = k_uptime_get();
-				}
 				unsigned key = irq_lock();
 #ifdef CONFIG_RELAY_LEDGER_TIMING
 				ledger_repair_final_cycles = relay_cycle_now() - admitted_cycles;
 #endif
-				bool valid = forward_slot >= 0
-					? tdma_forward_tx_valid((uint8_t)forward_slot, (uint8_t)length)
-					: tdma_slot_tx_valid((uint8_t)length);
-				bool ready = valid && (repair || relay_head_active()) && !layout_stale &&
+				bool valid = tdma_repair_tx_valid(repair_slot, (uint8_t)length);
+				bool ready = valid && !layout_stale &&
 					!channel_wait_normal;
 				LEDGER_REPAIR_REASON(ready ? LEDGER_REFUSAL_QUEUE : LEDGER_REFUSAL_FINAL);
 				err = ready ? esb_write_payload(&tx_payload) : -EAGAIN;
@@ -4207,7 +4150,7 @@ int esb_write_relay(void)
 			}
 			esb_air_release();
 		}
-		if (repair) relay_repair_result(err);
+		relay_repair_result(err);
 	}
 	esb_release_tx_clock(false);
 	k_mutex_unlock(&esb_radio_lock);
@@ -4754,7 +4697,7 @@ static void esb_thread(void)
 				if (executing_generation == remote_command_generation) {
 					/* A batch rate refusal is final for this request. The PING
 					 * still echoes the actual rate, never the rejected rate.
-					 * A collection start refused in the relay v3 profile is
+					 * A collection start refused in the relay profile is
 					 * final too, so it cannot start later on its own. */
 					bool consumed = err == 0 || (err == -EBUSY
 						&& (executing_command == ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Production TDMA relay windows and forwarding-slot admission on a modelled
-clock: tdma_slot_data_window, tdma_slot_ping_window, tdma_wait_for_forward_slot
+clock: tdma_slot_data_window, tdma_slot_ping_window, tdma_wait_for_repair_slot
 and their independence from the own-slot admission record."""
 import os
 from pathlib import Path

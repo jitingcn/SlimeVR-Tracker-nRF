@@ -1,75 +1,8 @@
-/* Peer relay wire format shared byte-for-byte by tracker and receiver.
- *
- * Both profiles use receiver-coordinated single-hop relay. Profile 1 (v3)
- * broadcasts relay control frames, assigns watch helpers, caches three static or five on-demand capture frames
- * and transmits repairs only in granted slots.
- *
- * Profile-0 compatibility topology: receiver-coordinated single hop. The receiver appoints up to
- * RELAY_MAX_HEADS "head" trackers (best link, or pinned by the user) and gives
- * each head up to RELAY_MAX_CHILDREN trackers whose uplink is failing. A child
- * changes nothing: it keeps transmitting its ordinary pose frames in its own
- * TDMA slot. Its head listens in that slot and forwards what it hears:
- *   - inside its own data frame when the bundle fits (no airtime cost), or
- *   - in a forwarding slot the receiver appends to the frame for that head
- *     when one bundle per frame cannot carry its children.
- * No tracker ever forwards receiver traffic back to a child: the receiver's
- * downlink (about +22 dBm through a FEM) is far stronger than any tracker uplink, so a
- * child keeps time sync and delivery feedback from PONGs it overhears.
- *
- * Profile-0 bundle (head -> receiver, head's own or forwarding slot, head's pipe, NoACK):
- *   [0] RELAY_BUNDLE_TYPE
- *   [1] head tracker id
- *   [2] bit 7: overflow (a record was dropped since the previous bundle)
- *       bits 0-6: own_len, length of the head's own embedded frame (0 = none)
- *   [3 .. 3+own_len)  head's own frame, exactly as it would be sent alone
- *   then one or more records:
- *       [len] relayed frame length
- *       [rssi] capture RSSI at the head (-dBm magnitude)
- *       [frame] relayed frame, verbatim (carries its own id + sequence)
- * At least one record is mandatory: a head with nothing to forward sends its
- * plain frame instead.
- *
- * Extended PONG (receiver -> relay-capable tracker, ACK payload of a PING):
- *   [0..12]  legacy 13-byte PONG, unchanged (CRC at 12 over 0..11)
- *   [13]     RELAY_TRAILER_MAGIC (format version)
- *   [14]     TDMA layout epoch this trailer describes
- *   [15..16] children mask (BE16): trackers this recipient must relay
- *   [17]     forwarding slot index owned by this recipient, or RELAY_NO_SLOT
- *   [18..19] direct member mask (BE16): slot of member i = rank of i in mask
- *   [20..21] relayed mask (BE16): trackers currently delivered through relay
- *   [22]     CRC-8 (poly 0x07, init 0x07) over [13..21]
- * While a layout change is pending the trailer is RELAY_TRAILER_PENDING_LEN
- * bytes (magic RELAY_TRAILER_MAGIC_PENDING, PONG 30 bytes) and inserts,
- * before the CRC:
- *   [22]     pending layout epoch
- *   [23]     pending total slots (direct members + forwarding slots)
- *   [24]     pending slot width, ticks
- *   [25..26] pending direct member mask (BE16): own slot = rank in mask
- *   [27..28] activation, in RELAY_ACTIVATION_UNIT_TICKS after this PONG's
- *            receiver timestamp (bytes 3..6)
- *   [29]     CRC-8 over [13..28]
- *
- * Staged layout activation. Layouts change for every tracker at the same
- * receiver tick, never as each tracker happens to get its next PONG (that
- * left old- and new-layout trackers transmitting in the same slot). The
- * receiver announces a change RELAY_LAYOUT_ACTIVATION_MS ahead and holds the
- * current layout in the legacy tuple until then. Trackers stage it and switch
- * at the activation tick; no data frame may straddle that tick. A tracker's
- * right to use its current layout expires RELAY_LAYOUT_GRANT_MS after the last
- * PONG (own or overheard) confirming it, which is shorter than the
- * announcement lead: a tracker that missed every announcement falls silent
- * before the old layout stops existing. Only fleets in which every member is
- * relay-capable use staging; any legacy member keeps immediate publication.
- * Trackers overhear extended PONGs addressed to others: the relayed mask
- * confirms their own delivery, and the member mask plus the legacy layout
- * tuple of a NORMAL PONG lets a tracker whose own PINGs fail follow a layout
- * change without its own PONG.
- *
- * Capability: the info sub-packet's reserved byte (data[7] of a 16-byte info
- * frame) carries RELAY_INFO_CAPS. The receiver zeroes it before HID output and
- * sends extended PONGs only to trackers that advertised it. HID output for a
- * relayed frame is byte-identical to direct delivery, so an unmodified
- * SlimeVR server sees nothing new.
+/* Shared relay protocol. Normal direct TDMA has no control broadcasts.
+ * On demand, control feedback assigns helper watches and grants repair slots.
+ * PONG layout trailers stage coordinated activation. Bytes 2..4 and 7..8 of
+ * the trailer are reserved zero; helper assignments and delivery feedback
+ * travel exclusively in control frames. Protocol version validates wire format.
  */
 #ifndef SLIMENRF_RELAY_PROTOCOL_H
 #define SLIMENRF_RELAY_PROTOCOL_H
@@ -79,44 +12,36 @@
 #include <stdint.h>
 #include <string.h>
 
-#define RELAY_PROTOCOL_VERSION 2U
-#define RELAY_MAX_HEADS 3U
+#define RELAY_PROTOCOL_VERSION 4U
 #define RELAY_MAX_CHILDREN 3U
 #define RELAY_MAX_TRACKERS 16U
 
-#define RELAY_BUNDLE_TYPE 0xE6U
-#define RELAY_BUNDLE_HEADER_LEN 3U
-#define RELAY_BUNDLE_OVERFLOW 0x80U
-#define RELAY_BUNDLE_OWN_LEN_MASK 0x7FU
-#define RELAY_RECORD_META_LEN 2U
 #define RELAY_FRAME_MAX 72U
 
 #define RELAY_CAP_HELPER 0x01U   /* can listen for and forward peers */
 #define RELAY_CAP_PRESENCE 0x02U /* keeps sync from overheard PONGs */
-#define RELAY_CAP_FORWARD_REQUEST 0x04U /* head cannot fit records beside its own frame */
 #define RELAY_CAP_VERSION_SHIFT 4
 #define RELAY_INFO_CAPS \
-	(RELAY_CAP_HELPER | RELAY_CAP_PRESENCE | (RELAY_V3_VERSION << RELAY_CAP_VERSION_SHIFT))
+	(RELAY_CAP_HELPER | RELAY_CAP_PRESENCE | (RELAY_PROTOCOL_VERSION << RELAY_CAP_VERSION_SHIFT))
 #define RELAY_INFO_CAPS_INDEX 7U /* data[7] of a 16-byte info frame */
 
-#define RELAY_PONG_LEGACY_LEN 13U
+#define RELAY_PONG_BASE_LEN 13U
 #define RELAY_TRAILER_MAGIC 0x5AU
 #define RELAY_TRAILER_LEN 10U
-#define RELAY_PONG_EXT_LEN (RELAY_PONG_LEGACY_LEN + RELAY_TRAILER_LEN)
+#define RELAY_PONG_EXT_LEN (RELAY_PONG_BASE_LEN + RELAY_TRAILER_LEN)
 #define RELAY_TRAILER_MAGIC_PENDING 0x5BU
 #define RELAY_TRAILER_PENDING_LEN 17U
-#define RELAY_PONG_EXT_PENDING_LEN (RELAY_PONG_LEGACY_LEN + RELAY_TRAILER_PENDING_LEN)
+#define RELAY_PONG_EXT_PENDING_LEN (RELAY_PONG_BASE_LEN + RELAY_TRAILER_PENDING_LEN)
 #define RELAY_ACTIVATION_UNIT_TICKS 4U
 /* Grant < announcement lead; the gap covers clock disagreement and a frame. */
 #define RELAY_LAYOUT_GRANT_MS 3000U
 #define RELAY_LAYOUT_ACTIVATION_MS 3500U
-#define RELAY_NO_SLOT 0xFFU
 
 /* Ordinary pose traffic: a 17-byte normal frame or a composite. */
 #define RELAY_NORMAL_FRAME_LEN 17U
 #define RELAY_COMPOSITE_TYPE 0xFEU
 #define RELAY_COMPOSITE_MIN_LEN 5U
-#define RELAY_RECORD_MAX_LEN (RELAY_FRAME_MAX - RELAY_BUNDLE_HEADER_LEN - RELAY_RECORD_META_LEN)
+#define RELAY_RECORD_MAX_LEN RELAY_DIRECT_MAX
 
 /* Private relay diagnostics, tracker -> receiver, about once per second
  * while the tracker holds an assignment or runs presence windows, and only
@@ -137,17 +62,16 @@
 #define RELAY_DIAG_F_LAYOUT 0x10U    /* TDMA layout available */
 #define RELAY_DIAG_LINK_SHIFT 5      /* 2 bits: enum link_state */
 
-#define RELAY_V3_VERSION 4U
-#define RELAY_CONTROL_V3 0xE8U
+#define RELAY_CONTROL 0xE8U
 #define RELAY_CONTROL_REPEAT 0xECU
-#define RELAY_REPAIR_V3 0xE9U
-#define RELAY_PEER_REPORT_V3 0xEAU
-#define RELAY_LAYOUT_V3 0xEBU
+#define RELAY_REPAIR 0xE9U
+#define RELAY_PEER_REPORT 0xEAU
+#define RELAY_LAYOUT 0xEBU
 #define RELAY_CONTROL_LEN 72U
 #define RELAY_LAYOUT_LEN 30U
 #define RELAY_PROFILE_120HZ 1U
 /* Runtime geometry belongs to one activated membership. Profile 0 keeps
- * its compatible legacy schedule. Period fields describe the base R only;
+ * its normal direct schedule. Period fields describe the base R only;
  * actual frame starts come from the current/next-R announcements. */
 #if defined(__GNUC__)
 #define RELAY_LAYOUT_INLINE static inline __attribute__((always_inline))
@@ -295,12 +219,12 @@ static inline bool relay_runtime_direct_granted(const struct relay_runtime_ancho
 		&& (int32_t)(tick - (a->third_start + a->direct * a->slot_ticks)) < 0;
 }
 
-#define RELAY_V3_REPAIR_MAX 5U
+#define RELAY_REPAIR_MAX 5U
 
 static inline bool
 relay_geometry_make(struct relay_geometry *g, uint8_t direct, uint8_t repairs, uint8_t slot_ticks, uint16_t cap)
 {
-	if (!direct || direct > RELAY_MAX_TRACKERS || repairs > RELAY_V3_REPAIR_MAX
+	if (!direct || direct > RELAY_MAX_TRACKERS || repairs > RELAY_REPAIR_MAX
 		|| (slot_ticks != 15U && slot_ticks != 16U) || !cap || cap > 32768U) {
 		return false;
 	}
@@ -401,20 +325,20 @@ RELAY_LAYOUT_INLINE const struct relay_geometry *relay_geometry_current(void)
 }
 #endif
 #if defined(CONFIG_RELAY_RUNTIME_LAYOUT) || defined(CONFIG_RELAY_LAYOUT_FOLLOW_RECEIVER)
-#define RELAY_V3_DIRECT_SLOTS (relay_geometry_current()->direct)
-#define RELAY_V3_REPAIR_SLOTS (relay_geometry_current()->repairs)
-#define RELAY_V3_SLOT_TICKS (relay_geometry_current()->slot_ticks)
-#define RELAY_V3_GRID_TICKS (relay_geometry_current()->numerator)
-#define RELAY_V3_GRID_FRAMES (relay_geometry_current()->denominator)
+#define RELAY_DIRECT_SLOTS (relay_geometry_current()->direct)
+#define RELAY_REPAIR_SLOTS (relay_geometry_current()->repairs)
+#define RELAY_SLOT_TICKS (relay_geometry_current()->slot_ticks)
+#define RELAY_GRID_TICKS (relay_geometry_current()->numerator)
+#define RELAY_GRID_FRAMES (relay_geometry_current()->denominator)
 #else
-#define RELAY_V3_DIRECT_SLOTS RELAY_HOST_DIRECT_SLOTS
-#define RELAY_V3_REPAIR_SLOTS RELAY_HOST_REPAIR_SLOTS
-#define RELAY_V3_SLOT_TICKS RELAY_HOST_SLOT_TICKS
-#define RELAY_V3_GRID_TICKS RELAY_HOST_NUMERATOR
-#define RELAY_V3_GRID_FRAMES RELAY_HOST_DENOMINATOR
+#define RELAY_DIRECT_SLOTS RELAY_HOST_DIRECT_SLOTS
+#define RELAY_REPAIR_SLOTS RELAY_HOST_REPAIR_SLOTS
+#define RELAY_SLOT_TICKS RELAY_HOST_SLOT_TICKS
+#define RELAY_GRID_TICKS RELAY_HOST_NUMERATOR
+#define RELAY_GRID_FRAMES RELAY_HOST_DENOMINATOR
 #endif
-#define RELAY_V3_TOTAL_SLOTS \
-	(RELAY_V3_DIRECT_SLOTS + 1U + RELAY_V3_REPAIR_SLOTS + relay_control_repeat_slots(relay_geometry_current()->control_repeat_mode))
+#define RELAY_TOTAL_SLOTS \
+	(RELAY_DIRECT_SLOTS + 1U + RELAY_REPAIR_SLOTS + relay_control_repeat_slots(relay_geometry_current()->control_repeat_mode))
 
 #define RELAY_TIMELINE_FRAMES 8U
 struct relay_timeline {
@@ -465,23 +389,23 @@ extern struct relay_runtime_anchor relay_direct_anchor;
  * previous slot's traffic. Hardware: 1 tick missed ~70% of child frames. */
 #define RELAY_RX_LEAD_TICKS 4U
 /* Frame layout: direct slots, then control frame, then the repair slots. */
-#define RELAY_V3_CONTROL_START (RELAY_V3_DIRECT_SLOTS * RELAY_V3_SLOT_TICKS)
-#define RELAY_V3_TX_OFFSET 2U /* preamble target inside a slot, as TDMA_SLOT_TARGET_OFFSET */
-#define RELAY_V3_CONTROL_PREAMBLE (RELAY_V3_CONTROL_START + RELAY_V3_TX_OFFSET)
-#define RELAY_V3_REPAIR_START                                                                                          \
-	(RELAY_V3_CONTROL_START + RELAY_V3_SLOT_TICKS * (1U + (2U * (relay_geometry_current()->control_repeat_mode == 1U))))
-#define RELAY_V3_REPAIR_FIRST_SLOT (RELAY_V3_DIRECT_SLOTS + 1U + (2U * (relay_geometry_current()->control_repeat_mode == 1U)))
-#define RELAY_V3_CAPTURE_TAIL_TICKS 2U
-#define RELAY_V3_CONTROL_PREP_LEAD_TICKS 3U
+#define RELAY_CONTROL_START (RELAY_DIRECT_SLOTS * RELAY_SLOT_TICKS)
+#define RELAY_TX_OFFSET 2U /* preamble target inside a slot, as TDMA_SLOT_TARGET_OFFSET */
+#define RELAY_CONTROL_PREAMBLE (RELAY_CONTROL_START + RELAY_TX_OFFSET)
+#define RELAY_REPAIR_START                                                                                          \
+	(RELAY_CONTROL_START + RELAY_SLOT_TICKS * (1U + (2U * (relay_geometry_current()->control_repeat_mode == 1U))))
+#define RELAY_REPAIR_FIRST_SLOT (RELAY_DIRECT_SLOTS + 1U + (2U * (relay_geometry_current()->control_repeat_mode == 1U)))
+#define RELAY_CAPTURE_TAIL_TICKS 2U
+#define RELAY_CONTROL_PREP_LEAD_TICKS 3U
 #define RELAY_REPAIR_HEADER_LEN 8U
 #define RELAY_REPAIR_RECORD_META_LEN 4U
 /* Ticks on air at 2 Mbps, rounded up: 83 bits of preamble, address, PCF and CRC. */
-#define RELAY_V3_AIR_TICKS(length) (((83U + 8U * (length)) * 32768U + 1999999U) / 2000000U)
-#define RELAY_V3_FRAME_TICKS_MAX ((RELAY_V3_GRID_TICKS + RELAY_V3_GRID_FRAMES - 1U) / RELAY_V3_GRID_FRAMES)
-#define RELAY_V3_CONTROL_AIR_TICKS 11U /* 72-byte control frame on air: 329.5 us */
-#define RELAY_V3_DIRECT_MAX 60U
-#define RELAY_V3_LAST_DIRECT_MAX 32U
-#define RELAY_V3_CACHE_FRAMES 3U
+#define RELAY_AIR_TICKS(length) (((83U + 8U * (length)) * 32768U + 1999999U) / 2000000U)
+#define RELAY_FRAME_TICKS_MAX ((RELAY_GRID_TICKS + RELAY_GRID_FRAMES - 1U) / RELAY_GRID_FRAMES)
+#define RELAY_CONTROL_AIR_TICKS 11U /* 72-byte control frame on air: 329.5 us */
+#define RELAY_DIRECT_MAX 60U
+#define RELAY_LAST_DIRECT_MAX 32U
+#define RELAY_CACHE_FRAMES 3U
 #define RELAY_CACHE_MAX_FRAMES 5U
 #define RELAY_OWNER_IDLE 0xFFU
 #define RELAY_OWNER_MAINTENANCE 0xFEU
@@ -498,7 +422,7 @@ enum relay_diag_counter {
 	RELAY_DIAG_CRC_FAIL,     /* head window frame failed CRC */
 	RELAY_DIAG_CAPTURES,     /* child pose frames stored */
 	RELAY_DIAG_FOREIGN,      /* valid frames that were not the child's pose */
-	RELAY_DIAG_FORWARDED,    /* records sent in bundles */
+	RELAY_DIAG_FORWARDED,    /* repair records submitted */
 	RELAY_DIAG_EXPIRED,      /* records dropped unsent */
 	RELAY_DIAG_PRESENCE,     /* presence windows opened */
 	RELAY_DIAG_PRESENCE_RX,  /* overheard PONGs accepted */
@@ -511,10 +435,7 @@ enum relay_diag_counter {
 
 struct relay_pong_trailer {
 	uint8_t epoch;
-	uint16_t children_mask;
-	uint8_t forward_slot;
 	uint16_t member_mask;
-	uint16_t relayed_mask;
 	/* Pending layout (RELAY_TRAILER_MAGIC_PENDING), see above. */
 	bool pending;
 	uint8_t pending_epoch;
@@ -528,15 +449,6 @@ struct relay_record_view {
 	const uint8_t *frame;
 	uint8_t length;
 	uint8_t rssi;
-};
-
-struct relay_bundle_view {
-	uint8_t head_id;
-	bool overflow;
-	const uint8_t *own;
-	uint8_t own_len;
-	uint8_t record_count;
-	struct relay_record_view records[RELAY_MAX_CHILDREN];
 };
 
 /* Same polynomial and bit order as Zephyr crc8_ccitt(). */
@@ -594,13 +506,13 @@ static inline size_t relay_trailer_encode(uint8_t *out, const struct relay_pong_
 	out[0] = trailer->pending ? ((trailer->pending_total & 0x80U)
 		? RELAY_TRAILER_PROFILE_MAGIC : RELAY_TRAILER_MAGIC_PENDING) : RELAY_TRAILER_MAGIC;
 	out[1] = trailer->epoch;
-	out[2] = (uint8_t)(trailer->children_mask >> 8);
-	out[3] = (uint8_t)trailer->children_mask;
-	out[4] = trailer->forward_slot;
+	out[2] = 0;
+	out[3] = 0;
+	out[4] = 0;
 	out[5] = (uint8_t)(trailer->member_mask >> 8);
 	out[6] = (uint8_t)trailer->member_mask;
-	out[7] = (uint8_t)(trailer->relayed_mask >> 8);
-	out[8] = (uint8_t)trailer->relayed_mask;
+	out[7] = 0;
+	out[8] = 0;
 	if (!trailer->pending) {
 		out[9] = relay_crc8(0x07, out, RELAY_TRAILER_LEN - 1);
 		return RELAY_TRAILER_LEN;
@@ -638,14 +550,12 @@ static inline bool relay_trailer_decode_len(const uint8_t *in, uint8_t length, s
 	if (!pending && !(length == RELAY_TRAILER_LEN && in[0] == RELAY_TRAILER_MAGIC)) {
 		return false;
 	}
-	if (in[length - 1U] != relay_crc8(0x07, in, length - 1U)) {
+	if (in[2] || in[3] || in[4] || in[7] || in[8]
+	    || in[length - 1U] != relay_crc8(0x07, in, length - 1U)) {
 		return false;
 	}
 	trailer->epoch = in[1];
-	trailer->children_mask = (uint16_t)(((uint16_t)in[2] << 8) | in[3]);
-	trailer->forward_slot = in[4];
 	trailer->member_mask = (uint16_t)(((uint16_t)in[5] << 8) | in[6]);
-	trailer->relayed_mask = (uint16_t)(((uint16_t)in[7] << 8) | in[8]);
 	trailer->pending = pending;
 	trailer->pending_epoch = pending ? in[9] : 0;
 	trailer->pending_total = pending ? in[10] : 0;
@@ -673,8 +583,8 @@ static inline bool relay_trailer_decode(const uint8_t in[RELAY_TRAILER_LEN], str
 static inline uint32_t relay_plan_lead(uint16_t members)
 {
 	uint32_t present = relay_mask_count(members);
-	uint32_t vacant = present < RELAY_V3_DIRECT_SLOTS ? RELAY_V3_DIRECT_SLOTS - present : 0;
-	uint32_t lead = vacant * RELAY_V3_SLOT_TICKS + RELAY_V3_TX_OFFSET;
+	uint32_t vacant = present < RELAY_DIRECT_SLOTS ? RELAY_DIRECT_SLOTS - present : 0;
+	uint32_t lead = vacant * RELAY_SLOT_TICKS + RELAY_TX_OFFSET;
 	return lead >= 32U && lead < 120U ? lead : 120U;
 }
 
@@ -702,107 +612,6 @@ static inline uint16_t relay_rssi_avg_x8(uint16_t avg_x8, uint8_t rssi)
 	return avg_x8 ? (7U * avg_x8 + 8U * rssi) / 8U : 8U * rssi;
 }
 
-/* Bundle builder: start with the head's own frame (own_len may be 0), then add
- * records while they fit. Returns false (bundle unchanged) when one does not. */
-struct relay_bundle_builder {
-	uint8_t *out;
-	size_t capacity;
-	size_t length;
-	uint8_t records;
-};
-
-static inline bool relay_bundle_begin(
-	struct relay_bundle_builder *b, uint8_t *out, size_t capacity,
-	uint8_t head_id, const uint8_t *own, uint8_t own_len, bool overflow)
-{
-	if (capacity > RELAY_FRAME_MAX) {
-		capacity = RELAY_FRAME_MAX;
-	}
-	if (own_len > RELAY_BUNDLE_OWN_LEN_MASK
-	    || (size_t)RELAY_BUNDLE_HEADER_LEN + own_len + RELAY_RECORD_META_LEN + 2U > capacity) {
-		return false;
-	}
-	b->out = out;
-	b->capacity = capacity;
-	b->records = 0;
-	if (own_len) {
-		/* Own frame may already sit at out[0]; move before writing header. */
-		memmove(&out[RELAY_BUNDLE_HEADER_LEN], own, own_len);
-	}
-	out[0] = RELAY_BUNDLE_TYPE;
-	out[1] = head_id;
-	out[2] = (uint8_t)(own_len | (overflow ? RELAY_BUNDLE_OVERFLOW : 0U));
-	b->length = RELAY_BUNDLE_HEADER_LEN + own_len;
-	return true;
-}
-
-static inline bool relay_bundle_add(
-	struct relay_bundle_builder *b, const uint8_t *frame, uint8_t length, uint8_t rssi)
-{
-	if (b->records >= RELAY_MAX_CHILDREN || length < 2
-	    || b->length + RELAY_RECORD_META_LEN + length > b->capacity) {
-		return false;
-	}
-	b->out[b->length] = length;
-	b->out[b->length + 1] = rssi;
-	memcpy(&b->out[b->length + RELAY_RECORD_META_LEN], frame, length);
-	b->length += RELAY_RECORD_META_LEN + length;
-	b->records++;
-	return true;
-}
-
-/* Encoded length, or 0 when no record was added (send the plain frame). */
-static inline size_t relay_bundle_finish(const struct relay_bundle_builder *b)
-{
-	return b->records ? b->length : 0;
-}
-
-static inline bool relay_bundle_decode(const uint8_t *in, uint8_t length, struct relay_bundle_view *view)
-{
-	if (length < RELAY_BUNDLE_HEADER_LEN + RELAY_RECORD_META_LEN + RELAY_COMPOSITE_MIN_LEN
-	    || in[0] != RELAY_BUNDLE_TYPE || in[1] >= RELAY_MAX_TRACKERS) {
-		return false;
-	}
-	uint8_t own_len = in[2] & RELAY_BUNDLE_OWN_LEN_MASK;
-	size_t pos = RELAY_BUNDLE_HEADER_LEN + (size_t)own_len;
-	if (pos > length) {
-		return false;
-	}
-	view->head_id = in[1];
-	view->overflow = (in[2] & RELAY_BUNDLE_OVERFLOW) != 0;
-	view->own_len = own_len;
-	view->own = own_len ? &in[RELAY_BUNDLE_HEADER_LEN] : NULL;
-	view->record_count = 0;
-	if (own_len && !relay_frame_is_pose(view->own, own_len, view->head_id)) {
-		return false;
-	}
-	uint16_t seen = 0;
-	while (pos < length) {
-		if (view->record_count >= RELAY_MAX_CHILDREN || pos + RELAY_RECORD_META_LEN > length) {
-			return false;
-		}
-		uint8_t record_len = in[pos];
-		const uint8_t *frame = &in[pos + RELAY_RECORD_META_LEN];
-		if (pos + RELAY_RECORD_META_LEN + record_len > length || record_len < 2) {
-			return false;
-		}
-		uint8_t child = frame[1];
-		/* A head never forwards itself, and one bundle carries one frame
-		 * per child (records expire before the child's next slot). */
-		if (child == view->head_id || child >= RELAY_MAX_TRACKERS || (seen & (1U << child))
-		    || !relay_frame_is_pose(frame, record_len, child)) {
-			return false;
-		}
-		seen |= (uint16_t)(1U << child);
-		view->records[view->record_count].frame = frame;
-		view->records[view->record_count].length = record_len;
-		view->records[view->record_count].rssi = in[pos + 1];
-		view->record_count++;
-		pos += RELAY_RECORD_META_LEN + record_len;
-	}
-	return view->record_count > 0;
-}
-
 struct relay_grant {
 	uint8_t owner;
 	uint16_t children;
@@ -818,11 +627,11 @@ struct relay_control {
 	uint32_t preamble_ticks;
 	uint16_t members;
 	uint16_t expected;
-	uint16_t missing[RELAY_V3_CACHE_FRAMES];
+	uint16_t missing[RELAY_CACHE_FRAMES];
 	uint16_t primary_valid;
 	uint16_t backup_valid;
 	uint8_t helpers[RELAY_MAX_TRACKERS];
-	struct relay_grant grants[RELAY_V3_REPAIR_MAX];
+	struct relay_grant grants[RELAY_REPAIR_MAX];
 	uint16_t survey;
 	uint8_t maintenance_owner;
 	uint16_t watch_generation;
@@ -833,11 +642,11 @@ struct relay_control {
 	uint8_t control_repeat_mode;
 };
 /* Keep the static control layout unchanged, including its hot-path offsets. */
-#define relay_control_missing(c, age) (*((unsigned)(age) < 3U ? &(c)->missing[(age)] : &(c)->missing_extra[(age) - 3U]))
+#define relay_control_missing(c, age) (*((unsigned)(age) < 3U ? &(c)->missing[(age) % 3U] : &(c)->missing_extra[(age) - 3U]))
 
 static inline unsigned relay_control_cache_frames(const struct relay_control *c)
 {
-	return c->on_demand ? RELAY_CACHE_MAX_FRAMES : RELAY_V3_CACHE_FRAMES;
+	return c->on_demand ? RELAY_CACHE_MAX_FRAMES : RELAY_CACHE_FRAMES;
 }
 
 struct relay_layout_descriptor {
@@ -921,8 +730,8 @@ RELAY_LAYOUT_INLINE bool relay_geometry_valid(
 )
 {
 	return g && profile == RELAY_PROFILE_120HZ && members && g->direct >= 1 && g->direct <= RELAY_MAX_TRACKERS
-		&& g->repairs <= RELAY_V3_REPAIR_MAX && (g->slot_ticks == 15U || g->slot_ticks == 16U) && g->tps
-		&& g->denominator && repairs <= RELAY_V3_REPAIR_MAX && relay_mask_count(members) <= g->direct
+		&& g->repairs <= RELAY_REPAIR_MAX && (g->slot_ticks == 15U || g->slot_ticks == 16U) && g->tps
+		&& g->denominator && repairs <= RELAY_REPAIR_MAX && relay_mask_count(members) <= g->direct
 		&& !(expected & ~members) && slot_ticks == g->slot_ticks;
 }
 
@@ -965,7 +774,7 @@ static inline bool relay_control_valid(const struct relay_control *c)
 			&g,
 			c->direct_count ? c->direct_count : relay_mask_count(c->members),
 			c->repair_count,
-			c->slot_ticks ? c->slot_ticks : RELAY_V3_SLOT_TICKS,
+			c->slot_ticks ? c->slot_ticks : RELAY_SLOT_TICKS,
 			c->tps_max ? c->tps_max : relay_geometry_current()->tps,
 			c->control_repeat_mode
 		)
@@ -974,7 +783,7 @@ static inline bool relay_control_valid(const struct relay_control *c)
 		|| (c->control_repeat_mode
 			&& (relay_control_next_repairs(c) < 2U || relay_control_next2_repairs(c) < 2U
 				|| relay_control_next_repairs(c) > 4U || relay_control_next2_repairs(c) > 4U))
-		|| relay_control_next_repairs(c) > RELAY_V3_REPAIR_MAX || relay_control_next2_repairs(c) > RELAY_V3_REPAIR_MAX
+		|| relay_control_next_repairs(c) > RELAY_REPAIR_MAX || relay_control_next2_repairs(c) > RELAY_REPAIR_MAX
 		|| (c->maintenance_owner >= RELAY_MAX_TRACKERS && c->maintenance_owner != RELAY_OWNER_IDLE)
 		|| ((c->primary_valid | c->backup_valid | c->survey) & ~c->members)) {
 		return false;
@@ -993,7 +802,7 @@ static inline bool relay_control_valid(const struct relay_control *c)
 			return false;
 		}
 	}
-	for (uint8_t i = 0; i < RELAY_V3_REPAIR_MAX; i++) {
+	for (uint8_t i = 0; i < RELAY_REPAIR_MAX; i++) {
 		const struct relay_grant *g = &c->grants[i];
 		if (i >= c->repair_count && g->owner != RELAY_OWNER_IDLE) {
 			return false;
@@ -1039,9 +848,9 @@ enum relay_control_offset {
 	RELAY_CONTROL_OFF_RESERVED_THIRD = 70,
 	RELAY_CONTROL_OFF_CRC = 71,
 };
-_Static_assert(RELAY_CONTROL_OFF_OWNERS + RELAY_V3_REPAIR_MAX == RELAY_CONTROL_OFF_CHILDREN, "grant owner layout");
+_Static_assert(RELAY_CONTROL_OFF_OWNERS + RELAY_REPAIR_MAX == RELAY_CONTROL_OFF_CHILDREN, "grant owner layout");
 _Static_assert(
-	RELAY_CONTROL_OFF_CHILDREN + 2 * RELAY_V3_REPAIR_MAX == RELAY_CONTROL_OFF_SURVEY,
+	RELAY_CONTROL_OFF_CHILDREN + 2 * RELAY_REPAIR_MAX == RELAY_CONTROL_OFF_SURVEY,
 	"grant children layout"
 );
 _Static_assert(RELAY_CONTROL_OFF_HELPERS + RELAY_MAX_TRACKERS == RELAY_CONTROL_OFF_OWNERS, "helper layout");
@@ -1050,8 +859,8 @@ _Static_assert(RELAY_CONTROL_OFF_CRC + 1 == RELAY_CONTROL_LEN, "control wire siz
 static inline size_t relay_control_encode(uint8_t out[RELAY_CONTROL_LEN], const struct relay_control *c)
 {
 	memset(out, 0, RELAY_CONTROL_LEN);
-	out[RELAY_CONTROL_OFF_TYPE] = RELAY_CONTROL_V3;
-	out[RELAY_CONTROL_OFF_VERSION] = RELAY_V3_VERSION;
+	out[RELAY_CONTROL_OFF_TYPE] = RELAY_CONTROL;
+	out[RELAY_CONTROL_OFF_VERSION] = RELAY_PROTOCOL_VERSION;
 	out[RELAY_CONTROL_OFF_EPOCH] = c->epoch;
 	out[RELAY_CONTROL_OFF_REPAIR_COUNT]
 		= (c->on_demand ? 0x80U : 0U) | c->repair_count | ((relay_mask_count(c->members) - 1U) << 3);
@@ -1060,13 +869,13 @@ static inline size_t relay_control_encode(uint8_t out[RELAY_CONTROL_LEN], const 
 	relay_put_be32(out + RELAY_CONTROL_OFF_PREAMBLE, c->preamble_ticks);
 	relay_put_be16(out + RELAY_CONTROL_OFF_MEMBERS, c->members);
 	relay_put_be16(out + RELAY_CONTROL_OFF_EXPECTED, c->expected);
-	for (uint8_t i = 0; i < RELAY_V3_CACHE_FRAMES; i++) {
+	for (uint8_t i = 0; i < RELAY_CACHE_FRAMES; i++) {
 		relay_put_be16(out + RELAY_CONTROL_OFF_MISSING + 2U * i, relay_control_missing(c, i));
 	}
 	relay_put_be16(out + RELAY_CONTROL_OFF_PRIMARY, c->primary_valid);
 	relay_put_be16(out + RELAY_CONTROL_OFF_BACKUP, c->backup_valid);
 	memcpy(out + RELAY_CONTROL_OFF_HELPERS, c->helpers, RELAY_MAX_TRACKERS);
-	for (uint8_t i = 0; i < RELAY_V3_REPAIR_MAX; i++) {
+	for (uint8_t i = 0; i < RELAY_REPAIR_MAX; i++) {
 		out[RELAY_CONTROL_OFF_OWNERS + i] = c->grants[i].owner;
 		relay_put_be16(out + RELAY_CONTROL_OFF_CHILDREN + 2U * i, c->grants[i].children);
 	}
@@ -1075,7 +884,7 @@ static inline size_t relay_control_encode(uint8_t out[RELAY_CONTROL_LEN], const 
 	relay_put_be16(out + RELAY_CONTROL_OFF_WATCH, c->watch_generation);
 	out[RELAY_CONTROL_OFF_PROFILE] = c->profile;
 	out[RELAY_CONTROL_OFF_FLAGS] = c->flags;
-	out[68] = (c->slot_ticks ? c->slot_ticks : RELAY_V3_SLOT_TICKS) | (c->control_repeat_mode << 6);
+	out[68] = (c->slot_ticks ? c->slot_ticks : RELAY_SLOT_TICKS) | (c->control_repeat_mode << 6);
 	relay_put_be16(out + 69, c->tps_max ? c->tps_max : relay_geometry_current()->tps);
 	if (c->on_demand) {
 		relay_put_be16(out + 63, relay_control_missing(c, 3));
@@ -1174,10 +983,10 @@ static inline void relay_control_finish_static_encode(
 		0xc8, 0xe4, 0x90, 0xbc, 0x78, 0x54, 0x20, 0x0c, 0xaf, 0x83, 0xf7, 0xdb, 0x1f, 0x33, 0x47, 0x6b,
 		0x06, 0x2a, 0x5e, 0x72, 0xb6, 0x9a, 0xee, 0xc2, 0x61, 0x4d, 0x39, 0x15, 0xd1, 0xfd, 0x89, 0xa5,
 	};
-	for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++) {
+	for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
 		relay_put_be16(out + RELAY_CONTROL_OFF_MISSING + 2U * age, relay_control_missing(c, age));
 	}
-	for (unsigned i = 0; write_grants && i < RELAY_V3_REPAIR_MAX; i++) {
+	for (unsigned i = 0; write_grants && i < RELAY_REPAIR_MAX; i++) {
 		out[RELAY_CONTROL_OFF_OWNERS + i] = c->grants[i].owner;
 		relay_put_be16(out + RELAY_CONTROL_OFF_CHILDREN + 2U * i, c->grants[i].children);
 	}
@@ -1236,10 +1045,10 @@ static inline void relay_control_finish_encode(
 		0xf7, 0xdb, 0x1f, 0x33, 0x47, 0x6b, 0x06, 0x2a, 0x5e, 0x72, 0xb6, 0x9a, 0xee, 0xc2, 0x61, 0x4d, 0x39, 0x15,
 		0xd1, 0xfd, 0x89, 0xa5,
 	};
-	for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++) {
+	for (unsigned age = 0; age < RELAY_CACHE_FRAMES; age++) {
 		relay_put_be16(out + RELAY_CONTROL_OFF_MISSING + 2U * age, relay_control_missing(c, age));
 	}
-	for (unsigned i = 0; write_grants && i < RELAY_V3_REPAIR_MAX; i++) {
+	for (unsigned i = 0; write_grants && i < RELAY_REPAIR_MAX; i++) {
 		out[RELAY_CONTROL_OFF_OWNERS + i] = c->grants[i].owner;
 		relay_put_be16(out + RELAY_CONTROL_OFF_CHILDREN + 2U * i, c->grants[i].children);
 	}
@@ -1269,8 +1078,8 @@ static inline void relay_control_finish_encode(
 static inline bool relay_control_decode(const uint8_t *in, size_t length, struct relay_control *c)
 {
 	if (length != RELAY_CONTROL_LEN
-		|| (in[RELAY_CONTROL_OFF_TYPE] != RELAY_CONTROL_V3 && in[RELAY_CONTROL_OFF_TYPE] != 0xecU)
-		|| in[RELAY_CONTROL_OFF_VERSION] != RELAY_V3_VERSION
+		|| (in[RELAY_CONTROL_OFF_TYPE] != RELAY_CONTROL && in[RELAY_CONTROL_OFF_TYPE] != 0xecU)
+		|| in[RELAY_CONTROL_OFF_VERSION] != RELAY_PROTOCOL_VERSION
 		|| (!(in[3] & 0x80U) && (in[68] & 63U) != 15U && (in[68] & 63U) != 16U)
 		|| ((in[3] & 0x80U) && ((in[68] & 63U) >> 1) > 16U) || !relay_get_be16(in + 69)
 		|| relay_get_be16(in + 69) > 32768U || in[RELAY_CONTROL_OFF_CRC] != relay_crc8(7, in, 71)) {
@@ -1287,13 +1096,13 @@ static inline bool relay_control_decode(const uint8_t *in, size_t length, struct
 	c->preamble_ticks = relay_get_be32(in + RELAY_CONTROL_OFF_PREAMBLE);
 	c->members = relay_get_be16(in + RELAY_CONTROL_OFF_MEMBERS);
 	c->expected = relay_get_be16(in + RELAY_CONTROL_OFF_EXPECTED);
-	for (uint8_t i = 0; i < RELAY_V3_CACHE_FRAMES; i++) {
+	for (uint8_t i = 0; i < RELAY_CACHE_FRAMES; i++) {
 		relay_control_missing(c, i) = relay_get_be16(in + RELAY_CONTROL_OFF_MISSING + 2U * i);
 	}
 	c->primary_valid = relay_get_be16(in + RELAY_CONTROL_OFF_PRIMARY);
 	c->backup_valid = relay_get_be16(in + RELAY_CONTROL_OFF_BACKUP);
 	memcpy(c->helpers, in + RELAY_CONTROL_OFF_HELPERS, RELAY_MAX_TRACKERS);
-	for (uint8_t i = 0; i < RELAY_V3_REPAIR_MAX; i++) {
+	for (uint8_t i = 0; i < RELAY_REPAIR_MAX; i++) {
 		c->grants[i].owner = in[RELAY_CONTROL_OFF_OWNERS + i];
 		c->grants[i].children = relay_get_be16(in + RELAY_CONTROL_OFF_CHILDREN + 2U * i);
 	}
@@ -1343,7 +1152,7 @@ static inline size_t relay_repair_encode(uint8_t out[RELAY_FRAME_MAX], const str
 		memcpy(out + pos + 4, record->source.frame, n);
 		pos += 4U + n;
 	}
-	out[0] = RELAY_REPAIR_V3;
+	out[0] = RELAY_REPAIR;
 	out[1] = r->helper;
 	out[2] = r->epoch;
 	out[3] = r->count | (r->overflow ? 0x80U : 0U);
@@ -1353,7 +1162,7 @@ static inline size_t relay_repair_encode(uint8_t out[RELAY_FRAME_MAX], const str
 
 static inline bool relay_repair_decode(const uint8_t *in, size_t length, struct relay_repair *r)
 {
-	if (length < 8 || length > RELAY_FRAME_MAX || in[0] != RELAY_REPAIR_V3
+	if (length < 8 || length > RELAY_FRAME_MAX || in[0] != RELAY_REPAIR
 	    || in[1] >= RELAY_MAX_TRACKERS || (in[3] & 0x7CU) || !(in[3] & 3U)) {
 		return false;
 	}
@@ -1373,7 +1182,7 @@ static inline bool relay_repair_decode(const uint8_t *in, size_t length, struct 
 		record->source.rssi = in[pos + 3];
 		record->source.frame = in + pos + 4;
 		uint8_t n = record->source.length;
-		if (n < 2 || n > RELAY_V3_DIRECT_MAX || pos + 4U + n > length
+		if (n < 2 || n > RELAY_DIRECT_MAX || pos + 4U + n > length
 		    || record->source.frame[1] == r->helper
 		    || !relay_frame_is_pose(record->source.frame, n, record->source.frame[1])) {
 			return false;
@@ -1391,7 +1200,7 @@ static inline bool relay_repair_decode(const uint8_t *in, size_t length, struct 
 
 static inline bool relay_capture_age(uint16_t current, uint16_t captured)
 {
-	return (uint16_t)(current - captured) < RELAY_V3_CACHE_FRAMES;
+	return (uint16_t)(current - captured) < RELAY_CACHE_FRAMES;
 }
 
 static inline size_t relay_layout_encode(uint8_t out[RELAY_LAYOUT_LEN], const struct relay_layout_descriptor *d)
@@ -1404,8 +1213,8 @@ static inline size_t relay_layout_encode(uint8_t out[RELAY_LAYOUT_LEN], const st
 		|| direct != relay_mask_count(d->members)) {
 		return 0;
 	}
-	out[0] = RELAY_LAYOUT_V3;
-	out[1] = RELAY_V3_VERSION;
+	out[0] = RELAY_LAYOUT;
+	out[1] = RELAY_PROTOCOL_VERSION;
 	relay_put_be32(out + 2, d->session);
 	out[6] = d->epoch;
 	out[7] = d->profile;
@@ -1426,7 +1235,7 @@ static inline size_t relay_layout_encode(uint8_t out[RELAY_LAYOUT_LEN], const st
 
 static inline bool relay_layout_decode(const uint8_t *in, size_t length, struct relay_layout_descriptor *d)
 {
-	if (length != RELAY_LAYOUT_LEN || in[0] != RELAY_LAYOUT_V3 || in[1] != RELAY_V3_VERSION || in[24] || in[28]
+	if (length != RELAY_LAYOUT_LEN || in[0] != RELAY_LAYOUT || in[1] != RELAY_PROTOCOL_VERSION || in[24] || in[28]
 		|| in[29] != relay_crc8(7, in, 29)) {
 		return false;
 	}
@@ -1451,7 +1260,7 @@ static inline bool relay_layout_decode(const uint8_t *in, size_t length, struct 
 
 static inline size_t relay_peer_report_encode(uint8_t out[RELAY_FRAME_MAX], const struct relay_peer_report *r)
 {
-	out[0] = RELAY_PEER_REPORT_V3;
+	out[0] = RELAY_PEER_REPORT;
 	out[1] = r->helper;
 	out[2] = r->epoch;
 	out[3] = r->count;
@@ -1473,7 +1282,7 @@ static inline size_t relay_peer_report_encode(uint8_t out[RELAY_FRAME_MAX], cons
 
 static inline bool relay_peer_report_decode(const uint8_t *in, size_t length, struct relay_peer_report *r)
 {
-	if (length < 9 || in[0] != RELAY_PEER_REPORT_V3 || in[1] >= RELAY_MAX_TRACKERS
+	if (length < 9 || in[0] != RELAY_PEER_REPORT || in[1] >= RELAY_MAX_TRACKERS
 	    || !in[3] || in[3] > RELAY_PEER_REPORT_ENTRIES || length != 9U + 7U * in[3]
 	    || in[length - 1] != relay_crc8(7, in, length - 1)) {
 		return false;
@@ -1513,7 +1322,7 @@ RELAY_LAYOUT_INLINE uint32_t relay_frame_start(uint32_t origin, uint32_t frame)
 		return start;
 	}
 #endif
-	return relay_frame_start_grid(origin, frame, RELAY_V3_GRID_TICKS, RELAY_V3_GRID_FRAMES);
+	return relay_frame_start_grid(origin, frame, RELAY_GRID_TICKS, RELAY_GRID_FRAMES);
 }
 
 #if defined(__GNUC__)
@@ -1538,11 +1347,11 @@ RELAY_LAYOUT_INLINE uint32_t relay_frame_at_tick(uint32_t origin, uint32_t tick)
 		}
 	}
 #endif
-	return relay_frame_at_tick_grid(origin, tick, RELAY_V3_GRID_TICKS, RELAY_V3_GRID_FRAMES);
+	return relay_frame_at_tick_grid(origin, tick, RELAY_GRID_TICKS, RELAY_GRID_FRAMES);
 }
 
 /* Extend a nearby wrapping tick from a recent full-frame control frame anchor.
- * The anchor's modulo-RELAY_V3_GRID_FRAMES phase preserves the exact fractional grid. */
+ * The anchor's modulo-RELAY_GRID_FRAMES phase preserves the exact fractional grid. */
 #if defined(__GNUC__)
 __attribute__((always_inline))
 #endif
@@ -1579,7 +1388,7 @@ RELAY_LAYOUT_INLINE uint32_t relay_frame_near(uint32_t frame, uint32_t start, ui
 		}
 	}
 #endif
-	return relay_frame_near_grid(frame, start, tick, RELAY_V3_GRID_TICKS, RELAY_V3_GRID_FRAMES);
+	return relay_frame_near_grid(frame, start, tick, RELAY_GRID_TICKS, RELAY_GRID_FRAMES);
 }
 
 static inline uint32_t relay_frame_start_near(uint32_t frame, uint32_t start, uint32_t target)
@@ -1590,8 +1399,8 @@ static inline uint32_t relay_frame_start_near(uint32_t frame, uint32_t start, ui
 		return at;
 	}
 #endif
-	return start + relay_frame_start_grid(0, target, RELAY_V3_GRID_TICKS, RELAY_V3_GRID_FRAMES)
-		 - relay_frame_start_grid(0, frame, RELAY_V3_GRID_TICKS, RELAY_V3_GRID_FRAMES);
+	return start + relay_frame_start_grid(0, target, RELAY_GRID_TICKS, RELAY_GRID_FRAMES)
+		 - relay_frame_start_grid(0, frame, RELAY_GRID_TICKS, RELAY_GRID_FRAMES);
 }
 
 #if defined(__GNUC__)
@@ -1617,23 +1426,23 @@ RELAY_LAYOUT_INLINE uint32_t relay_frame_at_tick64(uint64_t origin, uint64_t tic
 		}
 	}
 #endif
-	return relay_frame_at_tick64_grid(origin, tick, RELAY_V3_GRID_TICKS, RELAY_V3_GRID_FRAMES);
+	return relay_frame_at_tick64_grid(origin, tick, RELAY_GRID_TICKS, RELAY_GRID_FRAMES);
 }
 
 /* The control frame's preamble and the rational-grid frame start are distinct coordinates. */
 static inline uint32_t relay_control_start(uint32_t preamble)
 {
-	return preamble - RELAY_V3_CONTROL_PREAMBLE;
+	return preamble - RELAY_CONTROL_PREAMBLE;
 }
 
 static inline uint32_t relay_control_origin(uint32_t preamble, uint32_t frame)
 {
-	return relay_control_start(preamble) - relay_frame_start_grid(0, frame, RELAY_V3_GRID_TICKS, RELAY_V3_GRID_FRAMES);
+	return relay_control_start(preamble) - relay_frame_start_grid(0, frame, RELAY_GRID_TICKS, RELAY_GRID_FRAMES);
 }
 
 static inline uint32_t relay_repair_start(uint32_t preamble, unsigned slot)
 {
-	return relay_control_start(preamble) + RELAY_V3_REPAIR_START + slot * RELAY_V3_SLOT_TICKS;
+	return relay_control_start(preamble) + RELAY_REPAIR_START + slot * RELAY_SLOT_TICKS;
 }
 
 static inline uint32_t relay_frame_phase(uint32_t origin, uint32_t frame, uint32_t tick)
@@ -1644,13 +1453,13 @@ static inline uint32_t relay_frame_phase(uint32_t origin, uint32_t frame, uint32
 /* Caller first rejects phases before the repair region. */
 static inline unsigned relay_repair_slot(uint32_t phase)
 {
-	return (phase - RELAY_V3_REPAIR_START) / RELAY_V3_SLOT_TICKS;
+	return (phase - RELAY_REPAIR_START) / RELAY_SLOT_TICKS;
 }
 
 static inline uint8_t relay_direct_payload_max(uint8_t profile, uint8_t slot)
 {
 	return profile == RELAY_PROFILE_120HZ
-		? (slot == RELAY_V3_DIRECT_SLOTS - 1U ? RELAY_V3_LAST_DIRECT_MAX : RELAY_V3_DIRECT_MAX)
+		? (slot == RELAY_DIRECT_SLOTS - 1U ? RELAY_LAST_DIRECT_MAX : RELAY_DIRECT_MAX)
 		: RELAY_RECORD_MAX_LEN;
 }
 
