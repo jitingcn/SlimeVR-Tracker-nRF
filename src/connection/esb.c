@@ -2438,8 +2438,15 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	receiver_heard_time = layout_confirm_time;
 	receiver_heard_seen = true;
 	if (delivered) {
-		struct relay_pong_trailer confirmation = {.relayed_mask = BIT(tracker_id)};
-		esb_note_trailer_locked(&confirmation, layout_confirm_time);
+		/* A fresh delivery confirmation keeps esb_ping_timeout() from counting
+		 * lost maintenance PINGs. Run the full recovery only when there are
+		 * failures to clear: on every control frame it starved maintenance PINGs. */
+		relayed_confirm_time = layout_confirm_time;
+		relayed_confirm_seen = true;
+		if (ping_failures) {
+			struct relay_pong_trailer confirmation = {.relayed_mask = BIT(tracker_id)};
+			esb_note_trailer_locked(&confirmation, layout_confirm_time);
+		}
 	}
 	layout_stale = false;
 	irq_unlock(key);
