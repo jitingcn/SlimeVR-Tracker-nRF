@@ -123,4 +123,9 @@ config SENSOR_DRV_QMC6309
 	default y if !SENSOR_MAG_DRIVERS_MINIMAL
 	default n
 
+config SENSOR_DRV_QMC5883P
+	bool "QMC5883P"
+	default y if !SENSOR_MAG_DRIVERS_MINIMAL
+	default n
+
 endmenu
