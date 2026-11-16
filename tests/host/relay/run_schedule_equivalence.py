@@ -256,6 +256,8 @@ static bool control_seen, layout_confirm_seen, receiver_heard_seen, relayed_conf
 	channel_wait_normal;
 static uint32_t control_first_received, control_repeat_received, control_repeat_seen, control_repeat_reject[6];
 static uint8_t control_member_history, ping_failures;
+#define SYS_STATUS_CONNECTION_ERROR 0
+static bool get_status(int mask) { (void)mask; return false; }
 static uint32_t control_session, control_frame, control_tick, control_received, control_reject[6], layout_confirm_time,
 	receiver_heard_time, relayed_confirm_time, g_last_rx_raw_ticks;
 /* Link-health escalation is covered by run_presence.py; retain its schedule leaf. */

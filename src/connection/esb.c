@@ -2440,10 +2440,12 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	if (delivered) {
 		/* A fresh delivery confirmation keeps esb_ping_timeout() from counting
 		 * lost maintenance PINGs. Run the full recovery only when there are
-		 * failures to clear: on every control frame it starved maintenance PINGs. */
+		 * failures or a connection error to clear: on every control frame it
+		 * starved maintenance PINGs. esb_thread() may raise the error after a
+		 * recovery cleared the failures, so check it too. */
 		relayed_confirm_time = layout_confirm_time;
 		relayed_confirm_seen = true;
-		if (ping_failures) {
+		if (ping_failures || get_status(SYS_STATUS_CONNECTION_ERROR)) {
 			struct relay_pong_trailer confirmation = {.relayed_mask = BIT(tracker_id)};
 			esb_note_trailer_locked(&confirmation, layout_confirm_time);
 		}

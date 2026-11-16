@@ -52,6 +52,7 @@ static unsigned ping_failures,ping_success_streak;
 static int64_t connection_error_start_time;
 static bool shutdown_requested,status_error;
 static void set_status(unsigned mask,bool on){(void)mask;status_error=on;}
+static bool get_status(unsigned mask){(void)mask;return status_error;}
 static unsigned irq_lock(void){return 0;}
 static void irq_unlock(unsigned k){(void)k;}
 static bool esb_initialized=true,channel_search,channel_wait_normal,server_time_synced=true,layout_stale;
@@ -226,6 +227,10 @@ int main(int argc,char **argv) {
    assert(ping_failures<300 && esb_conn_state==ESB_ST_PAIRED && !status_error);
   }
   assert(relayed_confirm_time==now_ms && !ping_failures);
+  /* esb_thread() raised the error after a recovery had cleared the failures */
+  status_error=true;b.frame++;b.preamble_ticks+=273;now_ms+=8;
+  f=(struct relay_rx_frame){.pipe=1,.length=72,.end_kernel_ticks=b.preamble_ticks+11};
+  relay_control_encode(f.data,&b);assert(esb_relay_control_receive(&f) && !status_error);
  } else if(!strcmp(argv[1],"profile")) {
   struct relay_pong_trailer tr={.epoch=7,.member_mask=7,.pending=true,
    .pending_epoch=8,.pending_total=0x95,.pending_slot_ticks=16,
