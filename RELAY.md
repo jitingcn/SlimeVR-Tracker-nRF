@@ -2,6 +2,8 @@
 
 The receiver uses normal direct TDMA while links are healthy. `relay on` permits automatic relay entry after sustained loss or an outage. It does not start control broadcasts or helper listening by itself. Stable direct recovery stages a coordinated return to direct TDMA. `relay off` withdraws permission and stages the same safe exit; control frames continue until activation so trackers retain their direct clock anchors.
 
+Validated power-down notices provide bounded intent, not proof that a tracker is asleep. The receiver excludes that intent from automatic relay decisions and special query-recovery leases, but keeps ordinary RF membership and inactivity expiry. Cancellation, wake, session replacement and pairing invalidation clear the intent. Unannounced silence still follows the normal outage policy.
+
 An engaged receiver broadcasts control feedback, assigns helper watch windows, and grants repair transmissions. Helpers cache peer packets and transmit only granted repairs. Static cache ages remain 0 through 2; demand scheduling retains its bounded five-frame cache. Helper qualification remains 950 permille.
 
 Each primary or repeat control transmission has a four-RTC-tick arming guard after the preceding direct or repair area. Direct capture cutoffs and the receipt freeze relative to that area are unchanged. Control acquisition, frame periods, repair starts and repeat anchors include the guards. Native profile 0 is unchanged.
