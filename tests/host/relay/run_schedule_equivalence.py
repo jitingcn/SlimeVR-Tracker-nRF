@@ -255,7 +255,7 @@ RECEIVE_LEAVES = r"""
 static bool control_seen, layout_confirm_seen, receiver_heard_seen, relayed_confirm_seen, layout_stale,
 	channel_wait_normal;
 static uint32_t control_first_received, control_repeat_received, control_repeat_seen, control_repeat_reject[6];
-static uint8_t control_member_history, ping_failures;
+static uint8_t control_member_history, control_epoch, ping_failures;
 #define SYS_STATUS_CONNECTION_ERROR 0
 static bool get_status(int mask) { (void)mask; return false; }
 static uint32_t control_session, control_frame, control_tick, control_received, control_reject[6], layout_confirm_time,

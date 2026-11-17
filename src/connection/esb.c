@@ -159,7 +159,7 @@ static uint32_t layout_confirm_time;
 static bool layout_confirm_seen;
 static bool control_seen;
 static uint32_t control_session, control_frame, control_tick;
-static uint8_t control_member_history;
+static uint8_t control_member_history, control_epoch;
 static uint32_t control_received, control_missed;
 static uint32_t control_first_received, control_repeat_received, control_repeat_seen;
 static uint32_t control_repeat_reject[6];
@@ -1239,6 +1239,10 @@ static int64_t esb_sync_filter_update(
 
 static void esb_clear_time_sync_state(void)
 {
+	/* A new clock acquisition cannot inherit delivery evidence or grants. */
+	control_seen = false;
+	control_member_history = 0;
+	relayed_confirm_seen = false;
 	server_time_synced = false;
 	sync_filter.initialized = false;
 	g_last_sync_timestamp = 0;
@@ -1488,7 +1492,11 @@ static struct link_inputs esb_link_inputs_locked(uint32_t now)
 	struct link_inputs in = {
 		.own_pong_age_ms = now - own_pong_time,
 		.heard_age_ms = esb_age_ms(now, receiver_heard_time, receiver_heard_seen),
-		.relayed_age_ms = esb_age_ms(now, relayed_confirm_time, relayed_confirm_seen),
+		.relayed_age_ms = esb_age_ms(now, relayed_confirm_time,
+			relayed_confirm_seen && control_seen && sync_filter.initialized && !layout_stale && tdma_is_enabled()
+				&& control_epoch == tdma_get_config_epoch()
+				&& relay_timeline_active.valid && relay_direct_anchor.valid
+				&& relay_direct_anchor.frame == control_frame),
 	};
 	uint32_t own_heard = now - own_pong_time;
 	if (own_pong_seen && own_heard < in.heard_age_ms) {
@@ -2185,6 +2193,9 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			if (tdma_total == 0 || tdma_total > TDMA_MAX_TRACKERS || tdma_slot >= tdma_total
 				|| (tdma_sticks < 16 && !private_width)) {
 				layout_stale = true;
+				control_seen = false;
+				control_member_history = 0;
+				relayed_confirm_seen = false;
 				tdma_set_enabled(false);
 				relay_reset();
 				connection_request_ping_resync();
@@ -2327,6 +2338,12 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	control_repeat_seen += repeat;
 	if (frame->pipe != 1 || !relay_control_decode(frame->data, frame->length, &control)) {
 		if (frame->pipe == 1 && frame->length == RELAY_CONTROL_LEN && frame->data[0] == RELAY_CONTROL) {
+			unsigned key = irq_lock();
+			control_seen = false;
+			control_member_history = 0;
+			relayed_confirm_seen = false;
+			layout_confirm_seen = false;
+			irq_unlock(key);
 			tdma_profile_drop();
 		}
 		control_reject[0]++;
@@ -2354,6 +2371,8 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	    || (int32_t)(control.frame - control_frame) <= 0)) {
 		if (control.session != control_session) {
 			control_seen = false;
+			control_member_history = 0;
+			relayed_confirm_seen = false;
 			tdma_set_enabled(false);
 			layout_confirm_seen = false;
 		}
@@ -2391,19 +2410,40 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	sync_filter.receiver_lag = 0;
 	g_last_sync_timestamp = k_uptime_get();
 	g_last_rx_raw_ticks = control.preamble_ticks;
-	/* Only confirm history whose session, frame and membership we observed.
-	 * A current-frame repair follows control frame and is acknowledged by a later control frame. */
+	/* Qualify elapsed frames against the previous announcement before its
+	 * anchor is replaced. It covers the observed frame and its next two;
+	 * unseen later frames must not turn cleared missing bits into receipts. */
 	uint32_t advance = control.frame - control_frame;
-	control_member_history = control_seen && control.session == control_session
-		&& advance < RELAY_CACHE_MAX_FRAMES ? (control_member_history << advance) | 1U : 1U;
+	bool same_history = control_seen && !layout_stale && control.session == control_session
+		&& control.epoch == control_epoch && relay_timeline_active.valid
+		&& relay_direct_anchor.valid && relay_direct_anchor.frame == control_frame;
+	uint32_t history = 0;
+	if (same_history) {
+		if (advance < RELAY_CACHE_MAX_FRAMES) {
+			history = (uint32_t)control_member_history << advance;
+		}
+		if (advance > 1U && advance - 1U < RELAY_CACHE_MAX_FRAMES) {
+			history |= BIT(advance - 1U);
+		}
+		if (advance > 2U && advance - 2U < RELAY_CACHE_MAX_FRAMES) {
+			history |= BIT(advance - 2U);
+		}
+	} else {
+		relayed_confirm_seen = false;
+	}
+	control_member_history = (history | 1U) & ((1U << RELAY_CACHE_MAX_FRAMES) - 1U);
 	bool delivered = false;
-	for (unsigned age = 0; age < relay_control_cache_frames(&control); age++) {
-		if ((control_member_history & BIT(age))
-		    && !(relay_control_missing(&control, age) & BIT(tracker_id))) {
-			delivered = true;
+	if (control.expected & BIT(tracker_id)) {
+		for (unsigned age = 0; age < relay_control_cache_frames(&control); age++) {
+			if ((control_member_history & BIT(age))
+			    && !(relay_control_missing(&control, age) & BIT(tracker_id))) {
+				delivered = true;
+				break;
+			}
 		}
 	}
 	control_session = control.session;
+	control_epoch = control.epoch;
 	control_frame = control.frame;
 	control_tick = control.preamble_ticks;
 	tdma_stream_control(&control);
@@ -2443,11 +2483,15 @@ bool esb_relay_profile_lost(void)
 	if (!tdma_profile_get() || (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS) {
 		return false;
 	}
+	unsigned key = irq_lock();
 	control_seen = false;
+	control_member_history = 0;
+	relayed_confirm_seen = false;
 	layout_confirm_seen = false;
 	layout_stale = true;
 	channel_wait_normal = true;
 	atomic_set(&channel_found, false);
+	irq_unlock(key);
 	connection_request_ping_resync();
 	return true;
 }
@@ -2748,6 +2792,9 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 			follow_slot = (uint8_t)slot;
 		} else if (!layout_stale) {
 			layout_stale = true;
+			control_seen = false;
+			control_member_history = 0;
+			relayed_confirm_seen = false;
 			presence_stats.layout_stale++;
 		}
 	}
@@ -2759,6 +2806,11 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 		bool updated = tdma_update_config(follow_slot, tuple_total, tuple_sticks, tuple_epoch);
 		key = irq_lock();
 		layout_stale = !updated;
+		if (!updated) {
+			control_seen = false;
+			control_member_history = 0;
+			relayed_confirm_seen = false;
+		}
 		if (updated) {
 			presence_stats.layout_followed++;
 			if (confirm_layout) {
@@ -2973,6 +3025,8 @@ static void esb_presence_reset(void)
 {
 	unsigned key = irq_lock();
 	receiver_heard_seen = false;
+	control_seen = false;
+	control_member_history = 0;
 	relayed_confirm_seen = false;
 	layout_stale = false;
 	own_trailer_valid = false;
@@ -3100,7 +3154,6 @@ int esb_initialize(bool tx)
 	own_pong_time = k_uptime_get();
 	layout_confirm_seen = false;
 	tdma_stage_clear();
-	control_seen = false;
 	esb_presence_reset();
 	++radio_session_generation;
 	esb_raw_rx_resume();

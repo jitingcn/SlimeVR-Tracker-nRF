@@ -6,6 +6,8 @@ An engaged receiver broadcasts control feedback, assigns helper watch windows, a
 
 Each primary or repeat control transmission has a four-RTC-tick arming guard after the preceding direct or repair area. Direct capture cutoffs and the receipt freeze relative to that area are unchanged. Control acquisition, frame periods, repair starts and repeat anchors include the guards. Native profile 0 is unchanged.
 
+Delivery feedback is qualified by the active session and layout epoch. A received control covers its own membership and announces the next two frames, so their later receipt masks remain usable even when those controls were missed. Feedback outside observed or announced coverage is not delivery evidence, and a session, layout, clock-acquisition or profile reset fences old confirmations.
+
 PONG trailers coordinate layout activation and passive clock presence. Profile 0 means normal direct TDMA; profile 1 means engaged relay. Protocol version 5 validates the guarded wire timing. Both firmware repositories carry the same `src/connection/relay_protocol.h`. Update all relay trackers and their receiver together; do not mix these images with the earlier timing.
 
 Permission is `relay_user_enabled`, effective permission is `relay_coord.enabled`, automatic demand is `auto_engaged`, and the applied state is `relay_profile`. Commands are `relay on`, `relay off`, `relay` for status, and `relay layout` for settings. Diagnostic block and pool commands remain available. There is no second protocol switch or command alias.

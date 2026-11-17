@@ -29,6 +29,8 @@ static uint8_t epoch=7;
 static bool profile;
 static uint8_t tdma_profile_get(void){return profile;}
 static bool layout_stale,enabled=true,channel_wait_normal,server_time_synced=true;
+static bool control_seen,relayed_confirm_seen;
+static uint8_t control_member_history;
 static unsigned channel_found,resync,updates;
 static uint8_t tdma_get_config_epoch(void){return epoch;}
 static bool tdma_is_enabled(void){return enabled;}
@@ -78,8 +80,10 @@ int main(int argc,char **argv){
   receive_schedule(&p,ESB_PONG_FLAG_NORMAL);assert(resync==0);
   own_trailer.pending=false;receive_schedule(&p,ESB_PONG_FLAG_NORMAL);assert(resync==1);
  }else if(!strcmp(argv[1],"unassigned")){
+  control_seen=relayed_confirm_seen=true;control_member_history=0x1f;
   p.data[8]=255;p.data[11]=8;receive_schedule(&p,ESB_PONG_FLAG_NORMAL);
   assert(layout_stale && !enabled && resync==1);
+  assert(!control_seen && !control_member_history && !relayed_confirm_seen);
  }else if(!strcmp(argv[1],"same-epoch-recovery")){
   enabled=false;layout_stale=true;receive_schedule(&p,ESB_PONG_FLAG_NORMAL);
   assert(enabled && !layout_stale && updates==1);
