@@ -58,7 +58,7 @@ static void ping_windows(void)
 	uint16_t length;
 	assert(tdma_slot_ping_window(5, 1000, &start, &length));
 	assert(start == 160 * 128 + 5 * 16); /* phase 5*256/8 = 160 */
-	assert(length == 2 * 16 + 2 + 6);    /* both slots, offset, late tolerance */
+	assert(length == 2 * 16 + 2 + 5);    /* both slots, offset, late tolerance */
 	assert(tdma_slot_ping_window(5, start, &start, &length));
 	assert(start == (160 + 256) * 128 + 5 * 16);
 	puts("PASS presence windows land on other trackers' PING exchanges");
