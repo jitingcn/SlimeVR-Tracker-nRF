@@ -242,6 +242,8 @@ __attribute__((optimize("O3")))
 static bool tdma_config_snapshot(struct tdma_config *config)
 {
 	tdma_promote_staged();
+	/* Promotion writes geometry and pack under irq_lock; read both under it too. */
+	unsigned int key = irq_lock();
 	config->pack = (uint32_t)atomic_get(&tdma_cfg_pack);
 	config->epoch = TDMA_UNPACK_EPOCH(config->pack);
 	config->slot_index = TDMA_UNPACK_SLOT(config->pack);
@@ -252,6 +254,7 @@ static bool tdma_config_snapshot(struct tdma_config *config)
 		config->total_slots = RELAY_TOTAL_SLOTS;
 		config->frame_ticks = RELAY_FRAME_TICKS_MAX;
 	}
+	irq_unlock(key);
 	return (config->pack & TDMA_ENABLED_BIT) && config->total_slots != 0;
 }
 
