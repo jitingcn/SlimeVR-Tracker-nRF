@@ -44,6 +44,15 @@ int main(int argc,char **argv){
   reset();event_due=false;stream=true;stream_target=100;publish_a();
   iteration();assert(stream_wait_target==96 && sends);
   stream=false;
+ }else if(!strcmp(argv[1],"narrow-primary")){
+  reset();stream=true;stream_slot=RELAY_DIRECT_SLOTS-1;publish_a();
+  send_error=-EAGAIN;iteration();assert(sends==1 && completes==1 && !completion_success && qa_pending());
+  send_error=0;iteration();assert(sends==2 && completion_success && sent_len==17 && sent[0]==TRACKER_EVENT_ESB_TYPE && qa_pending());
+  reset();stream=true;stream_slot=RELAY_DIRECT_SLOTS-1;publish_a();publish_m();last_mag_time=0;
+  iteration();assert(sends==1 && sent_len<=32 && (sent[0]==SUB_PACKET_QUAT_MAG || body_for(SUB_PACKET_QUAT_MAG)) && qa_pending());
+  assert(last_mag_time==now_ms);
+  iteration();assert(sends==2 && sent[0]==TRACKER_EVENT_ESB_TYPE && completion_success);
+  stream=false;stream_slot=0;
  }else if(!strcmp(argv[1],"event-prefetch")){
   reset();publish_a();composite_builder_reset(&b);composite_prepare_event(&b);
   assert(selects==1 && !completes && !b.has_event);
@@ -90,5 +99,5 @@ with tempfile.TemporaryDirectory(prefix="relay-producer-",dir="/tmp") as tmp:
         "-DCONFIG_CONNECTION_RELAY=1","-DCONFIG_CONNECTION_RAW_COLLECTION=1",
         "-DCONFIG_SENSOR_USE_MAGNETOMETER=1","-I",str(HERE.parent/"concurrency"),
         "-I",str(ROOT/"src"),str(path),"-lm","-o",str(binary)],check=True)
-    for case in sys.argv[1:] or ("hid","fresh-wake","event-prefetch","rates","record-size","relay-size"):
+    for case in sys.argv[1:] or ("hid","fresh-wake","narrow-primary","event-prefetch","rates","record-size","relay-size"):
         subprocess.run([str(binary),case],check=True)

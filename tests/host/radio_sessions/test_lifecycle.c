@@ -41,7 +41,10 @@ static int sensor_data_snapshot;
 static bool sensor_ids_set;
 static int64_t last_mag_time, last_info_time, last_status_time, last_runtime_time;
 static struct { unsigned tps; bool mag_turn; } test_rate_schedule;
-struct composite_builder { uint8_t types[5]; unsigned n, sub_max; };
+struct composite_builder { uint8_t types[5]; unsigned n, sub_max; struct { uint32_t token; uint8_t packet[17]; } event; };
+#define SUB_DATA_LEN_COMPACT 13
+#define SUB_DATA_LEN_MAG 14
+static void tracker_events_complete(uint32_t token, bool ok, uint32_t now) {}
 static bool atomic_cas(atomic_t *p, int old, int value) { if (*p != old) return false; *p = value; return true; }
 static uint32_t k_uptime_get_32(void) { return now_ms; }
 static uint64_t k_uptime_ticks(void) { return (uint64_t)now_ms * 1000; }
@@ -98,7 +101,7 @@ static void sensor_data_snapshot_capture(int *snapshot, sensor_data_capture_t *c
 }
 static bool test_rate_due(uint64_t now) { return false; }
 static void test_rate_advance(uint64_t now) {}
-static void composite_builder_reset(struct composite_builder *builder) { builder->n = 0; }
+static void composite_builder_reset(struct composite_builder *builder) { builder->n = 0; builder->event.token = 0; }
 static bool composite_try_add(struct composite_builder *builder, uint8_t type)
 {
     assert(builder->n < 5);
@@ -115,6 +118,8 @@ static uint8_t composite_type_mask(const struct composite_builder *builder)
     for (unsigned i = 0; i < builder->n; ++i) mask |= 1u << builder->types[i];
     return mask;
 }
+struct esb_source_guard;
+static int esb_source_write(struct esb_source_guard *source, const uint8_t *p, unsigned n) { return 0; }
 static void composite_prepare_event(struct composite_builder *builder) { (void)builder; }
 struct esb_source_guard { unsigned key; bool active; };
 static bool esb_source_begin(struct esb_source_guard *g, uint32_t target) { (void)g; return tdma_wait_network_tick(target-4U); }

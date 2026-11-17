@@ -33,8 +33,9 @@ PREFIX = r'''
 #include "connection/tdma.h"
 static bool stream;
 static uint32_t stream_target, stream_wait_target;
+static uint8_t stream_slot;
 bool tdma_wait_network_tick(uint32_t t) { stream_wait_target=t;return true; }
-bool tdma_layout_get(struct tdma_layout *l) { *l=(struct tdma_layout){.profile=1}; return true; }
+bool tdma_layout_get(struct tdma_layout *l) { *l=(struct tdma_layout){.profile=1,.slot_index=stream_slot}; return true; }
 static uint32_t k_uptime_get_32(void);
 #include "connection/sensor_data_snapshot.h"
 #include "util.h"

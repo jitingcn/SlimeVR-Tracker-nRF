@@ -53,11 +53,6 @@ uint16_t test_mode_effective_tps(void)
 	if (!test_mode_get()) {
 		return 0;
 	}
-#if defined(CONFIG_CONNECTION_TDMA)
-	if (tdma_profile_get()) {
-		return 120;
-	}
-#endif
 	uint16_t tps = test_mode_get_target_tps();
 	if (tps == 0) {
 		tps = 1000U / TEST_MODE_MIN_SEND_INTERVAL_MS;
@@ -77,6 +72,9 @@ uint16_t test_mode_effective_tps(void)
 			}
 		}
 	}
+#endif
+#if defined(CONFIG_CONNECTION_TDMA)
+	if (tdma_profile_get()) max_tps = MIN(max_tps, 120U);
 #endif
 	return CLAMP(tps, 1U, max_tps);
 }

@@ -2146,6 +2146,12 @@ static void connection_thread(void)
 				composite_prepare_event(&builder);
 			}
 
+			bool event_only = stream && builder.event.token
+				&& builder.sub_max < 16U + 1U + SUB_DATA_LEN_COMPACT;
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+			event_only = event_only && !mag_due;
+#endif
+
 			/* Do transport and due-field bookkeeping before the fresh-pose
 			 * wake. Only snapshot capture and packet construction follow it. */
 			struct esb_source_guard source = {0};
@@ -2158,6 +2164,13 @@ static void connection_thread(void)
             ledger_source_wake_cycles = relay_cycle_now();
 #endif
 #endif
+			if (event_only) {
+				int err = esb_source_write(&source, builder.event.packet, sizeof(builder.event.packet));
+				tracker_events_complete(builder.event.token, err == 0, k_uptime_get_32());
+				esb_source_end(&source);
+				if (err) k_msleep(connection_send_retry_ms());
+				continue;
+			}
 			sensor_data_capture_t capture;
 			sensor_data_snapshot_capture(&sensor_data_snapshot, &capture);
 			quat_ready = stream || (in_test_mode ? test_send_due : (capture.pending & SENSOR_STREAM_QA) != 0);
@@ -2177,8 +2190,10 @@ static void connection_thread(void)
 
 			if (quat_ready) {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-				bool mag_primary = !stream && in_test_mode && mag_wanted
-					&& (!(capture.pending & SENSOR_STREAM_QA) || test_rate_schedule.mag_turn);
+				bool mag_primary = (stream && mag_due
+					&& builder.sub_max < 2U + SUB_DATA_LEN_COMPACT + SUB_DATA_LEN_MAG)
+					|| (!stream && in_test_mode && mag_wanted
+					&& (!(capture.pending & SENSOR_STREAM_QA) || test_rate_schedule.mag_turn));
 				if (mag_primary) {
 					composite_try_add_due(&builder, SUB_PACKET_QUAT_MAG, true, &last_mag_time, now);
 				} else
