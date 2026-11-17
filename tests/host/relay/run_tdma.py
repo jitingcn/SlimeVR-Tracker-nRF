@@ -64,7 +64,8 @@ static volatile uint64_t virtual_us;
 static uint32_t sleeps, sleep_entry_delay;
 #define CONFIG_SYS_CLOCK_TICKS_PER_SEC 1000000U
 #define K_TIMEOUT_ABS_TICKS(t) ((uint64_t)(t) | (1ULL << 63))
-static unsigned irq_lock(void) { return 0; }
+static void (*lock_hook)(void);
+static unsigned irq_lock(void) { if(lock_hook){void (*hook)(void)=lock_hook;lock_hook=NULL;hook();} return 0; }
 static void irq_unlock(unsigned key) { (void)key; }
 static bool server_time_synced = true;
 static int64_t g_last_sync_timestamp;

@@ -68,6 +68,8 @@ static atomic_t tdma_staged_activation; /* receiver ticks */
  * the stream's admission path, where reading the network clock each time
  * made large frames miss their 2-tick admission window. */
 static uint64_t tdma_staged_local;
+static uint32_t tdma_recent_activation;
+static bool tdma_recent_activation_valid;
 /* Promoted to "no slot" (left the layout): data stays off the air until the
  * receiver grants a slot again. */
 static atomic_t tdma_withdrawn;
@@ -194,7 +196,9 @@ static void tdma_promote_staged(void)
 		return;
 	}
 	unsigned key = irq_lock();
-	if ((uint32_t)atomic_get(&tdma_staged_pack) == staged) {
+	if ((uint32_t)atomic_get(&tdma_staged_pack) == staged
+	    && k_uptime_ticks() >= tdma_staged_local
+	    && (int32_t)(clock.receiver_ticks - (uint32_t)atomic_get(&tdma_staged_activation)) >= 0) {
 		/* Every activation begins a new geometry timeline. The control frame supplies the
 		 * authoritative frame number and two announced future starts. */
 		tdma_profile_origin = (uint32_t)atomic_get(&tdma_staged_activation);
@@ -207,6 +211,8 @@ static void tdma_promote_staged(void)
 			 * ACK RX reference. Every member shifts at this tick. */
 			tdma_profile_origin += (uint32_t)esb_restore_ack_reference();
 		}
+		tdma_recent_activation = tdma_profile_origin;
+		tdma_recent_activation_valid = true;
 		tdma_anchor_frame = 0;
 		tdma_anchor_start = tdma_profile_origin;
 		relay_timeline_clear(&relay_timeline_active);
@@ -434,6 +440,13 @@ static bool tdma_ping_target(
  * zone of a staged activation (see TDMA_ACTIVATION_QUIET_TICKS). */
 static bool tdma_window_quiet(uint32_t start, uint32_t width)
 {
+	if (tdma_recent_activation_valid) {
+		uint32_t from = tdma_recent_activation - TDMA_ACTIVATION_QUIET_TICKS;
+		if ((uint32_t)(start - from) < 2U * TDMA_ACTIVATION_QUIET_TICKS
+		    || (uint32_t)(from - start) < width) {
+			return true;
+		}
+	}
 	if (!((uint32_t)atomic_get(&tdma_staged_pack) & TDMA_STAGED_BIT)) {
 		return false;
 	}
@@ -1007,6 +1020,7 @@ void tdma_profile_drop(void)
 	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
 	if (pack & TDMA_PROFILE_BIT) {
 		(void)esb_restore_ack_reference();
+		tdma_recent_activation_valid = false;
 	}
 	atomic_set(&tdma_cfg_pack, (atomic_val_t)(pack & ~TDMA_PROFILE_BIT));
 	irq_unlock(key);
@@ -1210,8 +1224,8 @@ bool tdma_layout_get(struct tdma_layout *layout)
 		return false;
 	}
 	layout->slot_index = config.slot_index;
-	layout->total_slots = tdma_profile_get() ? RELAY_TOTAL_SLOTS : config.total_slots;
-	layout->profile = tdma_profile_get();
+	layout->total_slots = config.total_slots;
+	layout->profile = (config.pack & TDMA_PROFILE_BIT) != 0;
 	layout->slot_ticks = config.slot_ticks;
 	layout->frame_ticks = config.frame_ticks;
 	layout->epoch = config.epoch;

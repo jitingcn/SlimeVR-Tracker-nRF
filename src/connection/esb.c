@@ -2337,15 +2337,6 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	bool repeat = frame->length && frame->data[0] == 0xecU;
 	control_repeat_seen += repeat;
 	if (frame->pipe != 1 || !relay_control_decode(frame->data, frame->length, &control)) {
-		if (frame->pipe == 1 && frame->length == RELAY_CONTROL_LEN && frame->data[0] == RELAY_CONTROL) {
-			unsigned key = irq_lock();
-			control_seen = false;
-			control_member_history = 0;
-			relayed_confirm_seen = false;
-			layout_confirm_seen = false;
-			irq_unlock(key);
-			tdma_profile_drop();
-		}
 		control_reject[0]++;
 		control_repeat_reject[0] += repeat;
 		return false;
@@ -3597,7 +3588,7 @@ static int esb_submit_guarded(const struct esb_payload *payload, uint32_t wait_c
 	int err = -EAGAIN;
 	LEDGER_SOURCE_REASON(LEDGER_REFUSAL_FINAL);
 	if (!channel_wait_normal && !layout_stale && esb_initialized && esb_is_idle()
-	    && tdma_slot_tx_valid((uint8_t)payload->length)) {
+	    && (tdma_profile_get() || esb_layout_granted()) && tdma_slot_tx_valid((uint8_t)payload->length)) {
 		LEDGER_SOURCE_REASON(LEDGER_REFUSAL_QUEUE);
 		err = esb_write_payload(payload);
 		if (err == 0) {

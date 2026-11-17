@@ -97,9 +97,10 @@ int main(int argc,char **argv){
   struct esb_payload payload={.length=22,.data={0x77}};source_payload=true;
   inject_claim_irq=true;
   if(!strcmp(argv[1],"source-expired"))final_valid=false;
+  if(!strcmp(argv[1],"source-grant-expired")){granted=false;profile=false;}
   if(!strcmp(argv[1],"source-busy"))raw_rx_active=true;
   if(!strcmp(argv[1],"source-full"))queue_error=-ENOMEM;
-  int expected=raw_rx_active ? -EBUSY : !final_valid ? -EAGAIN : queue_error;
+  int expected=raw_rx_active ? -EBUSY : (!final_valid || !granted) ? -EAGAIN : queue_error;
   assert(esb_submit_guarded(&payload,0)==expected);
   assert(queued==(expected==0) && started==(expected==0));
   assert(direct_fail[1]==raw_rx_active && direct_fail[2]==(expected==-EAGAIN));
@@ -141,5 +142,5 @@ with tempfile.TemporaryDirectory(prefix="relay-submit-",dir="/tmp") as tmp:
         "-std=c11","-Wall","-Wextra","-Werror","-Wno-unused-function",
         "-g","-O1","-fsanitize=address,undefined","-I",str(ROOT/"src/connection"),
         str(path),"-o",str(binary)],check=True)
-    for case in sys.argv[1:] or ("source-valid","source-expired","source-busy","source-full","maintenance","maintenance-late","repair","repair-warm","peer-report","repair-ungranted","air","expired","collection","no-grant","valid"):
+    for case in sys.argv[1:] or ("source-valid","source-expired","source-grant-expired","source-busy","source-full","maintenance","maintenance-late","repair","repair-warm","peer-report","repair-ungranted","air","expired","collection","no-grant","valid"):
         subprocess.run([str(binary),case],check=True)

@@ -360,9 +360,9 @@ int main(int argc,char **argv) {
   f=(struct relay_rx_frame){.pipe=1,.length=RELAY_CONTROL_LEN,
    .end_kernel_ticks=c.preamble_ticks+RELAY_CONTROL_AIR_TICKS};
   assert(relay_control_encode(f.data,&c)==RELAY_CONTROL_LEN);f.data[71]^=1;
-  assert(!esb_relay_control_receive(&f) && !tdma_enabled && !relayed_confirm_seen);
+  assert(!esb_relay_control_receive(&f) && tdma_enabled && relayed_confirm_seen);
   tdma_enabled=true;c.frame++;c.preamble_ticks+=273;c.missing[0]=7;c.missing[1]=3;now_ms++;
-  assert(receive_history_control(&c) && !relayed_confirm_seen);
+  assert(receive_history_control(&c) && relayed_confirm_seen);
 
   reset_history_case();c=history_control(10,100000,true);c.expected=3;c.missing[0]=3;
   assert(receive_history_control(&c) && !relayed_confirm_seen); /* not expected, not a receipt */

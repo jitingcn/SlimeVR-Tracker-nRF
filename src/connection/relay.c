@@ -637,7 +637,7 @@ size_t relay_diag_build(uint8_t *buf, size_t capacity, uint8_t tracker_id)
 	buf[5] = layout.slot_index;
 	buf[6] = layout.total_slots;
 	buf[7] = layout.slot_ticks;
-	relay_put16(&buf[8], trailer.children_mask);
+	relay_put16(&buf[8], head ? active.children_mask : 0);
 	relay_put16(&buf[10], trailer.member_mask);
 	unsigned peak_key = irq_lock();
 	uint16_t start_late = stats.start_late_max;
@@ -778,7 +778,7 @@ void relay_on_control(const struct relay_control *control, uint8_t helper)
 	}
 	unsigned key = irq_lock();
 	if (!control_valid || control_plan.session != control->session ||
-	    control_plan.epoch != control->epoch) {
+	    control_plan.epoch != control->epoch || control_plan.on_demand != control->on_demand) {
 		relay_generation++;
 		/* The payload bytes are irrelevant once a cache entry is invalid. */
 		relay_cache_invalidate();

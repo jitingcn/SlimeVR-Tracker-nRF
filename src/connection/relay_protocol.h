@@ -892,7 +892,7 @@ static inline size_t relay_control_encode(uint8_t out[RELAY_CONTROL_LEN], const 
 	if (c->on_demand) {
 		relay_put_be16(out + 63, relay_control_missing(c, 3));
 		relay_put_be16(out + 65, relay_control_missing(c, 4));
-		out[68] = (c->slot_ticks == 15U) | ((c->maintenance_owner < 16U ? c->maintenance_owner : 16U) << 1)
+		out[68] = ((c->slot_ticks ? c->slot_ticks : RELAY_SLOT_TICKS) == 15U) | ((c->maintenance_owner < 16U ? c->maintenance_owner : 16U) << 1)
 				| (c->control_repeat_mode << 6);
 	}
 	out[RELAY_CONTROL_OFF_CRC] = relay_crc8(7, out, 71);
@@ -1061,7 +1061,7 @@ static inline void relay_control_finish_encode(
 		relay_put_be16(out + 63, relay_control_missing(c, 3));
 		relay_put_be16(out + 65, relay_control_missing(c, 4));
 		unsigned owner = c->maintenance_owner < 16U ? c->maintenance_owner : 16U;
-		out[68] = (c->slot_ticks == 15U) | (owner << 1) | (c->control_repeat_mode << 6);
+		out[68] = ((c->slot_ticks ? c->slot_ticks : RELAY_SLOT_TICKS) == 15U) | (owner << 1) | (c->control_repeat_mode << 6);
 		uint8_t v = relay_crc8(crc.prefix, out + 20, 6);
 		v = shift20[v] ^ crc.watch;
 		v = relay_crc8(v, out + 46, 22);

@@ -20,6 +20,7 @@ static void frame_start_exact(void)
 
 static void configure(uint8_t own, uint8_t total)
 {
+	tdma_recent_activation_valid = false;
 	tdma_cfg_pack = 0;
 	relay_timeline_clear(&relay_timeline_active);
 	relay_direct_anchor.valid = false;
@@ -80,6 +81,21 @@ static void final_admission_check(void)
 /* Staged layout activation: the staged tuple is promoted by the first
  * snapshot at or after its activation tick, no data or PING window straddles
  * that tick, an unassigned stage withdraws, and a later tuple recovers. */
+static void postpone_same_stage(void)
+{
+ atomic_set(&tdma_staged_activation, atomic_get(&tdma_staged_activation)+100);
+ tdma_staged_local += 1000000;
+}
+static void staged_deadline_race(void)
+{
+ struct tdma_layout layout;
+ configure(0,8);set_ticks(128000);
+ assert(tdma_stage_config(1,8,16,8,128100));set_ticks(128100);
+ lock_hook=postpone_same_stage;
+ assert(tdma_layout_get(&layout) && layout.epoch==7);
+ tdma_stage_clear();
+}
+
 static void staged_activation(void)
 {
 	struct tdma_layout layout;
@@ -104,6 +120,16 @@ static void staged_activation(void)
 		&& layout.total_slots == 9);
 	assert(now_ticks() % 144 >= 3 * 16 && now_ticks() % 144 < 4 * 16);
 	assert(!tdma_layout_withdrawn());
+
+	/* Promotion must preserve the exact same quiet window. */
+	act = now_ticks() + 1000;
+	assert(tdma_stage_config(3, 9, 16, 9, act));
+	assert(tdma_window_quiet(act - 2, 16));
+	set_ticks(act);
+	assert(tdma_layout_get(&layout) && layout.epoch == 9);
+	assert(tdma_window_quiet(act - 2, 16));
+	assert(!tdma_window_quiet(act + TDMA_ACTIVATION_QUIET_TICKS, 16));
+	assert(tdma_update_config(3, 9, 16, 8));
 
 	/* Removal: an unassigned stage disables TDMA at activation. */
 	act = now_ticks() + 1000;
@@ -383,6 +409,7 @@ int main(void)
 	data_windows();
 	ping_windows();
 	final_admission_check();
+	staged_deadline_race();
 	staged_activation();
 	staged_no_mixed_layouts();
 	return 0;
