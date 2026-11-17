@@ -106,8 +106,8 @@ static uint8_t tdma_profile_get(void){return stream_profile;}
 struct tdma_layout {uint8_t profile,epoch,slot_index,slot_ticks;};
 static bool tdma_layout_get(struct tdma_layout *l){*l=(struct tdma_layout){1,7,2,16};return tdma_enabled;}
 static void tdma_stream_control(const struct relay_control *c){
- relay_geometry_make(&geometry,c->direct_count,c->repair_count,c->slot_ticks,c->tps_max);
- relay_runtime_anchor_set(&relay_direct_anchor,c->frame,c->preamble_ticks,c->direct_count,c->repair_count,relay_control_next_repairs(c),relay_control_next2_repairs(c),c->slot_ticks,c->tps_max);
+ relay_geometry_make_control(&geometry,c->direct_count,c->repair_count,c->slot_ticks,c->tps_max,c->control_repeat_mode);
+ relay_runtime_anchor_set(&relay_direct_anchor,c->frame,c->preamble_ticks,c->direct_count,c->repair_count,relay_control_next_repairs(c),relay_control_next2_repairs(c),c->slot_ticks,c->tps_max,c->control_repeat_mode);
  relay_timeline_announce(&relay_timeline_active,&relay_direct_anchor);
 }
 #define BIT(x) (1U<<(x))
@@ -202,7 +202,7 @@ int main(int argc,char **argv) {
   uint32_t cutoff=relay_direct_anchor.third_start+3U*16U;
   current_tick=cutoff-1;assert(esb_layout_granted() && esb_relay_granted_at(current_tick));
   current_tick=cutoff;assert(!esb_layout_granted() && !esb_relay_granted_at(current_tick));
-  relay_runtime_anchor_set(&relay_direct_anchor,10,0xfffffff0U,3,5,0,2,16,120);
+  relay_runtime_anchor_set(&relay_direct_anchor,10,0xfffffff0U,3,5,0,2,16,120,0);
   cutoff=relay_direct_anchor.third_start+3U*16U;
   assert(esb_lease_at(cutoff-1));assert(!esb_lease_at(cutoff));
 

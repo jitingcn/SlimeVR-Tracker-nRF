@@ -21,7 +21,7 @@ prefix = r'''
 #include <string.h>
 #define CONFIG_RELAY_LAYOUT_FOLLOW_RECEIVER 1
 #include "relay_protocol.h"
-static struct relay_geometry geometry={11,5,16,120,4096,15,0};
+static struct relay_geometry geometry={11,5,16,120,276,1,0};
 const struct relay_geometry *relay_geometry_active=&geometry;
 static unsigned two_case,copy_index;
 /* Non-two cases: frames the radio completes, one END per frame, each at a tick. */
@@ -67,7 +67,7 @@ static bool relay_radio_prepare(unsigned channel,unsigned pipes,bool rx){
 static bool relay_radio_receive(void){assert(prepared && claimed && depth && tick>=100);if(setup_work)assert(tick==100);started++;return true;}
 static inline __attribute__((unused)) bool relay_radio_start(unsigned channel,unsigned pipes,bool rx){return relay_radio_prepare(channel,pipes,rx) && relay_radio_receive();}
 static bool esb_get_network_clock(struct esb_network_clock *c){if(completed_late && started)tick=125;c->receiver_ticks=tick;return true;}
-static bool relay_radio_ended(void){if(two_case){unsigned at=copy_index==0?111:111+(geometry.control_repeat_mode==1?16:(geometry.repairs+1)*16);return copy_index<2 && tick>=at && two_case!=3;}return !timeout && taken<frames_total && tick>=frame_tick[taken];}
+static bool relay_radio_ended(void){if(two_case){unsigned at=copy_index==0?111:111+relay_control_repeat_offset(geometry.direct,geometry.repairs,geometry.slot_ticks,geometry.control_repeat_mode);return copy_index<2 && tick>=at && two_case!=3;}return !timeout && taken<frames_total && tick>=frame_tick[taken];}
 static bool relay_radio_take(struct relay_rx_frame *f){if(two_case){f->data[0]=copy_index++?0xec:0xe8;return true;}unsigned i=taken++;f->data[0]=frame_type[i];return !(take_fail && i==0);}
 static void relay_radio_peek(uint8_t *len,bool *crc,uint8_t *rssi){*len=1;*crc=false;*rssi=0;}
 static bool relay_radio_stop(void){assert(prepared && !depth);stopped++;return true;}
@@ -108,7 +108,7 @@ int main(int argc,char **argv){
  if(!strcmp(c,"prepare-irq"))assert(prepared && started && tick==118);
  if(!strcmp(c,"busy"))assert(attempts==3 && delay_calls==2);
  if(timeout)assert(control_window_fail[5]==1 && control_no_address==1);
- if(!strcmp(c,"scan"))assert(tick>=100+274+16);
+ if(!strcmp(c,"scan"))assert(tick>=100+276+16);
  if(take_fail)assert(control_window_fail[3]==1 && control_crc_fail==1);
  if(stamp_fail)assert(control_window_fail[4]==1);
  if(clock_fail)assert(control_window_fail[0]==1);

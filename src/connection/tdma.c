@@ -56,7 +56,7 @@ static uint8_t tdma_slot_index_init; /* used only before first dyn config */
 #define TDMA_STAGED_BIT 0x40U
 #define TDMA_STAGED_UNASSIGNED 0x20U
 static atomic_t tdma_staged_pack;
-static struct relay_geometry tdma_active_geometry = {16, 1, 16, 120, 288, 1, 0};
+static struct relay_geometry tdma_active_geometry = {16, 1, 16, 120, 292, 1, 0};
 static struct relay_geometry tdma_staged_geometry;
 const struct relay_geometry *relay_geometry_active = &tdma_active_geometry;
 struct relay_timeline relay_timeline_active;
@@ -523,13 +523,6 @@ void tdma_stream_control(const struct relay_control *control)
 		relay_control_next_repairs(control),
 		relay_control_next2_repairs(control),
 		control->slot_ticks,
-		control->tps_max
-	);
-	relay_runtime_anchor_control_repeat(
-		&relay_direct_anchor,
-		control->repair_count,
-		relay_control_next_repairs(control),
-		relay_control_next2_repairs(control),
 		control->tps_max,
 		control->control_repeat_mode
 	);
@@ -601,7 +594,7 @@ static bool tdma_stream_admit(uint8_t slot, uint8_t reserve, bool consume)
 		}
 		uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
 		uint32_t frame = relay_frame_near(tdma_anchor_frame, tdma_anchor_start, clock.receiver_ticks);
-		uint32_t start = relay_frame_start(tdma_profile_origin, frame) + slot * RELAY_SLOT_TICKS;
+		uint32_t start = relay_frame_start(tdma_profile_origin, frame) + relay_slot_offset(slot);
 		int32_t pos = clock.receiver_ticks - start;
 		/* D0's existing target-minus-four handoff starts in the previous
 		 * frame. Treat those two ticks as early for the upcoming D0, not

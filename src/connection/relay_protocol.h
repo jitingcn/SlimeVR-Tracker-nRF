@@ -12,11 +12,15 @@
 #include <stdint.h>
 #include <string.h>
 
-#define RELAY_PROTOCOL_VERSION 4U
+#define RELAY_PROTOCOL_VERSION 5U
 #define RELAY_MAX_CHILDREN 3U
 #define RELAY_MAX_TRACKERS 16U
 
 #define RELAY_FRAME_MAX 72U
+
+/* Each control gets its own arming interval after the preceding RX window. */
+#define RELAY_CONTROL_ARM_GUARD_TICKS 4U
+#define RELAY_TX_OFFSET 2U /* preamble target inside a slot, as TDMA_SLOT_TARGET_OFFSET */
 
 #define RELAY_CAP_HELPER 0x01U   /* can listen for and forward peers */
 #define RELAY_CAP_PRESENCE 0x02U /* keeps sync from overheard PONGs */
@@ -111,17 +115,23 @@ static inline unsigned relay_control_repeat_slots(unsigned mode)
 /* Compute once for the staged member set, never from the configured member cap. */
 static inline struct relay_runtime_settings relay_runtime_for_members(struct relay_runtime_settings s, uint8_t direct)
 {
-	unsigned slots = 32768U / s.tps_min / s.slot_ticks;
+	unsigned ticks = 32768U / s.tps_min;
+	unsigned slots = ticks > RELAY_CONTROL_ARM_GUARD_TICKS
+		? (ticks - RELAY_CONTROL_ARM_GUARD_TICKS) / s.slot_ticks : 0U;
 	unsigned budget = slots > direct + 1U ? slots - direct - 1U : 1U;
 	unsigned repairs = budget;
 	if (repairs > s.max_repairs) {
 		repairs = s.max_repairs;
 	}
 	bool fixed = s.repair_floor == s.max_repairs;
-	s.control_repeat_mode = repairs >= 3U && (s.control_repeat_mode != 1U || budget >= 4U) ? s.control_repeat_mode : 0U;
+	unsigned repeat_slots = ticks > 2U * RELAY_CONTROL_ARM_GUARD_TICKS
+		? (ticks - 2U * RELAY_CONTROL_ARM_GUARD_TICKS) / s.slot_ticks : 0U;
+	unsigned repeat_budget = repeat_slots > direct + 1U ? repeat_slots - direct - 1U : 0U;
+	s.control_repeat_mode = repairs >= 3U
+		&& repeat_budget >= relay_control_repeat_slots(s.control_repeat_mode) + 2U ? s.control_repeat_mode : 0U;
 	if (s.control_repeat_mode) {
 		repairs--;
-		unsigned available = budget - relay_control_repeat_slots(s.control_repeat_mode);
+		unsigned available = repeat_budget - relay_control_repeat_slots(s.control_repeat_mode);
 		if (repairs > available) {
 			repairs = available;
 		}
@@ -138,10 +148,12 @@ static inline struct relay_runtime_settings relay_runtime_for_members(struct rel
 
 /* The cap grid is rational and tied to frame number. Occupied time can
  * lengthen any individual frame without losing fractional cap padding. */
-static inline uint16_t
-relay_runtime_period(uint32_t frame, uint8_t direct, uint8_t repairs, uint8_t slot_ticks, uint16_t cap)
+static inline uint16_t relay_runtime_period(
+	uint32_t frame, uint8_t direct, uint8_t repairs, uint8_t slot_ticks, uint16_t cap, uint8_t mode
+)
 {
-	uint32_t occupied = (direct + 1U + repairs) * slot_ticks;
+	uint32_t occupied = (direct + 1U + repairs + relay_control_repeat_slots(mode)) * slot_ticks
+		+ RELAY_CONTROL_ARM_GUARD_TICKS * (1U + (mode != 0U));
 	uint32_t remainder = 32768U % cap;
 	uint32_t phase = (frame % cap) * remainder % cap;
 	uint32_t padding = 32768U / cap + (phase + remainder >= cap);
@@ -166,40 +178,20 @@ static inline void relay_runtime_anchor_set(
 	uint8_t next_repairs,
 	uint8_t next2_repairs,
 	uint8_t slot_ticks,
-	uint16_t cap
+	uint16_t cap,
+	uint8_t mode
 )
 {
 	a->frame = frame;
 	a->direct = direct;
 	a->slot_ticks = slot_ticks;
-	a->start = preamble - direct * slot_ticks - 2U;
-	a->next_start = a->start + relay_runtime_period(frame, direct, repairs, slot_ticks, cap);
-	a->following_start = a->next_start + relay_runtime_period(frame + 1U, direct, next_repairs, slot_ticks, cap);
-	a->third_start = a->following_start + relay_runtime_period(frame + 2U, direct, next2_repairs, slot_ticks, cap);
+	a->start = preamble - direct * slot_ticks - RELAY_CONTROL_ARM_GUARD_TICKS - RELAY_TX_OFFSET;
+	a->next_start = a->start + relay_runtime_period(frame, direct, repairs, slot_ticks, cap, mode);
+	a->following_start = a->next_start + relay_runtime_period(frame + 1U, direct, next_repairs, slot_ticks, cap, mode);
+	a->third_start = a->following_start + relay_runtime_period(frame + 2U, direct, next2_repairs, slot_ticks, cap, mode);
 	a->valid = true;
 }
 
-static inline void relay_runtime_anchor_control_repeat(
-	struct relay_runtime_anchor *a,
-	uint8_t repairs,
-	uint8_t next,
-	uint8_t next2,
-	uint16_t cap,
-	uint8_t mode
-)
-{
-	if (mode) {
-		a->next_start
-			= a->start
-			+ relay_runtime_period(a->frame, a->direct, repairs + relay_control_repeat_slots(mode), a->slot_ticks, cap);
-		a->following_start
-			= a->next_start
-			+ relay_runtime_period(a->frame + 1U, a->direct, next + relay_control_repeat_slots(mode), a->slot_ticks, cap);
-		a->third_start
-			= a->following_start
-			+ relay_runtime_period(a->frame + 2U, a->direct, next2 + relay_control_repeat_slots(mode), a->slot_ticks, cap);
-	}
-}
 
 static inline bool relay_runtime_start(const struct relay_runtime_anchor *a, uint32_t frame, uint32_t *start)
 {
@@ -228,7 +220,7 @@ relay_geometry_make(struct relay_geometry *g, uint8_t direct, uint8_t repairs, u
 		|| (slot_ticks != 15U && slot_ticks != 16U) || !cap || cap > 32768U) {
 		return false;
 	}
-	uint32_t occupied = (direct + 1U + repairs) * slot_ticks;
+	uint32_t occupied = (direct + 1U + repairs) * slot_ticks + RELAY_CONTROL_ARM_GUARD_TICKS;
 	uint16_t divisor = cap & (uint16_t)(0U - cap);
 	*g = (struct relay_geometry){
 		direct,
@@ -258,7 +250,8 @@ static inline bool relay_geometry_make_control(
 	if (!relay_geometry_make(g, direct, repairs, width, cap)) {
 		return false;
 	}
-	unsigned occupied = (direct + 1U + repairs + relay_control_repeat_slots(control_repeat_mode)) * width;
+	unsigned occupied = (direct + 1U + repairs + relay_control_repeat_slots(control_repeat_mode)) * width
+		+ RELAY_CONTROL_ARM_GUARD_TICKS * (1U + (control_repeat_mode != 0U));
 	if (occupied * cap >= 32768U) {
 		g->numerator = occupied;
 		g->denominator = 1;
@@ -270,7 +263,8 @@ static inline bool relay_geometry_make_control(
 static inline uint32_t relay_control_repeat_offset(uint8_t direct, uint8_t repairs, uint8_t width, uint8_t mode)
 {
 	(void)direct;
-	return mode == 1U ? 2U * width : mode == 2U ? (repairs + 1U) * width : 0U;
+	return mode == 1U ? 2U * width + RELAY_CONTROL_ARM_GUARD_TICKS
+		: mode == 2U ? (repairs + 1U) * width + RELAY_CONTROL_ARM_GUARD_TICKS : 0U;
 }
 
 /* Private PONG geometry: bit7 private, bits6..3 direct-1, bits2..0 base R.
@@ -306,7 +300,8 @@ RELAY_LAYOUT_INLINE const struct relay_geometry *relay_geometry_current(void)
 #ifndef RELAY_HOST_TPS_MAX
 #define RELAY_HOST_TPS_MAX 120U
 #endif
-#define RELAY_HOST_OCCUPIED ((RELAY_HOST_DIRECT_SLOTS + 1U + RELAY_HOST_REPAIR_SLOTS) * RELAY_HOST_SLOT_TICKS)
+#define RELAY_HOST_OCCUPIED \
+	((RELAY_HOST_DIRECT_SLOTS + 1U + RELAY_HOST_REPAIR_SLOTS) * RELAY_HOST_SLOT_TICKS + RELAY_CONTROL_ARM_GUARD_TICKS)
 #define RELAY_HOST_LONG (RELAY_HOST_OCCUPIED * RELAY_HOST_TPS_MAX >= 32768U)
 #define RELAY_HOST_DIVISOR (RELAY_HOST_TPS_MAX & (0U - RELAY_HOST_TPS_MAX))
 #define RELAY_HOST_NUMERATOR (RELAY_HOST_LONG ? RELAY_HOST_OCCUPIED : 32768U / RELAY_HOST_DIVISOR)
@@ -388,13 +383,21 @@ extern struct relay_runtime_anchor relay_direct_anchor;
  * Only the child's pipe is enabled, so an early window cannot capture the
  * previous slot's traffic. Hardware: 1 tick missed ~70% of child frames. */
 #define RELAY_RX_LEAD_TICKS 4U
-/* Frame layout: direct slots, then control frame, then the repair slots. */
-#define RELAY_CONTROL_START (RELAY_DIRECT_SLOTS * RELAY_SLOT_TICKS)
-#define RELAY_TX_OFFSET 2U /* preamble target inside a slot, as TDMA_SLOT_TARGET_OFFSET */
+/* Guard after the direct window, and another before an optional repeat. */
+#define RELAY_CONTROL_START (RELAY_DIRECT_SLOTS * RELAY_SLOT_TICKS + RELAY_CONTROL_ARM_GUARD_TICKS)
 #define RELAY_CONTROL_PREAMBLE (RELAY_CONTROL_START + RELAY_TX_OFFSET)
-#define RELAY_REPAIR_START                                                                                          \
-	(RELAY_CONTROL_START + RELAY_SLOT_TICKS * (1U + (2U * (relay_geometry_current()->control_repeat_mode == 1U))))
+#define RELAY_REPAIR_START \
+	(RELAY_CONTROL_START + RELAY_SLOT_TICKS * (1U + (2U * (relay_geometry_current()->control_repeat_mode == 1U))) \
+		+ RELAY_CONTROL_ARM_GUARD_TICKS * (relay_geometry_current()->control_repeat_mode == 1U))
 #define RELAY_REPAIR_FIRST_SLOT (RELAY_DIRECT_SLOTS + 1U + (2U * (relay_geometry_current()->control_repeat_mode == 1U)))
+
+/* Logical repair slot numbers exclude guard ticks; direct slots are unchanged. */
+static inline uint32_t relay_slot_offset(unsigned slot)
+{
+	return slot >= RELAY_REPAIR_FIRST_SLOT
+		? RELAY_REPAIR_START + (slot - RELAY_REPAIR_FIRST_SLOT) * RELAY_SLOT_TICKS
+		: slot * RELAY_SLOT_TICKS;
+}
 #define RELAY_CAPTURE_TAIL_TICKS 2U
 #define RELAY_CONTROL_PREP_LEAD_TICKS 3U
 #define RELAY_REPAIR_HEADER_LEN 8U

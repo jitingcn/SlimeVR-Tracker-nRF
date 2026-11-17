@@ -2561,7 +2561,9 @@ bool esb_relay_control_window(uint32_t start)
 	 * one maximum-length frame, with poses still fenced by the anchor.
 	 * This also acquires the cap when joining a private runtime layout. */
 	if (!relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, now)) {
-		uint32_t longest = (RELAY_DIRECT_SLOTS + 1U + RELAY_REPAIR_MAX) * RELAY_SLOT_TICKS;
+		uint32_t longest = (RELAY_DIRECT_SLOTS + 1U + RELAY_REPAIR_MAX
+			+ relay_control_repeat_slots(relay_geometry_current()->control_repeat_mode)) * RELAY_SLOT_TICKS
+			+ RELAY_CONTROL_ARM_GUARD_TICKS * (1U + (relay_geometry_current()->control_repeat_mode != 0U));
 		longest = MAX(longest, (32768U + relay_geometry_current()->tps - 1U) / relay_geometry_current()->tps);
 		end = start + longest + RELAY_SLOT_TICKS;
 	}

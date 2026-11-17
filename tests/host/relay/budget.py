@@ -23,6 +23,11 @@ CALL_LATENCY_US = 20.0
 SYNC_ERROR_TICKS = 2   # head vs child receiver-time estimates, combined
 RX_SETTLE_US = 40.0    # receiver settling after READY before a preamble is reliably caught
 
+# Intentional model-contract change for D11/R5/width16/mode0 at cap 120:
+# the preserved RX cutoff and four-tick guard raise the modeled worst case
+# from 24,977.186 us to 25,251.844 us. Not an RF or all-geometries bound.
+REFERENCE_MODEL_MAX_US = 26000
+
 
 def consts(path, names):
     text = path.read_text()
@@ -53,6 +58,23 @@ def check(cond, message):
     if not cond:
         failures.append(message)
 
+def repair_latency_sweep(relay, target_offset, reserve, guard):
+    width = relay["RELAY_SLOT_TICKS"]
+    worst = (-1, 0, 0, 0, 0)
+    for phase in range(relay["RELAY_GRID_FRAMES"]):
+        def start(frame):
+            return (frame * relay["RELAY_GRID_TICKS"]) // relay["RELAY_GRID_FRAMES"]
+        for source in range(relay["RELAY_DIRECT_SLOTS"]):
+            original = start(phase) + source * width + target_offset
+            for repair in range(relay["RELAY_REPAIR_SLOTS"]):
+                for age in range(3):
+                    finish = start(phase + age) + (relay["RELAY_DIRECT_SLOTS"] + 1 + repair) * width + guard
+                    finish += width - reserve
+                    delay = (finish - original + SYNC_ERROR_TICKS) * TICK_US + CALL_LATENCY_US + airtime_us(72)
+                    if delay > worst[0]:
+                        worst = (delay, phase, source, repair, age)
+    return worst
+
 
 def main():
     t = consts(TRACKER / "src/connection/tdma.c", [
@@ -64,7 +86,7 @@ def main():
         "RELAY_PRESENCE_CLOCK_LEAD_US"])
     p = consts(TRACKER / "src/connection/relay_protocol.h", [
         "RELAY_FRAME_MAX", "RELAY_TRAILER_LEN", "RELAY_TRAILER_PENDING_LEN", "RELAY_ACTIVATION_UNIT_TICKS",
-        "RELAY_LAYOUT_GRANT_MS", "RELAY_LAYOUT_ACTIVATION_MS", "RELAY_RX_LEAD_TICKS"])
+        "RELAY_LAYOUT_GRANT_MS", "RELAY_LAYOUT_ACTIVATION_MS", "RELAY_RX_LEAD_TICKS", "RELAY_CONTROL_ARM_GUARD_TICKS"])
     r["RELAY_RX_LEAD_TICKS"] = p["RELAY_RX_LEAD_TICKS"]
     link = consts(TRACKER / "src/connection/link_supervision.h", [
         "LINK_UPLINK_HOLDOVER_MS", "LINK_PRESENCE_TIMEOUT_MS", "LINK_DEGRADED_AFTER_MS"])
@@ -133,18 +155,43 @@ def main():
 
     # Evaluate the shared table rather than duplicating its layout arithmetic.
     names = ["RELAY_SLOT_TICKS", "RELAY_DIRECT_SLOTS", "RELAY_REPAIR_SLOTS",
-             "RELAY_DIRECT_MAX", "RELAY_LAST_DIRECT_MAX", "RELAY_GRID_TICKS", "RELAY_GRID_FRAMES"]
+             "RELAY_DIRECT_MAX", "RELAY_LAST_DIRECT_MAX", "RELAY_GRID_TICKS", "RELAY_GRID_FRAMES",
+             "relay_geometry_current()->control_repeat_mode"]
+    policy_names = ["member11_100.max_repairs", "member11_100.repair_floor",
+                    "member11_120.max_repairs", "member11_120.repair_floor",
+                    "member8_120.max_repairs", "member8_120.repair_floor",
+                    "geometry8.numerator", "geometry8.denominator"]
     with tempfile.TemporaryDirectory() as temporary:
         source = Path(temporary) / "geometry.c"
         binary = Path(temporary) / "geometry"
         source.write_text('#include <stdio.h>\n#include "relay_protocol.h"\nint main(void) {\n' +
-            ''.join(f'printf("%u\\n", (unsigned){name});\n' for name in names) + '}\n')
+            ''.join(f'printf("%u\\n", (unsigned){name});\n' for name in names) +
+            'struct relay_runtime_settings s = {16, 5, 16, 100, 120, 5, 0};\n'
+            'if (!relay_runtime_validate(&s, false)) return 1;\n'
+            'struct relay_runtime_settings member11_100 = relay_runtime_for_members(s, 11);\n'
+            's.tps_min = 120;\n'
+            'if (!relay_runtime_validate(&s, false)) return 1;\n'
+            'struct relay_runtime_settings member11_120 = relay_runtime_for_members(s, 11);\n'
+            'struct relay_runtime_settings member8_120 = relay_runtime_for_members(s, 8);\n'
+            'struct relay_geometry geometry8;\n'
+            'if (!relay_geometry_make_control(&geometry8, 8, member8_120.max_repairs, 16, 120, '
+            'member8_120.control_repeat_mode)) return 1;\n' +
+            ''.join(f'printf("%u\\n", (unsigned){name});\n' for name in policy_names) + '}\n')
         subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + ['-I', str(TRACKER / 'src/connection'), str(source), '-o', str(binary)], check=True)
-        relay = dict(zip(names, map(int, subprocess.check_output([str(binary)], text=True).split())))
+        relay = dict(zip(names + policy_names, map(int, subprocess.check_output([str(binary)], text=True).split())))
+    scope = (relay["RELAY_DIRECT_SLOTS"], relay["RELAY_REPAIR_SLOTS"], relay["RELAY_SLOT_TICKS"],
+             relay["relay_geometry_current()->control_repeat_mode"], relay["RELAY_GRID_TICKS"],
+             relay["RELAY_GRID_FRAMES"], p["RELAY_CONTROL_ARM_GUARD_TICKS"])
+    if scope != (11, 5, 16, 0, 276, 1, 4):
+        raise SystemExit(f"26 ms reference budget applies only to guarded D11/R5/width16/mode0/cap120: {scope}")
+    check((relay["member11_100.max_repairs"], relay["member11_100.repair_floor"],
+           relay["member11_120.max_repairs"], relay["member11_120.repair_floor"],
+           relay["member8_120.max_repairs"], relay["member8_120.repair_floor"]) == (5, 5, 4, 4, 5, 5),
+          "validated static floor/ceiling policy: D11 R5 at min100, R4 at min120; D8 R5 at min120")
     s3 = relay["RELAY_SLOT_TICKS"]
     latest32 = (s3 - t["TDMA_LEN18_32_RESERVE_TICKS"]) * TICK_US
     latest32 += CALL_LATENCY_US + RAMP_US + airtime_us(relay["RELAY_LAST_DIRECT_MAX"])
-    earliest_b = (s3 + t["TDMA_SLOT_TARGET_OFFSET"] - SYNC_ERROR_TICKS) * TICK_US + RAMP_US
+    earliest_b = (s3 + p["RELAY_CONTROL_ARM_GUARD_TICKS"] + t["TDMA_SLOT_TARGET_OFFSET"] - SYNC_ERROR_TICKS) * TICK_US + RAMP_US
     for mcu, disable in (("nRF52840", 4), ("nRF54L15", 2)):
         check(latest32 + disable + RAMP_US + RX_SETTLE_US <= earliest_b,
               f"relay last direct->control frame {mcu}: {earliest_b - latest32 - disable - RAMP_US - RX_SETTLE_US:.3f} us slack")
@@ -154,19 +201,22 @@ def main():
           "relay control frame->R0 leaves the receiver turnaround allowance after relative clock error")
     r0_admission = (s3 + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US
     check(r0_admission - control_end >= 60, "relay control frame decode and ownership transfer have 60 us")
-    worst = 0
-    for phase in range(relay["RELAY_GRID_FRAMES"]):
-        start = lambda frame: (frame * relay["RELAY_GRID_TICKS"]) // relay["RELAY_GRID_FRAMES"]
-        for source in range(relay["RELAY_DIRECT_SLOTS"]):
-            original = start(phase) + source * s3 + t["TDMA_SLOT_TARGET_OFFSET"]
-            for repair in range(relay["RELAY_REPAIR_SLOTS"]):
-                for age in range(3):
-                    finish = start(phase + age) + (relay["RELAY_DIRECT_SLOTS"] + 1 + repair) * s3
-                    finish += s3 - t["TDMA_LEN33_PLUS_RESERVE_TICKS"]
-                    delay = (finish - original) * TICK_US + CALL_LATENCY_US + airtime_us(72)
-                    delay += SYNC_ERROR_TICKS * TICK_US
-                    worst = max(worst, delay)
-    check(worst < 25000, f"relay source/repair/age/phase sweep worst {worst:.3f} us < 25 ms")
+    worst, phase, source_slot, repair_slot, age = repair_latency_sweep(
+        relay, t["TDMA_SLOT_TARGET_OFFSET"], t["TDMA_LEN33_PLUS_RESERVE_TICKS"], p["RELAY_CONTROL_ARM_GUARD_TICKS"]
+    )
+    print(f"model-only D11/R5/width16/mode0 cap120: old worst 24977.186 us; "
+          f"guarded worst {worst:.3f} us at phase={phase} source={source_slot} repair={repair_slot} age={age}")
+    check(worst < REFERENCE_MODEL_MAX_US,
+          f"reference source/repair/age/phase sweep {worst:.3f} us < {REFERENCE_MODEL_MAX_US / 1000:.0f} ms; not physical RF")
+    fleet = dict(relay)
+    fleet.update({"RELAY_DIRECT_SLOTS": 8, "RELAY_REPAIR_SLOTS": relay["member8_120.max_repairs"],
+                  "RELAY_GRID_TICKS": relay["geometry8.numerator"], "RELAY_GRID_FRAMES": relay["geometry8.denominator"]})
+    fleet_worst, phase, source_slot, repair_slot, age = repair_latency_sweep(
+        fleet, t["TDMA_SLOT_TARGET_OFFSET"], t["TDMA_LEN33_PLUS_RESERVE_TICKS"], p["RELAY_CONTROL_ARM_GUARD_TICKS"]
+    )
+    check(fleet_worst < 25000,
+          f"model-only D8/R5/width16/mode0 cap120 worst {fleet_worst:.3f} us < 25 ms "
+          f"(phase={phase} source={source_slot} repair={repair_slot} age={age})")
 
     # Table.
     print("\nLatency added by relay (worst case = one frame + one slot) and head RX cost per child:")

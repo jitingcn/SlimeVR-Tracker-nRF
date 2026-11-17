@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Compare runtime schedules against accepted R5 and FULL16/R3 trace digests.
+"""Check runtime schedules against the guarded geometry over complete trace grids.
 
-Golden traces cover every slot/tick, RTC wrap, repeated PONGs and activation
-seeds. They were verified against the accepted historical TDMA implementations.
-The hashes retain the comparison without depending on unpublished Git objects.
-Clock, radio and IRQ leaves are modeled. This does not measure RF or latency.
+Golden hashes from the old unguarded wire schedule cannot describe this cutover.
+The independent coordinate checks retain exhaustive slot/tick, wrap, repeated
+PONG and activation-seed coverage. Radio and IRQ leaves remain modeled.
 """
 
 from pathlib import Path
@@ -309,9 +308,7 @@ static void at(uint64_t ticks)
 }
 static uint32_t expected_start(uint32_t f)
 {
-	return origin
-		 + (uint32_t)(direct_count == 11 ? (uint64_t)f * 4096 / 15 - (uint64_t)seed * 4096 / 15
-										 : (uint64_t)(f - seed) * 320);
+	return origin + (uint32_t)(f - seed) * (direct_count == 11 ? 276U : 324U);
 }
 static void pong(unsigned own)
 {
@@ -348,7 +345,7 @@ static void control(uint32_t f, unsigned own)
 		   .epoch = 7,
 		   .session = 42,
 		   .frame = f,
-		   .preamble_ticks = expected_start(f) + direct_count * 16 + 2,
+		   .preamble_ticks = expected_start(f) + direct_count * 16 + 6,
 		   .maintenance_owner = RELAY_OWNER_IDLE,
 		   .repair_count = repairs};
 	c.expected = c.members;
@@ -365,10 +362,8 @@ static void control(uint32_t f, unsigned own)
 #endif
 	struct relay_rx_frame rx = {.pipe = 1, .length = 72};
 	assert(relay_control_encode(rx.data, &c) == 72);
-	uint64_t end
-		= (uint64_t)origin
-		+ (direct_count == 11 ? (uint64_t)f * 4096 / 15 - (uint64_t)seed * 4096 / 15 : (uint64_t)(f - seed) * 320)
-		+ direct_count * 16 + 13;
+	uint64_t end = (uint64_t)origin + (uint64_t)(f - seed) * (direct_count == 11 ? 276U : 324U)
+		+ direct_count * 16 + 17;
 	rx.end_kernel_ticks = (uint32_t)((end * 1000000U + 32767U) / 32768U);
 	assert(equiv_receive_control(&rx));
 #if NEW_VERSION
@@ -394,7 +389,7 @@ static void run(unsigned own)
 	server_time_synced = true;
 	assert(tdma_update_config(own, direct_count, 16, 6));
 	pong(own);
-	at((uint64_t)origin + direct_count * 16 + 13);
+	at((uint64_t)origin + direct_count * 16 + 17);
 	assert(tdma_profile_get() == 1);
 	granted = true;
 	control(seed, own);
@@ -402,20 +397,17 @@ static void run(unsigned own)
 		unsigned f = seed + step;
 		uint32_t start = expected_start(f), length = expected_start(f + 1) - start;
 		for (unsigned offset = 0; offset < length; offset++) {
-			at((uint64_t)origin
-			   + (direct_count == 11 ? (uint64_t)f * 4096 / 15 - (uint64_t)seed * 4096 / 15
-									 : (uint64_t)(f - seed) * 320)
-			   + offset);
-			if (offset == direct_count * 16 + 13) {
+			at((uint64_t)origin + (uint64_t)(f - seed) * (direct_count == 11 ? 276U : 324U) + offset);
+			if (offset == direct_count * 16 + 17) {
 				control(f, own);
 			}
-			if (offset == 1 || offset == direct_count * 16 + 14) {
+			if (offset == 1 || offset == direct_count * 16 + 18) {
 				pong(own);
 			}
 			if (seed && offset != 0 && offset != own * 16 && offset != own * 16 + 2 && offset != own * 16 + 4
-				&& offset != own * 16 + 6 && offset != own * 16 + 8 && offset != direct_count * 16 - 5
-				&& offset != direct_count * 16 - 4 && offset != direct_count * 16 + 13
-				&& offset != direct_count * 16 + 14 && offset != length - 2) {
+				&& offset != own * 16 + 6 && offset != own * 16 + 8 && offset != direct_count * 16 - 1
+				&& offset != direct_count * 16 && offset != direct_count * 16 + 17
+				&& offset != direct_count * 16 + 18 && offset != length - 2) {
 				continue;
 			}
 			tdma_last_admitted_pack = 0;
@@ -431,7 +423,7 @@ static void run(unsigned own)
 			row[n++] = relay_frame_start(tdma_profile_origin, f + 1);
 			row[n++] = relay_frame_near(tdma_anchor_frame, tdma_anchor_start, now_ticks());
 			row[n++] = tdma_stream_at(now_ticks(), own * 16 + 2);
-			uint32_t control_start = tdma_stream_at(now_ticks(), direct_count * 16 - 4);
+			uint32_t control_start = tdma_stream_at(now_ticks(), direct_count * 16);
 			row[n++] = control_start;
 			row[n++] = control_start + 4 + 16;
 			bool control_frame = false;
@@ -440,7 +432,7 @@ static void run(unsigned own)
 			row[n++] = target;
 			row[n++] = control_frame;
 			uint64_t saved_us = virtual_us;
-			if (offset == 0 || offset == direct_count * 16 - 5 || offset == direct_count * 16 + 14) {
+			if (offset == 0 || offset == direct_count * 16 - 1 || offset == direct_count * 16 + 18) {
 				inject_B = false;
 				radio_open_tick = radio_close_tick = 0;
 				assert(!esb_relay_control_window(control_start));
@@ -594,7 +586,80 @@ def trace_fields(direct, repairs):
     return fields + ["padding"] * (96 - len(fields))
 
 
-GOLDEN = {11: (97312, 'a486e1735a4eeb5544a8257d7dcc9c5a5e8d152e828782164ca375e5e1fff868'), 16: (164100, 'fcd662008d6def92689ce8534db91d2e9af1d7c63fb99d9eb6991afbf903c28c')}
+MASK = (1 << 32) - 1
+
+
+def check_trace(data, direct):
+    repairs = 5 if direct == 11 else 3
+    period = 276 if direct == 11 else 324
+    fields = trace_fields(direct, repairs)
+    count = handoff_cases = oversize_rejections = 0
+    seen = set()
+    for values in struct.iter_unpack("<96I", data):
+        r = dict(zip(fields, values))
+        origin, own, frame, phase = (r[k] for k in ("origin", "own", "frame", "phase"))
+        context = {"direct": direct, "origin": origin, "own": own, "frame": frame, "phase": phase}
+        candidates = [seed for seed in (0, 14, 65535)
+                      if 1 <= frame - seed <= 15
+                      and r["frame_start"] == ((origin + (frame - seed) * period) & MASK)]
+        assert len(candidates) == 1, (context, "anchor candidates", candidates, r["frame_start"])
+        seed = candidates[0]
+        seen.add((origin, own, seed))
+        start = (origin + (frame - seed) * period) & MASK
+        next_start = (start + period) & MASK
+        assert phase < period and own < direct, (context, "phase/slot")
+        assert r["frame_start"] == start and r["next_frame_start"] == next_start, (context, "frame starts", r)
+        assert r["frame_near"] == frame, (context, "frame near", r)
+        direct_offset = own * 16 + 2
+        assert r["direct_target"] == ((start + direct_offset + (period if phase > direct_offset else 0)) & MASK), (context, "direct target", r)
+        control_offset = direct * 16
+        assert r["control_target_open"] == ((start + control_offset + (period if phase > control_offset else 0)) & MASK), (context, "control open", r)
+        assert r["control_target_close"] == ((r["control_target_open"] + 20) & MASK), (context, "control close", r)
+        assert r["next_ready"] == 1 and r["next_is_B"] in (0, 1), (context, "next ready", r)
+        for i in range(repairs):
+            first = direct + 1
+            eligible = [j for j in range(i, repairs)
+                        if phase >= direct * 16 + 17 and phase <= direct * 16 + 24 + j * 16]
+            target, slot = r[f"repair_{i}_target"], r[f"repair_{i}_slot"]
+            if eligible:
+                j = eligible[0]
+                assert slot == first + j, (context, "repair grant", i, slot, j, r)
+                assert target == ((start + max(phase, direct * 16 + 22 + j * 16)) & MASK), (context, "repair target", i, r)
+            else:
+                assert target == MASK and slot == MASK, (context, "unexpected repair", i, r)
+            admit, final, duplicate = (r[f"repair_{i}_{k}"] for k in ("admit", "final", "duplicate"))
+            assert admit in (0, 1) and final == admit and not duplicate, (context, "repair admission", i, r)
+        for payload in (17, 32, 60):
+            admit, tick, final, is_control = (r[f"direct_{payload}_{k}"]
+                                              for k in ("admit", "tick", "final", "next_is_B"))
+            assert admit in (0, 1) and final in (0, 1) and is_control in (0, 1), (context, payload, r)
+            # Admission reserves airtime, while final validation also enforces
+            # the 32-byte maximum in the last direct slot.
+            within_limit = payload <= (32 if own == direct - 1 else 60)
+            assert final == (admit and within_limit), (context, "direct final", payload, r)
+            if admit and not within_limit:
+                oversize_rejections += 1
+            if admit:
+                position = (tick - start - own * 16) & MASK
+                reserve = 8 if payload <= 17 else 10 if payload <= 32 else 12
+                if position >= period:
+                    # D0 may enter at the end of this frame, but the admitted
+                    # transmission must belong to the next D0's own window.
+                    assert own == 0 and phase >= period - 2 and position == period + 2, (r, payload, position)
+                    handoff_cases += 1
+                else:
+                    assert 2 <= position <= 16 - reserve, (r, payload, position)
+        count += 1
+    assert len(seen) == 2 * direct * 3
+    assert handoff_cases > 0
+    assert oversize_rejections > 0, (direct, "missing last-slot size rejection")
+    expected = 0
+    for own in range(direct):
+        samples = {0, own * 16, own * 16 + 2, own * 16 + 4, own * 16 + 6, own * 16 + 8,
+                   direct * 16 - 1, direct * 16, direct * 16 + 17, direct * 16 + 18, period - 2}
+        expected += 2 * 15 * (period + 2 * len({x for x in samples if x < period}))
+    assert count == expected
+    return count
 
 results = []
 for direct, ref in ((11, "e9e9a439"), (16, "730bd8a3")):
@@ -638,10 +703,8 @@ for direct, ref in ((11, "e9e9a439"), (16, "730bd8a3")):
         new = outputs[0]
         rowbytes = 96 * 4
         assert len(new) % rowbytes == 0
-        expected = GOLDEN[direct]
-        row = {"direct": direct, "rows": len(new) // rowbytes,
-               "trace_sha256": hashlib.sha256(new).hexdigest()}
-        row["passed"] = row["rows"] == expected[0] and row["trace_sha256"] == expected[1]
+        row = {"direct": direct, "rows": check_trace(new, direct),
+               "trace_sha256": hashlib.sha256(new).hexdigest(), "passed": True}
         results.append(row)
         print(json.dumps(row), flush=True)
 evidence(

@@ -3,7 +3,7 @@
 int main(void)
 {
 	for (unsigned width = 15; width <= 16; width++) {
-		unsigned callback = relay_control_repeat_offset(10, 4, width, 1) - RELAY_TX_OFFSET - 3;
+		unsigned callback = relay_control_repeat_offset(10, 4, width, 1) - RELAY_TX_OFFSET - RELAY_CONTROL_ARM_GUARD_TICKS - 3;
 		printf(
 			"adjacent width=%u callback=%u first_END=%u slack=%u ticks\n",
 			width,

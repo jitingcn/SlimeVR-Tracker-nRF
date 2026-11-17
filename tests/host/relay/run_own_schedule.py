@@ -60,7 +60,7 @@ int main(int argc,char **argv){
   p.data[8]=255;receive_schedule(&p,ESB_PONG_FLAG_NORMAL);
   assert(!enabled && layout_stale && resync==1 && updates==0);
  }else if(!strcmp(argv[1],"private-bootstrap")){
-  const struct relay_geometry cases[]={{11,5,16,120,4096,15, 0},{16,3,15,120,300,1, 0}};
+  const struct relay_geometry cases[]={{11,5,16,120,276,1, 0},{16,3,15,120,304,1, 0}};
   for(unsigned row=0;row<sizeof(cases)/sizeof(cases[0]);row++){
    channel_wait_normal=true;channel_found=0;enabled=false;profile=false;updates=0;
    p.data[9]=11;p.data[10]=cases[row].slot_ticks;
