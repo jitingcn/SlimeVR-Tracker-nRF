@@ -25,7 +25,7 @@ RX_SETTLE_US = 40.0    # receiver settling after READY before a preamble is reli
 
 # Intentional model-contract change for D11/R5/width16/mode0 at cap 120:
 # the preserved RX cutoff and four-tick guard raise the modeled worst case
-# from 24,977.186 us to 25,251.844 us. Not an RF or all-geometries bound.
+# from 24,977.186 us to 25,291.844 us. Not an RF or all-geometries bound.
 REFERENCE_MODEL_MAX_US = 26000
 
 
@@ -70,7 +70,7 @@ def repair_latency_sweep(relay, target_offset, reserve, guard):
                 for age in range(3):
                     finish = start(phase + age) + (relay["RELAY_DIRECT_SLOTS"] + 1 + repair) * width + guard
                     finish += width - reserve
-                    delay = (finish - original + SYNC_ERROR_TICKS) * TICK_US + CALL_LATENCY_US + airtime_us(72)
+                    delay = (finish - original + SYNC_ERROR_TICKS) * TICK_US + CALL_LATENCY_US + RAMP_US + airtime_us(72)
                     if delay > worst[0]:
                         worst = (delay, phase, source, repair, age)
     return worst
@@ -110,7 +110,7 @@ def main():
     attempt = RAMP_US + airtime_us(13) + TURNAROUND_US + airtime_us(pong_ext)
     latest_start = (t["TDMA_SLOT_TARGET_OFFSET"] + t["TDMA_PING_LATE_TOLERANCE_TICKS"]) * TICK_US
     # The retry timer begins after the first TX ends, not at its start.
-    end = latest_start + CALL_LATENCY_US + airtime_us(13) + retransmit_us + attempt
+    end = latest_start + CALL_LATENCY_US + RAMP_US + airtime_us(13) + retransmit_us + attempt
     window = t["TDMA_PING_WINDOW_SLOTS"] * slot_us
     receiver_ready = end + RAMP_US
     next_preamble = window + t["TDMA_SLOT_TARGET_OFFSET"] * TICK_US + RAMP_US

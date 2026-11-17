@@ -147,25 +147,34 @@ static void cache_equivalence(void) {
  for(unsigned trial=0;trial<10000;trial++) {
   reset();test_layout.profile=1;
   control_helper=0;
-  control_plan=(struct relay_control){.frame=100,.repair_count=1+trial%5,.members=0xffff};
+  control_plan=(struct relay_control){.frame=100,.on_demand=trial%2,.repair_count=1+trial%5,.members=0xffff};
   unsigned grant=cache_random()%control_plan.repair_count;
   control_plan.grants[grant]=(struct relay_grant){0,(uint16_t)cache_random()};
-  for(unsigned age=0;age<3;age++) relay_control_missing(&control_plan, age)=cache_random();
-  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++) {
+  for(unsigned age=0;age<relay_control_cache_frames(&control_plan);age++) relay_control_missing(&control_plan, age)=cache_random();
+  for(unsigned i=0;i<(sizeof(records) / sizeof(records[0]));i++) {
    struct relay_record *r=&records[i];
-   r->valid=cache_random()%3; r->child=1+cache_random()%15;
+   r->valid=i < 16U*relay_control_cache_frames(&control_plan) && cache_random()%3; r->child=1+cache_random()%15;
    r->capture_frame=100-cache_random()%5; r->length=17; r->rssi=20+cache_random()%50;
    memset(r->data,0,sizeof(r->data));r->data[0]=1;r->data[1]=r->child;r->data[16]=i;
   }
+  if (trial==1) {
+   memset(records,0,sizeof(records));control_plan.grants[grant].children=2;
+   for(unsigned age=0;age<5;age++)relay_control_missing(&control_plan,age)=0;
+   records[64]=(struct relay_record){.valid=true,.child=1,.capture_frame=96,.length=17,.rssi=50};
+   records[64].data[0]=1;records[64].data[1]=1;
+  }
   uint64_t selected=((uint64_t)cache_random()<<32)|cache_random();
-  repair_selected=selected;
+  repair_selected=selected;repair_selected_high=0;
   uint8_t expected[72]={0},actual[72]={0};
   size_t n=reference_build_repair(expected,RELAY_REPAIR_FIRST_SLOT+grant);
   uint64_t expected_selected=repair_selected,expected_pending=repair_pending_mask;
+  uint64_t expected_high=repair_selected_high,expected_pending_high=repair_pending_high;
   uint8_t pending[RELAY_MAX_TRACKERS];memcpy(pending,repair_pending,sizeof(pending));
-  repair_selected=selected;
+  repair_selected=selected;repair_selected_high=0;
   size_t m=relay_build_repair(actual,RELAY_REPAIR_FIRST_SLOT+grant);
   assert(n==m && !memcmp(expected,actual,n));
+  if(trial==1)assert(n && (expected_high & 1U));
+  assert(expected_high==repair_selected_high && expected_pending_high==repair_pending_high);
   assert(expected_selected==repair_selected && expected_pending==repair_pending_mask && !memcmp(pending,repair_pending,sizeof(pending)));
  }
  puts("PASS runtime: 10000 independent cache-builder wire and selection comparisons, all five nonempty pool sizes");
@@ -437,7 +446,8 @@ static void demand_cache(void) {
  relay_repair_result(0);
  records[68].valid=records[67].valid=true;relay_control_missing(&c, 4)=2;
  c.frame=101;relay_on_control(&c,0);assert(!records[68].valid && records[67].valid);
- c.on_demand=false;relay_on_control(&c,0);assert(!records[67].valid && !records[66].valid);
+ records[64].valid=true;records[64].capture_frame=c.frame;
+ c.on_demand=false;relay_on_control(&c,0);assert(!records[64].valid && !records[67].valid && !records[66].valid);
  puts("PASS runtime: five-age high-index cache, failed-submit retry, age-five expiry and static three-age fence");
 }
 int main(int argc,char **argv) {

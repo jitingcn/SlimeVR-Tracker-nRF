@@ -595,6 +595,7 @@ def check_trace(data, direct):
     fields = trace_fields(direct, repairs)
     count = handoff_cases = oversize_rejections = 0
     seen = set()
+    repair_success = [0] * repairs
     for values in struct.iter_unpack("<96I", data):
         r = dict(zip(fields, values))
         origin, own, frame, phase = (r[k] for k in ("origin", "own", "frame", "phase"))
@@ -628,7 +629,10 @@ def check_trace(data, direct):
             else:
                 assert target == MASK and slot == MASK, (context, "unexpected repair", i, r)
             admit, final, duplicate = (r[f"repair_{i}_{k}"] for k in ("admit", "final", "duplicate"))
-            assert admit in (0, 1) and final == admit and not duplicate, (context, "repair admission", i, r)
+            offset = direct * 16 + 20 + i * 16
+            expected_admit = offset - 2 <= phase <= offset + 4
+            assert admit == expected_admit and final == admit and not duplicate, (context, "repair admission", i, r)
+            repair_success[i] += admit
         for payload in (17, 32, 60):
             admit, tick, final, is_control = (r[f"direct_{payload}_{k}"]
                                               for k in ("admit", "tick", "final", "next_is_B"))
@@ -651,6 +655,7 @@ def check_trace(data, direct):
                     assert 2 <= position <= 16 - reserve, (r, payload, position)
         count += 1
     assert len(seen) == 2 * direct * 3
+    assert all(repair_success), (direct, repair_success)
     assert handoff_cases > 0
     assert oversize_rejections > 0, (direct, "missing last-slot size rejection")
     expected = 0

@@ -1,6 +1,6 @@
 """A newly observed peak after unlock must survive the current report."""
 from pathlib import Path
-import subprocess,tempfile
+import os,shlex,subprocess,tempfile
 h=Path(__file__).resolve().parent
 s=(h.parents[2]/'src/connection/relay.c').read_text()
 a=s.index('\tunsigned peak_key = irq_lock();');b=s.index('\tconst uint32_t counters',a)
@@ -14,5 +14,5 @@ int main(void){
 '''
 with tempfile.TemporaryDirectory() as t:
  p=Path(t)/'p.c';p.write_text(c);e=Path(t)/'p'
- subprocess.run(['cc','-Wall','-Wextra','-Werror',str(p),'-o',str(e)],check=True);subprocess.run([str(e)],check=True)
+ subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-Wall','-Wextra','-Werror',str(p),'-o',str(e)],check=True);subprocess.run([str(e)],check=True)
 print('Peak handoff: snapshot contains old maximum; next maximum survives unlock')

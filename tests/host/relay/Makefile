@@ -6,7 +6,7 @@ TMP := $(shell mktemp -d 2>/dev/null || echo /tmp/tracker-relay-host)
 check:
 	$(CC) $(CFLAGS) test_control_repeat_deadline.c -o $(TMP)/control_repeat_deadline
 	$(TMP)/control_repeat_deadline
-	python3 run_peak.py
+	CC="$(CC)" python3 run_peak.py
 	python3 run_layout_failure.py
 	CC="$(CC)" python3 run_quiesce.py
 	$(CC) $(CFLAGS) test_link.c -o $(TMP)/test_link

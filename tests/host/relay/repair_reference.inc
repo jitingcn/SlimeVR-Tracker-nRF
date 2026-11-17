@@ -1,11 +1,11 @@
-/* Scalar three-pass cache builder retained for independent equivalence. */
+/* Scalar age-by-age cache builder retained for independent equivalence. */
 size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 {
 	struct relay_repair repair
 		= {.helper = control_helper, .epoch = control_plan.epoch, .session = control_plan.session};
 	unsigned key = irq_lock();
 	unsigned grant = slot - RELAY_REPAIR_FIRST_SLOT;
-	repair_pending_mask = 0;
+	repair_pending_mask = repair_pending_high = 0;
 	pending_report.count = 0;
 #ifdef CONFIG_RELAY_FRAME_LEDGER
 	ledger_pending_count = 0;
@@ -46,11 +46,11 @@ size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 	 * Fill consecutive missing ages in one packet; a gap waits for the next
 	 * control frame confirmation or the existing cache expiry, never a longer deadline. */
 	uint16_t blocked = 0;
-	for (int age = RELAY_CACHE_FRAMES - 1; age >= 0; age--) {
+	for (int age = relay_control_cache_frames(&control_plan) - 1; age >= 0; age--) {
 		uint16_t included = 0;
-		for (unsigned i = 0; i < RELAY_CACHE_RECORDS && repair.count < RELAY_MAX_CHILDREN; i++) {
+		for (unsigned i = 0; i < (sizeof(records) / sizeof(records[0])) && repair.count < RELAY_MAX_CHILDREN; i++) {
 			struct relay_record *r = &records[i];
-			if (!r->valid || (repair_selected & (1ULL << i)) || (blocked & (1U << r->child))
+			if (!r->valid || ((i < 64 ? repair_selected : repair_selected_high) & (1ULL << (i % 64U))) || (blocked & (1U << r->child))
 				|| (uint16_t)(control_plan.frame - r->capture_frame) != age
 				|| !(control_plan.grants[grant].children & (1U << r->child))
 				|| length + RELAY_REPAIR_RECORD_META_LEN + r->length > RELAY_FRAME_MAX) {
@@ -62,8 +62,10 @@ size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 			};
 			length += RELAY_REPAIR_RECORD_META_LEN + r->length;
 			included |= 1U << r->child;
-			repair_selected |= 1ULL << i;
-			repair_pending_mask |= 1ULL << i;
+			if (i < 64) repair_selected |= 1ULL << i;
+			else repair_selected_high |= 1ULL << (i - 64U);
+			if (i < 64) repair_pending_mask |= 1ULL << i;
+			else repair_pending_high |= 1ULL << (i - 64U);
 			repair_diag[r->child].selected++;
 			ledger_note(
 				control_plan.session,
@@ -86,9 +88,9 @@ size_t reference_build_repair(uint8_t *buf, uint8_t slot)
 		 * so it must not suppress a younger copy held by this final owner.
 		 * Earlier grants and age-one gaps retain chronological blocking. */
 		bool final_expiring_gap = control_plan.repair_count >= 1 && control_plan.repair_count <= 3
-							   && grant == control_plan.repair_count - 1U && age == RELAY_CACHE_FRAMES - 1;
+							   && grant == control_plan.repair_count - 1U && age == (int)relay_control_cache_frames(&control_plan) - 1;
 		if (!final_expiring_gap) {
-			blocked |= control_plan.missing[age] & ~included;
+			blocked |= relay_control_missing(&control_plan, age) & ~included;
 		}
 	}
 	size_t n = repair.count ? relay_repair_encode(buf, &repair) : 0;

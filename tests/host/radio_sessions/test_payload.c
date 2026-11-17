@@ -323,6 +323,7 @@ static void irq_unlock(unsigned key)
 
 static void reset(void)
 {
+	stream_waited = false;
 	queued_count = 0;
 	queue_calls = 0;
 	queue_failures = 0;
