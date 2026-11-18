@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <errno.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -38,27 +39,40 @@ static struct {
 	int16_t field[3];
 	int64_t now_ms;
 	int64_t single_at_ms;
+	uint32_t single_delay_ms;
 	unsigned writes;
 	unsigned transits;
 	unsigned resets;
 	unsigned singles;
 	unsigned bursts;
 	unsigned frame_reads;
+	unsigned status_reads;
 	unsigned signed_writes;
 	bool ext;
 	bool reset_pending;
+	uint8_t fail_write_reg;
+	uint8_t fail_write_value;
+	bool apply_failed_write;
+	bool fail_status_read;
+	bool fail_burst;
 } hw;
+
+/* Publish magnetic data without changing the field for the next single shot. */
+static void next_sample(int16_t x, int16_t y, int16_t z)
+{
+	hw.regs[REG_DATA + 0] = (uint16_t)x & 0xff;
+	hw.regs[REG_DATA + 1] = (uint16_t)x >> 8;
+	hw.regs[REG_DATA + 2] = (uint16_t)y & 0xff;
+	hw.regs[REG_DATA + 3] = (uint16_t)y >> 8;
+	hw.regs[REG_DATA + 4] = (uint16_t)z & 0xff;
+	hw.regs[REG_DATA + 5] = (uint16_t)z >> 8;
+	hw.regs[REG_STATUS] |= STAT_DRDY;
+}
 
 static void settle(void)
 {
 	if (hw.single_at_ms && hw.now_ms >= hw.single_at_ms) {
-		hw.regs[REG_DATA + 0] = (uint16_t)hw.field[0] & 0xff;
-		hw.regs[REG_DATA + 1] = (uint16_t)hw.field[0] >> 8;
-		hw.regs[REG_DATA + 2] = (uint16_t)hw.field[1] & 0xff;
-		hw.regs[REG_DATA + 3] = (uint16_t)hw.field[1] >> 8;
-		hw.regs[REG_DATA + 4] = (uint16_t)hw.field[2] & 0xff;
-		hw.regs[REG_DATA + 5] = (uint16_t)hw.field[2] >> 8;
-		hw.regs[REG_STATUS] |= STAT_DRDY;
+		next_sample(hw.field[0], hw.field[1], hw.field[2]);
 		hw.mode = MODE_SUSPEND;
 		hw.single_at_ms = 0;
 	}
@@ -75,21 +89,7 @@ static void reset_hw(void)
 	memset(&hw, 0, sizeof(hw));
 	hw.regs[REG_CHIPID] = 0x80;
 	hw.mode = MODE_SUSPEND;
-}
-
-/* Publish a fresh sample in the data registers. */
-static void next_sample(int16_t x, int16_t y, int16_t z)
-{
-	hw.field[0] = x;
-	hw.field[1] = y;
-	hw.field[2] = z;
-	hw.regs[REG_DATA + 0] = (uint16_t)x & 0xff;
-	hw.regs[REG_DATA + 1] = (uint16_t)x >> 8;
-	hw.regs[REG_DATA + 2] = (uint16_t)y & 0xff;
-	hw.regs[REG_DATA + 3] = (uint16_t)y >> 8;
-	hw.regs[REG_DATA + 4] = (uint16_t)z & 0xff;
-	hw.regs[REG_DATA + 5] = (uint16_t)z >> 8;
-	hw.regs[REG_STATUS] = STAT_DRDY;
+	hw.single_delay_ms = 1;
 }
 
 /* QMC5883P has no temperature register, so the driver reuses the "none" hook. */
@@ -149,6 +149,7 @@ static int write_register(uint8_t reg, uint8_t value)
 			if (hw.mode != MODE_SUSPEND)
 				hw.transits++;
 			hw.mode = MODE_SUSPEND;
+			hw.single_at_ms = 0;
 			return 0;
 		}
 		/* A running mode may only be entered from suspend, or stay in the
@@ -157,7 +158,7 @@ static int write_register(uint8_t reg, uint8_t value)
 		hw.mode = mode;
 		if (mode == MODE_SINGLE) {
 			hw.singles++;
-			hw.single_at_ms = hw.now_ms + 1;
+			hw.single_at_ms = hw.now_ms + hw.single_delay_ms;
 		}
 		return 0;
 	}
@@ -167,6 +168,12 @@ static int write_register(uint8_t reg, uint8_t value)
 int ssi_reg_write_byte(enum sensor_interface_dev dev, uint8_t reg, uint8_t value)
 {
 	assert(dev == SENSOR_INTERFACE_DEV_MAG);
+	if (reg == hw.fail_write_reg && value == hw.fail_write_value) {
+		hw.fail_write_reg = 0;
+		if (hw.apply_failed_write)
+			write_register(reg, value);
+		return -EIO;
+	}
 	return write_register(reg, value);
 }
 int ssi_reg_write_byte_io(enum sensor_interface_dev dev, uint8_t reg, uint8_t value,
@@ -181,7 +188,6 @@ static int read_frame(uint8_t reg, uint8_t *buf, uint32_t len)
 	advance(1);
 	assert(reg == REG_DATA && len == 6);
 	memcpy(buf, &hw.regs[REG_DATA], 6);
-	hw.regs[REG_STATUS] &= (uint8_t)~STAT_DRDY;
 	return 0;
 }
 
@@ -189,6 +195,10 @@ int ssi_burst_read(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uin
 {
 	assert(dev == SENSOR_INTERFACE_DEV_MAG);
 	hw.bursts++;
+	if (hw.fail_burst) {
+		hw.fail_burst = false;
+		return -EIO;
+	}
 	return read_frame(reg, buf, len);
 }
 int ssi_burst_read_io(enum sensor_interface_dev dev, uint8_t reg, uint8_t *buf, uint32_t len,
@@ -210,7 +220,45 @@ int ssi_reg_read_byte(enum sensor_interface_dev dev, uint8_t reg, uint8_t *value
 	advance(1);
 	assert(dev == SENSOR_INTERFACE_DEV_MAG);
 	*value = hw.regs[reg];
+	/* Reading STATUS acknowledges both flags (Rev E §9.2.2). */
+	if (reg == REG_STATUS) {
+		hw.status_reads++;
+		hw.regs[REG_STATUS] &= (uint8_t)~(STAT_DRDY | STAT_OVFL);
+		if (hw.fail_status_read) {
+			hw.fail_status_read = false;
+			return -EIO;
+		}
+	}
 	return 0;
+}
+
+static void expect_read_blocked(void)
+{
+	float m[3] = {1, 2, 3};
+	unsigned status_reads = hw.status_reads;
+	unsigned bursts = hw.bursts;
+	unsigned frame_reads = hw.frame_reads;
+	CHECK(!mag->mag_read(m));
+	CHECK(!mag->mag_read(m));
+	CHECK(hw.status_reads == status_reads);
+	CHECK(hw.bursts == bursts);
+	CHECK(hw.frame_reads == frame_reads);
+	CHECK(m[0] == 1 && m[1] == 2 && m[2] == 3);
+}
+
+static void test_off(void)
+{
+	reset_hw();
+	hw.ext = true;
+	next_sample(375, 0, 0);
+	expect_read_blocked(); /* Before initialization */
+	mag->mag_oneshot();
+	CHECK(hw.writes == 0);
+
+	float actual = 0;
+	CHECK(mag->init(0, &actual) == 0);
+	CHECK(hw.mode == MODE_SUSPEND);
+	expect_read_blocked(); /* Powered down, with retained XYZ */
 }
 
 static void test_init_sequence(void)
@@ -244,17 +292,30 @@ static void test_odr_ladder(void)
 	CHECK(hw.regs[REG_CTRL1] == 0xC9);
 }
 
-static void test_oneshot(void)
+static void test_oneshot(bool start_normal)
 {
 	reset_hw();
+	hw.ext = true;
+	hw.single_delay_ms = 5;
 	float actual = 0;
-	CHECK(mag->update_odr(INFINITY, &actual) == 0);
-	CHECK(isinf(actual));
-	CHECK(hw.mode == MODE_SUSPEND);
+	CHECK(mag->init(start_normal ? 0.01f : INFINITY, &actual) == 0);
+	CHECK(hw.mode == (start_normal ? MODE_NORMAL : MODE_SUSPEND));
 
-	next_sample(3750, -3750, 375);
+	next_sample(-7500, 0, 0);
+	hw.regs[REG_STATUS] |= STAT_OVFL;
+	if (!start_normal) {
+		CHECK(isinf(actual));
+		expect_read_blocked();
+	}
+	hw.field[0] = 3750;
+	hw.field[1] = -3750;
+	hw.field[2] = 375;
 	mag->mag_oneshot();
 	CHECK(hw.singles == 1);
+	CHECK(hw.transits == (unsigned)start_normal);
+	CHECK(hw.mode == MODE_SINGLE); /* Old XYZ still present */
+	CHECK(hw.regs[REG_STATUS] == 0);
+	CHECK(hw.status_reads == 1);
 	float m[3] = {0};
 	CHECK(mag->mag_read(m));
 	CHECK(hw.regs[REG_CTRL1] == (0xC0 | 0x0C | 0x02)); /* OSR | 200 Hz | single */
@@ -262,6 +323,100 @@ static void test_oneshot(void)
 	CHECK(fabsf(m[1] + 1.0f) < 1e-4f);
 	CHECK(fabsf(m[2] - 0.1f) < 1e-4f);
 	CHECK(hw.mode == MODE_SUSPEND);
+	CHECK(hw.status_reads > 2); /* Waited for this conversion's readiness */
+	CHECK(hw.bursts == 1);
+	advance(20);
+	expect_read_blocked();
+	CHECK(hw.frame_reads == 0);
+
+	/* A fresh trigger is allowed after auto-suspend, not a periodic read. */
+	hw.field[0] = 7500;
+	mag->mag_oneshot();
+	CHECK(hw.singles == 2);
+	CHECK(mag->mag_read(m));
+	CHECK(fabsf(m[0] - 2.0f) < 1e-4f);
+	expect_read_blocked();
+}
+
+static void test_oneshot_failures(void)
+{
+	reset_hw();
+	hw.ext = true;
+	float actual = 0;
+	CHECK(mag->init(INFINITY, &actual) == 0);
+	next_sample(3750, 0, 0);
+	float m[3] = {0};
+
+	hw.fail_status_read = true; /* Pre-trigger acknowledgement failed. */
+	mag->mag_oneshot();
+	CHECK(hw.singles == 0);
+	expect_read_blocked();
+
+	mag->mag_oneshot();
+	hw.fail_burst = true; /* DRDY consumed, but XYZ did not arrive. */
+	CHECK(!mag->mag_read(m));
+	CHECK(hw.bursts == 1);
+	advance(20);
+	expect_read_blocked();
+
+	mag->mag_oneshot();
+	hw.fail_status_read = true; /* Completion might have been acknowledged. */
+	CHECK(!mag->mag_read(m));
+	CHECK(hw.bursts == 1);
+	expect_read_blocked();
+
+	CHECK(mag->update_odr(INFINITY, &actual) == 0);
+	hw.single_delay_ms = 30;
+	mag->mag_oneshot();
+	CHECK(!mag->mag_read(m)); /* Timeout leaves the eventual data unowned. */
+	CHECK(hw.mode == MODE_SINGLE);
+	advance(30);
+	CHECK(hw.mode == MODE_SUSPEND);
+	expect_read_blocked();
+	CHECK(hw.frame_reads == 0);
+}
+
+static void test_ambiguous_trigger(void)
+{
+	reset_hw();
+	hw.ext = true;
+	hw.single_delay_ms = 30;
+	float actual = 0;
+	CHECK(mag->init(INFINITY, &actual) == 0);
+	next_sample(375, 0, 0);
+
+	hw.fail_write_reg = REG_CTRL1;
+	hw.fail_write_value = 0xCE;
+	hw.apply_failed_write = true;
+	mag->mag_oneshot();
+	CHECK(hw.mode == MODE_SINGLE); /* Register write reached the chip. */
+	expect_read_blocked();
+	mag->mag_oneshot();
+	CHECK(hw.singles == 1); /* Must not retry an uncertain trigger. */
+
+	CHECK(mag->update_odr(0.01f, &actual) == 0);
+	CHECK(hw.transits == 1);
+	CHECK(hw.mode == MODE_NORMAL);
+}
+
+static void test_failed_configuration(void)
+{
+	reset_hw();
+	hw.ext = true;
+	float actual = 0;
+	CHECK(mag->init(0.01f, &actual) == 0);
+	next_sample(3750, 0, 0);
+
+	hw.fail_write_reg = REG_SIGN;
+	hw.fail_write_value = 0x06;
+	mag->mag_oneshot(); /* Failed normal-to-suspend preparation. */
+	CHECK(hw.singles == 0);
+	CHECK(hw.mode == MODE_NORMAL);
+	expect_read_blocked();
+
+	CHECK(mag->update_odr(0.01f, &actual) == 0);
+	float m[3] = {0};
+	CHECK(mag->mag_read(m));
 }
 
 static void test_scale(void)
@@ -288,11 +443,10 @@ static void test_status_overflow(void)
 	float m[3] = {0};
 	CHECK(!mag->mag_read(m));
 
-	/* Not data-ready: dropped before any burst read. */
-	hw.regs[REG_STATUS] = 0;
-	unsigned bursts = hw.bursts;
+	CHECK(hw.regs[REG_STATUS] == 0);
+	/* Neither overflow nor not-ready should reach the periodic frame reader. */
 	CHECK(!mag->mag_read(m));
-	CHECK(hw.bursts == bursts);
+	CHECK(hw.frame_reads == 0);
 }
 
 static void test_saturation_guard(void)
@@ -325,25 +479,35 @@ static void test_external_duplicate_suppression(void)
 	CHECK(mag->mag_read(m));               /* same bytes, window expired */
 	next_sample(376, 0, 0);
 	CHECK(mag->mag_read(m));               /* changed frame is not suppressed */
+	CHECK(hw.status_reads == 0);
+	CHECK(hw.regs[REG_STATUS] == STAT_DRDY); /* XYZ reads don't acknowledge it. */
 	CHECK(hw.frame_reads >= 4);
 }
 
 static void test_shutdown(void)
 {
 	reset_hw();
+	hw.ext = true;
 	float actual = 0;
 	CHECK(mag->init(0.01f, &actual) == 0);
+	next_sample(3750, 0, 0);
 	mag->shutdown();
 	CHECK(hw.resets == 1);
 	CHECK(hw.regs[REG_CTRL2] == 0x00);
 	CHECK(hw.mode == MODE_SUSPEND);
+	expect_read_blocked();
 }
 
 int main(void)
 {
+	test_off();
 	test_init_sequence();
 	test_odr_ladder();
-	test_oneshot();
+	test_oneshot(false);
+	test_oneshot(true);
+	test_oneshot_failures();
+	test_ambiguous_trigger();
+	test_failed_configuration();
 	test_scale();
 	test_status_overflow();
 	test_saturation_guard();

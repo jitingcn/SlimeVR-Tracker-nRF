@@ -45,6 +45,8 @@
 #define ODR_200Hz 0b11
 #define ODR_MASK(odr) ((odr) << 2)
 
+#define CONFIG_UNKNOWN 0xff
+
 // Control register 2 {SOFT_RST:1;SELF_TEST:1;-:1;-:1;INT_ENB:1;RNG:2;SET_RST:2}
 #define QMC5883P_CTRL_REG_2 0x0B
 
@@ -61,9 +63,8 @@
 #define SOFT_RESET_CLEAR 0x00
 #define SELF_TEST_MASK 0x40 // factory self-test; never set during init
 
-// Sign register. The datasheet power-on sequence writes 0x29 = 0x06, and the
-// driver rewrites it before every entry into a running mode so that polarity
-// cannot flip after a mode change (community workaround).
+// The datasheet power-on sequence writes 0x29 = 0x06. Rewrite it during
+// configuration to avoid a polarity flip after a mode change.
 #define QMC5883P_SIGN_REG 0x29
 #define SIGN_VALUE 0x06
 
@@ -76,11 +77,10 @@ static const float sensitivity = 1 / 3750.0f;
 // reference.
 #define MAG_SATURATION_LSB 30000
 
-static uint8_t last_state = 0xff;
+// A confirmed SINGLE owns one synchronous read; UNKNOWN never permits reads.
+static uint8_t last_state = CONFIG_UNKNOWN;
 static bool last_overflow = false;
 static int64_t oneshot_trigger_ms = 0;
-static bool oneshot_pending;
-static bool oneshot_failed;
 // In normal mode the data registers retain the previous sample; byte equality
 // is a duplicate heuristic, not proof of sample identity. Only the external
 // interface path needs it because it has no status read (same as QMC6309).
@@ -93,29 +93,20 @@ LOG_MODULE_REGISTER(QMC5883P, LOG_LEVEL_INF);
 
 int qmc5883p_init(float period_s, float *actual_period_s)
 {
-	last_state = 0xff; // init state
+	last_state = CONFIG_UNKNOWN;
 	last_overflow = false;
-	oneshot_trigger_ms = 0;
-	oneshot_pending = false;
-	oneshot_failed = false;
 	last_raw_sample_valid = false;
 	last_mag_time_ms = 0;
-	// Datasheet power-on sequence 0x29 = 0x06 -> 0x0B = 0x08 -> 0x0A is
-	// emitted by update_odr, which is also where the sign register is
-	// rewritten before every entry into a running mode.
+	// update_odr writes 0x29 = 0x06 -> 0x0B = 0x08 -> 0x0A config.
 	int err = qmc5883p_update_odr(period_s, actual_period_s);
 	return (err < 0 ? err : 0);
 }
 
 void qmc5883p_shutdown(void)
 {
-	last_state = 0xff;
-	oneshot_trigger_ms = 0;
-	oneshot_pending = false;
-	oneshot_failed = false;
+	last_state = CONFIG_UNKNOWN;
 	last_raw_sample_valid = false;
-	// Soft reset. The bit self-clears, but the datasheet sequence writes the
-	// cleared value back explicitly.
+	// Issue a soft reset, then explicitly write the cleared CTRL2 value.
 	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_CTRL_REG_2, SOFT_RESET_MASK);
 	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_CTRL_REG_2, SOFT_RESET_CLEAR);
 }
@@ -158,12 +149,16 @@ int qmc5883p_update_odr(float period_s, float *actual_period_s)
 		return 0; /* already configured - success for err|= callers */
 	}
 
-	// P-specific constraint: switching between running modes must transit
-	// through suspend (write MODE=00 first, then the target mode).
+	uint8_t previous_state = last_state;
+	last_state = CONFIG_UNKNOWN;
+	last_raw_sample_valid = false;
+
+	// Enter a running mode through suspend, including when a previous
+	// operation may have changed the mode despite returning an error.
 	int err = 0;
-	if (last_state != 0xff && (last_state & MODE_MASK) != MODE_SUSPEND && mode_code != MODE_SUSPEND) {
-		err = ssi_reg_write_byte(
-			SENSOR_INTERFACE_DEV_MAG, QMC5883P_CTRL_REG_1, (last_state & ~MODE_MASK) | MODE_SUSPEND);
+	if (mode_code != MODE_SUSPEND && (previous_state & MODE_MASK) != MODE_SUSPEND) {
+		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_CTRL_REG_1,
+					 OSR_MASK | ODR_MASK(odr_code) | MODE_SUSPEND);
 	}
 
 	if (!err) {
@@ -179,16 +174,10 @@ int qmc5883p_update_odr(float period_s, float *actual_period_s)
 		// code; tests assert both).
 		err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_CTRL_REG_1, OSR_MASK | config_code);
 	}
-	if (err) {
-		last_state = 0xff;
+	if (err)
 		return err;
-	}
 
 	last_state = config_code;
-	oneshot_trigger_ms = 0;
-	oneshot_pending = false;
-	oneshot_failed = false;
-	last_raw_sample_valid = false;
 
 	if (mode_code != MODE_SUSPEND) {
 		mag_period_ms = (int32_t)(period_s * 1000);
@@ -200,46 +189,55 @@ int qmc5883p_update_odr(float period_s, float *actual_period_s)
 
 void qmc5883p_mag_oneshot(void)
 {
-	// Oneshot starts from suspend; P returns to suspend by itself after the
-	// single measurement, so no explicit transit is needed here.
-	int err = ssi_reg_write_byte(
-		SENSOR_INTERFACE_DEV_MAG, QMC5883P_CTRL_REG_1, OSR_MASK | ODR_MASK(ODR_200Hz) | MODE_SINGLE);
-	last_state = 0xff;
-	oneshot_failed = err != 0;
-	oneshot_pending = true;
+	// An unconfigured or uncertain device requires explicit configuration.
+	if (last_state == CONFIG_UNKNOWN)
+		return;
+
+	float actual_period_s;
+	if (qmc5883p_update_odr(INFINITY, &actual_period_s))
+		return;
+
+	// STATUS acknowledges both flags (Rev E §9.2.2). Drain any previous
+	// conversion in suspend before starting the next one, even on EXT.
+	uint8_t stale_status;
+	if (ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_STAT_REG, &stale_status))
+		return;
+
+	uint8_t config = ODR_MASK(ODR_200Hz) | MODE_SINGLE;
+	last_state = CONFIG_UNKNOWN;
+	if (ssi_reg_write_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_CTRL_REG_1, OSR_MASK | config))
+		return;
+
 	oneshot_trigger_ms = k_uptime_get();
+	last_state = config;
 }
 
 bool qmc5883p_mag_read(float m[3])
 {
-	bool was_oneshot = oneshot_pending;
-	if (oneshot_pending) {
-		if (oneshot_failed) {
-			oneshot_pending = false;
-			oneshot_failed = false;
-			return false;
-		}
+	uint8_t mode = last_state & MODE_MASK;
+	bool was_oneshot = mode == MODE_SINGLE;
+	if (!was_oneshot && mode != MODE_NORMAL)
+		return false;
 
-		// Oneshot mode: wait for DRDY with timeout
-		uint8_t status = 0;
+	bool ext = !was_oneshot && sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) == SENSOR_INTERFACE_SPEC_EXT;
+	if (was_oneshot) {
+		// Revoke the shot before fallible I/O. Only a fresh DRDY proves that
+		// the chip has completed the conversion and returned to suspend.
+		uint8_t suspend_config = last_state & ~MODE_MASK;
+		last_state = CONFIG_UNKNOWN;
+		uint8_t status;
 		int64_t deadline_ms = oneshot_trigger_ms + 10; // 10ms timeout
-		while ((status & STAT_DATA_RDY_MASK) == 0) {
-			int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_STAT_REG, &status);
-			if (err) {
-				oneshot_pending = false;
+		for (;;) {
+			if (ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_STAT_REG, &status))
 				return false;
-			}
-			if (status & STAT_DATA_RDY_MASK) {
+			if (status & STAT_DATA_RDY_MASK)
 				break;
-			}
 			if (k_uptime_get() >= deadline_ms) {
 				LOG_WRN("Data ready status timeout!");
-				oneshot_pending = false;
 				return false;
 			}
 		}
-		oneshot_trigger_ms = 0;
-		oneshot_pending = false;
+		last_state = suspend_config;
 		if (status & STAT_OVERFLOW_MASK) {
 			if (!last_overflow) {
 				LOG_INF("Magnetometer overflow");
@@ -249,7 +247,7 @@ bool qmc5883p_mag_read(float m[3])
 		}
 		last_overflow = false;
 	}
-	if (!was_oneshot && sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) != SENSOR_INTERFACE_SPEC_EXT) {
+	if (!was_oneshot && !ext) {
 		uint8_t status = 0;
 		int err = ssi_reg_read_byte(SENSOR_INTERFACE_DEV_MAG, QMC5883P_STAT_REG, &status);
 		if (err) {
@@ -279,25 +277,23 @@ bool qmc5883p_mag_read(float m[3])
 		}
 	}
 	last_overflow = false;
-	// External continuous reads lack a status bit, so retain their duplicate
-	// heuristic: reject byte-identical readings until the cached period plus
-	// its 10% margin expires.
-	int64_t now = k_uptime_get();
-	if (!was_oneshot && sensor_interface_get_spec(SENSOR_INTERFACE_DEV_MAG) == SENSOR_INTERFACE_SPEC_EXT
-	    && last_raw_sample_valid && memcmp(rawData, last_raw_sample, 6) == 0) {
-		if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10)) {
-			return false;
-		}
-		// Advance one cached period; resynchronize to now only when far behind.
-		last_mag_time_ms += mag_period_ms;
-		if (now - last_mag_time_ms > mag_period_ms * 2) {
+	if (ext) {
+		// External periodic reads lack status. Retain the duplicate heuristic:
+		// reject byte-identical readings until the period plus 10% expires.
+		int64_t now = k_uptime_get();
+		if (last_raw_sample_valid && memcmp(rawData, last_raw_sample, 6) == 0) {
+			if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10))
+				return false;
+			// Advance one cached period; resynchronize to now only when far behind.
+			last_mag_time_ms += mag_period_ms;
+			if (now - last_mag_time_ms > mag_period_ms * 2)
+				last_mag_time_ms = now;
+		} else {
 			last_mag_time_ms = now;
 		}
-	} else {
-		last_mag_time_ms = now;
+		memcpy(last_raw_sample, rawData, 6);
+		last_raw_sample_valid = true;
 	}
-	memcpy(last_raw_sample, rawData, 6);
-	last_raw_sample_valid = true;
 	qmc5883p_mag_process(rawData, m);
 	return true;
 }
