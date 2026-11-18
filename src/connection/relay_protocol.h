@@ -37,9 +37,10 @@
 #define RELAY_TRAILER_PENDING_LEN 17U
 #define RELAY_PONG_EXT_PENDING_LEN (RELAY_PONG_BASE_LEN + RELAY_TRAILER_PENDING_LEN)
 #define RELAY_ACTIVATION_UNIT_TICKS 4U
-/* Grant < announcement lead; the gap covers clock disagreement and a frame. */
+/* Allow three own PONG opportunities. After the old grant expires, leave
+ * time for clock disagreement and a frame admitted on the old layout. */
 #define RELAY_LAYOUT_GRANT_MS 3000U
-#define RELAY_LAYOUT_ACTIVATION_MS 3500U
+#define RELAY_LAYOUT_ACTIVATION_MS 3150U
 
 /* Ordinary pose traffic: a 17-byte normal frame or a composite. */
 #define RELAY_NORMAL_FRAME_LEN 17U
