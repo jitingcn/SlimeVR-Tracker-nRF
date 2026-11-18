@@ -7,9 +7,9 @@
  * skeleton reuse, not a product lineage.
  *
  * Differences from QMC6309 that every change below follows:
- *   1. I2C address 0x2C (QMC6309 sits in the 0x7C/0x0C groups); CHIP_ID at
- *      0x00 reads 0x80. The 0x2C group is otherwise unused; QMC6310 shares
- *      ID 0x80 but lives at 0x1C/0x3C, so there is no collision.
+ *   1. I2C only: probe 0x2C directly or through an IMU's I2C master,
+ *      including when the IMU itself uses SPI. Register 0x00 reads 0x80;
+ *      register 0x01 is sample data, not a second identity register.
  *   2. ODR bits live in CTRL1 (0x0A) [3:2] (QMC6309 uses CTRL2 [6:4]), two
  *      bits: 00 = 10, 01 = 50, 10 = 100, 11 = 200 Hz.
  *   3. 8 G sensitivity is 3750 LSB/G (QMC6309: 4000); RNG_8G is still 0b10.

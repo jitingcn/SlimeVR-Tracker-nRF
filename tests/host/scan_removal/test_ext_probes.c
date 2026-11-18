@@ -130,12 +130,14 @@ struct probe_call {
 static struct probe_call calls[8];
 static unsigned call_count;
 static const sensor_ext_ssi_t *real_ext;
-static bool nack_first_probe;
+static unsigned nack_probe_call;
 static uint8_t fail_probe_reg;
-static unsigned fail_probe_call;
+static unsigned fail_bus_probe_call;
+static bool unstable_second_identity;
 
 static void set_nack(void);
 static void clear_nack(void);
+static void inject_nested_failure(void);
 
 static int trace_read(uint8_t addr, const void *write_buf, size_t num_write,
 	void *read_buf, size_t num_read)
@@ -145,15 +147,19 @@ static int trace_read(uint8_t addr, const void *write_buf, size_t num_write,
 	struct probe_call *call = &calls[call_count++];
 	call->addr = addr;
 	call->reg = *(const uint8_t *)write_buf;
-	if ((fail_probe_reg && call->reg == fail_probe_reg) || call_count == fail_probe_call) {
+	if (fail_probe_reg && call->reg == fail_probe_reg) {
 		call->result = -EIO;
 		return -EIO;
 	}
-	bool first_nack = nack_first_probe && call_count == 1;
-	if (first_nack)
+	if (call_count == fail_bus_probe_call)
+		inject_nested_failure();
+	if (unstable_second_identity && call_count == 2)
+		hw.external[call->reg] ^= 1;
+	bool nack = call_count == nack_probe_call;
+	if (nack)
 		set_nack();
 	call->result = real_ext->ext_write_read(addr, write_buf, num_write, read_buf, num_read);
-	if (first_nack)
+	if (nack)
 		clear_nack();
 	return call->result;
 }
@@ -193,14 +199,16 @@ static void prepare(void)
 	hw.external[ICT153XX_CHIP_ID] = ICT153XX_CHIP_ID_VALUE;
 	host_log_reset();
 	call_count = 0;
-	nack_first_probe = false;
+	nack_probe_call = 0;
 	fail_probe_reg = 0;
-	fail_probe_call = 0;
+	fail_bus_probe_call = 0;
+	unstable_second_identity = false;
 }
 
-static int scan(uint8_t reg, uint8_t expected, int identity, uint16_t *addr, uint8_t *selected_reg)
+static int scan(uint8_t target_addr, uint8_t reg, uint8_t expected, int identity,
+	uint16_t *addr, uint8_t *selected_reg)
 {
-	const uint8_t addresses[] = {1, identity == MAG_QMC5883L ? 0x0d : identity == MAG_QMC6309 ? 0x7c : ICT153XX_I2C_ADDR};
+	const uint8_t addresses[] = {1, target_addr};
 #if defined(PROBE_ICM)
 	/* Select the modeled peripheral independently of the driver's programmed address. */
 	hw.external_address = addresses[1];
@@ -312,7 +320,7 @@ static void test_absent_and_nested_scan(void)
 	uint8_t reg;
 	prepare();
 	set_nack();
-	assert(scan(0x03, 0x42, MAG_LIS3MDL, &addr, &reg) == -1);
+	assert(scan(0x1e, 0x03, 0x42, MAG_LIS3MDL, &addr, &reg) == -1);
 	assert(addr == 0xff && reg == 0xff && call_count == 1 && starts() == 1);
 	assert(calls[0].addr == 0x1e && calls[0].reg == 0x03 && calls[0].result == nack_error());
 	assert(host_log_error_count() == 0);
@@ -320,7 +328,7 @@ static void test_absent_and_nested_scan(void)
 
 	prepare();
 	inject_nested_failure();
-	assert(scan(0x03, 0x42, MAG_LIS3MDL, &addr, &reg) == -1);
+	assert(scan(0x1e, 0x03, 0x42, MAG_LIS3MDL, &addr, &reg) == -1);
 	assert(addr == 0xff && reg == 0xff && call_count == 1 && starts() == 0);
 	assert(calls[0].result == nested_error() && host_log_error_count() == 0);
 	expect_quiescent();
@@ -331,8 +339,8 @@ static void test_ict_probe_retry(void)
 	uint16_t addr;
 	uint8_t reg;
 	prepare();
-	assert(scan(ICT153XX_MANU_ID, ICT153XX_MANU_ID_VALUE, MAG_ICT153XX, &addr, &reg)
-		== MAG_ICT153XX);
+	assert(scan(ICT153XX_I2C_ADDR, ICT153XX_MANU_ID, ICT153XX_MANU_ID_VALUE,
+		MAG_ICT153XX, &addr, &reg) == MAG_ICT153XX);
 	assert(addr == 0x1e && reg == 0x00 && call_count == 3 && starts() == 3);
 	assert(calls[0].reg == 0x00 && calls[1].reg == 0x01 && calls[2].reg == 0x00);
 	assert(calls[0].result == 0 && calls[1].result == 0 && calls[2].result == 0);
@@ -340,9 +348,9 @@ static void test_ict_probe_retry(void)
 	expect_quiescent();
 
 	prepare();
-	nack_first_probe = true;
-	assert(scan(ICT153XX_MANU_ID, ICT153XX_MANU_ID_VALUE, MAG_ICT153XX, &addr, &reg)
-		== MAG_ICT153XX);
+	nack_probe_call = 1;
+	assert(scan(ICT153XX_I2C_ADDR, ICT153XX_MANU_ID, ICT153XX_MANU_ID_VALUE,
+		MAG_ICT153XX, &addr, &reg) == MAG_ICT153XX);
 	assert(addr == 0x1e && reg == 0x00 && call_count == 4 && starts() == 4);
 	assert(calls[0].reg == 0x00 && calls[0].result == nack_error());
 	assert(calls[1].reg == 0x00 && calls[1].result == 0);
@@ -401,25 +409,50 @@ static void test_runtime_failures(void)
 	expect_quiescent();
 }
 
-static void test_qmc6309_identity(void)
+static void expect_qmc_identity_pair(uint8_t target_addr, unsigned bus_starts, int verify_result)
+{
+	assert(call_count == 2 && starts() == bus_starts);
+	assert(calls[0].addr == target_addr && calls[0].reg == 0 && calls[0].result == 0);
+	assert(calls[1].addr == target_addr && calls[1].reg == 0 && calls[1].result == verify_result);
+	assert(host_log_error_count() == 0);
+	expect_quiescent();
+}
+
+static void test_qmc_identity_only(uint8_t target_addr, uint8_t id, int identity)
 {
 	uint16_t addr;
 	uint8_t reg;
-	static const uint8_t ids[] = {0x90, 0x0c};
-	for (unsigned i = 0; i < ARRAY_SIZE(ids); i++) {
+	const uint8_t x_low[] = {id, 0x00, 0xff, 0x37};
+	for (unsigned i = 0; i < ARRAY_SIZE(x_low); i++) {
 		prepare();
-		hw.external[0] = ids[i];
-		hw.external[1] = ids[i];
+		hw.external[0] = id;
+		hw.external[1] = x_low[i];
 		hw.external[9] = 0xff;
-		assert(scan(0, ids[i], MAG_QMC6309, &addr, &reg) == MAG_QMC6309);
-		assert(call_count == 2 && calls[0].reg == 0 && calls[1].reg == 0);
-		prepare();
-		hw.external[0] = ids[i];
-		fail_probe_call = 2;
-		assert(scan(0, ids[i], MAG_QMC6309, &addr, &reg) == -1);
-		assert(call_count == 2 && calls[1].result == -EIO);
+		assert(scan(target_addr, 0, id, identity, &addr, &reg) == identity);
+		assert(addr == target_addr && reg == 0);
+		expect_qmc_identity_pair(target_addr, 2, 0);
 	}
-	assert(host_log_error_count() == 0);
+
+	prepare();
+	hw.external[0] = id;
+	nack_probe_call = 2;
+	assert(scan(target_addr, 0, id, identity, &addr, &reg) == -1);
+	assert(addr == 0xff && reg == 0xff);
+	expect_qmc_identity_pair(target_addr, 2, nack_error());
+
+	prepare();
+	hw.external[0] = id;
+	fail_bus_probe_call = 2;
+	assert(scan(target_addr, 0, id, identity, &addr, &reg) == -1);
+	assert(addr == 0xff && reg == 0xff);
+	expect_qmc_identity_pair(target_addr, 1, nested_error());
+
+	prepare();
+	hw.external[0] = id;
+	unstable_second_identity = true;
+	assert(scan(target_addr, 0, id, identity, &addr, &reg) == -1);
+	assert(addr == 0xff && reg == 0xff);
+	expect_qmc_identity_pair(target_addr, 2, 0);
 }
 
 #if defined(PROBE_DSV)
@@ -545,26 +578,28 @@ static void test_qmc5883l_ff_identity(void)
 		prepare();
 		hw.external[0x0d] = 0xff;
 		hw.external[9] = controls[i];
-		assert(scan(0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == MAG_QMC5883L);
+		assert(scan(0x0d, 0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == MAG_QMC5883L);
 		assert(call_count == 3 && calls[1].reg == 9);
 	}
 	prepare();
 	memset(hw.external, 0xff, sizeof(hw.external));
-	assert(scan(0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == -1);
+	assert(scan(0x0d, 0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == -1);
 	prepare();
 	hw.external[0x0d] = 0xff;
 	fail_probe_reg = 9;
-	assert(scan(0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == -1);
+	assert(scan(0x0d, 0x0d, 0xff, MAG_QMC5883L, &addr, &reg) == -1);
 	prepare();
 	hw.external[0x0d] = 0xff;
-	assert(scan(0x0d, 0xff, MAG_LIS3MDL, &addr, &reg) == -1);
+	assert(scan(0x0d, 0x0d, 0xff, MAG_LIS3MDL, &addr, &reg) == -1);
 	assert(call_count == 1 && host_log_error_count() == 0);
 }
 
 int main(void)
 {
 	test_qmc5883l_ff_identity();
-	test_qmc6309_identity();
+	test_qmc_identity_only(0x2c, 0x80, MAG_QMC5883P);
+	test_qmc_identity_only(0x0c, 0x90, MAG_QMC6309);
+	test_qmc_identity_only(0x7c, 0x90, MAG_QMC6309);
 #if defined(PROBE_DSV)
 	test_ssi_group_and_dummy_boundaries();
 #endif
