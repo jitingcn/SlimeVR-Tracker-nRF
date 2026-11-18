@@ -2110,7 +2110,7 @@ static void sensor_update_sensor_state(bool resting)
 #if CONFIG_SENSOR_TCAL_HEATED
 	calibrating = calibrating || sensor_tcal_heated_busy();
 #endif
-	bool in_test_mode = test_mode_get() || tdma_profile_get();
+	bool in_test_mode = test_mode_get();
 	bool ota_suppressed_now = esb_ota_is_active() || connection_get_ota_suppressed();
 	bool suspended = atomic_get(&main_suspended);
 	int64_t now_ms = k_uptime_get();
