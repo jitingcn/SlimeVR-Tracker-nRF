@@ -282,7 +282,8 @@ bool qmc5883p_mag_read(float m[3])
 		// reject byte-identical readings until the period plus 10% expires.
 		int64_t now = k_uptime_get();
 		if (last_raw_sample_valid && memcmp(rawData, last_raw_sample, 6) == 0) {
-			if ((now - last_mag_time_ms) < (mag_period_ms + mag_period_ms / 10))
+			// Round up: a 5 ms period still needs a nonzero margin.
+			if (now - last_mag_time_ms < mag_period_ms + (mag_period_ms + 9) / 10)
 				return false;
 			// Advance one cached period; resynchronize to now only when far behind.
 			last_mag_time_ms += mag_period_ms;

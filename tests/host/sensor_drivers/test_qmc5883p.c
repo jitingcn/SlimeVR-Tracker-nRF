@@ -482,6 +482,13 @@ static void test_external_duplicate_suppression(void)
 	CHECK(hw.status_reads == 0);
 	CHECK(hw.regs[REG_STATUS] == STAT_DRDY); /* XYZ reads don't acknowledge it. */
 	CHECK(hw.frame_reads >= 4);
+
+	/* At 200 Hz the 5.5 ms threshold rounds up on the millisecond clock. */
+	CHECK(mag->update_odr(0.005f, &actual) == 0);
+	CHECK(mag->mag_read(m));
+	advance(4); /* Each modeled frame read takes 1 ms. */
+	CHECK(!mag->mag_read(m)); /* 5 ms since acceptance */
+	CHECK(mag->mag_read(m));  /* 6 ms since acceptance */
 }
 
 static void test_shutdown(void)
