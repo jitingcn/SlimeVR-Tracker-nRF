@@ -1,6 +1,6 @@
 # Peer relay
 
-The receiver uses normal direct TDMA while links are healthy. `relay on` permits automatic relay entry after sustained loss or an outage. It does not start control broadcasts or helper listening by itself. Stable direct recovery stages a coordinated return to direct TDMA. `relay off` withdraws permission and stages the same safe exit; control frames continue until activation so trackers retain their direct clock anchors.
+The receiver boots in `relay auto` mode and uses direct TDMA while links are healthy. Sustained loss or an outage can trigger relay, and stable direct recovery stages a return to direct TDMA. `relay force` requests relay whenever the roster, layout and radio state allow it, regardless of link quality. `relay off` requests direct TDMA. On exit, control frames continue until activation so trackers retain their direct clock anchors.
 
 Validated power-down notices provide bounded intent, not proof that a tracker is asleep. The receiver excludes that intent from automatic relay decisions and special query-recovery leases, but keeps ordinary RF membership and inactivity expiry. Cancellation, wake, session replacement and pairing invalidation clear the intent. Unannounced silence still follows the normal outage policy.
 
@@ -12,7 +12,7 @@ Delivery feedback is qualified by the active session and layout epoch. A receive
 
 PONG trailers coordinate layout activation and passive clock presence. Profile 0 means direct TDMA, and profile 1 means engaged relay. Both firmware repositories carry byte-identical `src/connection/relay_protocol.h` headers. Keep pre-v5 relay firmware out of a v5 relay fleet because it uses different control timing. V5 trackers derive activation from the delta transmitted in the PONG, so they accept a v5 receiver's updated announcement lead.
 
-Permission is `relay_user_enabled`, effective permission is `relay_coord.enabled`, automatic demand is `auto_engaged`, and the applied state is `relay_profile`. Commands are `relay on`, `relay off`, `relay` for status, and `relay layout` for settings. Diagnostic block and pool commands remain available. There is no second protocol switch or command alias.
+The receiver stores the selected mode in `relay_user_mode`. `relay_coord.enabled` controls effective permission, `auto_engaged` records automatic demand, and `relay_profile` records the applied profile. Use `relay` for status and `relay layout` for settings. `relay on` is an alias for `relay auto`. Diagnostic block and pool commands remain available.
 
 Receiver counters use the same definitions in both profiles. `arrivals` counts validated pose records before deduplication; `duplicate_stale` counts duplicate or stale records rejected at publication; `direct_accepted` and `repair_accepted` count unique accepted records by path. Total TPS counts accepted unique records, including info and status records. Malformed packets and injected direct drops do not enter arrivals. Host `total_received`, gap and status counters retain publication accounting.
 
