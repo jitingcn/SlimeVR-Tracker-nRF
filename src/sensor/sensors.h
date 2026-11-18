@@ -115,6 +115,8 @@ int sensor_scan_mag(struct i2c_dt_spec *i2c_dev, uint8_t *i2c_dev_reg);
 #endif
 int sensor_scan_imu_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg);
 #if CONFIG_SENSOR_USE_MAGNETOMETER
+/* Returns a device ID, -1 for a completed scan with no match, or -EIO
+ * for an incomplete scan. An I/O error leaves the retained hint unchanged. */
 int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg);
 int sensor_scan_mag_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uint8_t *ext_dev_reg);
 #endif

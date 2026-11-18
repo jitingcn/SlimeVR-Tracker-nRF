@@ -20,6 +20,7 @@
 	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 	THE SOFTWARE.
 */
+#include <errno.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/types.h>
 
@@ -99,7 +100,7 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
+static int probe_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 {
 #if IS_ENABLED(CONFIG_SENSOR_DRV_MMC5983MA) || IS_ENABLED(CONFIG_SENSOR_DRV_LIS3MDL) \
 	|| IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL) || IS_ENABLED(CONFIG_SENSOR_DRV_BMM150) \
@@ -140,11 +141,15 @@ int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 	/* Byte zero is clocked during the command, followed by the ID byte. */
 	for (size_t i = 0; i < ARRAY_SIZE(probes); i++) {
 		command = probes[i].command;
-		if (spi_transceive_dt(bus, &tx, &rx) || buf[1] != probes[i].id)
+		if (spi_transceive_dt(bus, &tx, &rx))
+			return -EIO;
+		if (buf[1] != probes[i].id)
 			continue;
 		if (probes[i].verify_command) {
 			command = probes[i].verify_command;
-			if (spi_transceive_dt(bus, &tx, &rx) || buf[1] != probes[i].verify_id)
+			if (spi_transceive_dt(bus, &tx, &rx))
+				return -EIO;
+			if (buf[1] != probes[i].verify_id)
 				continue;
 		}
 		*spi_dev_reg = probes[i].command;
@@ -153,7 +158,28 @@ int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 	}
 #else
 	ARG_UNUSED(bus);
+	ARG_UNUSED(spi_dev_reg);
 #endif
+	return -1;
+}
+
+int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
+{
+	int id = probe_mag_spi(bus, spi_dev_reg);
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL)
+	if (id == -1) {
+		/* A LIS2MDL in 3-wire mode leaves SDO undriven. Enable 4-wire,
+		 * BDU and I2C_DIS only after every identity read completed. */
+		uint8_t cfg_reg_c[] = {0x62, 0x34};
+		struct spi_buf buf = {.buf = cfg_reg_c, .len = sizeof(cfg_reg_c)};
+		const struct spi_buf_set tx = {.buffers = &buf, .count = 1};
+		if (spi_write_dt(bus, &tx))
+			return -EIO;
+		id = probe_mag_spi(bus, spi_dev_reg);
+	}
+#endif
+	if (id != -1)
+		return id;
 	/* Keep an I2C register hint for the fallback scanner. */
 	if (*spi_dev_reg & 0x80)
 		*spi_dev_reg = 0xff;
