@@ -105,7 +105,12 @@ static void tracker_event_notice(uint8_t kind, uint8_t phase, uint8_t detail)
 	}
 }
 static void tracker_events_notify(void) {}
-static bool configure_system_off(void) { led_shutdown(); return true; }
+static bool configure_system_off(bool allow_imu_failure)
+{
+	(void)allow_imu_failure;
+	led_shutdown();
+	return true;
+}
 static int sys_flush_warm(void) { return 0; }
 static void sensor_calibration_online_mag_cold_start(void) {}
 static void sensor_retained_write(void) {}

@@ -320,7 +320,7 @@ int lsm_init(
 	return (err < 0 ? err : 0);
 }
 
-void lsm_shutdown(void)
+int lsm_shutdown(void)
 {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	ext_frame_valid = false;
@@ -333,9 +333,10 @@ void lsm_shutdown(void)
 	// must still be attempted, but CTRL3 is safe only after a checked page select.
 	int reset_err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
 	if (!reset_err) {
-		ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
+		reset_err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL3, 0x01); // SW_RESET
 	}
 	k_msleep(2); // Wait for reset to complete before the next init path continues
+	return reset_err;
 }
 
 void lsm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)

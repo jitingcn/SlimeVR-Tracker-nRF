@@ -181,10 +181,10 @@ static int smoke_burst_read(const struct device *dev, uint16_t addr, uint8_t reg
 #undef i2c_reg_read_byte
 
 struct led_token { unsigned int id; };
-struct imu_stub { void (*shutdown)(void); int (*setup_WOM)(void); };
+struct imu_stub { int (*shutdown)(void); int (*setup_WOM)(void); };
 struct fusion_stub { void (*take_rest_observation)(void *); };
 static int shutdown_calls, wom_calls;
-static void imu_shutdown(void) { shutdown_calls++; }
+static int imu_shutdown(void) { shutdown_calls++; return 0; }
 static int imu_setup_wom(void) { wom_calls++; return 0x31; }
 static struct imu_stub sensor_imu_none, mock_imu = {
     .shutdown = imu_shutdown, .setup_WOM = imu_setup_wom,
@@ -411,7 +411,7 @@ static void suspend_entry(void *a, void *b, void *c)
 {
     ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
     result2 = main_imu_suspend();
-    if (!result2 && shutdown_on_suspend) shutdown_result = sensor_shutdown();
+    if (!result2 && shutdown_on_suspend) shutdown_result = sensor_shutdown(NULL);
     if (!result2 && recoverable_failure) sensor_release_failed_restart();
     k_sem_give(&suspended);
     if (!result2) {

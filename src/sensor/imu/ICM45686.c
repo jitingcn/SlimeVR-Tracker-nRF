@@ -491,18 +491,22 @@ int icm45_init(
 	return 0;
 }
 
-void icm45_shutdown(void)
+int icm45_shutdown(void)
 {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	icm45_ext_drain_read_ahead(SSI_REPORT);
+	int drain_err = icm45_ext_drain_read_ahead(SSI_UNREPORTED);
+	if (drain_err) {
+		LOG_WRN("AUX drain failed before IMU reset: %d", drain_err);
+	}
 #endif
 	icm45_invalidate_odr_cache();
 	fifo_temp_c = 25.0f;
 	fifo_temp_valid = false;
 	// Global reset terminates even a stuck/uncertain GO; unlike command changes,
 	// reset recovery must remain available when the bounded idle drain fails.
-	ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
+	int err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM45686_REG_MISC2, 0x02); // Soft reset
 	k_msleep(2); // Retain the reset settling delay; its 2 ms margin is not verified here.
+	return err;
 }
 
 void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)

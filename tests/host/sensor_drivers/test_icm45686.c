@@ -580,7 +580,7 @@ static void test_disabled_prefetch_lifecycle(void)
 	uint8_t command[] = {0x04, 0x02};
 	assert(hw.ext->ext_write(0x1e, command, sizeof(command)) == 0);
 	assert(hw.go_count == 3 && hw.writes == 1 && !hw.busy);
-	icm45_shutdown();
+	assert(icm45_shutdown() == 0);
 	initialize();
 	set_sample(0x71);
 	assert(read_sample(0x08, out, sizeof(out)) == 0);
@@ -839,13 +839,39 @@ static void test_shutdown_recovers_failed_drain(void)
 		hw.stuck = true; /* The successor GO is still outstanding. */
 		if (status_read_error)
 			fail_on(READ, TOP(ICM45686_I2CM_STATUS), 0, false);
-		icm45_shutdown();
+		uint64_t start = hw.now;
+		assert(sensor_imu_icm45686.shutdown() == 0);
+		const struct bus_record *reset = &hw.records[hw.record_count - 1];
+		assert(reset->kind == WRITE && reset->address == ICM45686_REG_MISC2 && !reset->result);
+		/* The deadline is observed on a BUSY poll, after a possible final yield. */
+		assert(reset->at - start <= 10000 + 50 + 2 * hw.latency + 8);
+		assert(hw.now - reset->at == hw.latency + 2000);
 		assert(!hw.busy); /* Failed drain must not prevent global reset recovery. */
 		hw.stuck = false;
 		initialize();
 		set_sample(0x70);
 		assert(read_sample(0x08, &out, 1) == 0);
 		assert(out == 0x70);
+	}
+}
+
+static void test_shutdown_reports_reset_write_failure(void)
+{
+	for (unsigned stuck = 0; stuck < 2; stuck++) {
+		reset_model(true);
+		if (stuck) {
+			uint8_t out;
+			assert(read_sample(0x08, &out, 1) == 0);
+			hw.stuck = true;
+		}
+		unsigned go_count = hw.go_count;
+		fail_on(WRITE, ICM45686_REG_MISC2, 0, false);
+		assert(sensor_imu_icm45686.shutdown() == -EIO);
+		assert(hw.failure_index == hw.record_count && !hw.fault.armed);
+		const struct bus_record *reset = &hw.records[hw.record_count - 1];
+		assert(reset->kind == WRITE && reset->address == ICM45686_REG_MISC2);
+		assert(hw.now - reset->at == hw.latency + 2000);
+		assert(hw.go_count == go_count && hw.busy == (stuck != 0));
 	}
 }
 
@@ -1271,6 +1297,7 @@ int main(int argc, char **argv)
 	test_setup_failures();
 	test_elapsed_deadline();
 	test_shutdown_recovers_failed_drain();
+	test_shutdown_reports_reset_write_failure();
 	test_wom_register_spacing();
 	printf("IREG: minimum_inter_access_gap_us=%llu\n", (unsigned long long)minimum_ireg_gap);
 	puts("ICM45686 actual-driver register regressions passed");

@@ -156,7 +156,7 @@ int lsm_init(
 	float *accel_actual_period_s,
 	float *gyro_actual_period_s
 );
-void lsm_shutdown(void);
+int lsm_shutdown(void);
 
 void lsm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range);
 int lsm_update_odr(

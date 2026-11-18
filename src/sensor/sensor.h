@@ -42,7 +42,11 @@ int sensor_request_scan(bool force, bool user_feedback);
 void sensor_retained_write(void);
 void sensor_record_wom_sleep(void);
 
-int sensor_shutdown(void);
+/* Caller owns a successful main_imu_suspend() lease, transferred to power
+ * even on failure. A negative return is a lifecycle or IMU shutdown error.
+ * When non-NULL, access_quiesced is true only if host-side sensor access
+ * is stopped; it does not attest to successful IMU reset or sleep. */
+int sensor_shutdown(bool *access_quiesced);
 /* Return GPIO pull/sense configuration, or a negative lifecycle error. */
 int sensor_setup_WOM(void);
 
@@ -164,7 +168,8 @@ typedef struct sensor_imu {
 		float *actual_accel_period_s,
 		float *actual_gyro_period_s
 	);
-	void (*shutdown)(void);
+	/* Return 0 for a successful shutdown command, or a negative errno. */
+	int (*shutdown)(void);
 
 	/* Requested and actual full-scale ranges: g for accel, deg/s for gyro. */
 	void (*update_fs)(

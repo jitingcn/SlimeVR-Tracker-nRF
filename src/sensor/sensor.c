@@ -1611,9 +1611,13 @@ static void sensor_transfer_suspension_to_power(void)
 	k_mutex_unlock(&sensor_lifecycle_lock);
 }
 
-int sensor_shutdown(void) // Communicate all imus to shut down
+int sensor_shutdown(bool *access_quiesced)
 {
 	int err = 0;
+	int imu_err = 0;
+	if (access_quiesced) {
+		*access_quiesced = false;
+	}
 #if CONFIG_SENSOR_TCAL_HEATED
 	bool was_ok = main_ok;
 	main_ok = false;
@@ -1621,7 +1625,8 @@ int sensor_shutdown(void) // Communicate all imus to shut down
 	if (err) {
 		main_ok = was_ok;
 		LOG_ERR("Sensor shutdown blocked by heater: %d", err);
-		goto release_lease;
+		sensor_transfer_suspension_to_power();
+		return err;
 	}
 #else
 	main_ok = false;
@@ -1635,26 +1640,34 @@ int sensor_shutdown(void) // Communicate all imus to shut down
 	sensor_mag_timing_reset();
 #endif
 	if (!sensor_sensor_init || sensor_imu == NULL || sensor_imu == &sensor_imu_none) {
-		LOG_INF("sensor_shutdown: sensors not initialized, skip");
-		goto release_lease;
-	}
-
-	err = sys_interface_resume();
-	if (err) {
-		goto release_lease;
-	}
+		LOG_INF("sensor_shutdown: sensors not initialized, skip driver shutdown");
+	} else {
+		err = sys_interface_resume();
+		if (!err) {
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-	if (mag_available && mag_enabled && sensor_mag != NULL && sensor_mag != &sensor_mag_none) {
-		sensor_mag->shutdown();
-	}
+			if (mag_available && mag_enabled && sensor_mag != NULL && sensor_mag != &sensor_mag_none) {
+				sensor_mag->shutdown();
+			}
 #endif
-	sensor_imu->shutdown();
-	err = sys_interface_suspend();
-release_lease:
+			imu_err = sensor_imu->shutdown();
+			if (imu_err) {
+				LOG_ERR("IMU shutdown failed: %d", imu_err);
+			}
+		}
+	}
+	/* A failed resume may have resumed only some buses. Always try to
+	 * suspend all of them, and prioritize host-side PM errors at the owner. */
+	int suspend_err = sys_interface_suspend();
+	if (!err) {
+		err = suspend_err;
+	}
+	if (!err && access_quiesced) {
+		*access_quiesced = true;
+	}
 	/* The shutdown owner is done touching drivers. Keep the stop latched and
 	 * transfer it only to the power thread, never to calibration or scans. */
 	sensor_transfer_suspension_to_power();
-	return err;
+	return err ? err : imu_err;
 }
 
 int sensor_setup_WOM(void)
@@ -2228,7 +2241,11 @@ static int sensor_init(void)
 	if (fast_wom_wake) {
 		LOG_INF("Skipping IMU pre-init reset after WOM wake");
 	} else {
-		sensor_imu->shutdown(); // TODO: is this needed?
+		err = sensor_imu->shutdown();
+		if (err) {
+			LOG_ERR("IMU pre-init reset failed: %d", err);
+			return err;
+		}
 	}
 
 	// Clock already enabled during sensor scan, just ensure it's still on

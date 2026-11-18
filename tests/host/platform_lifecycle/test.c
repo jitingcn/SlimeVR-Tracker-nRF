@@ -321,20 +321,29 @@ static int pm_device_action_run(const struct device *device, enum pm_device_acti
     return 0;
 }
 static bool main_ok, sensor_sensor_init = true, mag_available = true, mag_enabled = true;
-static int shutdowns, wom_calls, scan_result;
-static void shutdown_driver(void) { shutdowns++; }
+static int imu_shutdowns, mag_shutdowns, imu_shutdown_result, wom_calls, scan_result;
+static int shutdown_imu(void)
+{
+    assert(!bus_suspended[1] && !bus_suspended[2]);
+    assert(mag_shutdowns == imu_shutdowns + 1);
+    imu_shutdowns++;
+    return imu_shutdown_result;
+}
+static void shutdown_mag(void) { mag_shutdowns++; }
 static uint8_t setup_wom_driver(void) { wom_calls++; return 0x12; }
-struct driver { void (*shutdown)(void); uint8_t (*setup_WOM)(void); };
-static const struct driver sensor_imu_none, sensor_mag_none;
-static const struct driver driver = {shutdown_driver, setup_wom_driver};
-static const struct driver *sensor_imu = &driver, *sensor_mag = &driver;
+struct imu_driver { int (*shutdown)(void); uint8_t (*setup_WOM)(void); };
+struct mag_driver { void (*shutdown)(void); };
+static const struct imu_driver sensor_imu_none, imu_driver = {shutdown_imu, setup_wom_driver};
+static const struct mag_driver sensor_mag_none, mag_driver = {shutdown_mag};
+static const struct imu_driver *sensor_imu = &imu_driver;
+static const struct mag_driver *sensor_mag = &mag_driver;
 static void sensor_calibration_set_consumer_ready(bool ready) {}
 static void sensor_mag_timing_reset(void) {}
 static int sensor_request_scan(bool a, bool b) { return scan_result; }
 static K_MUTEX_DEFINE(sensor_lifecycle_lock);
-static int sensor_owner_token;
-static void *const power_thread_id = &sensor_owner_token;
-static void *sensor_suspend_owner = &sensor_owner_token;
+static int sensor_owner_token, power_owner_token;
+static void *const power_thread_id = &power_owner_token;
+static void *sensor_suspend_owner;
 static void *k_current_get(void) { return &sensor_owner_token; }
 static int main_imu_suspend(void)
 {
@@ -717,15 +726,41 @@ int main(void)
     assert(pm_calls[PM_DEVICE_ACTION_SUSPEND][1] == 1 && pm_calls[PM_DEVICE_ACTION_SUSPEND][2] == 1);
     pm_error[PM_DEVICE_ACTION_SUSPEND][2] = 0;
     assert(sys_interface_suspend() == 0 && bus_suspended[2]);
+    static const struct {
+        int resume_err, imu_err, suspend_err, result;
+    } cases[] = {
+        {-EBUSY, 0, 0, -EBUSY},
+        {-EBUSY, 0, -EIO, -EBUSY},
+        {0, 0, -EIO, -EIO},
+        {0, -ENXIO, -EIO, -EIO},
+        {0, -ENXIO, 0, -ENXIO},
+        {0, 0, 0, 0},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bus_suspended[1] = bus_suspended[2] = true;
+        pm_error[PM_DEVICE_ACTION_RESUME][2] = cases[i].resume_err;
+        pm_error[PM_DEVICE_ACTION_SUSPEND][1] = cases[i].suspend_err;
+        imu_shutdown_result = cases[i].imu_err;
+        imu_shutdowns = mag_shutdowns = 0;
+        int before1 = pm_calls[PM_DEVICE_ACTION_SUSPEND][1];
+        int before2 = pm_calls[PM_DEVICE_ACTION_SUSPEND][2];
+        assert(main_imu_suspend() == 0);
+        bool access_quiesced = true;
+        assert(sensor_shutdown(&access_quiesced) == cases[i].result);
+        assert(access_quiesced == (!cases[i].resume_err && !cases[i].suspend_err));
+        assert(sensor_suspend_owner == power_thread_id);
+        assert(imu_shutdowns == !cases[i].resume_err && mag_shutdowns == imu_shutdowns);
+        assert(pm_calls[PM_DEVICE_ACTION_SUSPEND][1] == before1 + 1);
+        assert(pm_calls[PM_DEVICE_ACTION_SUSPEND][2] == before2 + 1);
+        assert(bus_suspended[1] == !cases[i].suspend_err && bus_suspended[2]);
+    }
+    /* WoM setup has its own bus cycle (after successful shutdown). */
     pm_error[PM_DEVICE_ACTION_RESUME][2] = -EBUSY;
-    assert(sensor_shutdown() == -EBUSY && shutdowns == 0);
     assert(sensor_setup_WOM() == -EBUSY && wom_calls == 0);
     pm_error[PM_DEVICE_ACTION_RESUME][2] = 0;
     pm_error[PM_DEVICE_ACTION_SUSPEND][1] = -EIO;
-    assert(sensor_shutdown() == -EIO && shutdowns == 2);
     assert(sensor_setup_WOM() == -EIO && wom_calls == 1);
     pm_error[PM_DEVICE_ACTION_SUSPEND][1] = 0;
-    assert(sensor_shutdown() == 0 && shutdowns == 4);
     assert(sensor_setup_WOM() == 0x12 && wom_calls == 2);
     assert(bus_suspended[1] && bus_suspended[2]);
     puts("platform lifecycle regression passed");

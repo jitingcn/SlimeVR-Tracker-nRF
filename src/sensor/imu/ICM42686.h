@@ -131,7 +131,7 @@ int icm42686_init(
 	float *accel_actual_period_s,
 	float *gyro_actual_period_s
 );
-void icm42686_shutdown(void);
+int icm42686_shutdown(void);
 
 void icm42686_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range);
 int icm42686_update_odr(

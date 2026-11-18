@@ -448,7 +448,7 @@ static int ota_begin_impl(const uint8_t *data, size_t len, uint32_t request)
 	LOG_WRN("OTA: Suspending sensor subsystem for OTA update");
 	int sensor_err = main_imu_suspend();
 	if (!sensor_err) {
-		sensor_err = sensor_shutdown();
+		sensor_err = sensor_shutdown(NULL);
 	}
 	if (sensor_err) {
 		LOG_ERR("OTA BEGIN: sensor shutdown failed: %d", sensor_err);

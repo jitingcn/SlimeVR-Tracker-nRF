@@ -232,7 +232,7 @@ int sys_interface_resume(void)
 // TODO: usually charging, i would flash LED but that will drain the battery while it is charging..
 // TODO: should not really shut off while plugged in
 
-static bool configure_system_off(void)
+static bool configure_system_off(bool allow_imu_failure)
 {
 #if CONFIG_SENSOR_TCAL_HEATED
 	atomic_set(&heater_power_terminal, true);
@@ -250,13 +250,18 @@ static bool configure_system_off(void)
 	/* Freeze online-mag commits before the final warm-NVS flush. */
 	sensor_calibration_online_mag_prepare_power_down();
 #endif
+	bool access_quiesced = false;
 	int sensor_err = main_imu_suspend();
 	if (!sensor_err) {
-		sensor_err = sensor_shutdown();
+		sensor_err = sensor_shutdown(&access_quiesced);
 	}
 	if (sensor_err) {
-		LOG_ERR("Power transition blocked by sensor shutdown: %d", sensor_err);
-		return false;
+		if (!allow_imu_failure || !access_quiesced) {
+			LOG_ERR("Power transition blocked by sensor shutdown: %d", sensor_err);
+			return false;
+		}
+		/* Only terminal off/reboot, not a transition relying on the IMU. */
+		LOG_WRN("Proceeding with terminal power transition despite IMU shutdown failure: %d", sensor_err);
 	}
 	clock_pre_shutdown();
 	sensor_calibration_prepare_power_down();
@@ -660,7 +665,7 @@ static bool sys_WOM(bool force, uint32_t generation)
 	wom_manual = false;
 	k_mutex_unlock(&power_plan_lock);
 	led_quiesce();
-	if (!configure_system_off()) {
+	if (!configure_system_off(false)) {
 		tracker_event_notice(TRACKER_EVENT_KIND_POWER, POWER_WOM_CANCELLED,
 			force ? POWER_WOM_FORCED : POWER_WOM_NORMAL);
 		tracker_events_notify();
@@ -755,7 +760,7 @@ static bool sys_system_off(void)
 	k_mutex_unlock(&power_plan_lock);
 	led_quiesce();
 	sys_power_notice(POWER_WILL_SHUTDOWN);
-	if (!configure_system_off()) {
+	if (!configure_system_off(true)) {
 		return false;
 	}
 	sys_flush_warm(); /* persist warm cal before session clear / power loss */
@@ -808,7 +813,7 @@ static bool sys_system_reboot(void)
 	k_mutex_unlock(&power_plan_lock);
 	led_quiesce();
 	sys_power_notice(POWER_WILL_REBOOT);
-	if (!configure_system_off()) {
+	if (!configure_system_off(true)) {
 		return false;
 	}
 	return sys_reboot_prepared();

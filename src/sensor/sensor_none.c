@@ -20,6 +20,7 @@
 	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 	THE SOFTWARE.
 */
+#include <errno.h>
 #include <zephyr/logging/log.h>
 
 #include "sensor_none.h"
@@ -38,9 +39,10 @@ static int imu_none_init(
 	return -1;
 }
 
-static void imu_none_shutdown(void)
+static int imu_none_shutdown(void)
 {
 	LOG_DBG("imu_none_shutdown, sensor has no IMU or IMU cannot be shutdown");
+	return -ENODEV;
 }
 
 static void imu_none_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)

@@ -136,18 +136,14 @@ int icm_init(
 	return (err < 0 ? err : 0);
 }
 
-void icm_shutdown(void)
+int icm_shutdown(void)
 {
 	fifo_temp_valid = false;
 	last_accel_odr = 0xff; // reset last odr
 	last_gyro_odr = 0xff;  // reset last odr
 	last_accel_mode = 0xff;
 	last_gyro_mode = 0xff;
-	ssi_reg_write_byte(
-		SENSOR_INTERFACE_DEV_IMU,
-		ICM42688_DEVICE_CONFIG,
-		0x01
-	); // Don't need to wait for ICM to finish reset
+	return ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42688_DEVICE_CONFIG, 0x01); // Soft reset
 }
 
 void icm_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range)

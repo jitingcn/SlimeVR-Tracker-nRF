@@ -222,7 +222,7 @@ int icm45_init(
 	float *accel_actual_period_s,
 	float *gyro_actual_period_s
 );
-void icm45_shutdown(void);
+int icm45_shutdown(void);
 
 void icm45_update_fs(float accel_range, float gyro_range, float *accel_actual_range, float *gyro_actual_range);
 int icm45_update_odr(

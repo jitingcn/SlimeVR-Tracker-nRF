@@ -115,6 +115,7 @@ static unsigned shutdown_prepare_attempts, warm_flushes, mag_cold_starts, retain
 static unsigned wom_records, wom_mag_saves;
 static bool shutdown_allowed;
 static int suspend_result, shutdown_result, sensor_shutdown_calls, suspend_calls;
+static bool shutdown_access_quiesced;
 static unsigned battery_updates, log_waits, skip_dfu_calls, mag_prepares;
 static bool sensor_live, fault_reset_expected;
 static jmp_buf fault_reset;
@@ -149,7 +150,12 @@ static int main_imu_suspend(void)
 	if (!result) sensor_live = false;
 	return result;
 }
-static int sensor_shutdown(void) { sensor_shutdown_calls++; return shutdown_result; }
+static int sensor_shutdown(bool *access_quiesced)
+{
+	sensor_shutdown_calls++;
+	if (access_quiesced) *access_quiesced = shutdown_access_quiesced;
+	return shutdown_result;
+}
 static unsigned ram_launches;
 #if OTA_USE_RAM_ENGINE
 static void ota_launch_ram_engine(void);
@@ -223,15 +229,15 @@ bool esb_ota_is_active(void);
 static int prepare_upgrade(void);
 
 static bool connection_get_ota_suppressed(void) { return ota_suppressed; }
-static bool configure_system_off_body(void);
-static bool configure_system_off(void)
+static bool configure_system_off_body(bool allow_imu_failure);
+static bool configure_system_off(bool allow_imu_failure)
 {
 	shutdown_prepare_attempts++;
 	assert(notices > 0);
 	int64_t lead = now_ms - notice_log[notices - 1].time;
 	assert(lead >= (notice_phase == POWER_WILL_WOM ?
 		TRACKER_EVENT_WOM_ADVANCE_MS : TRACKER_EVENT_POWER_FLUSH_MS));
-	bool prepared = configure_system_off_body();
+	bool prepared = configure_system_off_body(allow_imu_failure);
 	unsigned before_cancel = notices;
 	sys_cancel_WOM();
 	assert(notices == before_cancel);
@@ -415,6 +421,7 @@ static void fixture(void)
 #endif
 	shutdown_allowed = true;
 	suspend_result = shutdown_result = sensor_shutdown_calls = suspend_calls = 0;
+	shutdown_access_quiesced = true;
 	suspend_observer = NULL;
 	flash_ready = true;
 	flash_mutations = flash_result = crc_result = 0;
@@ -515,6 +522,28 @@ static void owner_request_dispatch(void)
 		owner_trace(reboot ? "reboot-retried" : "off-retried");
 	}
 
+	/* Deliberate OFF, private battery/dock OFF and cold reboot all use
+	 * best effort only after the sensor owner and buses are quiesced. */
+	for (unsigned owner = 0; owner < 3; owner++) {
+		fixture(); memset(&ota, 0, sizeof(ota));
+		bool reboot = owner == 1;
+		if (owner != 2) {
+			assert((reboot ? sys_request_system_reboot() : sys_request_system_off()) == 0);
+		}
+		shutdown_result = -EIO;
+		shutdown_access_quiesced = false;
+		if (owner == 2) sys_battery_dock_system_off();
+		else power_iteration();
+		assert(physical_offs == 0 && physical_reboots == 0 && shutdown_prepares == 0);
+		assert(!power_requests.physical_started && sensor_shutdown_calls == 1);
+		shutdown_result = -ENXIO;
+		shutdown_access_quiesced = true;
+		if (owner == 2) sys_battery_dock_system_off();
+		else power_iteration();
+		assert(physical_offs == !reboot && physical_reboots == reboot);
+		assert(shutdown_prepares == 1 && sensor_shutdown_calls == 2);
+	}
+
 	fixture(); memset(&ota, 0, sizeof(ota));
 	assert(sys_request_system_off() == 0);
 	before_mutex_lock = reserve_ota_during_request;
@@ -587,7 +616,7 @@ static void owner_request_dispatch(void)
 	owner_trace("wom-replacement-consumed");
 
 	for (int force = 0; force < 2; force++) {
-		for (int stage = 0; stage < 3; stage++) {
+		for (int stage = 0; stage < 4; stage++) {
 #if !CONFIG_SENSOR_TCAL_HEATED
 			if (stage == 0) continue;
 #endif
@@ -602,7 +631,8 @@ static void owner_request_dispatch(void)
 			if (stage == 0) heater_abort_result = -EIO;
 #endif
 			if (stage == 1) suspend_result = -ETIMEDOUT;
-			if (stage == 2) shutdown_result = -EIO;
+			if (stage >= 2) shutdown_result = -EIO;
+			shutdown_access_quiesced = stage != 3;
 			power_until_fault_reset();
 			assert(physical_reboots == 1 && physical_offs == 0);
 			assert(power_requests.physical_started);
@@ -617,9 +647,9 @@ static void owner_request_dispatch(void)
 			assert(warm_flushes == 0 && mag_cold_starts == 0 && retained_writes == 0);
 			assert(battery_updates == 0 && log_waits == 0);
 			assert(skip_dfu_calls == ADAFRUIT_BOOTLOADER);
-			assert(sensor_live == (stage != 2));
+			assert(sensor_live == (stage < 2));
 			assert(suspend_calls == (stage != 0));
-			assert(sensor_shutdown_calls == (stage == 2));
+			assert(sensor_shutdown_calls == (stage >= 2));
 			assert(mag_prepares == (stage != 0));
 #if CONFIG_SENSOR_USE_TCAL
 			assert(boot_cal_resets == 0);
@@ -1352,12 +1382,13 @@ static void assert_immediate_recovery(uint8_t error)
 	assert(atomic_get(&ota_reboot_pending));
 	assert(esb_ota_handle_begin(packet, sizeof(packet)) == -EALREADY);
 	assert(!sys_system_off());
-	if (suspend_result || shutdown_result) {
+	if (suspend_result || (shutdown_result && !shutdown_access_quiesced)) {
 		power_iteration();
 		assert(physical_reboots == 0 && physical_offs == 0);
 		assert(power_requests.state == POWER_REQUEST_RETRY);
 		assert(warm_flushes == 0 && retained_writes == 0);
 		suspend_result = shutdown_result = 0;
+		shutdown_access_quiesced = true;
 	}
 	power_iteration();
 	assert(physical_reboots == 1 && physical_offs == 0);
@@ -1380,8 +1411,9 @@ static void admitted_errors_recover_without_transport(void)
 			if (failure == 1) shutdown_result = -ETIMEDOUT;
 			int result = esb_ota_handle_begin(packet, sizeof(packet));
 			if (failure < 2) {
-				assert(result < 0);
+				assert(result == (failure == 0 ? -EIO : -ETIMEDOUT));
 				assert(sensor_shutdown_calls == (failure == 1));
+				assert(flash_mutations == 0 && ram_launches == 0);
 			} else {
 				assert(result == 0);
 				uint8_t data[8] = {0};
