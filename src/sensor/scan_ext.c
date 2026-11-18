@@ -124,37 +124,36 @@ scan_loop:;
 						{
 							if (id == dev_id[id_ind + l])
 							{
-								// Cross-register verification: read a DIFFERENT register
-								// to confirm a real device exists (not stale bus data).
-								// Some IMU I2C masters (e.g. LSM6DSV sensor hub) don't
-								// reliably signal NACK for non-existent slaves. Instead,
-								// SENSOR_HUB registers retain stale data from a previous
-								// transaction, causing all addresses/registers to return
-								// the same value. Real devices return different values on
-								// different registers; stale/ghost data returns the same.
-								uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
-								// QMC6309/H register 1 is arbitrary X data, not identity evidence.
-								// Validate two ID epochs without imposing undocumented status bits.
-								bool qmc6309_probe = reg == 0x00 && dev_ids[fnd_id + l] == MAG_QMC6309;
-								if (qmc5883l_probe)
-									cross_reg = 0x09;
-#if defined(CONFIG_SENSOR_DRV_ICT153XX)
-								if (ict_probe)
-									cross_reg = ICT153XX_CHIP_ID;
-#endif
-								uint8_t cross_val = 0;
-								int c_err = qmc6309_probe ? 0 : sensor_scan_ext_read_byte(ext_ssi, addr, cross_reg, &cross_val);
-								// QST Table 18 permits MODE and RNG only 00/01.
-								if (qmc5883l_probe && (c_err || (cross_val & 0x22)))
-									break;
-#if defined(CONFIG_SENSOR_DRV_ICT153XX)
-								if (ict_probe && (c_err || cross_val != ICT153XX_CHIP_ID_VALUE))
-									break;
-#endif
-								if (!qmc6309_probe && !c_err && cross_val == id)
+								int candidate = dev_ids[fnd_id + l];
+								// QMC6309/H and QMC5883P reg 0x01 is X_L, which can equal the ID.
+								// Validate their identity with two successful reads of reg 0x00.
+								bool identity_only = reg == 0x00
+									&& (candidate == MAG_QMC6309 || candidate == MAG_QMC5883P);
+								if (!identity_only)
 								{
-									LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data", addr, reg, cross_reg, id);
-									break;
+									// Some hubs return stale data rather than NACK for absent slaves.
+									// Check an independent register for a repeated stale ID.
+									uint8_t cross_reg = (reg == 0x00) ? 0x01 : 0x00;
+									if (qmc5883l_probe)
+										cross_reg = 0x09;
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+									if (ict_probe)
+										cross_reg = ICT153XX_CHIP_ID;
+#endif
+									uint8_t cross_val = 0;
+									int c_err = sensor_scan_ext_read_byte(ext_ssi, addr, cross_reg, &cross_val);
+									// QST Table 18 permits MODE and RNG only 00/01.
+									if (qmc5883l_probe && (c_err || (cross_val & 0x22)))
+										break;
+#if defined(CONFIG_SENSOR_DRV_ICT153XX)
+									if (ict_probe && (c_err || cross_val != ICT153XX_CHIP_ID_VALUE))
+										break;
+#endif
+									if (!c_err && cross_val == id)
+									{
+										LOG_WRN("Ghost device at 0x%02X: reg 0x%02X and 0x%02X both return 0x%02X, likely stale data", addr, reg, cross_reg, id);
+										break;
+									}
 								}
 								// Re-read WHO_AM_I to confirm consistency
 								uint8_t verify_id = 0;
@@ -167,7 +166,7 @@ scan_loop:;
 								*ext_dev_addr = addr;
 								*ext_dev_reg = reg;
 								LOG_INF("Valid device found at address: 0x%02X (register: 0x%02X, value: 0x%02X)", addr, reg, id);
-								return dev_ids[fnd_id + l];
+								return candidate;
 							}
 						}
 					}
