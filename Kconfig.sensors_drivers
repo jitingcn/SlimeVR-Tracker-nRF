@@ -12,6 +12,8 @@ config SENSOR_MAG_DRIVERS_MINIMAL
 	help
 	  Same as SENSOR_IMU_DRIVERS_MINIMAL but for magnetometer drivers.
 	  Mag may be entirely disabled (mag-less boards).
+	  Direct SPI discovery only probes enabled drivers with a native SPI ID.
+	  An I2C magnetometer behind an SPI IMU still uses the I2C probe table.
 
 menu "IMU drivers"
 
