@@ -26,8 +26,9 @@
 
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
 #include "mag/ICT153xx.h"
-#include "sensors_enum.h"
 #endif
+
+#include "sensors_enum.h"
 
 LOG_MODULE_REGISTER(sensor_scan_spi, LOG_LEVEL_DBG);
 
@@ -42,15 +43,20 @@ static int sensor_scan_spi_match(uint8_t reg, uint8_t id, int groups,
 			int count = dev_id[ii++];
 			for (int item = 0; item < count; item++) {
 				uint8_t candidate = dev_id[ii + item];
-				if (candidate_reg != reg || candidate == 0xff)
+				if (candidate_reg != reg || candidate == 0xff || candidate != id)
+					continue;
+				int device = dev_ids[fi + item];
+				/* These QMC IDs require an I2C address. On MMC5983MA SPI,
+				 * register 0x00 is XOUT0 and can also read 0x80. */
+				if (reg == 0x00 && id == 0x80
+					&& (device == MAG_QMC5883P || device == MAG_QMC6310))
 					continue;
 #if defined(CONFIG_SENSOR_DRV_ICT153XX)
-				if (reg == ICT153XX_MANU_ID && candidate == ICT153XX_MANU_ID_VALUE
-					&& dev_ids[fi + item] == MAG_ICT153XX)
+				if (reg == ICT153XX_MANU_ID && id == ICT153XX_MANU_ID_VALUE
+					&& device == MAG_ICT153XX)
 					continue;
 #endif
-				if (candidate == id)
-					return dev_ids[fi + item];
+				return device;
 			}
 			ii += count;
 			fi += count;
