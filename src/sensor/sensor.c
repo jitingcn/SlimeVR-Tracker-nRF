@@ -1122,11 +1122,19 @@ int sensor_scan(void)
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	int mag_id = -1;
 #if SENSOR_MAG_SPI_EXISTS
-	// for SPI scan, set frequency of 10MHz, it will be set later by the driver initialization if needed
-	sensor_mag_spi_dev.config.frequency = MHZ(10);
+	const uint32_t mag_spi_hz = MIN(DT_PROP(SENSOR_MAG_SPI_NODE, spi_max_frequency), MHZ(10));
+	struct spi_dt_spec *probe_bus = &sensor_mag_spi_dev;
+#if IS_ENABLED(CONFIG_SENSOR_DRV_AK09940) && DT_PROP(SENSOR_MAG_SPI_NODE, spi_max_frequency) > 2000000
+	/* AK09940A needs >=150 ns per half-cycle. A separate config pointer lets
+	 * the controller switch from slow discovery to full speed for other chips. */
+	static struct spi_dt_spec slow_probe = SPI_DT_SPEC_GET(SENSOR_MAG_SPI_NODE, SPI_OP);
+	slow_probe.config.frequency = MHZ(2);
+	probe_bus = &slow_probe;
+#endif
+	sensor_mag_spi_dev.config.frequency = mag_spi_hz;
 	LOG_INF("Scanning SPI bus for magnetometer");
-	mag_id = sensor_scan_mag_spi(&sensor_mag_spi_dev, &sensor_mag_dev_reg);
-	if (mag_id < 0) {
+	mag_id = sensor_scan_mag_spi(probe_bus, &sensor_mag_dev_reg);
+	if (IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL) && mag_id < 0) {
 		// ST magnetometers (e.g. LIS2MDL) boot in 3-wire SPI: SDO stays high-Z so 4-wire
 		// reads return 0x00 and the scan above fails. Blind-write CFG_REG_C (0x62) with
 		// 4WSPI=bit2 (enable SDO), BDU=bit4 (avoid high/low byte tearing on async reads)
@@ -1135,13 +1143,14 @@ int sensor_scan(void)
 		uint8_t lis2mdl_4wspi[2] = {0x62, 0x34};
 		const struct spi_buf tx_buf = {.buf = lis2mdl_4wspi, .len = sizeof(lis2mdl_4wspi)};
 		const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
-		int wspi_err = spi_write_dt(&sensor_mag_spi_dev, &tx);
+		int wspi_err = spi_write_dt(probe_bus, &tx);
 		if (wspi_err == 0) {
-			sensor_mag_dev_reg = 0xFF;
-			mag_id = sensor_scan_mag_spi(&sensor_mag_spi_dev, &sensor_mag_dev_reg);
+			mag_id = sensor_scan_mag_spi(probe_bus, &sensor_mag_dev_reg);
 		}
 	}
 	if (mag_id >= 0) {
+		if (mag_id == MAG_AK09940)
+			sensor_mag_spi_dev.config.frequency = probe_bus->config.frequency;
 		sensor_interface_register_sensor_mag_spi(&sensor_mag_spi_dev);
 	}
 #endif

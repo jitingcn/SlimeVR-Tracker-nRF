@@ -167,7 +167,7 @@ const sensor_imu_t *sensor_imus[SENSOR_DEV_IMU_COUNT] = {
 	&sensor_imu_none
 #endif
 };
-// Scan tables use the packed format read by sensor_scan_i2c/_spi/_ext:
+// I2C/EXT scan tables are packed as below (the SPI IMU scan reuses reg/id/dev):
 //   addr[] : per group { count, addr0, addr1, ... }
 //   reg[]  : per group { reg_count, reg0, reg1, ... }
 //   id[]   : per group, per register { id_count, id0, id1, ... }
@@ -384,7 +384,7 @@ const sensor_mag_t *sensor_mags[SENSOR_DEV_MAG_COUNT] = {
 };
 // When no mag driver is enabled every SLIME_MAG_Gx gates to 0, which would
 // leave these initializers empty and trip -Werror. Guard the whole table and
-// stub sensor_scan_mag* to return -1 instead (see below).
+// stub the I2C and external magnetometer scans to return -1 (see below).
 #if SENSOR_MAG_DRV_COUNT > 0
 static const int i2c_dev_mag_addr_count = SLIME_MAG_G0 + SLIME_MAG_G1 + SLIME_MAG_G2 + SLIME_MAG_G3 + SLIME_MAG_G4
 										+ SLIME_MAG_G5 + SLIME_MAG_G6 + SLIME_MAG_G7 + SLIME_MAG_G8 + SLIME_MAG_G9
@@ -800,20 +800,6 @@ int sensor_scan_imu_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
 }
 
 #if CONFIG_SENSOR_USE_MAGNETOMETER
-int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
-{
-#if SENSOR_MAG_DRV_COUNT == 0
-	ARG_UNUSED(bus);
-	ARG_UNUSED(spi_dev_reg);
-	return -1;
-#else
-#if SENSOR_MAG_DRV_COUNT == 1
-	LOG_INF("Magnetometer single-driver SPI scan (%d groups)", i2c_dev_mag_addr_count);
-#endif
-	return sensor_scan_spi(bus, spi_dev_reg, i2c_dev_mag_addr_count, i2c_dev_mag_reg, i2c_dev_mag_id, i2c_dev_mag);
-#endif
-}
-
 int sensor_scan_mag_ext(const sensor_ext_ssi_t *ext_ssi, uint16_t *ext_dev_addr, uint8_t *ext_dev_reg)
 {
 #if SENSOR_MAG_DRV_COUNT == 0

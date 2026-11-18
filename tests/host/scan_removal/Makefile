@@ -33,8 +33,15 @@ MIXED_CONFIG := $(MINIMAL_CONFIG) -DCONFIG_SENSOR_DRV_ICM42688=1 \
 GROUP_A_CONFIG := $(MINIMAL_CONFIG) -DCONFIG_SENSOR_DRV_ICM42686=1
 GROUP_B_CONFIG := $(MINIMAL_CONFIG) -DCONFIG_SENSOR_DRV_LSM6DSO=1
 
-MAG_SPI_CONFIG := -UCONFIG_SENSOR_USE_MAGNETOMETER -DCONFIG_SENSOR_USE_MAGNETOMETER=1 \
-	-DCONFIG_SENSOR_DRV_QMC6309=1 -DCONFIG_SENSOR_DRV_QMC5883P=1 -DCONFIG_SENSOR_DRV_MMC5983MA=1
+MAG_SPI_CONFIG := -UCONFIG_SENSOR_USE_MAGNETOMETER -DCONFIG_SENSOR_USE_MAGNETOMETER=1
+MAG_I2C_DRIVERS := -DCONFIG_SENSOR_DRV_QMC6309=1 -DCONFIG_SENSOR_DRV_QMC5883P=1 \
+	-DCONFIG_SENSOR_DRV_QMC5883L=1 -DCONFIG_SENSOR_DRV_BMM350=1 \
+	-DCONFIG_SENSOR_DRV_IST8306=1 -DCONFIG_SENSOR_DRV_IST8308=1 \
+	-DCONFIG_SENSOR_DRV_MMC5603NJ=1 -DCONFIG_SENSOR_DRV_ICT153XX=1
+MAG_SPI_SUBSET := -DCONFIG_SENSOR_DRV_MMC5983MA=1 -DCONFIG_SENSOR_DRV_AK09940=1
+MAG_SPI_ALL := $(MAG_SPI_SUBSET) -DCONFIG_SENSOR_DRV_LIS3MDL=1 \
+	-DCONFIG_SENSOR_DRV_LIS2MDL=1 -DCONFIG_SENSOR_DRV_BMM150=1
+MAG_SPI_TESTS := test_mag_spi_full test_mag_spi_minimal test_mag_spi_i2c_only test_mag_spi_no_drivers
 MAG_SPI_SOURCES := test_mag_spi.c $(SCAN_SOURCES)
 MAG_SPI_HEADERS := $(SCAN_HEADERS) $(wildcard ../../../src/sensor/mag/*.h)
 
@@ -51,7 +58,7 @@ PROBE_HEADERS := $(wildcard ../../../src/sensor/*.h ../../../src/sensor/imu/*.h)
 .PHONY: check clean
 
 check: test_full test_minimal_mixed test_minimal_group_a test_minimal_group_b \
-	test_ext_dso test_ext_dsv test_ext_icm test_mag_spi_full test_mag_spi_minimal
+	test_ext_dso test_ext_dsv test_ext_icm $(MAG_SPI_TESTS)
 	python3 test_scan_retry.py
 	./test_full
 	./test_minimal_mixed
@@ -62,6 +69,8 @@ check: test_full test_minimal_mixed test_minimal_group_a test_minimal_group_b \
 	./test_ext_icm
 	./test_mag_spi_full
 	./test_mag_spi_minimal
+	./test_mag_spi_i2c_only
+	./test_mag_spi_no_drivers
 
 test_full: $(SOURCES) $(HEADERS) Makefile
 	$(CC) $(CPPFLAGS) $(FULL_CONFIG) $(CFLAGS) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
@@ -75,8 +84,10 @@ test_minimal_group_a: $(SOURCES) $(HEADERS) Makefile
 test_minimal_group_b: $(SOURCES) $(HEADERS) Makefile
 	$(CC) $(CPPFLAGS) $(GROUP_B_CONFIG) $(CFLAGS) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
-test_mag_spi_minimal: MAG_SPI_CONFIG += -DCONFIG_SENSOR_MAG_DRIVERS_MINIMAL=1
-test_mag_spi_full test_mag_spi_minimal: $(MAG_SPI_SOURCES) $(MAG_SPI_HEADERS) Makefile
+test_mag_spi_full: MAG_SPI_CONFIG += $(MAG_I2C_DRIVERS) $(MAG_SPI_ALL)
+test_mag_spi_minimal: MAG_SPI_CONFIG += $(MAG_I2C_DRIVERS) $(MAG_SPI_SUBSET) -DCONFIG_SENSOR_MAG_DRIVERS_MINIMAL=1
+test_mag_spi_i2c_only: MAG_SPI_CONFIG += $(MAG_I2C_DRIVERS)
+$(MAG_SPI_TESTS): $(MAG_SPI_SOURCES) $(MAG_SPI_HEADERS) Makefile
 	$(CC) $(CPPFLAGS) $(MAG_SPI_CONFIG) $(CFLAGS) -ffunction-sections -fdata-sections \
 		$(MAG_SPI_SOURCES) $(LDFLAGS) -Wl,--gc-sections $(LDLIBS) -o $@
 
@@ -100,5 +111,5 @@ test_ext_icm: $(PROBE_SOURCES) $(PROBE_HEADERS) ../sensor_drivers/test_icm45686.
 
 clean:
 	$(RM) test_full test_minimal_mixed test_minimal_group_a test_minimal_group_b \
-		test_ext_dso test_ext_dsv test_ext_icm test_mag_spi_full test_mag_spi_minimal
+		test_ext_dso test_ext_dsv test_ext_icm $(MAG_SPI_TESTS)
 	$(RM) $(IMU_MAPPING)

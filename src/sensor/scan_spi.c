@@ -22,13 +22,8 @@
 */
 #include <zephyr/logging/log.h>
 #include <zephyr/types.h>
-#include <zephyr/drivers/spi.h>
 
-#if defined(CONFIG_SENSOR_DRV_ICT153XX)
-#include "mag/ICT153xx.h"
-#endif
-
-#include "sensors_enum.h"
+#include "sensors.h"
 
 LOG_MODULE_REGISTER(sensor_scan_spi, LOG_LEVEL_DBG);
 
@@ -45,18 +40,7 @@ static int sensor_scan_spi_match(uint8_t reg, uint8_t id, int groups,
 				uint8_t candidate = dev_id[ii + item];
 				if (candidate_reg != reg || candidate == 0xff || candidate != id)
 					continue;
-				int device = dev_ids[fi + item];
-				/* These QMC IDs require an I2C address. On MMC5983MA SPI,
-				 * register 0x00 is XOUT0 and can also read 0x80. */
-				if (reg == 0x00 && id == 0x80
-					&& (device == MAG_QMC5883P || device == MAG_QMC6310))
-					continue;
-#if defined(CONFIG_SENSOR_DRV_ICT153XX)
-				if (reg == ICT153XX_MANU_ID && id == ICT153XX_MANU_ID_VALUE
-					&& device == MAG_ICT153XX)
-					continue;
-#endif
-				return device;
+				return dev_ids[fi + item];
 			}
 			ii += count;
 			fi += count;
@@ -113,3 +97,66 @@ int sensor_scan_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg, int dev_addr_
 
 	return -1;
 }
+
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+int sensor_scan_mag_spi(struct spi_dt_spec *bus, uint8_t *spi_dev_reg)
+{
+#if IS_ENABLED(CONFIG_SENSOR_DRV_MMC5983MA) || IS_ENABLED(CONFIG_SENSOR_DRV_LIS3MDL) \
+	|| IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL) || IS_ENABLED(CONFIG_SENSOR_DRV_BMM150) \
+	|| IS_ENABLED(CONFIG_SENSOR_DRV_AK09940)
+	/* Dedicated native SPI identities. Probe in this order even with a
+	 * retained hint: on MMC5983MA, other chips' ID registers can be data. */
+	static const struct {
+		uint8_t command;
+		uint8_t id;
+		uint8_t verify_command; /* Zero means no second read. */
+		uint8_t verify_id;
+		enum dev_mag device;
+	} probes[] = {
+#if IS_ENABLED(CONFIG_SENSOR_DRV_MMC5983MA)
+		{.command = 0x80 | 0x2f, .id = 0x30, .device = MAG_MMC5983MA},
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LIS3MDL)
+		{.command = 0x80 | 0x0f, .id = 0x3d, .device = MAG_LIS3MDL},
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL)
+		{.command = 0x80 | 0x4f, .id = 0x40, .device = MAG_LIS2MDL},
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_BMM150)
+		{.command = 0x80 | 0x40, .id = 0x32, .device = MAG_BMM150},
+#endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_AK09940)
+		{.command = 0x80 | 0x01, .id = 0xa3, .verify_command = 0x80 | 0x00, .verify_id = 0x48,
+		 .device = MAG_AK09940},
+#endif
+	};
+	uint8_t command;
+	uint8_t buf[2];
+	struct spi_buf tx_buf = {.buf = &command, .len = 1};
+	const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
+	struct spi_buf rx_buf = {.buf = buf, .len = sizeof(buf)};
+	const struct spi_buf_set rx = {.buffers = &rx_buf, .count = 1};
+
+	/* Byte zero is clocked during the command, followed by the ID byte. */
+	for (size_t i = 0; i < ARRAY_SIZE(probes); i++) {
+		command = probes[i].command;
+		if (spi_transceive_dt(bus, &tx, &rx) || buf[1] != probes[i].id)
+			continue;
+		if (probes[i].verify_command) {
+			command = probes[i].verify_command;
+			if (spi_transceive_dt(bus, &tx, &rx) || buf[1] != probes[i].verify_id)
+				continue;
+		}
+		*spi_dev_reg = probes[i].command;
+		LOG_INF("Valid device found using register: 0x%02X (value: 0x%02X)", *spi_dev_reg, probes[i].id);
+		return probes[i].device;
+	}
+#else
+	ARG_UNUSED(bus);
+#endif
+	/* Keep an I2C register hint for the fallback scanner. */
+	if (*spi_dev_reg & 0x80)
+		*spi_dev_reg = 0xff;
+	return -1;
+}
+#endif
