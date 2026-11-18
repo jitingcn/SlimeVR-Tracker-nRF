@@ -1134,20 +1134,6 @@ int sensor_scan(void)
 	sensor_mag_spi_dev.config.frequency = mag_spi_hz;
 	LOG_INF("Scanning SPI bus for magnetometer");
 	mag_id = sensor_scan_mag_spi(probe_bus, &sensor_mag_dev_reg);
-	if (IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL) && mag_id < 0) {
-		// ST magnetometers (e.g. LIS2MDL) boot in 3-wire SPI: SDO stays high-Z so 4-wire
-		// reads return 0x00 and the scan above fails. Blind-write CFG_REG_C (0x62) with
-		// 4WSPI=bit2 (enable SDO), BDU=bit4 (avoid high/low byte tearing on async reads)
-		// and I2C_DIS=bit5 (inhibit I2C since we're on SPI), then rescan so SDO is driven.
-		// (writes work in 3-wire since the host drives SDI/O)
-		uint8_t lis2mdl_4wspi[2] = {0x62, 0x34};
-		const struct spi_buf tx_buf = {.buf = lis2mdl_4wspi, .len = sizeof(lis2mdl_4wspi)};
-		const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
-		int wspi_err = spi_write_dt(probe_bus, &tx);
-		if (wspi_err == 0) {
-			mag_id = sensor_scan_mag_spi(probe_bus, &sensor_mag_dev_reg);
-		}
-	}
 	if (mag_id >= 0) {
 		if (mag_id == MAG_AK09940)
 			sensor_mag_spi_dev.config.frequency = probe_bus->config.frequency;

@@ -24,8 +24,13 @@ const sensor_mag_t sensor_mag_qmc5883p;
 static struct spi_dt_spec spi_bus;
 static const struct device i2c_bus;
 static uint8_t spi_regs[128];
-static bool spi_probed[128];
-static bool spi_failed[128];
+static unsigned int spi_reads[128];
+static int spi_read_errors[128];
+static unsigned int spi_reads_after_write;
+static unsigned int spi_writes;
+static int spi_write_error;
+static bool spi_error_after_write;
+static bool spi_lis2mdl_3wire;
 static uint8_t spi_dummy;
 static uint8_t i2c_addr;
 static uint8_t i2c_id;
@@ -38,18 +43,15 @@ int spi_transceive_dt(const struct spi_dt_spec *spec, const struct spi_buf_set *
 	uint8_t command = *(const uint8_t *)tx->buffers[0].buf;
 	assert(command & 0x80);
 	uint8_t reg = command & 0x7f;
-	spi_probed[reg] = true;
+	spi_reads[reg]++;
+	if (spi_writes)
+		spi_reads_after_write++;
 	uint8_t *data = rx->buffers[0].buf;
 	data[0] = spi_dummy;
-	int err = 0;
-	for (size_t i = 1; i < rx->buffers[0].len; i++) {
-		uint8_t payload_reg = (reg + i - 1) & 0x7f;
-		data[i] = spi_regs[payload_reg];
-		/* A failed transaction may still have populated the receive buffer. */
-		if (spi_failed[payload_reg])
-			err = -EIO;
-	}
-	return err;
+	for (size_t i = 1; i < rx->buffers[0].len; i++)
+		data[i] = spi_lis2mdl_3wire ? 0 : spi_regs[(reg + i - 1) & 0x7f];
+	/* A failed transaction may still have populated the receive buffer. */
+	return spi_error_after_write && !spi_writes ? 0 : spi_read_errors[reg];
 }
 
 int i2c_reg_read_byte(const struct device *dev, uint16_t addr, uint8_t reg, uint8_t *value)
@@ -86,17 +88,41 @@ static const struct {
 	{MAG_AK09940,   0x00, 0x48, IS_ENABLED(CONFIG_SENSOR_DRV_AK09940)},
 };
 
+int spi_write_dt(const struct spi_dt_spec *spec, const struct spi_buf_set *tx)
+{
+	assert(spec == &spi_bus && IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL));
+	assert(tx->count == 1 && tx->buffers[0].len == 2);
+	const uint8_t *data = tx->buffers[0].buf;
+	assert(data[0] == 0x62 && data[1] == 0x34);
+	spi_writes++;
+	assert(spi_writes == 1);
+	for (size_t i = 0; i < ARRAY_SIZE(native_ids); i++) {
+		if (!native_ids[i].enabled)
+			continue;
+		/* A clean miss must exhaust all enabled probes before writing. */
+		assert(spi_reads[native_ids[i].reg] ||
+			(native_ids[i].mag == MAG_AK09940 && spi_reads[0x01]));
+	}
+	if (spi_write_error)
+		return spi_write_error;
+	spi_lis2mdl_3wire = false;
+	return 0;
+}
+
 static void reset_spi(void)
 {
 	memset(spi_regs, 0, sizeof(spi_regs));
-	memset(spi_failed, 0, sizeof(spi_failed));
+	memset(spi_read_errors, 0, sizeof(spi_read_errors));
+	spi_write_error = 0;
+	spi_error_after_write = false;
+	spi_lis2mdl_3wire = false;
 	spi_dummy = 0;
 }
 
-static void check_mag_spi(uint8_t hint, int expected)
+static void check_mag_spi_with_writes(uint8_t hint, int expected, unsigned int writes)
 {
 	bool allowed[128] = {0};
-	uint8_t expected_hint = hint < 0x80 ? hint : 0xff;
+	uint8_t expected_hint = expected == -1 && (hint & 0x80) ? 0xff : hint;
 	for (size_t i = 0; i < ARRAY_SIZE(native_ids); i++) {
 		if (!native_ids[i].enabled)
 			continue;
@@ -107,13 +133,23 @@ static void check_mag_spi(uint8_t hint, int expected)
 			expected_hint = native_ids[i].reg | 0x80;
 	}
 
-	memset(spi_probed, 0, sizeof(spi_probed));
+	memset(spi_reads, 0, sizeof(spi_reads));
+	spi_reads_after_write = 0;
+	spi_writes = 0;
 	uint8_t reg = hint;
 	assert(sensor_scan_mag_spi(&spi_bus, &reg) == expected);
 	assert(reg == expected_hint || (expected == MAG_AK09940 && reg == 0x81));
+	assert(spi_writes == writes);
+	assert((spi_reads_after_write != 0) == (writes != 0 && spi_write_error == 0));
 	/* No order assumption; I2C-only and no-driver configs allow no transfers. */
-	for (size_t i = 0; i < ARRAY_SIZE(spi_probed); i++)
-		assert(!spi_probed[i] || allowed[i]);
+	for (size_t i = 0; i < ARRAY_SIZE(spi_reads); i++)
+		assert(!spi_reads[i] || allowed[i]);
+}
+
+static void check_mag_spi(uint8_t hint, int expected)
+{
+	check_mag_spi_with_writes(hint, expected,
+		expected == -1 && IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL));
 }
 
 static void check_native_ids(void)
@@ -131,8 +167,9 @@ static void check_native_ids(void)
 
 		if (!native_ids[i].enabled)
 			continue;
-		spi_failed[reg] = true;
-		check_mag_spi(reg | 0x80, -1);
+		spi_read_errors[reg] = -EIO;
+		check_mag_spi(reg | 0x80, -EIO);
+		assert(spi_reads[reg] == 1);
 		if (mag == MAG_AK09940)
 			continue;
 
@@ -158,16 +195,30 @@ static void check_ak_signature(void)
 	check_mag_spi(0x01, -1); /* The command-phase byte is not WIA2. */
 	spi_dummy = 0;
 
-	spi_regs[0x01] = 0xa3;
-	spi_failed[0x01] = true;
-	check_mag_spi(0x81, -1);
-	spi_failed[0x01] = false;
 	spi_regs[0x00] = 0x00;
 	spi_dummy = 0x48;
 	check_mag_spi(0xff, -1);
 	spi_dummy = 0;
 	spi_regs[0x01] = 0x48;
 	check_mag_spi(0xff, -1); /* An AK-like pair starts one byte too late. */
+}
+
+static void check_ak_signature_errors(void)
+{
+	if (!IS_ENABLED(CONFIG_SENSOR_DRV_AK09940))
+		return;
+
+	reset_spi();
+	spi_regs[0x00] = 0x48;
+	spi_regs[0x01] = 0xa3;
+	spi_read_errors[0x01] = -ETIMEDOUT;
+	check_mag_spi(0x81, -EIO);
+	assert(spi_reads[0x01] == 1 && spi_reads[0x00] == 0);
+
+	spi_read_errors[0x01] = 0;
+	spi_read_errors[0x00] = -EPERM; /* Raw -1 is still an I/O failure, not a scan miss. */
+	check_mag_spi(0x01, -EIO);
+	assert(spi_reads[0x01] == 1 && spi_reads[0x00] == 1);
 }
 
 static void check_priority(void)
@@ -184,8 +235,40 @@ static void check_priority(void)
 	check_mag_spi(0x81, expected);
 	check_mag_spi(0xaf, expected);
 
-	spi_failed[0x2f] = true;
+	if (IS_ENABLED(CONFIG_SENSOR_DRV_MMC5983MA)) {
+		spi_read_errors[0x2f] = -EIO;
+		check_mag_spi(0xaf, -EIO);
+		assert(spi_reads[0x2f] == 1 && spi_reads[0x01] == 0 && spi_reads[0x00] == 0);
+	}
+
+	/* A successful MMC read with a non-matching ID must still allow AK. */
+	spi_read_errors[0x2f] = 0;
+	spi_regs[0x2f] = 0x31;
 	check_mag_spi(0xaf, ak_or_none);
+	if (ak_or_none >= 0)
+		assert(spi_reads[0x01] == 1 && spi_reads[0x00] == 1);
+}
+
+static void check_lis2mdl_mode_switch(void)
+{
+	if (!IS_ENABLED(CONFIG_SENSOR_DRV_LIS2MDL))
+		return;
+
+	reset_spi();
+	spi_lis2mdl_3wire = true;
+	spi_regs[0x4f] = 0x40;
+	check_mag_spi_with_writes(0xaf, MAG_LIS2MDL, 1);
+	assert(spi_reads[0x4f] == 2);
+
+	spi_lis2mdl_3wire = true;
+	spi_write_error = -ETIMEDOUT;
+	check_mag_spi_with_writes(0xcf, -EIO, 1);
+
+	spi_write_error = 0;
+	spi_error_after_write = true;
+	spi_read_errors[0x4f] = -EAGAIN;
+	check_mag_spi_with_writes(0xaf, -EIO, 1);
+	assert(spi_reads[0x4f] == 2);
 }
 
 static void check_i2c_only_ids(void)
@@ -239,7 +322,9 @@ int main(void)
 {
 	check_native_ids();
 	check_ak_signature();
+	check_ak_signature_errors();
 	check_priority();
+	check_lis2mdl_mode_switch();
 	check_i2c_only_ids();
 
 	if (IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309)) {
