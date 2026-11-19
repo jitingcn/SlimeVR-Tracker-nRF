@@ -76,10 +76,10 @@
 	leds {
 		compatible = "gpio-leds";
 		led0: led_0 {
-			gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
+			gpios = <&gpio0 13 GPIO_OPEN_SOURCE>;
 		};
 		led1: led_1 {
-			gpios = <&gpio0 13 GPIO_OPEN_SOURCE>;
+			gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
 		};
 	};
 
