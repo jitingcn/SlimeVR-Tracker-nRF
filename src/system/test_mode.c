@@ -73,6 +73,9 @@ uint16_t test_mode_effective_tps(void)
 		}
 	}
 #endif
+#if defined(CONFIG_CONNECTION_TDMA)
+	if (tdma_profile_get()) max_tps = MIN(max_tps, 120U);
+#endif
 	return CLAMP(tps, 1U, max_tps);
 }
 

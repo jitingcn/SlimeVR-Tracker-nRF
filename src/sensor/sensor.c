@@ -29,6 +29,7 @@
 #include "system/watchdog.h"
 #include "util.h"
 #include "connection/connection.h"
+#include "connection/tdma.h"
 #include "connection/tracker_events.h"
 #include "calibration/calibration.h"
 #include "calibration/imu_calibration.h"
@@ -3463,7 +3464,8 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 	int64_t min_interval = test_mode_min_send_interval_ms();
 	bool force_send_by_time = (now - last_sensor_send_time) >= min_interval;
 
-	if (send_quat_data || send_lin_accel_data || force_send_by_time) {
+	bool relay_publication = tdma_profile_get() != 0;
+	if (relay_publication || send_quat_data || send_lin_accel_data || force_send_by_time) {
 		float dq_dot = fabsf(q[0] * last_q[0] + q[1] * last_q[1] + q[2] * last_q[2] + q[3] * last_q[3]);
 		if (dq_dot > 1.0f) {
 			dq_dot = 1.0f;
@@ -3477,7 +3479,7 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 		sensor_compute_device_and_reported_quat(q, device_quat, reported_quat);
 		sensor_rotate_sensor_vector_to_device_frame(lin_a, lin_a);
 
-		if (!send_quat_data && !send_lin_accel_data) {
+		if (!relay_publication && !send_quat_data && !send_lin_accel_data) {
 			memset(lin_a, 0, sizeof(lin_a)); // zero out linear acceleration when no motion detected
 		}
 

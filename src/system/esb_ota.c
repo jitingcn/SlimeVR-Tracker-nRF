@@ -51,6 +51,7 @@
 #include "globals.h"
 #include "build_defines.h"
 #include "connection/esb.h"
+#include "connection/tdma.h"
 #include "connection/connection.h"
 #include "system/power.h"
 #include "system/watchdog.h"
@@ -201,7 +202,9 @@ BUILD_ASSERT(sizeof(((struct ota_context *)0)->page_buf) >= OTA_FLASH_PAGE_SIZE,
 
 /* ── Forward declarations ────────────────────────────────────────── */
 static void ota_send_status(void);
-static void ota_send_fw_info(void);
+static int ota_send_fw_info(void);
+static bool fw_info_pending;
+static int64_t fw_info_retry_time;
 static struct esb_ota_page_buf ota_page_buf_view(void);
 
 #if OTA_USE_RAM_ENGINE
@@ -233,7 +236,8 @@ static uint8_t esb_ota_get_status(void)
 void esb_ota_handle_query_info(void)
 {
 	LOG_INF("OTA: Firmware info requested");
-	ota_send_fw_info();
+	fw_info_pending = true;
+	fw_info_retry_time = 0;
 }
 
 static int ota_begin_impl(const uint8_t *data, size_t len, uint32_t request)
@@ -824,8 +828,22 @@ static void ota_abort(void)
 	sys_ota_reboot_resolve(true);
 }
 
+static void ota_service_fw_info(void)
+{
+	/* The receiver stages profile 0 for QUERY_INFO. Its 66-byte reliable
+	 * reply cannot fit a private direct slot, including the final slot. */
+	int64_t now = k_uptime_get();
+	if (fw_info_pending && !tdma_profile_get() && now >= fw_info_retry_time) {
+		int err = ota_send_fw_info();
+		fw_info_pending = err != 0;
+		fw_info_retry_time = now + 100;
+		if (err) LOG_WRN("OTA: Firmware info deferred: %d", err);
+	}
+}
+
 void esb_ota_service(void)
 {
+	ota_service_fw_info();
 	if (atomic_cas(&ota_abort_requested, 1, 0)) {
 		ota_abort();
 		return;
@@ -950,7 +968,7 @@ static void ota_send_status(void)
 	ota.last_status_time = k_uptime_get();
 }
 
-static void ota_send_fw_info(void)
+static int ota_send_fw_info(void)
 {
 	uint8_t pkt[OTA_FW_INFO_PACKET_SIZE];
 	memset(pkt, 0, sizeof(pkt));
@@ -998,7 +1016,7 @@ static void ota_send_fw_info(void)
 
 	pkt[65] = esb_ota_crc8(pkt, 65);
 
-	esb_write(pkt, false, OTA_FW_INFO_PACKET_SIZE);
+	return esb_write(pkt, false, OTA_FW_INFO_PACKET_SIZE);
 }
 
 
@@ -1072,6 +1090,10 @@ static void ota_launch_ram_engine(void)
 
 	/* Stop ESB driver. */
 	LOG_WRN("OTA: Stopping ESB driver");
+	if (esb_raw_rx_quiesce()) {
+		LOG_ERR("OTA: raw RX still owns radio");
+		return;
+	} /* never resumed: the RAM engine owns the radio now */
 	esb_disable();
 	k_msleep(50);
 

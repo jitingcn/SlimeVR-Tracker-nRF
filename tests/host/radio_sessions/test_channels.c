@@ -249,10 +249,18 @@ static bool tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8
     return true;
 }
 static void connection_request_ping_resync(void) {}
+/* The base fixture had no enabled gate: an adopted schedule stays enabled. */
+#define TDMA_MAX_TRACKERS 16
+static bool tdma_is_enabled(void) { return true; }
+static uint32_t sys_get_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
 void set_status(enum sys_status status, bool value) {
     if (value) status_state |= status; else status_state &= ~status;
 }
 int get_status(enum sys_status status) { return status_state & status; }
+#include "relay_off.h"
 #include "channels.inc"
 /* Model the production stop guard; the native clock tests exercise the real
  * onoff manager and ISR path. */
@@ -567,7 +575,8 @@ static void pong_age(void) {
 }
 static void visit(uint8_t target) {
     assert(esb_channel_search_poll(false));
-    for (unsigned i = 0; radio_channel != target && i < channel_candidate_count(search_home); ++i) {
+    /* Home revisits (LINK_SEARCH_HOME_EVERY) stretch one candidate wrap. */
+    for (unsigned i = 0; radio_channel != target && i < 2U * channel_candidate_count(search_home); ++i) {
         now = search_deadline; assert(esb_channel_search_poll(false));
     }
     assert(radio_channel == target && writes == 0);
@@ -947,6 +956,41 @@ static void legacy_compatibility(void) {
     assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
 }
 
+/* A running profile-0 member told of a staged 0->1 switch keeps sending on its
+ * current layout until activation. Before this, every own PONG in the 3.5 s
+ * announcement marked the layout stale and the fleet's uplink stopped. */
+static void staged_profile_keeps_layout(void) {
+    struct {
+        uint8_t tuple_epoch, pending_epoch; bool stale_before, wait_normal, keep;
+    } cases[] = {
+        {41, 42, false, false, true},  /* staged 0->1: keep the current layout */
+        {42, 42, false, false, false}, /* running-profile join announcement */
+        {40, 42, false, false, false}, /* tuple names a layout we do not run */
+        {41, 42, true, false, false},  /* already stale stays stale */
+        {41, 42, false, true, false},  /* acquisition is unchanged */
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        reset(84); ping_failures = 0; server_time_synced = true;
+        epoch = 41; layout_stale = cases[i].stale_before;
+        channel_wait_normal = cases[i].wait_normal;
+        layout_confirm_seen = false;
+        normal_packet(2, 11); rx_payload.data[11] = cases[i].tuple_epoch; packet_crc();
+        own_trailer = (struct relay_pong_trailer){.epoch = cases[i].tuple_epoch,
+            .member_mask = 0x7ff, .pending = true,
+            .pending_epoch = cases[i].pending_epoch,
+            .pending_total = relay_geometry_code(11, 5), .pending_slot_ticks = 16,
+            .pending_member_mask = 0x7ff, .activation_units = 100};
+        own_trailer_valid = true;
+        unsigned updates = schedule_updates;
+        receive_schedule(ESB_PONG_FLAG_NORMAL);
+        assert(layout_stale == !cases[i].keep);
+        assert(layout_confirm_seen == cases[i].keep);
+        assert(schedule_updates == updates && epoch == 41);
+    }
+    own_trailer_valid = false; layout_stale = false;
+    puts("channels: staged 0->1 switch keeps the profile-0 layout until activation PASS");
+}
+
 static void ota_status_abort(void) {
     for (unsigned pending = 0; pending < 2; ++pending) {
         for (unsigned invalid = 0; invalid < 5; ++invalid) {
@@ -1080,21 +1124,27 @@ static void scan_sequences(void) {
         for (unsigned ch = 0; ch <= 100; ++ch)
             assert(seen[ch] == (!(ch & 1) || ch == home));
 
-        /* Observe actual owner PING submissions through two complete wraps. */
+        /* Observe actual owner PING submissions over two candidate wraps.
+         * Every LINK_SEARCH_HOME_EVERY-th probe revisits home (a body over
+         * the receiver looks exactly like a channel move); the others walk
+         * the candidate list in order. */
         reset(home);
         for (unsigned i = 0; i <= count * 2; ++i) {
             if (i) now = search_deadline;
             unsigned before = probes;
+            unsigned index = link_search_step_is_home(i) ? 0
+                : link_search_step_candidate(i, count);
             assert(esb_channel_search_poll(false));
-            assert(probes == before + 1 && last_probe_channel == expected[i % count]);
-            assert(search_index == i % count);
+            assert(probes == before + 1 && last_probe_channel == expected[index]);
+            assert(search_index == index);
         }
         assert(changes == count * 2 && !writes && !address_writes);
         /* OTA freezes the active sweep, including an explicit odd home. */
         ota_active = true; now = search_deadline;
         unsigned old_probes = probes, old_changes = changes;
+        uint8_t frozen = radio_channel;
         assert(!esb_channel_search_poll(false));
-        assert(probes == old_probes && changes == old_changes && radio_channel == home);
+        assert(probes == old_probes && changes == old_changes && radio_channel == frozen);
 
         /* Actual discovery sends three bursts per candidate; model no peer
          * and interrupt via the existing lifecycle generation after two wraps. */
@@ -1135,6 +1185,7 @@ int main(void) {
     advertised_channels();
     proof_during_channel_hold();
     legacy_compatibility();
+    staged_profile_keeps_layout();
     ota_status_abort();
     restart_same_epoch();
     owner_command_arguments();

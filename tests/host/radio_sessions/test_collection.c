@@ -74,6 +74,7 @@ static atomic_val_t publication_atomic_set(atomic_t *target, atomic_val_t value)
     return previous;
 }
 #define atomic_set(target, value) publication_atomic_set(target, value)
+#include "relay_off.h"
 #include "collection.inc"
 #include "sensor/raw_collection.c"
 

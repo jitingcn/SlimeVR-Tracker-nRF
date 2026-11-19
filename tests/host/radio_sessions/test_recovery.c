@@ -13,7 +13,7 @@
 static int status_state;
 static uint8_t tracker_id = 3;
 static uint8_t ping_counter = 10, radio_channel = 84, channel_redirect;
-static struct esb_payload { uint8_t data[13]; } rx_payload;
+static struct esb_payload { uint8_t data[13], length; } rx_payload = {.length = 13};
 static bool ping_pending, ping_failed, shutdown_requested;
 static uint32_t ping_failures, ping_success_streak;
 static int esb_conn_state;
@@ -35,6 +35,7 @@ void set_status(enum sys_status status, bool set)
     else status_state &= ~status;
 }
 
+#include "relay_off.h"
 #include "recovery.inc"
 
 static void disconnect(int other_status)
