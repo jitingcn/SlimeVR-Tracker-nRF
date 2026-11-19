@@ -218,6 +218,7 @@ jobs:
                   {boardname: "dawn_tracker_mini_uf2/nrf52833", filename: "Dawn_Tracker_Mini"},
                   {boardname: "aero_tracker_uf2/nrf52840", filename: "Aero_Tracker"},
                   {boardname: "aero_pro_uf2/nrf52840", filename: "Aero_Tracker_Pro"},
+                  {boardname: "aero_ultra_uf2/nrf52840", filename: "Aero_Tracker_Ultra"},
                   {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"},
                   {boardname: "miro_uf2/nrf52833", filename: "Miro_Tracker"},
                   {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"},
