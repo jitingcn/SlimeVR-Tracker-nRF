@@ -44,14 +44,14 @@ with tempfile.TemporaryDirectory(prefix="tracker-retained-") as directory:
     common = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
               "-Wno-sign-compare", "-Wno-builtin-macro-redefined", "-g", "-O1", "-fsanitize=address,undefined",
               "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
-              '-D__DATE__="Oct 29 2026"', "-DCONFIG_SENSOR_VQF_OUTPUT_OBSERVER=0",
+              '-D__DATE__="Oct 29 2026"',
               "-DCONFIG_SENSOR_USE_MAGNETOMETER=0", "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=0",
-              "-DCONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION=0",
               "-DCONFIG_SENSOR_POLY_TEMP_MIN=0", "-DCONFIG_SENSOR_POLY_TEMP_MAX=2",
               "-DCONFIG_SENSOR_POLY_STEPS_PER_DEGREE=1", "-DCONFIG_SENSOR_POLY_DEGREE=2",
               "-I", str(temp), "-I", str(SRC)]
-    for tcal, bootcal in [(0, False), (1, False), (1, True)]:
-        config = [f"-DCONFIG_SENSOR_USE_TCAL={tcal}"]
+    for vqf, tcal, bootcal in [(v, t, b) for v in (0, 1)
+                               for t, b in [(0, False), (1, False), (1, True)]]:
+        config = [f"-DCONFIG_SENSOR_USE_VQF={vqf}", f"-DCONFIG_SENSOR_USE_TCAL={tcal}"]
         if bootcal:
             config.append("-DCONFIG_SENSOR_USE_BOOT_CALIBRATION=1")
         objects = []

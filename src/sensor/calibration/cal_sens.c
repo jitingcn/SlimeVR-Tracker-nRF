@@ -44,7 +44,6 @@ static uint32_t sensitivity_generation;
 static uint16_t sensitivity_operation;
 static struct led_token sensitivity_feedback;
 
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
 /* Initialized before IMU-ready, then updated only by the sensor owner. The
  * generation and all three axes always describe the same applied epoch. */
 static struct sensitivity_snapshot {
@@ -52,7 +51,6 @@ static struct sensitivity_snapshot {
 	uint32_t generation;
 } sensitivity_cache = {{1.0f, 1.0f, 1.0f}, 0};
 static bool sensitivity_cache_seeded;
-#endif
 
 static void sensitivity_replace_locked(uint8_t reason)
 {
@@ -63,7 +61,6 @@ static void sensitivity_replace_locked(uint8_t reason)
 	sensitivity_generation++;
 }
 
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
 bool sensor_calibration_sensitivity_init(void)
 {
 	/* Startup validation must share the writers' storage -> sensitivity
@@ -97,18 +94,16 @@ bool sensor_calibration_sensitivity_init(void)
 	return healed;
 }
 
-bool sensor_calibration_apply_sensitivity(float g[3], float delta[3])
+void sensor_calibration_apply_sensitivity(float g[3], float delta[3])
 {
 	/* A writer may hold this mutex throughout NVS. Keep the last complete
 	 * sensor-owned snapshot on contention, including its observed epoch. */
-	bool changed = false;
 	if (k_mutex_lock(&sensitivity_lock, K_NO_WAIT) == 0) {
 		if (sensitivity_cache.generation != sensitivity_generation) {
 			for (int i = 0; i < 3; i++) {
 				sensitivity_cache.scale[i] = retained->gyroSensScale[i];
 			}
 			sensitivity_cache.generation = sensitivity_generation;
-			changed = true;
 		}
 		k_mutex_unlock(&sensitivity_lock);
 	}
@@ -116,7 +111,6 @@ bool sensor_calibration_apply_sensitivity(float g[3], float delta[3])
 		g[i] *= sensitivity_cache.scale[i];
 		delta[i] *= sensitivity_cache.scale[i];
 	}
-	return changed;
 }
 
 void sensor_calibration_sensitivity_clear_begin(void)
@@ -130,7 +124,6 @@ void sensor_calibration_sensitivity_clear_end(void)
 	sensitivity_generation++;
 	k_mutex_unlock(&sensitivity_lock);
 }
-#endif
 
 static void sensitivity_step(uint16_t operation_id, struct led_token feedback, uint8_t phase, uint8_t detail)
 {
@@ -520,9 +513,7 @@ void sensor_calibrate_sens(void)
 		return;
 	}
 	retained->gyroSensScale[axis] = scale;
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
 	sensitivity_generation++;
-#endif
 	cal_event_end(operation_id, CAL_OUTCOME_SUCCESS, CAL_PHASE_APPLIED, CAL_REASON_NONE);
 	sensitivity_operation = 0;
 	sensitivity_feedback = (struct led_token){0};

@@ -8,6 +8,10 @@
 #include "retained.h"
 #include "test_timestamp.inc"
 
+_Static_assert(sizeof(((struct retained_data *)0)->fusion_data) ==
+                   (CONFIG_SENSOR_USE_VQF ? 904 : 840),
+               "Fusion retained capacity must preserve backend layout");
+
 extern uint64_t test_ticks;
 static uint64_t k_uptime_ticks(void) { return test_ticks; }
 static void k_mutex_lock(int *lock, int timeout) { (void)lock; (void)timeout; }

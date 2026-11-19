@@ -78,13 +78,12 @@ static void tracker_events_notify(void) {}
 static int sensor_operation_result(int owner, int result, bool applied)
 { (void)owner; (void)applied; return result; }
 
-static unsigned total_gyro_samples, history_discards, fusion_feeds, rebases;
+static unsigned total_gyro_samples, fusion_feeds, rebases;
 static const float gyro_actual_time = 0.0025f;
 static const float raw_sample[3] = {12.0f, -8.0f, 4.0f};
 static const float raw_delta[3] = {0.5f, -0.25f, 0.125f};
 static float received_g[3], received_delta[3];
 static struct { bool frame_invalid; } sensor_motion_state;
-static void vqf_discard_motion_history(void) { history_discards++; }
 static void sensor_diagnostics_on_raw_gyro(float *g) { (void)g; }
 static void sensor_diagnostics_on_cal_gyro(float *g) { (void)g; }
 static bool sensor_calibration_process_gyro(float *g, float dt, float *delta)
@@ -135,7 +134,7 @@ static void *write_scales(void *argument)
                                  sensor_calibration_set_sensitivity(degrees);
     return NULL;
 }
-static void feed_and_check(const float scale[3], unsigned expected_discards)
+static void feed_and_check(const float scale[3])
 {
     int count = 0;
     float raw[3];
@@ -143,7 +142,7 @@ static void feed_and_check(const float scale[3], unsigned expected_discards)
     unsigned before_feeds = fusion_feeds, before_rebases = rebases;
     feed_gyro_sample(raw, &count, true);
     assert(count == 1 && fusion_feeds == before_feeds + 1 && rebases == before_rebases + 1);
-    assert(history_discards == expected_discards && !sensor_motion_state.frame_invalid);
+    assert(!sensor_motion_state.frame_invalid);
     for (int axis = 0; axis < 3; axis++) {
         assert(fabsf(received_g[axis] - raw_sample[axis] * scale[axis]) < 1e-6f);
         assert(fabsf(received_delta[axis] - raw_delta[axis] * scale[axis]) < 1e-6f);
@@ -156,7 +155,6 @@ static void exercise_contention(const float old_scale[3], const float new_scale[
     pthread_t writer;
     uint32_t old_generation = sensitivity_generation;
     uint32_t old_cache_generation = TEST_CACHE_GENERATION;
-    unsigned old_discards = history_discards;
 
     assert(pthread_mutex_lock(&nvs_gate) == 0);
     nvs_entered = nvs_release = false;
@@ -172,7 +170,7 @@ static void exercise_contention(const float old_scale[3], const float new_scale[
     for (int axis = 0; axis < 3; axis++)
         assert(fabsf(retained->gyroSensScale[axis] - new_scale[axis]) < 1e-6f);
     for (int i = 0; i < 2; i++) {
-        feed_and_check(old_scale, old_discards);
+        feed_and_check(old_scale);
         assert(sensitivity_generation == old_generation);
         assert(TEST_CACHE_GENERATION == old_cache_generation);
     }
@@ -186,11 +184,10 @@ static void exercise_contention(const float old_scale[3], const float new_scale[
     assert(args.result == write_error);
     assert(sensitivity_generation == old_generation + 1);
     assert(TEST_CACHE_GENERATION == old_cache_generation);
-    assert(history_discards == old_discards);
     if (!adopt) return;
-    feed_and_check(new_scale, old_discards + 1);
+    feed_and_check(new_scale);
     assert(TEST_CACHE_GENERATION == sensitivity_generation);
-    feed_and_check(new_scale, old_discards + 1);
+    feed_and_check(new_scale);
 }
 int main(void)
 {
@@ -222,7 +219,6 @@ int main(void)
     assert(imu_loads == 2 && TEST_CACHE_GENERATION == pending_cache_generation);
     exercise_contention(unity, unity, true, 0, true);
     exercise_contention(unity, replacement, false, 0, true);
-    unsigned old_discards = history_discards;
 
     /* Later validation heals only the bad axis and publishes a new epoch
      * without touching the sensor-owned cache from the load caller. */
@@ -236,8 +232,8 @@ int main(void)
     assert(TEST_CACHE_GENERATION == before_heal_cache);
     float healed[3] = {replacement[0], 1.0f, replacement[2]};
     assert(!memcmp(retained->gyroSensScale, healed, sizeof(healed)));
-    feed_and_check(healed, old_discards + 1);
-    feed_and_check(healed, old_discards + 1);
+    feed_and_check(healed);
+    feed_and_check(healed);
     puts("sensitivity contention: persisted first feed, coherent g/delta, deferred epochs, equal replacement and failed reset");
     return 0;
 }

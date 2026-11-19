@@ -981,7 +981,7 @@ int sys_clear(void)
 	warm_tcal_receipt_count = 0;
 #endif
 	warm_dirty_count = 0;
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	sensor_calibration_sensitivity_clear_begin();
 #endif
 	retained_reset();
@@ -992,7 +992,7 @@ int sys_clear(void)
 	atomic_set(&wom_timeout_delay_ms, WOM_TIMEOUT_DEFAULT_MS);
 
 	retained_update();
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	sensor_calibration_sensitivity_clear_end();
 #endif
 	k_mutex_unlock(&sys_storage_lock);

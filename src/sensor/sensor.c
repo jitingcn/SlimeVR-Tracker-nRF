@@ -129,7 +129,9 @@ static float reported_output_bias_quat[4] = {SENSOR_QUATERNION_OUTPUT_BIAS};
 static float last_lin_a[3] = {0}; // vector to hold last linear accelerometer
 
 static float temp; // sensor temperature
+#if CONFIG_CONNECTION_RAW_COLLECTION
 static int64_t last_temp_time = -1000;
+#endif
 
 static bool main_ok = false;
 static int packet_errors = 0;
@@ -2533,7 +2535,9 @@ typedef struct {
 	float raw_m[3];
 	bool new_mag_data;
 #endif
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	float raw_collect_temp_c;
+#endif
 	int g_count;
 	float a_sum[3];
 	int a_count;
@@ -2696,11 +2700,6 @@ static void gyro_dq_to_feed_gyro(float g_feed_dps[3], float T_eff, const float f
 
 void sensor_gyro_report_discontinuity(void)
 {
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
-	/* Only an explicitly lost interval queues the owner-side reset. Decoder
-	 * skips also cover benign metadata/empty records and are not gap signals. */
-	vqf_request_motion_history_reset();
-#endif
 	/* Zero dt is an explicit unknown-interval record, never a replacement
 	 * rate or an extension of the next sample's represented interval. The
 	 * queue's existing session lock/overflow policy owns its publication. */
@@ -2712,9 +2711,6 @@ static void sensor_reject_gyro_sample(void)
 {
 	sensor_motion_state.frame_invalid = true;
 	sensor_discard_gyro_window();
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
-	vqf_discard_motion_history();
-#endif
 }
 
 static void feed_gyro_sample(
@@ -2747,18 +2743,7 @@ static void feed_gyro_sample(
 
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	/* Firmware-ish scale; applied before fusion, same as non-OS path. */
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
-	if (sensor_calibration_apply_sensitivity(g, reference_delta)) {
-		vqf_discard_motion_history();
-	}
-#else
-	g[0] *= retained->gyroSensScale[0];
-	g[1] *= retained->gyroSensScale[1];
-	g[2] *= retained->gyroSensScale[2];
-	reference_delta[0] *= retained->gyroSensScale[0];
-	reference_delta[1] *= retained->gyroSensScale[1];
-	reference_delta[2] *= retained->gyroSensScale[2];
-#endif
+	sensor_calibration_apply_sensitivity(g, reference_delta);
 #endif
 	if (!v_finite(g, 3) || !v_finite(reference_delta, 3)) {
 		sensor_reject_gyro_sample();
@@ -2929,7 +2914,9 @@ static void sensor_loop_read_temperature(
 	// Only update if the value looks like a valid temperature (-20 to 60).
 	if (v_finite(&temp, 1) && temp != 0.0f && temp > -20.0f && temp < 60.0f) {
 		int64_t now_ms = k_uptime_get();
+#if CONFIG_CONNECTION_RAW_COLLECTION
 		last_temp_time = now_ms;
+#endif
 
 		// Keep last raw value for debugging/telemetry if needed
 		sensor_tcal_temp_raw = temp;
@@ -2981,13 +2968,16 @@ static void sensor_loop_read_temperature(
 #else
 	// Read IMU temperature after FIFO read so FIFO-backed drivers can reuse it.
 	temp = sensor_imu->temp_read(); // TODO: use as calibration data
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	last_temp_time = k_uptime_get();
+#endif
 	connection_update_sensor_temp(temp);
 #endif
 #if CONFIG_SENSOR_TCAL_HEATED
 	sensor_tcal_heated_update(heated_resting);
 #endif
 
+#if CONFIG_CONNECTION_RAW_COLLECTION
 	frame->raw_collect_temp_c = NAN;
 	int64_t temp_age_ms = k_uptime_get() - last_temp_time;
 #if CONFIG_SENSOR_USE_TCAL
@@ -2998,6 +2988,9 @@ static void sensor_loop_read_temperature(
 	if (last_temp_time >= 0 && temp_age_ms <= 1000) {
 		frame->raw_collect_temp_c = temp;
 	}
+#endif
+#else
+	ARG_UNUSED(frame);
 #endif
 }
 
@@ -3140,12 +3133,6 @@ static void sensor_loop_acquire(sensor_loop_frame_t *frame)
 
 static void sensor_loop_process_fifo(sensor_loop_frame_t *frame)
 {
-#if CONFIG_SENSOR_VQF_ADAPTIVE_BIAS
-	/* Match the recorded, signed temperature; NaN preserves the last valid
-	 * observation without inventing a temperature before the first reading. */
-	vqf_update_temperature(frame->raw_collect_temp_c);
-#endif
-
 	// Fuse all data
 	frame->g_count = 0;
 	frame->a_sum[0] = 0;
@@ -3667,9 +3654,6 @@ static void sensor_loop_wait(int64_t time_begin)
 #endif
 
 	if (atomic_get(&main_suspended)) {
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
-		vqf_discard_motion_history();
-#endif
 		if (sensor_fusion->take_rest_observation) {
 			sensor_fusion->take_rest_observation(NULL);
 		}
@@ -3858,9 +3842,6 @@ int main_imu_suspend(void)
 	}
 #endif
 	atomic_set(&main_suspended, true);
-#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
-	vqf_request_motion_history_reset();
-#endif
 	atomic_clear(&output_ready);
 	sensor_calibration_set_consumer_ready(false);
 	sys_cancel_WOM();

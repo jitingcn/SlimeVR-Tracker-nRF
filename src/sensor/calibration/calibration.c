@@ -403,7 +403,7 @@ void sensor_calibration_read(void)
 	}
 #endif
 	bool sensitivity_healed = false;
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	/* This seeds the sensor-owned snapshot before imu_load publishes ready. */
 	sensitivity_healed = sensor_calibration_sensitivity_init();
 #else
@@ -416,7 +416,7 @@ void sensor_calibration_read(void)
 #endif
 	if (healed || sensitivity_healed) {
 		LOG_WRN("Calibration: cleared invalid values persisted by an older build");
-#if CONFIG_SENSOR_USE_SENS_CALIBRATION && CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
 		/* Sensitivity healing was already sealed under its writer locks. */
 		if (healed) {
 			retained_update();

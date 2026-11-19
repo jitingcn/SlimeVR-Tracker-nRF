@@ -188,9 +188,8 @@ static void run_worker(int mode,bool finish_in_write) {
         assert(fabsf(retained->gyroSensScale[0]-1.0f)<1e-6f);
     }
     /* Manual set/reset replaces once even if the stale worker subsequently
-     * reaches validation; only an actual automatic commit advances SIDE. */
-    assert(sensitivity_generation==previous_generation+
-        (mode ? 1U : (unsigned)CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION));
+     * reaches validation; an automatic commit also advances the generation. */
+    assert(sensitivity_generation==previous_generation+1);
     assert(requested_calibration==(finish_in_write ? 0 : CAL_REQUEST_GYRO_SENS));
     /* The guarded final write runs inside a warm transaction. */
     assert(warm_begin >= 1 && warm_end >= 1);
@@ -319,8 +318,7 @@ static float run_axis_stream(unsigned batch, bool accepted_fit, unsigned axis, u
         assert(writes==prior_writes && successes==prior_success && failures==prior_failure+1);
         assert(!memcmp(before,data.gyroSensScale,sizeof(before)));
     }
-    assert(sensitivity_generation==prior_generation+
-        (accepted_fit ? (unsigned)CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION : 0U));
+    assert(sensitivity_generation==prior_generation+(accepted_fit ? 1U : 0U));
     assert(sensor_calibration_request(CAL_REQUEST_CLEAR,CAL_REQUEST_USER)==0);
     replay_mode=false;
     return data.gyroSensScale[axis];
@@ -542,12 +540,12 @@ def main():
     stream_struct = requests.extract_block(sensitivity, r"^struct sensitivity_stream\s*\{") + ";\n"
     finite = requests.function("v_finite", (ROOT / "src/util.c").read_text())
     snapshot_start = sensitivity.index("static struct sensitivity_snapshot {")
-    snapshot = sensitivity[snapshot_start:sensitivity.index("\n#endif", snapshot_start)]
+    snapshot = sensitivity[snapshot_start:sensitivity.index("\nstatic void sensitivity_replace_locked", snapshot_start)]
     load_bodies = (
         requests.function("sensor_calibration_sensitivity_valid", calibration)
-        + "\n#if CONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION\n" + snapshot + "\n"
+        + "\n" + snapshot + "\n"
         + requests.function("sensor_calibration_sensitivity_init", sensitivity)
-        + "\n#endif\n" + requests.function("sensor_calibration_read", calibration)
+        + "\n" + requests.function("sensor_calibration_read", calibration)
     )
     sens_bodies = "\n".join(requests.function(name, sensitivity) for name in (
         "sensitivity_replace_locked", "sensitivity_step", "sensitivity_failed",
@@ -561,17 +559,15 @@ def main():
         kernel = path / "zephyr/kernel.h"
         kernel.parent.mkdir()
         kernel.write_text("typedef int k_timeout_t;\n")
-        for side in (0, 1):
-            for flags in ([], ["-ffast-math"]):
-                subprocess.run(shlex.split(os.environ.get("CC") or "cc") + [
-                    "-std=gnu11", "-Wall", "-Wextra", "-Werror", *flags,
-                    "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
-                    "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=1", "-DCONFIG_SENSOR_TCAL_HEATED=1",
-                    f"-DCONFIG_SENSOR_VQF_CYCLE_BIAS_OBSERVATION={side}",
-                    "-DCONFIG_SENSOR_USE_TCAL=0", "-I", str(path),
-                    "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test"),
-                ], check=True)
-                subprocess.run([str(path / "test")], check=True)
+        for flags in ([], ["-ffast-math"]):
+            subprocess.run(shlex.split(os.environ.get("CC") or "cc") + [
+                "-std=gnu11", "-Wall", "-Wextra", "-Werror", *flags,
+                "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
+                "-DCONFIG_SENSOR_USE_SENS_CALIBRATION=1", "-DCONFIG_SENSOR_TCAL_HEATED=1",
+                "-DCONFIG_SENSOR_USE_TCAL=0", "-I", str(path),
+                "-I", str(ROOT / "src"), str(path / "test.c"), "-lm", "-o", str(path / "test"),
+            ], check=True)
+            subprocess.run([str(path / "test")], check=True)
     print("sensitivity sample-time fits, admission/load and replacement/reset: PASS")
 
 

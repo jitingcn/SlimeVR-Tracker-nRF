@@ -316,14 +316,6 @@ void sensor_diagnostics_output(
 				(double)vqf_info.bias_sigma,
 				(double)vqf_info.delta
 			);
-#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-			printk(
-				"     Adapt: tauAcc:%.2fs accDev:%.3f gyrSpeed:%.3f\n",
-				(double)vqf_info.tau_acc,
-				(double)vqf_info.acc_deviation,
-				(double)vqf_info.angular_speed
-			);
-#endif
 			printk(
 				"     RestDiag: enter:%u exit:%u total:%.1fs last:%.1fs up:%.0fs rest%%:%.1f\n",
 				vqf_info.rest_enter_count,

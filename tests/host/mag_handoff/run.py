@@ -16,19 +16,6 @@ ROOT = Path(os.environ.get('SOURCE_ROOT', Path(__file__).resolve().parents[3]))
 def function(source, name):
     return extract_block(source, rf'^(?:static )?(?:ALWAYS_INLINE )?(?:void|bool|float|int) {re.escape(name)}\([^;{{]*\)\s*\{{')
 
-def conditional(source, pattern):
-    """Keep a complete source conditional, including its inactive branches."""
-    matches = list(re.finditer(pattern, source, re.MULTILINE))
-    if len(matches) != 1:
-        raise ValueError(f'Expected one source conditional: {pattern}')
-    start = matches[0].start()
-    depth = 0
-    for directive in re.finditer(r'^[ \t]*#[ \t]*(if|ifdef|ifndef|endif)\b[^\n]*',
-                                 source[start:], re.MULTILINE):
-        depth += -1 if directive[1] == 'endif' else 1
-        if depth == 0:
-            return source[start:start + directive.end()]
-    raise ValueError('Unclosed source conditional')
 
 preamble = '''
 #include <assert.h>
@@ -39,8 +26,6 @@ preamble = '''
 #include <stdio.h>
 '''
 vqf = (ROOT / 'src/sensor/fusion/vqf/vqf.c').read_text()
-output_layout = conditional(
-    vqf, r'^#if IS_ENABLED\(CONFIG_SENSOR_VQF_OUTPUT_OBSERVER\)\nstatic vqf_output_t output_observer;')
 retained_layout = vqf[vqf.index('/* Raw state layouts are not interchangeable'):
                      vqf.index('static float last_a')]
 vqf_test = preamble + '''
@@ -51,18 +36,14 @@ static vqf_coeffs_t coeffs;
 static bool rest_observation_pending;
 static float last_a[3];
 #define ARG_UNUSED(x) ((void)(x))
-#define IS_ENABLED(x) 0
-/* This selective native-MAG fixture intentionally disables app policies.
- * The full public output/904-byte lifecycle is covered by vqf_adaptive_tau. */
-#define CONFIG_SENSOR_VQF_OUTPUT_OBSERVER 0
 #define DEG_TO_RAD 0.01745329251994329577f
 #define CONST_EARTH_GRAVITY 9.80665f
 static void vqf_track_rest_diag(void) {}
 #define ALWAYS_INLINE inline
 #define BUILD_ASSERT(c,m) _Static_assert(c,m)
 #define printk(...) ((void)0)
-''' + output_layout + '\n' + retained_layout + '''
-struct retained_data { unsigned char fusion_data[2048]; };
+''' + retained_layout + '''
+struct retained_data { unsigned char fusion_data[904]; };
 static uint32_t rest_enter_count, rest_exit_count;
 static float rest_total_s, rest_last_enter_time, rest_last_duration_s, uptime_s;
 static bool prev_rest_detected;
@@ -70,7 +51,7 @@ static uint8_t rest_event_idx, rest_event_total;
 ''' + '\n'.join(function(vqf, name) for name in (
     'set_params', 'vqf_float_finite', 'vqf_vec3_finite', 'vqf_loaded_state_valid',
     'vqf_init', 'vqf_load', 'vqf_save', 'vqf_update_gyro', 'vqf_update_accel',
-    'vqf_hard_rest_detected', 'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag',
+    'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag',
     'vqf_rebase_gyro_bias')) + r'''
 static void check_gyro_rebase(int warmup) {
     vqf_init(.01f,.01f,.01f);
@@ -177,15 +158,25 @@ static void check_static_baseline_handoff(void) {
 static void check_current_period_restore(void) {
     unsigned char saved[VQF_MEM_SIZE];
     vqf_params_t p; vqf_state_t s; vqf_coeffs_t c;
-    init_params(&p); initVqf(&p,&s,&c,.0025f,.005f,.02f);
+    set_params(); p=params; initVqf(&p,&s,&c,.0025f,.005f,.02f);
     s.bias[0]=.125f;
     vqf_saved_header_t header={VQF_SAVED_MAGIC,VQF_SAVED_VERSION,VQF_MEM_SIZE};
     memcpy(saved,&header,sizeof(header));
     memcpy(saved+sizeof(header),&s,sizeof(s));
     memcpy(saved+sizeof(header)+sizeof(s),&c,sizeof(c));
+    assert(header.version==3 && header.size==840);
     /* This is the first wrapper call, as on a retained reboot. */
     vqf_load(saved,.0025f,.005f,.02f);
     assert(state.bias[0]==.125f && coeffs.gyrTs==.0025f);
+    for (int old_version=1;old_version<=2;old_version++) {
+        vqf_saved_header_t old_header=header;
+        old_header.version=old_version;
+        old_header.size=old_version==2 ? 904 : 840;
+        memcpy(saved,&old_header,sizeof(old_header));
+        vqf_load(saved,.0025f,.005f,.02f);
+        assert(state.bias[0]==0 && coeffs.gyrTs==.0025f);
+    }
+    memcpy(saved,&header,sizeof(header));
     const float changed[4][3]={{.004f,.005f,.02f},{.0025f,.01f,.02f},
                                {.0025f,.005f,.04f},{.0025f,.005f,0}};
     for(int i=0;i<4;i++) {
@@ -206,7 +197,10 @@ int main(void) {
     check_static_baseline_handoff();
     check_gyro_rebase(0);   /* no samples: preserve native NaN sentinels */
     check_gyro_rebase(1);   /* partial initialization: translate sums */
-    check_gyro_rebase(243); /* cross the motion-LP initialization boundary */
+    check_gyro_rebase(227); /* just before rest-LP initialization boundary */
+    check_gyro_rebase(229); /* just after rest-LP initialization boundary */
+    check_gyro_rebase(329); /* just before motion-LP initialization boundary */
+    check_gyro_rebase(331); /* just after motion-LP initialization boundary */
     check_gyro_rebase(350); /* mature native biquad histories */
     vqf_init(.01f,.01f,.01f);
     float large_delta[3]={50,-60,70};
@@ -236,15 +230,22 @@ int main(void) {
     assert(!vqf_take_rest_observation(&rest)); /* rejection/reinit early return */
     vqf_update_accel(still,.01f); vqf_init(.01f,.01f,.01f);
     assert(!vqf_take_rest_observation(&rest));
+    vqf_update_accel(still,.01f);
+    bool before_rebase=vqf_get_rest_detected();
+    vqf_rebase_gyro_bias((float[3]){.01f,-.02f,.03f});
+    assert(vqf_take_rest_observation(&rest) && rest==before_rebase);
     float g[3] = {.12f, -.21f, .4f}, a[3] = {0, 0, 9.81f};
     for (int i=0;i<100;i++) { updateGyr(&params,&state,&coeffs,g); updateAcc(&params,&state,&coeffs,a); }
     state.delta = .7f;
     float q[4], bias[3], cov[9];
+    vqf_update_gyro((float[3]){0,0,0},.01f);
+    bool pending_rest=vqf_get_rest_detected();
     getQuat6D(&state,q); memcpy(bias,state.bias,sizeof(bias)); memcpy(cov,state.biasP,sizeof(cov));
     state.magCandidateT=100; state.magUndisturbedT=100; state.magRejectT=10000;
     state.kMagInit=1;
     for (int i=0;i<4;i++) state.magNormDipLpState[i]=12345;
     vqf_rebase_mag(2,0);
+    assert(vqf_take_rest_observation(&rest) && rest==pending_rest);
     float after[4]; getQuat6D(&state,after);
     assert(!memcmp(q,after,sizeof(q)) && !memcmp(bias,state.bias,sizeof(bias)));
     assert(!memcmp(cov,state.biasP,sizeof(cov)) && state.delta==.7f);
