@@ -76,10 +76,10 @@
 	leds {
 		compatible = "gpio-leds";
 		led0: led_0 {
-			gpios = <&gpio0 13 GPIO_OPEN_SOURCE>;
+			gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
 		};
 		led1: led_1 {
-			gpios = <&gpio0 15 GPIO_OPEN_SOURCE>;
+			gpios = <&gpio0 13 GPIO_OPEN_SOURCE>;
 		};
 	};
 
@@ -118,7 +118,7 @@
 		led-capability = "dual-discrete";
 		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
 			<&pwm0 1 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
-		led-channel-colors = <1 2>;
+		led-channel-colors = <2 1>;
 		led-channel-weights = <10000 10000>;
 		int0-gpios = <&gpio0 2 0>;
 	};
