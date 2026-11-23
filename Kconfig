@@ -381,7 +381,7 @@ config SENSOR_RETAINED_SCAN_POWER_UP_DELAY_MS
 config SENSOR_ACCEL_ODR
     int "Accelerometer output data rate (Hz)"
     default 100
-    range 1 2147483647
+    range 1 200
     help
         Requested accelerometer output data rate. Actual rate will be raised to the nearest supported rate.
         A higher rate will increase the time to read and process sensor data.
@@ -389,7 +389,7 @@ config SENSOR_ACCEL_ODR
 config SENSOR_GYRO_ODR
     int "Gyrometer output data rate (Hz)"
     default 400
-    range 1 2147483647
+    range 1 3200
     help
         Requested gyrometer output data rate. Actual rate will be raised to the nearest supported rate.
         A higher rate will increase the time to read and process sensor data.
@@ -474,8 +474,8 @@ config SENSOR_USE_MAGNETOMETER
 
 config SENSOR_MAG_ODR
     int "Magnetometer ODR (Hz)"
-    default 50
-    range 1 2147483647
+    default 100
+    range 1 400
     help
         Requested magnetometer output data rate in Hz.
         Fixed at magnetometer init for the session (nearest supported continuous rate).
@@ -786,7 +786,7 @@ endif
 
 config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
     bool "Enable RC oscillator calibration for K32SRC"
-    default y if CLOCK_USE_LF_SYNTH && CONNECTION_TDMA
+    default n
 
 menu "TDMA diagnostics"
 
