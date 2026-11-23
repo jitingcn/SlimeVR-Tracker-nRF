@@ -105,6 +105,7 @@ enum led_admission led_engine_state(
 	const struct led_behavior *behavior = led_behavior_get(semantic);
 	if (!led_owner_valid(token.owner) || !token.session || !revision
 		|| (semantic != LED_NONE && (!behavior || behavior->priority != LED_PRIORITY_TASK))
+		|| semantic == LED_STARTUP
 		|| (semantic == LED_MANUAL_EXIT && token.owner != LED_OWNER_SYSTEM)) {
 		return LED_INVALID;
 	}
@@ -633,9 +634,23 @@ static struct led_selection background(const struct led_engine *e, uint32_t now_
 	);
 }
 
+static struct led_selection ordinary(struct led_engine *e, uint32_t now_ms)
+{
+	struct led_selection out = foreground(e, now_ms);
+	if (e->startup_active && (out.semantic == LED_NONE || out.semantic == LED_INITIALIZING)) {
+		out = selection(LED_STARTUP, LED_OWNER_SYSTEM, e->startup_origin_ms, 0x60000001U, true, false);
+		cap_deadline(&out, now_ms, e->startup_origin_ms + LED_STARTUP_VISUAL_MS);
+		return out;
+	}
+	return out.semantic != LED_NONE ? out : background(e, now_ms);
+}
+
 struct led_selection led_engine_select(struct led_engine *e, uint32_t now_ms)
 {
 	ready_truth(e);
+	if (e->startup_active && due(now_ms, e->startup_origin_ms + LED_STARTUP_VISUAL_MS)) {
+		e->startup_active = false;
+	}
 	struct led_selection out = selection(LED_NONE, LED_OWNER_SYSTEM, 0, 0, false, false);
 	if (e->quiesced) {
 		out.priority = LED_PRIORITY_SHUTDOWN;
@@ -765,21 +780,14 @@ struct led_selection led_engine_select(struct led_engine *e, uint32_t now_ms)
 					false
 				);
 				out.priority = LED_PRIORITY_IDENTIFY; /* Synthetic source follows real IDENTIFY. */
-				e->real_winner = foreground(e, now_ms);
-				if (e->real_winner.semantic == LED_NONE) {
-					e->real_winner = background(e, now_ms);
-				}
+				e->real_winner = ordinary(e, now_ms);
 				cap_deadline(&out, now_ms, e->preview.expires_ms);
 				goto chosen;
 			}
 		}
 	}
 #endif
-	out = foreground(e, now_ms);
-	if (out.semantic != LED_NONE) {
-		goto chosen;
-	}
-	out = background(e, now_ms);
+	out = ordinary(e, now_ms);
 chosen:
 	if (out.priority <= LED_PRIORITY_FAULT && e->low) {
 		e->low_active = false;
@@ -802,7 +810,8 @@ chosen:
 	 * restart only on visibility changes, never on repeated revisions. */
 	bool event = out.priority == LED_PRIORITY_EVENT;
 	bool wall = out.semantic == LED_IDENTIFY || out.semantic == LED_EXIT_PENDING || out.semantic == LED_MANUAL_EXIT
-			 || out.semantic == LED_BUTTON_HOLD || out.semantic == LED_LOW_BATTERY || out.network;
+			 || out.semantic == LED_BUTTON_HOLD || out.semantic == LED_LOW_BATTERY || out.semantic == LED_STARTUP
+			 || out.network;
 #ifdef CONFIG_LED_DEBUG
 	wall |= e->preview.status == LED_PREVIEW_ACTIVE && out.identity == 0x80000000U + e->preview.generation;
 #endif

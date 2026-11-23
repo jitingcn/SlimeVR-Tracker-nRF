@@ -35,6 +35,22 @@ static void init_locked(uint32_t now_ms)
 		initialized = true;
 	}
 }
+void led_startup(void)
+{
+	uint32_t now_ms = local_ms();
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	init_locked(now_ms);
+	bool changed = !engine.quiesced && !engine.startup_submitted;
+	if (changed) {
+		engine.startup_submitted = true;
+		engine.startup_active = true;
+		engine.startup_origin_ms = now_ms;
+	}
+	k_spin_unlock(&led_lock, key);
+	if (changed) {
+		k_sem_give(&led_changed);
+	}
+}
 static uint32_t next_id(uint32_t *counter)
 {
 	k_spinlock_key_t key = k_spin_lock(&led_lock);

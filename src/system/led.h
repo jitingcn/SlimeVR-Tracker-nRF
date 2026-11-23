@@ -55,8 +55,12 @@ enum led_semantic {
 	LED_EXIT_PENDING,
 	LED_BUTTON_HOLD,
 	LED_MANUAL_EXIT,
+	LED_STARTUP,
 	LED_SEMANTIC_COUNT
 };
+
+/* One local startup cue per application boot, including SYSTEMOFF wake. */
+void led_startup(void);
 
 /* Admission is local bookkeeping, never proof of display or business success. */
 enum led_admission { LED_ADMITTED, LED_DUPLICATE, LED_STALE, LED_INVALID, LED_SHUTDOWN, LED_CONFLICT };

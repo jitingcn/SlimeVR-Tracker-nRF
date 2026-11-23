@@ -31,6 +31,10 @@ static const struct segment exit_ramp[] = {{600, SEGMENT_DOWN}, {200, SEGMENT_OF
 static const struct segment exit_gpio[] = {{600, SEGMENT_ON}, {200, SEGMENT_OFF}};
 static const struct segment manual_exit_ramp[] = {{250, SEGMENT_OFF}, {1000, SEGMENT_LINEAR_DOWN}, {250, SEGMENT_OFF}};
 static const struct segment manual_exit_gpio[] = {{250, SEGMENT_OFF}, {1000, SEGMENT_ON}, {250, SEGMENT_OFF}};
+static const struct segment startup[] = {
+	{200, SEGMENT_ON}, {200, SEGMENT_OFF}, {200, SEGMENT_ON},
+	{200, SEGMENT_OFF}, {200, SEGMENT_ON}, {200, SEGMENT_OFF}
+};
 static const struct timeline timelines[] = {
 	[LED_STYLE_SHORT] = {short_ack, 800, 2, false},
 	[LED_STYLE_SUCCESS] = {success, 2000, 8, false},
@@ -45,6 +49,7 @@ static const struct timeline timelines[] = {
 	[LED_STYLE_EXIT] = {exit_ramp, 800, 2, false},
 	[LED_STYLE_MANUAL_EXIT] = {manual_exit_ramp, LED_MANUAL_EXIT_VISUAL_MS, 3, false},
 	[LED_STYLE_BUTTON_HOLD] = {.hold = true},
+	[LED_STYLE_STARTUP] = {startup, LED_STARTUP_VISUAL_MS, 6, false},
 };
 _Static_assert(sizeof(timelines) / sizeof(timelines[0]) == LED_STYLE_COUNT, "LED style missing timeline");
 

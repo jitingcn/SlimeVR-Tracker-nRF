@@ -513,6 +513,7 @@ static void stale_hold_and_command_budget(void)
 #define DT_NODE_HAS_PROP(...) 0
 #define IGNORE_RESET 0
 #define POWER_RESETREAS_RESETPIN_Msk 1U
+#define POWER_RESETREAS_OFF_Msk (1U << 16)
 static uint32_t sys_get_reset_reason(void) { return host_reset_reason; }
 static uint8_t reboot_counter_read(void) { return 100; }
 static bool dock_read(void) { return false; }
@@ -526,12 +527,136 @@ static void k_usleep(int microseconds) { (void)microseconds; }
 #include "startup_production.inc"
 #undef main
 
-static void startup_does_not_fake_button_input(void)
+static void startup_pulses_without_fake_input_or_ready(void)
+{
+	const uint32_t reasons[] = {0, POWER_RESETREAS_OFF_Msk};
+	const enum led_capability capabilities[] = {LED_CAP_MONO_GPIO, LED_CAP_RGB_PWM};
+	for (unsigned reason = 0; reason < sizeof(reasons) / sizeof(reasons[0]); ++reason) {
+		for (unsigned cap = 0; cap < sizeof(capabilities) / sizeof(capabilities[0]); ++cap) {
+			reset_case(capabilities[cap]);
+			host_reset_reason = reasons[reason];
+			assert(startup_main() == 0 && host_now_ms == 0 && reset_requests == 1);
+			for (uint32_t time = 0; time < 1200; ++time) {
+				host_now_ms = time;
+				if (time == 250) led_startup(); /* Duplicate cannot shift the origin. */
+				uint32_t wait = host_step(time);
+				assert(wait > 0 && wait <= 200 - time % 200);
+				assert(engine.winner.semantic == LED_STARTUP && engine.winner.origin_ms == 0);
+				assert(host_role == LED_ROLE_NEUTRAL && host_level == LED_LEVEL_NOTICE);
+				assert(host_value == (time % 400 < 200 ? 10000 : 0));
+				assert(!engine.ready && !engine.button_hold_active);
+				assert(!button_status && !press_generation && !click_notices);
+			}
+			host_step(1200);
+			assert(engine.winner.semantic == LED_NONE && host_value == 0 && !engine.ready);
+			led_startup(); /* Idempotence extends beyond expiration. */
+			host_step(1200);
+			assert(engine.winner.semantic == LED_NONE && host_value == 0);
+			host_step(2400);
+			assert(engine.winner.semantic == LED_NONE && host_value == 0);
+		}
+	}
+}
+
+static void startup_uses_original_local_epoch(void)
+{
+	const uint32_t origins[] = {517, UINT32_MAX - 350U};
+	const uint32_t samples[] = {0, 199, 200, 399, 400, 799, 800, 999, 1000, 1199};
+	for (unsigned i = 0; i < sizeof(origins) / sizeof(origins[0]); ++i) {
+		reset_case(LED_CAP_MONO_GPIO);
+		host_now_ms = origins[i];
+		assert(startup_main() == 0 && host_now_ms == origins[i]);
+		for (unsigned j = 0; j < sizeof(samples) / sizeof(samples[0]); ++j) {
+			uint32_t age = samples[j];
+			host_step(origins[i] + age);
+			assert(engine.winner.semantic == LED_STARTUP && engine.winner.origin_ms == origins[i]);
+			assert(host_value == (age % 400 < 200 ? 10000 : 0));
+		}
+		host_step(origins[i] + 1200U);
+		assert(engine.winner.semantic == LED_NONE && host_value == 0);
+	}
+}
+
+static void startup_restores_real_state(void)
+{
+	reset_case(LED_CAP_RGB_PWM);
+	host_begin(LED_OWNER_SENSOR, LED_INITIALIZING);
+	assert(startup_main() == 0);
+	host_step(300); assert(engine.winner.semantic == LED_STARTUP && host_value == 0);
+	host_step(400); assert(engine.winner.semantic == LED_STARTUP && host_value == 10000);
+	host_step(1199); assert(engine.winner.semantic == LED_STARTUP && host_value == 0);
+	host_step(1200); assert(engine.winner.semantic == LED_INITIALIZING && !engine.ready);
+
+	reset_case(LED_CAP_RGB_PWM);
+	assert(startup_main() == 0);
+	const struct led_connection_facts ready = {
+		.radio_required = true, .paired = true, .healthy = true, .output_ready = true
+	};
+	led_connection_publish(&ready);
+	host_step(1199); assert(engine.winner.semantic == LED_STARTUP && engine.ready);
+	host_step(1200); assert(engine.winner.semantic == LED_READY && engine.ready);
+}
+
+static void startup_preemption_does_not_extend_window(void)
+{
+	reset_case(LED_CAP_MONO_GPIO);
+	assert(startup_main() == 0);
+	host_step(0); assert(engine.winner.semantic == LED_STARTUP && host_value == 10000);
+	host_now_ms = 100;
+	struct led_token task = host_begin(LED_OWNER_ACC, LED_WAIT_STILL);
+	host_step(100); assert(engine.winner.semantic == LED_WAIT_STILL);
+	host_now_ms = 350; assert(led_state(task, 2, LED_NONE) == LED_ADMITTED);
+	host_step(350); assert(engine.winner.semantic == LED_STARTUP && host_value == 0);
+	host_step(400); assert(engine.winner.semantic == LED_STARTUP && host_value == 10000);
+	host_step(1200); assert(engine.winner.semantic == LED_NONE && host_value == 0);
+
+	const enum led_fault_kind faults[] = {LED_FAULT_SENSOR, LED_FAULT_SAFETY};
+	const enum led_semantic fault_semantics[] = {LED_SENSOR_FAULT, LED_SAFETY_FAULT};
+	for (unsigned i = 0; i < sizeof(faults) / sizeof(faults[0]); ++i) {
+		reset_case(LED_CAP_RGB_PWM);
+		assert(startup_main() == 0);
+		host_step(0); host_now_ms = 100;
+		led_fault_publish(LED_OWNER_SENSOR, faults[i], 0);
+		host_step(100); assert(engine.winner.semantic == fault_semantics[i]);
+		host_step(1300); assert(engine.winner.semantic == fault_semantics[i]);
+		led_fault_publish(LED_OWNER_SENSOR, LED_FAULT_NONE, 0);
+		host_step(1300); assert(engine.winner.semantic == LED_NONE && host_value == 0);
+		led_startup(); host_step(1300);
+		assert(engine.winner.semantic == LED_NONE && host_value == 0);
+	}
+
+	reset_case(LED_CAP_RGB_PWM);
+	assert(startup_main() == 0);
+	host_step(0); host_now_ms = 100; led_quiesce(); host_step(100);
+	assert(engine.quiesced && engine.winner.priority == LED_PRIORITY_SHUTDOWN && host_value == 0);
+	led_startup(); host_step(800);
+	assert(engine.quiesced && engine.winner.priority == LED_PRIORITY_SHUTDOWN && host_value == 0);
+}
+
+static void startup_yields_to_real_feedback(void)
 {
 	reset_case(LED_CAP_RGB_PWM);
 	assert(startup_main() == 0);
-	host_step(0); host_step(120);
-	assert(host_value == 0 && engine.winner.semantic == LED_NONE && !engine.ready);
+	host_now_ms = 100; physical_pressed = true;
+	button_interrupt_handler(NULL, NULL, 1);
+	host_step(100); assert(engine.winner.semantic == LED_BUTTON_HOLD && host_value == 10000);
+
+	reset_case(LED_CAP_RGB_PWM);
+	assert(startup_main() == 0);
+	host_now_ms = 100; led_power_publish(LED_POWER_BATTERY, true);
+	host_step(100); assert(engine.winner.semantic == LED_LOW_BATTERY);
+	host_step(2100); assert(engine.winner.semantic == LED_NONE && host_value == 0);
+
+	reset_case(LED_CAP_RGB_PWM);
+	assert(startup_main() == 0);
+	host_now_ms = 100;
+	assert(led_request_event(LED_OWNER_ACC, led_request_id(), led_event_id(), LED_FAILED) == LED_ADMITTED);
+	host_step(100); assert(engine.winner.semantic == LED_FAILED);
+
+	reset_case(LED_CAP_RGB_PWM);
+	assert(startup_main() == 0);
+	host_now_ms = 100; led_identify();
+	host_step(100); assert(engine.winner.semantic == LED_IDENTIFY);
 }
 
 static void startup_usb_prevents_unplugged_shutdown(void)
@@ -556,7 +681,9 @@ static void startup_usb_prevents_unplugged_shutdown(void)
 int main(void)
 {
 	qualified_release_preempts_older_click_deadline();
-	startup_does_not_fake_button_input();
+	startup_pulses_without_fake_input_or_ready(); startup_uses_original_local_epoch();
+	startup_restores_real_state(); startup_preemption_does_not_extend_window();
+	startup_yields_to_real_feedback();
 	startup_usb_prevents_unplugged_shutdown();
 	held_release_and_complete(); short_hold_release_and_single_click();
 	fresh_input_survives_late_veto(); invisible_output_never_adds_manual_wait();

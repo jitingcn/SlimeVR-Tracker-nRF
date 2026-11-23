@@ -37,6 +37,7 @@ enum led_style {
 	LED_STYLE_EXIT,
 	LED_STYLE_MANUAL_EXIT,
 	LED_STYLE_BUTTON_HOLD,
+	LED_STYLE_STARTUP,
 	LED_STYLE_COUNT
 };
 enum led_role {
@@ -52,6 +53,7 @@ enum led_role {
 /* Fade samples use the monotonic wall-clock grid, not producer wake times. */
 #define LED_FRAME_MS 5U
 #define LED_MANUAL_EXIT_VISUAL_MS 1500U
+#define LED_STARTUP_VISUAL_MS 1200U
 /* Fresh finite feedback needs a whole terminal-length black pause, including
  * replacement of a partly visible acknowledgement by an actual terminal. */
 #define LED_FEEDBACK_START_GAP_MS 600U

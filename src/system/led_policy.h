@@ -63,9 +63,12 @@ struct led_engine {
 	bool ready;
 	bool identify_active;
 	bool black_known;
+	bool startup_submitted;
+	bool startup_active;
 	uint32_t low_due_ms;
 	uint32_t low_origin_ms;
 	uint32_t identify_origin_ms;
+	uint32_t startup_origin_ms;
 	uint32_t black_since_ms;
 	uint32_t identity_counter;
 	uint32_t visible_identity;

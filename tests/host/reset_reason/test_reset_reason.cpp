@@ -110,6 +110,7 @@ static int system_uptime_since_boot_ms() { return 0; }
 static void esb_reset_pair() {}
 static void k_msleep(int) {}
 static void k_usleep(int) {}
+void led_startup() {} // LED output is covered by the boot/worker fixture.
 static uint8_t applied_reset_mode;
 static void sys_reset_mode(uint8_t mode) { applied_reset_mode = mode; }
 #define CUSTOMER_INFO_REPORT_LOG_SUMMARY 0

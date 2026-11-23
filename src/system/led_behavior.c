@@ -28,6 +28,7 @@ enum behavior_id {
 	BEHAVIOR_EXIT,
 	BEHAVIOR_BUTTON_HOLD,
 	BEHAVIOR_MANUAL_EXIT,
+	BEHAVIOR_STARTUP,
 	BEHAVIOR_COUNT
 };
 static const struct led_behavior behaviors[] = {
@@ -131,6 +132,10 @@ static const struct led_behavior behaviors[] = {
 		.style = LED_STYLE_MANUAL_EXIT, .role = LED_ROLE_INTERACTION, .level = LED_LEVEL_NOTICE,
 		.extent = LED_FINITE, .duration_ms = LED_MANUAL_EXIT_VISUAL_MS, .priority = LED_PRIORITY_TASK
 	},
+	[BEHAVIOR_STARTUP] = {
+		.style = LED_STYLE_STARTUP, .role = LED_ROLE_NEUTRAL, .level = LED_LEVEL_NOTICE,
+		.extent = LED_FINITE, .duration_ms = LED_STARTUP_VISUAL_MS, .priority = LED_PRIORITY_TASK
+	},
 };
 /* Dense semantic order makes adding any enum without a map entry a build error. */
 static const uint8_t semantic_behaviors[] = {
@@ -170,6 +175,7 @@ static const uint8_t semantic_behaviors[] = {
 	BEHAVIOR_EXIT,
 	BEHAVIOR_BUTTON_HOLD,
 	BEHAVIOR_MANUAL_EXIT,
+	BEHAVIOR_STARTUP,
 };
 _Static_assert(sizeof(behaviors) / sizeof(behaviors[0]) == BEHAVIOR_COUNT, "LED behavior missing descriptor");
 _Static_assert(sizeof(semantic_behaviors) == LED_SEMANTIC_COUNT, "LED semantic missing behavior mapping");
@@ -191,7 +197,7 @@ const char *led_behavior_name(enum led_semantic semantic)
 		"collect_still", "wait_move", "collect_move", "processing", "ota_active", "heated_active", "maintenance",
 		"test_active", "initializing", "charging", "charged", "external_power_unknown", "low_battery",
 		"sensor_missing", "sensor_fault", "blocking_fault", "safety_fault", "identify", "exit_pending",
-		"button_hold", "manual_exit"
+		"button_hold", "manual_exit", "startup"
 	};
 	_Static_assert(sizeof(names) / sizeof(names[0]) == LED_SEMANTIC_COUNT, "LED semantic missing debug name");
 	return semantic > LED_NONE && semantic < LED_SEMANTIC_COUNT ? names[semantic] : "none";
@@ -200,7 +206,7 @@ const char *led_style_name(enum led_style style)
 {
 	static const char *const names[] = {
 		"short", "success", "double", "link", "ready", "solid", "move", "breathe", "low", "warning", "exit",
-		"manual_exit", "button_hold"
+		"manual_exit", "button_hold", "startup"
 	};
 	_Static_assert(sizeof(names) / sizeof(names[0]) == LED_STYLE_COUNT, "LED style missing debug name");
 	return style >= LED_STYLE_SHORT && style < LED_STYLE_COUNT ? names[style] : "invalid";

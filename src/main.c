@@ -21,6 +21,7 @@
 	THE SOFTWARE.
 */
 #include "globals.h"
+#include "system/led.h"
 #include "system/system.h"
 #include "system/uptime.h"
 #if CONFIG_CUSTOMER_INFO
@@ -78,8 +79,7 @@ int main(void)
 #endif
 #endif
 
-	/* Boot is not a new button input. Initialization/link/readiness owners
-	 * publish their real states without an extra startup ACK color change. */
+	led_startup();
 
 	uint8_t reboot_counter = reboot_counter_read();
 	bool booting_from_shutdown
