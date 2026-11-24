@@ -175,6 +175,21 @@ config IGNORE_CHARGE_WAKE_ON_VBUS
         sources during system shutdown. This keeps charge state transitions
         from waking the device while USB power is already connected.
 
+config MCUBOOT_CONFIRM_REQUIRE_LINK
+    bool "Confirm MCUboot trial images only after a receiver link"
+    depends on BOOTLOADER_MCUBOOT
+    help
+        Besides 60 s of healthy uptime, require a live receiver link (paired,
+        recent PONG round trip) before confirming a trial image. Without one
+        by MCUBOOT_CONFIRM_LINK_DEADLINE_MS, reboot so MCUboot reverts to the
+        previous image, keeping a radio-broken update recoverable over ESB.
+
+config MCUBOOT_CONFIRM_LINK_DEADLINE_MS
+    int "Receiver link deadline for trial images (ms)"
+    depends on MCUBOOT_CONFIRM_REQUIRE_LINK
+    default 180000
+    range 60000 3600000
+
 config USE_IMU_WAKE_UP
     bool "IMU wake up support"
     default n

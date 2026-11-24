@@ -936,12 +936,46 @@ static void sys_battery_dock_system_off(void)
 
 
 
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+/* A revertible trial image is confirmed only once it has proven a live
+ * receiver link (paired, recent PONG round trip). Confirming an image whose
+ * radio is broken would leave no wireless path back; rebooting before
+ * confirmation lets MCUboot revert. Freshly programmed images are unconfirmed
+ * but not revertible, so they keep the 60 s confirmation path. */
+static bool power_mcuboot_trial_confirm_ready(int64_t boot_uptime_ms, int *boot_swap_type)
+{
+	if (boot_is_img_confirmed()) {
+		return true;
+	}
+	if (*boot_swap_type < 0) {
+		*boot_swap_type = mcuboot_swap_type();
+	}
+	if (*boot_swap_type != BOOT_SWAP_TYPE_REVERT) {
+		return true;
+	}
+	struct led_connection_facts link = {0};
+	esb_led_connection_facts(&link);
+	if (link.healthy) {
+		return true;
+	}
+	if (boot_uptime_ms > CONFIG_MCUBOOT_CONFIRM_LINK_DEADLINE_MS) {
+		LOG_ERR("Trial image has no receiver link; rebooting to revert");
+		wait_for_logging();
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+	return false;
+}
+#endif
+
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
 // TODO: should be separated to be more clear in its function?
 // TODO: call into other thread for handling the system state
 static void power_thread(void)
 {
 	static bool boot_success_checked = false;
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	static int boot_swap_type = -1;
+#endif
 	static bool watchdog_registered = false;
 	static bool ota_gpregret_logged = false;
 	int battery_mV = 0;
@@ -989,19 +1023,26 @@ static void power_thread(void)
 		 * clearing the WDT reset counter, allowing multiple WDT resets to
 		 * accumulate and eventually trigger DFU mode if there's a persistent issue.
 		 */
-		if (!boot_success_checked && system_uptime_since_boot_ms() > 60000) {
-			boot_success_checked = true;
-#if defined(CONFIG_BOOTLOADER_MCUBOOT)
-			if (!boot_is_img_confirmed()) {
-				int err = boot_write_img_confirmed();
-				if (err) {
-					LOG_ERR("Failed to confirm MCUboot image: %d", err);
-				} else {
-					LOG_INF("MCUboot test image confirmed");
-				}
-			}
+		if (!boot_success_checked) {
+			int64_t boot_uptime_ms = system_uptime_since_boot_ms();
+			if (boot_uptime_ms > 60000
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+				&& power_mcuboot_trial_confirm_ready(boot_uptime_ms, &boot_swap_type)
 #endif
-			watchdog_mark_boot_success();
+			) {
+				boot_success_checked = true;
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+				if (!boot_is_img_confirmed()) {
+					int err = boot_write_img_confirmed();
+					if (err) {
+						LOG_ERR("Failed to confirm MCUboot image: %d", err);
+					} else {
+						LOG_INF("MCUboot test image confirmed");
+					}
+				}
+#endif
+				watchdog_mark_boot_success();
+			}
 		}
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))
