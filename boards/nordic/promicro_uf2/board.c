@@ -7,6 +7,7 @@
 #include <zephyr/init.h>
 #include <hal/nrf_gpio.h>
 #include <zephyr/devicetree.h>
+#include <soc.h>
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
@@ -15,9 +16,11 @@
 #define GND_GPIO_PIN DT_GPIO_PIN(ZEPHYR_USER_NODE, gnd_gpios)
 #define GND_GPIO_PORT_NUM DT_PROP(DT_GPIO_CTLR(ZEPHYR_USER_NODE, gnd_gpios), port)
 
-/* A board may use the module VCC rail even with separately switched sensors. */
+/* Explicit EN keeps module VCC on during boot even with separate sensor power. */
+#define EXTERNAL_3V3_REGULATOR_PIN \
+	NRF_DT_GPIOS_TO_PSEL_OR(ZEPHYR_USER_NODE, external_3v3_en_gpios, NRF_GPIO_PIN_MAP(0, 13))
 #if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, pwr_gpios) && \
-	!DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, keep_external_3v3)
+	!DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, external_3v3_en_gpios)
 #define EXTERNAL_3V3_REGULATOR_PULL NRF_GPIO_PIN_PULLDOWN
 #else
 #define EXTERNAL_3V3_REGULATOR_PULL NRF_GPIO_PIN_PULLUP
@@ -36,7 +39,7 @@ static int board_promicro_init(void)
 	nrf_gpio_cfg(NRF_GPIO_PIN_MAP(GND_GPIO_PORT_NUM, GND_GPIO_PIN), NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_H0D1, NRF_GPIO_PIN_NOSENSE);
 	nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(GND_GPIO_PORT_NUM, GND_GPIO_PIN));
 #endif
-	nrf_gpio_cfg(NRF_GPIO_PIN_MAP(0, 13), NRF_GPIO_PIN_DIR_INPUT, NRF_GPIO_PIN_INPUT_DISCONNECT, EXTERNAL_3V3_REGULATOR_PULL, NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_NOSENSE);
+	nrf_gpio_cfg(EXTERNAL_3V3_REGULATOR_PIN, NRF_GPIO_PIN_DIR_INPUT, NRF_GPIO_PIN_INPUT_DISCONNECT, EXTERNAL_3V3_REGULATOR_PULL, NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_NOSENSE);
 	return 0;
 }
 

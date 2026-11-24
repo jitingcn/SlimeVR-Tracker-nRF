@@ -63,7 +63,8 @@
 
 	zephyr,user {
 		/delete-property/ vcc-gpios;
-		keep-external-3v3; /* Module +VCC feeds the common-anode RGB LED. */
+		/* Module +VCC feeds only the RGB LED: pull EN up at boot and down in SYSTEMOFF. */
+		external-3v3-en-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
 		led-capability = "rgb-pwm";
 		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_INVERTED>,
 			<&pwm0 1 PWM_MSEC(1) PWM_POLARITY_INVERTED>,

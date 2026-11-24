@@ -382,6 +382,11 @@ void configure_sense_pins(void)
 #endif
 }
 
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, external_3v3_en_gpios)
+BUILD_ASSERT(DT_GPIO_FLAGS(ZEPHYR_USER_NODE, external_3v3_en_gpios) == GPIO_ACTIVE_HIGH,
+	"External 3V3 enable requires active-high polarity without pull/drive flags");
+#endif
+
 void sys_enter_poweroff(void)
 {
 	/* No ISR may rewrite the saved STAT SENSE between re-arming and SYSTEMOFF. */
@@ -395,6 +400,12 @@ void sys_enter_poweroff(void)
 #endif
 		nrf_gpio_cfg_sense_set(pin, charger_stat_wake_sense);
 	}
+#endif
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, external_3v3_en_gpios)
+	/* LED output is already quiesced. Keep the independent WOM sensor rail untouched. */
+	const nrf_gpio_pin_pull_t pull = NRF_GPIO_PIN_PULLDOWN;
+	nrf_gpio_reconfigure(NRF_DT_GPIOS_TO_PSEL(ZEPHYR_USER_NODE, external_3v3_en_gpios),
+		NULL, NULL, &pull, NULL, NULL);
 #endif
 	sys_poweroff();
 }
