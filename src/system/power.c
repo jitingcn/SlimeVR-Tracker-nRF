@@ -951,9 +951,9 @@ static bool power_mcuboot_trial_confirm_ready(int64_t boot_uptime_ms, int *boot_
 	if (*boot_swap_type < 0) {
 		int type = mcuboot_swap_type();
 
-		/* A failed read is not a classification: retry it next pass and
-		 * treat the image as revertible meanwhile. */
-		if (type >= 0 && type != BOOT_SWAP_TYPE_PANIC) {
+		/* A failed read (negative errno) is not a classification: retry
+		 * it next pass and treat the image as revertible meanwhile. */
+		if (type >= 0) {
 			*boot_swap_type = type;
 		}
 	}
