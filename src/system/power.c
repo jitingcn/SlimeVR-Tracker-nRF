@@ -941,16 +941,23 @@ static void sys_battery_dock_system_off(void)
  * receiver link (paired, recent PONG round trip). Confirming an image whose
  * radio is broken would leave no wireless path back; rebooting before
  * confirmation lets MCUboot revert. Freshly programmed images are unconfirmed
- * but not revertible, so they keep the 60 s confirmation path. */
+ * but not revertible, so they keep the 60 s confirmation path. An unreadable
+ * swap state is handled like a revertible trial. */
 static bool power_mcuboot_trial_confirm_ready(int64_t boot_uptime_ms, int *boot_swap_type)
 {
 	if (boot_is_img_confirmed()) {
 		return true;
 	}
 	if (*boot_swap_type < 0) {
-		*boot_swap_type = mcuboot_swap_type();
+		int type = mcuboot_swap_type();
+
+		/* A failed read is not a classification: retry it next pass and
+		 * treat the image as revertible meanwhile. */
+		if (type >= 0 && type != BOOT_SWAP_TYPE_PANIC) {
+			*boot_swap_type = type;
+		}
 	}
-	if (*boot_swap_type != BOOT_SWAP_TYPE_REVERT) {
+	if (*boot_swap_type >= 0 && *boot_swap_type != BOOT_SWAP_TYPE_REVERT) {
 		return true;
 	}
 	struct led_connection_facts link = {0};

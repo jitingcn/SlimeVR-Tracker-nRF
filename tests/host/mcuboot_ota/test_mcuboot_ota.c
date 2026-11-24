@@ -87,6 +87,7 @@ static int pm_device_action_run(const struct device *dev, enum pm_device_action 
 /* MCUboot and receiver link stubs for power_mcuboot_trial_confirm_ready(). */
 #define BOOT_SWAP_TYPE_NONE   1
 #define BOOT_SWAP_TYPE_REVERT 3
+#define BOOT_SWAP_TYPE_PANIC  0xff
 #define SYS_REBOOT_COLD       0
 
 struct led_connection_facts {
@@ -218,6 +219,27 @@ static void test_trial_confirm_gating(void)
 	assert(log_flush_calls == 1);
 	assert(reboot_calls == 1);
 	assert(last_reboot_type == SYS_REBOOT_COLD);
+
+	/* 5. Failed swap-state read: not cached, needs a link, retried next pass. */
+	reset_confirm_stubs();
+	cached_swap = -1;
+	stub_swap_type = BOOT_SWAP_TYPE_PANIC;
+	assert(power_mcuboot_trial_confirm_ready(61000, &cached_swap) == false);
+	assert(cached_swap == -1);
+	assert(link_query_calls == 1);
+	assert(reboot_calls == 0);
+
+	/* Read recovers as a revertible trial: still waits for the link. */
+	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
+	assert(power_mcuboot_trial_confirm_ready(62000, &cached_swap) == false);
+	assert(swap_type_calls == 2);
+	assert(cached_swap == BOOT_SWAP_TYPE_REVERT);
+
+	/* Persistent failure past the deadline reboots rather than confirming. */
+	cached_swap = -1;
+	stub_swap_type = BOOT_SWAP_TYPE_PANIC;
+	assert(power_mcuboot_trial_confirm_ready(180001, &cached_swap) == false);
+	assert(reboot_calls == 1);
 }
 
 int main(void)
