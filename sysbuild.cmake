@@ -101,17 +101,20 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
 endif()
 
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15)
-  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
-       ${mcuboot_overlay_dir}/mcuboot_nrf54l15.overlay)
   if(SB_CONFIG_BOARD STREQUAL "xiao_nrf54l15")
-    # XIAO nRF54L15: the nRF54L15 has no native USB controller and the
-    # onboard SAMD11 serves the USB-C connector as a USB-UART bridge on
-    # uart20, so MCUboot serial recovery runs over uart20 instead of USB
-    # CDC ACM.
+    # XIAO nRF54L15: disable board-specific peripherals in MCUboot (including
+    # vbat_pwr) and run serial recovery over uart20 (the onboard SAMD11
+    # USB-UART bridge), since nRF54L15 has no native USB controller.
+    list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+         ${mcuboot_overlay_dir}/mcuboot_nrf54l15.overlay
+         ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.overlay)
     list(APPEND mcuboot_EXTRA_CONF_FILE
          ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.conf)
-    list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
-         ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.overlay)
+  else()
+    # nRF54L15 has no native USB controller; drop USB CDC ACM serial recovery
+    # unless a board supplies its own UART recovery configuration.
+    list(APPEND mcuboot_EXTRA_CONF_FILE
+         ${mcuboot_overlay_dir}/mcuboot_nrf54l15_no_serial.conf)
   endif()
 endif()
 
