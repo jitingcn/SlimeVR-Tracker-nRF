@@ -173,21 +173,42 @@ static void sys_disconnect_interface_pins(void)
 #endif
 }
 
+#define IS_TRACKER_SENSOR_NODE(node)                                                                   \
+	((DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_SAME_NODE(node, DT_NODELABEL(imu))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_SAME_NODE(node, DT_NODELABEL(imu_spi))) ||        \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_SAME_NODE(node, DT_NODELABEL(mag))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_SAME_NODE(node, DT_NODELABEL(mag_spi))))
+
+#define SENSOR_BUS_FOREIGN_CHILD(child) +!IS_TRACKER_SENSOR_NODE(child)
+
+/* Other okay children (flash, PMIC, display, ...) share this bus. */
+#define SENSOR_BUS_HAS_FOREIGN_CHILD(bus)                                                              \
+	(0 DT_FOREACH_CHILD_STATUS_OKAY(bus, SENSOR_BUS_FOREIGN_CHILD))
+
 static int sys_interface_action(enum pm_device_action action)
 {
-	/* IMU and magnetometer may share one controller. Operate each bus once. */
+	/* IMU and magnetometer may share one controller. Operate each bus once,
+	 * and leave buses that also serve non-sensor devices powered. */
 	static const struct device *const buses[] = {
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(imu_spi)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi))),
 #endif
+#endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(imu)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu))),
 #endif
+#endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(mag_spi)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi))),
 #endif
+#endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(mag)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag))),
+#endif
 #endif
 		NULL
 	};
@@ -318,18 +339,6 @@ static void __maybe_unused disconnect_spim_pins(uintptr_t reg)
 	nrf_psel_cfg_default("Disconnected SPI MISO", nrf_spim_miso_pin_get(spim));
 }
 #endif
-
-#define IS_TRACKER_SENSOR_NODE(node)                                                                   \
-	((DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_SAME_NODE(node, DT_NODELABEL(imu))) ||                \
-	 (DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_SAME_NODE(node, DT_NODELABEL(imu_spi))) ||        \
-	 (DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_SAME_NODE(node, DT_NODELABEL(mag))) ||                \
-	 (DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_SAME_NODE(node, DT_NODELABEL(mag_spi))))
-
-#define SENSOR_BUS_FOREIGN_CHILD(child) +!IS_TRACKER_SENSOR_NODE(child)
-
-/* Other okay children (flash, PMIC, display, ...) share this bus. */
-#define SENSOR_BUS_HAS_FOREIGN_CHILD(bus)                                                              \
-	(0 DT_FOREACH_CHILD_STATUS_OKAY(bus, SENSOR_BUS_FOREIGN_CHILD))
 
 #define DISCONNECT_NRF_BUS_PINS(bus)                                                                   \
 	IF_ENABLED(DT_NODE_HAS_COMPAT(bus, nordic_nrf_twim),                                           \
