@@ -15,7 +15,9 @@
 #define GND_GPIO_PIN DT_GPIO_PIN(ZEPHYR_USER_NODE, gnd_gpios)
 #define GND_GPIO_PORT_NUM DT_PROP(DT_GPIO_CTLR(ZEPHYR_USER_NODE, gnd_gpios), port)
 
-#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, pwr_gpios)
+/* A board may use the module VCC rail even with separately switched sensors. */
+#if DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, pwr_gpios) && \
+	!DT_NODE_HAS_PROP(ZEPHYR_USER_NODE, keep_external_3v3)
 #define EXTERNAL_3V3_REGULATOR_PULL NRF_GPIO_PIN_PULLDOWN
 #else
 #define EXTERNAL_3V3_REGULATOR_PULL NRF_GPIO_PIN_PULLUP

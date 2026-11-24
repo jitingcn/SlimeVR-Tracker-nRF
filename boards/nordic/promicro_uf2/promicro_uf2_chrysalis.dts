@@ -3,6 +3,7 @@
 
 /dts-v1/;
 #include "promicro_uf2_default_spi.dts"
+#include <zephyr/dt-bindings/gpio/nordic-nrf-gpio.h>
 
 &pwm0_default {
 	group1 {
@@ -61,6 +62,8 @@
 	};
 
 	zephyr,user {
+		/delete-property/ vcc-gpios;
+		keep-external-3v3; /* Module +VCC feeds the common-anode RGB LED. */
 		led-capability = "rgb-pwm";
 		pwms = <&pwm0 0 PWM_MSEC(1) PWM_POLARITY_INVERTED>,
 			<&pwm0 1 PWM_MSEC(1) PWM_POLARITY_INVERTED>,
@@ -69,6 +72,8 @@
 		led-channel-weights = <10000 10000 10000>;
 		led-primary-channel = <1>;
 		clk-gpios = <&gpio0 20 GPIO_OPEN_DRAIN>;
+		/* P0.31 directly feeds the sensors: retain high-side drive, drive low on shutdown. */
+		pwr-gpios = <&gpio0 31 (GPIO_ACTIVE_HIGH | NRF_GPIO_DRIVE_S0H1)>;
 	};
 };
 
