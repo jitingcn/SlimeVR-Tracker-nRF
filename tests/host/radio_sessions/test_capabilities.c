@@ -169,6 +169,8 @@ int main(void)
     if (getenv("CAPABILITY_SMOKE")) printf("remote_execute raw=%d mag=%d command=0x%02x result=%d identify=%u\n",
         CONFIG_CONNECTION_RAW_COLLECTION, CONFIG_SENSOR_USE_MAGNETOMETER,
         ESB_PONG_FLAG_PING, identify_result, led_test_events[LED_IDENTIFY]);
+    command(ESB_PONG_FLAG_DFU, false, 0);
+    command(ESB_PONG_FLAG_DFU_OTA, false, 0);
     command(ESB_PONG_FLAG_DATA_COLLECT_ON, CONFIG_CONNECTION_RAW_COLLECTION, 0);
     assert(raw_enabled == !!CONFIG_CONNECTION_RAW_COLLECTION);
     command(ESB_PONG_FLAG_DATA_COLLECT_OFF, CONFIG_CONNECTION_RAW_COLLECTION, 0);

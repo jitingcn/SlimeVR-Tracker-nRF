@@ -336,6 +336,7 @@ int main(void) {
                     "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
                     f"-DCONFIG_CONNECTION_RAW_COLLECTION={raw_enabled}",
                     f"-DCONFIG_SENSOR_USE_MAGNETOMETER={mag_enabled}", "-DHOST_CAPABILITY_MATRIX=1",
+                    "-DDFU_EXISTS=0",
                     "-I", str(temporary), "-I", str(SRC), "-I", str(HERE / "../raw_collection"),
                     str(HERE / "test_capabilities.c"), "-lm", "-o", str(binary),
                 ]

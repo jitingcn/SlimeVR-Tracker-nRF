@@ -535,24 +535,14 @@ static void esb_remote_cmd_clear(void)
 
 static void esb_remote_cmd_dfu(void)
 {
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT
 	LOG_WRN("Executing remote command: DFU (enter bootloader)");
 	sys_enter_dfu(false);
-#else
-	LOG_WRN("Remote command: DFU not supported (no bootloader)");
-	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
-#endif
 }
 
 static void esb_remote_cmd_dfu_ota(void)
 {
-#if CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT
 	LOG_WRN("Executing remote command: DFU_OTA (enter OTA bootloader)");
 	sys_enter_dfu(true);
-#else
-	LOG_WRN("Remote command: DFU_OTA not supported (no bootloader)");
-	led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
-#endif
 }
 
 static void esb_remote_cmd_set_channel(void)
@@ -941,6 +931,10 @@ static void remote_print_meow(void)
 static bool esb_remote_command_supported(uint8_t cmd)
 {
 	switch (cmd) {
+#if !DFU_EXISTS
+	case ESB_PONG_FLAG_DFU:
+	case ESB_PONG_FLAG_DFU_OTA:
+#endif
 #if !CONFIG_CONNECTION_RAW_COLLECTION
 	case ESB_PONG_FLAG_DATA_COLLECT_ON:
 	case ESB_PONG_FLAG_DATA_COLLECT_OFF:
@@ -956,7 +950,7 @@ static bool esb_remote_command_supported(uint8_t cmd)
 	case ESB_PONG_FLAG_MAG_AUTO_ON:
 	case ESB_PONG_FLAG_MAG_AUTO_OFF:
 #endif
-#if !CONFIG_CONNECTION_RAW_COLLECTION || !CONFIG_SENSOR_USE_MAGNETOMETER
+#if !DFU_EXISTS || !CONFIG_CONNECTION_RAW_COLLECTION || !CONFIG_SENSOR_USE_MAGNETOMETER
 		return false;
 #endif
 	default:
@@ -969,7 +963,9 @@ static int esb_remote_command_execute(uint8_t cmd)
 	if (!esb_remote_command_supported(cmd)) {
 		LOG_WRN("Remote command 0x%02X unavailable in this firmware", cmd);
 		enum led_owner owner = LED_OWNER_SENSOR;
-		if (cmd == ESB_PONG_FLAG_MAG_ON || cmd == ESB_PONG_FLAG_MAG_OFF
+		if (cmd == ESB_PONG_FLAG_DFU || cmd == ESB_PONG_FLAG_DFU_OTA) {
+			owner = LED_OWNER_SYSTEM;
+		} else if (cmd == ESB_PONG_FLAG_MAG_ON || cmd == ESB_PONG_FLAG_MAG_OFF
 		    || cmd == ESB_PONG_FLAG_MAG_CLEAR || cmd == ESB_PONG_FLAG_MAG_CAL
 		    || cmd == ESB_PONG_FLAG_MAG_AUTO_ON || cmd == ESB_PONG_FLAG_MAG_AUTO_OFF) {
 			owner = LED_OWNER_MAG;

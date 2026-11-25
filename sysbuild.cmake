@@ -82,6 +82,13 @@ foreach(extra_dtc_overlay_candidate ${extra_dtc_overlay_candidates})
   endif()
 endforeach()
 
+# Keep the existing recovery profiles on boards with a transport. Other L15
+# boards have no USB and can opt into UART in their own MCUboot configuration.
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
+   (NOT SB_CONFIG_SOC_NRF54L15 OR SB_CONFIG_BOARD STREQUAL "xiao_nrf54l15"))
+  list(APPEND mcuboot_EXTRA_CONF_FILE ${mcuboot_overlay_dir}/mcuboot_serial.conf)
+endif()
+
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
        ${mcuboot_overlay_dir}/mcuboot_nrf54lm20a.overlay)
@@ -100,19 +107,16 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   endif()
 endif()
 
-if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15)
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15 AND
+   SB_CONFIG_BOARD STREQUAL "xiao_nrf54l15")
+  # XIAO nRF54L15: disable board-specific peripherals in MCUboot (including
+  # vbat_pwr) and run serial recovery over uart20 (the onboard SAMD11
+  # USB-UART bridge), since nRF54L15 has no native USB controller.
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
-       ${mcuboot_overlay_dir}/mcuboot_nrf54l15.overlay)
-  if(SB_CONFIG_BOARD STREQUAL "xiao_nrf54l15")
-    # XIAO nRF54L15: the nRF54L15 has no native USB controller and the
-    # onboard SAMD11 serves the USB-C connector as a USB-UART bridge on
-    # uart20, so MCUboot serial recovery runs over uart20 instead of USB
-    # CDC ACM.
-    list(APPEND mcuboot_EXTRA_CONF_FILE
-         ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.conf)
-    list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
-         ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.overlay)
-  endif()
+       ${mcuboot_overlay_dir}/mcuboot_nrf54l15.overlay
+       ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.overlay)
+  list(APPEND mcuboot_EXTRA_CONF_FILE
+       ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.conf)
 endif()
 
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
@@ -128,6 +132,10 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
 endif()
 
 if(SB_CONFIG_BOOTLOADER_MCUBOOT)
+  # The bootloader is configured before the application. Use its effective
+  # recovery capability, including any board overrides.
+  set_property(TARGET ${DEFAULT_IMAGE} APPEND PROPERTY IMAGE_CONF_SCRIPT
+               ${mcuboot_overlay_dir}/mcuboot_app_recovery.cmake)
   set_property(TARGET mcuboot APPEND PROPERTY _EP_CMAKE_ARGS
                -DBOARD_DEFCONFIG:FILEPATH=${mcuboot_overlay_dir}/mcuboot_board_defconfig)
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE

@@ -9,6 +9,13 @@
 #include "power.h"
 #include "status.h"
 
+#if CONFIG_BOOTLOADER_MCUBOOT ? CONFIG_MCUBOOT_SERIAL_BOOT_MODE_AVAILABLE : \
+    (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER)
+#define DFU_EXISTS 1
+#else
+#define DFU_EXISTS 0
+#endif
+
 #define RBT_CNT_ID 1
 #define PAIRED_ID 2
 #define MAIN_ACCEL_BIAS_ID 3 // Reserved retired accelerometer bias; do not reuse.

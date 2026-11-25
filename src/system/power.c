@@ -173,21 +173,42 @@ static void sys_disconnect_interface_pins(void)
 #endif
 }
 
+#define IS_TRACKER_SENSOR_NODE(node)                                                                   \
+	((DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_SAME_NODE(node, DT_NODELABEL(imu))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_SAME_NODE(node, DT_NODELABEL(imu_spi))) ||        \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_SAME_NODE(node, DT_NODELABEL(mag))) ||                \
+	 (DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_SAME_NODE(node, DT_NODELABEL(mag_spi))))
+
+#define SENSOR_BUS_FOREIGN_CHILD(child) +!IS_TRACKER_SENSOR_NODE(child)
+
+/* Other okay children (flash, PMIC, display, ...) share this bus. */
+#define SENSOR_BUS_HAS_FOREIGN_CHILD(bus)                                                              \
+	(0 DT_FOREACH_CHILD_STATUS_OKAY(bus, SENSOR_BUS_FOREIGN_CHILD))
+
 static int sys_interface_action(enum pm_device_action action)
 {
-	/* IMU and magnetometer may share one controller. Operate each bus once. */
+	/* IMU and magnetometer may share one controller. Operate each bus once,
+	 * and leave buses that also serve non-sensor devices powered. */
 	static const struct device *const buses[] = {
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu_spi)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(imu_spi)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu_spi))),
 #endif
+#endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(imu)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(imu)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(imu))),
 #endif
+#endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag_spi)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(mag_spi)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag_spi))),
 #endif
+#endif
 #if DT_NODE_HAS_STATUS_OKAY(DT_PARENT(DT_NODELABEL(mag)))
+#if !SENSOR_BUS_HAS_FOREIGN_CHILD(DT_PARENT(DT_NODELABEL(mag)))
 		DEVICE_DT_GET(DT_PARENT(DT_NODELABEL(mag))),
+#endif
 #endif
 		NULL
 	};
@@ -318,18 +339,6 @@ static void __maybe_unused disconnect_spim_pins(uintptr_t reg)
 	nrf_psel_cfg_default("Disconnected SPI MISO", nrf_spim_miso_pin_get(spim));
 }
 #endif
-
-#define IS_TRACKER_SENSOR_NODE(node)                                                                   \
-	((DT_NODE_EXISTS(DT_NODELABEL(imu)) && DT_SAME_NODE(node, DT_NODELABEL(imu))) ||                \
-	 (DT_NODE_EXISTS(DT_NODELABEL(imu_spi)) && DT_SAME_NODE(node, DT_NODELABEL(imu_spi))) ||        \
-	 (DT_NODE_EXISTS(DT_NODELABEL(mag)) && DT_SAME_NODE(node, DT_NODELABEL(mag))) ||                \
-	 (DT_NODE_EXISTS(DT_NODELABEL(mag_spi)) && DT_SAME_NODE(node, DT_NODELABEL(mag_spi))))
-
-#define SENSOR_BUS_FOREIGN_CHILD(child) +!IS_TRACKER_SENSOR_NODE(child)
-
-/* Other okay children (flash, PMIC, display, ...) share this bus. */
-#define SENSOR_BUS_HAS_FOREIGN_CHILD(bus)                                                              \
-	(0 DT_FOREACH_CHILD_STATUS_OKAY(bus, SENSOR_BUS_FOREIGN_CHILD))
 
 #define DISCONNECT_NRF_BUS_PINS(bus)                                                                   \
 	IF_ENABLED(DT_NODE_HAS_COMPAT(bus, nordic_nrf_twim),                                           \
@@ -927,12 +936,72 @@ static void sys_battery_dock_system_off(void)
 
 
 
+/* After 60 seconds of stable operation, confirm the image before clearing the
+ * WDT reset counter. Failed confirmation writes are retried on later passes. */
+static void power_check_boot_success(int64_t boot_uptime_ms)
+{
+	static bool boot_success_checked;
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	static int boot_swap_type = -1;
+#endif
+
+	if (boot_success_checked || boot_uptime_ms < 60000) {
+		return;
+	}
+
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	if (!boot_is_img_confirmed()) {
+#if IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+		if (boot_swap_type < 0) {
+			int type = mcuboot_swap_type();
+
+			/* MCUboot can return a positive internal PANIC (0xff) as well
+			 * as a negative error. Cache only documented swap states. */
+			switch (type) {
+			case BOOT_SWAP_TYPE_NONE:
+			case BOOT_SWAP_TYPE_TEST:
+			case BOOT_SWAP_TYPE_PERM:
+			case BOOT_SWAP_TYPE_REVERT:
+				boot_swap_type = type;
+				break;
+			default:
+				break;
+			}
+		}
+
+		/* REVERT is a trial; an unreadable state may be one. Freshly
+		 * programmed images and other known states are not revertible. */
+		if (boot_swap_type < 0 || boot_swap_type == BOOT_SWAP_TYPE_REVERT) {
+			if (boot_uptime_ms >= CONFIG_MCUBOOT_CONFIRM_LINK_DEADLINE_MS) {
+				LOG_ERR("Trial image unconfirmed at deadline; rebooting");
+				wait_for_logging();
+				sys_reboot(SYS_REBOOT_COLD);
+				return;
+			}
+			struct led_connection_facts link = {0};
+			esb_led_connection_facts(&link);
+			if (!link.healthy) {
+				return;
+			}
+		}
+#endif
+		int err = boot_write_img_confirmed();
+		if (err) {
+			LOG_ERR_RATELIMIT("Failed to confirm MCUboot image: %d", err);
+			return;
+		}
+		LOG_INF("MCUboot test image confirmed");
+	}
+#endif
+	watchdog_mark_boot_success();
+	boot_success_checked = true;
+}
+
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
 // TODO: should be separated to be more clear in its function?
 // TODO: call into other thread for handling the system state
 static void power_thread(void)
 {
-	static bool boot_success_checked = false;
 	static bool watchdog_registered = false;
 	static bool ota_gpregret_logged = false;
 	int battery_mV = 0;
@@ -975,25 +1044,7 @@ static void power_thread(void)
 			}
 		}
 
-		/* After 60 seconds of successful operation, mark boot as successful.
-		 * This is long enough to ensure the system is truly stable before
-		 * clearing the WDT reset counter, allowing multiple WDT resets to
-		 * accumulate and eventually trigger DFU mode if there's a persistent issue.
-		 */
-		if (!boot_success_checked && system_uptime_since_boot_ms() > 60000) {
-			boot_success_checked = true;
-#if defined(CONFIG_BOOTLOADER_MCUBOOT)
-			if (!boot_is_img_confirmed()) {
-				int err = boot_write_img_confirmed();
-				if (err) {
-					LOG_ERR("Failed to confirm MCUboot image: %d", err);
-				} else {
-					LOG_INF("MCUboot test image confirmed");
-				}
-			}
-#endif
-			watchdog_mark_boot_success();
-		}
+		power_check_boot_success(system_uptime_since_boot_ms());
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));

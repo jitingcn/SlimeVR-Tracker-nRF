@@ -461,7 +461,6 @@ static void status_cb(struct usbd_context *const ctx, const struct usbd_msg *con
 	}
 }
 
-#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT)
 #define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
 
 static void usb_init_thread(void)
