@@ -936,53 +936,72 @@ static void sys_battery_dock_system_off(void)
 
 
 
-#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
-/* A revertible trial image is confirmed only once it has proven a live
- * receiver link (paired, recent PONG round trip). Confirming an image whose
- * radio is broken would leave no wireless path back; rebooting before
- * confirmation lets MCUboot revert. Freshly programmed images are unconfirmed
- * but not revertible, so they keep the 60 s confirmation path. An unreadable
- * swap state is handled like a revertible trial. */
-static bool power_mcuboot_trial_confirm_ready(int64_t boot_uptime_ms, int *boot_swap_type)
+/* After 60 seconds of stable operation, confirm the image before clearing the
+ * WDT reset counter. Failed confirmation writes are retried on later passes. */
+static void power_check_boot_success(int64_t boot_uptime_ms)
 {
-	if (boot_is_img_confirmed()) {
-		return true;
-	}
-	if (*boot_swap_type < 0) {
-		int type = mcuboot_swap_type();
-
-		/* A failed read (negative errno) is not a classification: retry
-		 * it next pass and treat the image as revertible meanwhile. */
-		if (type >= 0) {
-			*boot_swap_type = type;
-		}
-	}
-	if (*boot_swap_type >= 0 && *boot_swap_type != BOOT_SWAP_TYPE_REVERT) {
-		return true;
-	}
-	struct led_connection_facts link = {0};
-	esb_led_connection_facts(&link);
-	if (link.healthy) {
-		return true;
-	}
-	if (boot_uptime_ms > CONFIG_MCUBOOT_CONFIRM_LINK_DEADLINE_MS) {
-		LOG_ERR("Trial image has no receiver link; rebooting to revert");
-		wait_for_logging();
-		sys_reboot(SYS_REBOOT_COLD);
-	}
-	return false;
-}
+	static bool boot_success_checked;
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	static int boot_swap_type = -1;
 #endif
+
+	if (boot_success_checked || boot_uptime_ms < 60000) {
+		return;
+	}
+
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	if (!boot_is_img_confirmed()) {
+#if IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+		if (boot_swap_type < 0) {
+			int type = mcuboot_swap_type();
+
+			/* MCUboot can return a positive internal PANIC (0xff) as well
+			 * as a negative error. Cache only documented swap states. */
+			switch (type) {
+			case BOOT_SWAP_TYPE_NONE:
+			case BOOT_SWAP_TYPE_TEST:
+			case BOOT_SWAP_TYPE_PERM:
+			case BOOT_SWAP_TYPE_REVERT:
+				boot_swap_type = type;
+				break;
+			default:
+				break;
+			}
+		}
+
+		/* REVERT is a trial; an unreadable state may be one. Freshly
+		 * programmed images and other known states are not revertible. */
+		if (boot_swap_type < 0 || boot_swap_type == BOOT_SWAP_TYPE_REVERT) {
+			if (boot_uptime_ms >= CONFIG_MCUBOOT_CONFIRM_LINK_DEADLINE_MS) {
+				LOG_ERR("Trial image unconfirmed at deadline; rebooting");
+				wait_for_logging();
+				sys_reboot(SYS_REBOOT_COLD);
+				return;
+			}
+			struct led_connection_facts link = {0};
+			esb_led_connection_facts(&link);
+			if (!link.healthy) {
+				return;
+			}
+		}
+#endif
+		int err = boot_write_img_confirmed();
+		if (err) {
+			LOG_ERR_RATELIMIT("Failed to confirm MCUboot image: %d", err);
+			return;
+		}
+		LOG_INF("MCUboot test image confirmed");
+	}
+#endif
+	watchdog_mark_boot_success();
+	boot_success_checked = true;
+}
 
 // TODO: this thread is handling reading charging state, battery state, dock state, and setting status/led
 // TODO: should be separated to be more clear in its function?
 // TODO: call into other thread for handling the system state
 static void power_thread(void)
 {
-	static bool boot_success_checked = false;
-#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
-	static int boot_swap_type = -1;
-#endif
 	static bool watchdog_registered = false;
 	static bool ota_gpregret_logged = false;
 	int battery_mV = 0;
@@ -1025,32 +1044,7 @@ static void power_thread(void)
 			}
 		}
 
-		/* After 60 seconds of successful operation, mark boot as successful.
-		 * This is long enough to ensure the system is truly stable before
-		 * clearing the WDT reset counter, allowing multiple WDT resets to
-		 * accumulate and eventually trigger DFU mode if there's a persistent issue.
-		 */
-		if (!boot_success_checked) {
-			int64_t boot_uptime_ms = system_uptime_since_boot_ms();
-			if (boot_uptime_ms > 60000
-#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
-				&& power_mcuboot_trial_confirm_ready(boot_uptime_ms, &boot_swap_type)
-#endif
-			) {
-				boot_success_checked = true;
-#if defined(CONFIG_BOOTLOADER_MCUBOOT)
-				if (!boot_is_img_confirmed()) {
-					int err = boot_write_img_confirmed();
-					if (err) {
-						LOG_ERR("Failed to confirm MCUboot image: %d", err);
-					} else {
-						LOG_INF("MCUboot test image confirmed");
-					}
-				}
-#endif
-				watchdog_mark_boot_success();
-			}
-		}
+		power_check_boot_success(system_uptime_since_boot_ms());
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(uart0))
 		const struct device *const uart = DEVICE_DT_GET(DT_NODELABEL(uart0));

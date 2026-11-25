@@ -175,20 +175,32 @@ config IGNORE_CHARGE_WAKE_ON_VBUS
         sources during system shutdown. This keeps charge state transitions
         from waking the device while USB power is already connected.
 
+config MCUBOOT_SERIAL_BOOT_MODE_AVAILABLE
+    bool "MCUboot accepts application requests for serial recovery"
+    depends on BOOTLOADER_MCUBOOT
+    default n
+    help
+        Sysbuild sets this from the actual MCUboot boot-mode config. For
+        independently built bootloaders, enable only when
+        CONFIG_BOOT_SERIAL_BOOT_MODE is enabled in MCUboot.
+
 config MCUBOOT_CONFIRM_REQUIRE_LINK
     bool "Confirm MCUboot trial images only after a receiver link"
     depends on BOOTLOADER_MCUBOOT
     help
         Besides 60 s of healthy uptime, require a live receiver link (paired,
-        recent PONG round trip) before confirming a trial image. Without one
-        by MCUBOOT_CONFIRM_LINK_DEADLINE_MS, reboot so MCUboot reverts to the
-        previous image, keeping a radio-broken update recoverable over ESB.
+        recent PONG round trip) before confirming a trial image. If it remains
+        unconfirmed at MCUBOOT_CONFIRM_LINK_DEADLINE_MS, including after failed
+        confirmation writes, reboot so MCUboot can revert to the previous image.
 
 config MCUBOOT_CONFIRM_LINK_DEADLINE_MS
     int "Receiver link deadline for trial images (ms)"
     depends on MCUBOOT_CONFIRM_REQUIRE_LINK
     default 180000
-    range 60000 3600000
+    range 61000 3600000
+    help
+        The minimum leaves one second after the 60-second stability interval,
+        allowing the approximately 100 ms power loop time to attempt confirmation.
 
 config USE_IMU_WAKE_UP
     bool "IMU wake up support"

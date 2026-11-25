@@ -136,6 +136,11 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
  */
 static bool should_enter_dfu(void)
 {
+	/* A MCUboot build without this recovery entry must keep initializing. */
+	if (IS_ENABLED(CONFIG_BOOTLOADER_MCUBOOT) && !DFU_EXISTS) {
+		return false;
+	}
+
 	/* Reset causes remain available after the boot snapshot clears hardware. */
 	if (!watchdog_caused_reset()) {
 		return false;

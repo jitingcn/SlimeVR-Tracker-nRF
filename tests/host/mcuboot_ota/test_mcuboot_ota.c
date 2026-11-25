@@ -8,6 +8,8 @@
 
 #define IS_ENABLED(x) (x)
 #define LOG_ERR(...) ((void)0)
+#define LOG_ERR_RATELIMIT(...) ((void)0)
+#define LOG_INF(...) ((void)0)
 
 enum pm_device_action {
 	PM_DEVICE_ACTION_SUSPEND = 1,
@@ -84,10 +86,48 @@ static int pm_device_action_run(const struct device *dev, enum pm_device_action 
 	return -ENODEV;
 }
 
-/* MCUboot and receiver link stubs for power_mcuboot_trial_confirm_ready(). */
+/* Each scenario runs in a fresh process, like a fresh power-thread boot. */
+static int boot_success_calls;
+static char events[16];
+static size_t event_count;
+
+static void record_event(char event)
+{
+	assert(event_count + 1 < sizeof(events));
+	events[event_count++] = event;
+	events[event_count] = '\0';
+}
+
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
 #define BOOT_SWAP_TYPE_NONE   1
-#define BOOT_SWAP_TYPE_REVERT 4 /* zephyr/dfu/mcuboot.h */
-#define SYS_REBOOT_COLD       0
+#define BOOT_SWAP_TYPE_TEST   2
+#define BOOT_SWAP_TYPE_PERM   3
+#define BOOT_SWAP_TYPE_REVERT 4
+
+static bool stub_img_confirmed;
+static int stub_write_error;
+static int write_calls;
+
+static bool boot_is_img_confirmed(void)
+{
+	return stub_img_confirmed;
+}
+
+static int boot_write_img_confirmed(void)
+{
+	write_calls++;
+	if (stub_write_error) {
+		record_event('F');
+		return stub_write_error;
+	}
+	stub_img_confirmed = true;
+	record_event('C');
+	return 0;
+}
+#endif
+
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+#define SYS_REBOOT_COLD 0
 
 struct led_connection_facts {
 	bool healthy;
@@ -96,19 +136,13 @@ struct led_connection_facts {
 	bool pairing;
 };
 
-static bool stub_img_confirmed;
-static int stub_swap_type;
+static int stub_swap_type = BOOT_SWAP_TYPE_NONE;
 static int swap_type_calls;
 static int link_query_calls;
 static bool stub_link_healthy;
 static int log_flush_calls;
 static int reboot_calls;
 static int last_reboot_type = -1;
-
-static bool boot_is_img_confirmed(void)
-{
-	return stub_img_confirmed;
-}
 
 static int mcuboot_swap_type(void)
 {
@@ -131,21 +165,20 @@ static void sys_reboot(int type)
 {
 	reboot_calls++;
 	last_reboot_type = type;
+	record_event('R');
+}
+#endif
+
+static void watchdog_mark_boot_success(void)
+{
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	assert(stub_img_confirmed);
+#endif
+	boot_success_calls++;
+	record_event('M');
 }
 
 #include "production.inc"
-
-static void reset_confirm_stubs(void)
-{
-	stub_img_confirmed = false;
-	stub_swap_type = BOOT_SWAP_TYPE_NONE;
-	swap_type_calls = 0;
-	link_query_calls = 0;
-	stub_link_healthy = false;
-	log_flush_calls = 0;
-	reboot_calls = 0;
-	last_reboot_type = -1;
-}
 
 static void test_shared_bus_suspend(void)
 {
@@ -170,81 +203,220 @@ static void test_shared_bus_suspend(void)
 #endif
 }
 
-static void test_trial_confirm_gating(void)
+static void test_boot_success(void)
 {
-	int cached_swap = -1;
-
-	/* 1. Already-confirmed image: ready immediately, no flash trailer read. */
-	reset_confirm_stubs();
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
 	stub_img_confirmed = true;
-	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
-	assert(power_mcuboot_trial_confirm_ready(61000, &cached_swap) == true);
-	assert(swap_type_calls == 0);
-	assert(link_query_calls == 0);
-	assert(reboot_calls == 0);
-
-	/* 2. Freshly programmed unconfirmed image (not revertible): confirms without link. */
-	reset_confirm_stubs();
-	cached_swap = -1;
-	stub_swap_type = BOOT_SWAP_TYPE_NONE;
-	assert(power_mcuboot_trial_confirm_ready(61000, &cached_swap) == true);
-	assert(swap_type_calls == 1);
-	assert(cached_swap == BOOT_SWAP_TYPE_NONE);
-	assert(link_query_calls == 0);
-	assert(reboot_calls == 0);
-
-	/* 3. Revertible trial: waits until healthy link; caches swap type. */
-	reset_confirm_stubs();
-	cached_swap = -1;
-	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
-	assert(power_mcuboot_trial_confirm_ready(61000, &cached_swap) == false);
-	assert(power_mcuboot_trial_confirm_ready(180000, &cached_swap) == false);
-	assert(swap_type_calls == 1);
-	assert(link_query_calls == 2);
-	assert(reboot_calls == 0);
-
-	/* Link becomes healthy before deadline -> ready to confirm. */
-	stub_link_healthy = true;
-	assert(power_mcuboot_trial_confirm_ready(180000, &cached_swap) == true);
-	assert(swap_type_calls == 1);
-	assert(reboot_calls == 0);
-
-	/* 4. Revertible trial past deadline with no link -> cold reboot to revert. */
-	reset_confirm_stubs();
-	cached_swap = -1;
-	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
-	assert(power_mcuboot_trial_confirm_ready(180001, &cached_swap) == false);
-	assert(swap_type_calls == 1);
-	assert(log_flush_calls == 1);
-	assert(reboot_calls == 1);
-	assert(last_reboot_type == SYS_REBOOT_COLD);
-
-	/* 5. Failed swap-state read: not cached, needs a link, retried next pass. */
-	reset_confirm_stubs();
-	cached_swap = -1;
-	stub_swap_type = -EIO;
-	assert(power_mcuboot_trial_confirm_ready(61000, &cached_swap) == false);
-	assert(cached_swap == -1);
-	assert(link_query_calls == 1);
-	assert(reboot_calls == 0);
-
-	/* Read recovers as a revertible trial: still waits for the link. */
-	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
-	assert(power_mcuboot_trial_confirm_ready(62000, &cached_swap) == false);
-	assert(swap_type_calls == 2);
-	assert(cached_swap == BOOT_SWAP_TYPE_REVERT);
-
-	/* Persistent failure past the deadline reboots rather than confirming. */
-	cached_swap = -1;
-	stub_swap_type = -EIO;
-	assert(power_mcuboot_trial_confirm_ready(180001, &cached_swap) == false);
-	assert(reboot_calls == 1);
+#endif
+	power_check_boot_success(59999);
+	assert(boot_success_calls == 0);
+	power_check_boot_success(60000);
+	power_check_boot_success(180000);
+	assert(boot_success_calls == 1);
+	assert(strcmp(events, "M") == 0);
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	assert(write_calls == 0);
+#if IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	assert(swap_type_calls == 0 && link_query_calls == 0 && reboot_calls == 0);
+#endif
+#endif
 }
 
-int main(void)
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+static void test_nonrevertible(int type)
 {
-	test_shared_bus_suspend();
-	test_trial_confirm_gating();
-	printf("PASS mcuboot_ota (shared_mag_bus=%d)\n", HOST_SHARED_MAG_BUS);
+	(void)type;
+#if IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	stub_swap_type = type;
+#endif
+	stub_write_error = -EIO;
+	power_check_boot_success(60000);
+	assert(!stub_img_confirmed && boot_success_calls == 0);
+	power_check_boot_success(180000);
+	assert(write_calls == 2 && boot_success_calls == 0);
+#if IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	assert(swap_type_calls == 1 && link_query_calls == 0 && reboot_calls == 0);
+#endif
+	stub_write_error = 0;
+	power_check_boot_success(180100);
+	power_check_boot_success(180200);
+	assert(stub_img_confirmed && write_calls == 3 && boot_success_calls == 1);
+	assert(strcmp(events, "FFCM") == 0);
+}
+
+static void test_confirmed_late(void)
+{
+	stub_img_confirmed = true;
+	power_check_boot_success(180000);
+	power_check_boot_success(180100);
+	assert(write_calls == 0 && boot_success_calls == 1);
+	assert(strcmp(events, "M") == 0);
+#if IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	assert(swap_type_calls == 0 && link_query_calls == 0 && reboot_calls == 0);
+#endif
+}
+#endif
+
+#if defined(CONFIG_BOOTLOADER_MCUBOOT) && IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+static void test_trial_retry(void)
+{
+	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
+	stub_link_healthy = true;
+	stub_write_error = -EIO;
+	power_check_boot_success(59999);
+	assert(swap_type_calls == 0 && write_calls == 0 && boot_success_calls == 0);
+	power_check_boot_success(60000);
+	assert(write_calls == 1 && boot_success_calls == 0 && !stub_img_confirmed);
+
+	/* A previously healthy link must not authorize a later retry. */
+	stub_link_healthy = false;
+	stub_write_error = 0;
+	power_check_boot_success(60100);
+	assert(write_calls == 1 && boot_success_calls == 0);
+	stub_link_healthy = true;
+	power_check_boot_success(60200);
+	power_check_boot_success(60300);
+	assert(swap_type_calls == 1 && link_query_calls == 3);
+	assert(write_calls == 2 && boot_success_calls == 1 && stub_img_confirmed);
+	assert(reboot_calls == 0 && strcmp(events, "FCM") == 0);
+}
+
+static void test_unknown_reclassification(bool revertible)
+{
+	/* Positive PANIC, negative errno and an unknown zero must not be cached. */
+	stub_swap_type = 0xff;
+	power_check_boot_success(60000);
+	power_check_boot_success(60100);
+	stub_swap_type = -EIO;
+	power_check_boot_success(60200);
+	stub_swap_type = 0;
+	power_check_boot_success(60300);
+	assert(swap_type_calls == 4 && link_query_calls == 4);
+	assert(write_calls == 0 && boot_success_calls == 0);
+
+	stub_swap_type = revertible ? BOOT_SWAP_TYPE_REVERT : BOOT_SWAP_TYPE_NONE;
+	power_check_boot_success(60400);
+	assert(swap_type_calls == 5);
+	if (revertible) {
+		assert(write_calls == 0 && boot_success_calls == 0);
+		/* The known REVERT result is cached and still needs a live link. */
+		stub_swap_type = BOOT_SWAP_TYPE_NONE;
+		power_check_boot_success(60500);
+		assert(swap_type_calls == 5 && write_calls == 0);
+		stub_link_healthy = true;
+		power_check_boot_success(60600);
+	}
+	assert(write_calls == 1 && boot_success_calls == 1 && stub_img_confirmed);
+	assert(reboot_calls == 0 && strcmp(events, "CM") == 0);
+}
+
+static void test_unknown_healthy(int type)
+{
+	stub_swap_type = type;
+	stub_link_healthy = true;
+	power_check_boot_success(60000);
+	assert(swap_type_calls == 1 && link_query_calls == 1);
+	assert(write_calls == 1 && boot_success_calls == 1 && stub_img_confirmed);
+	assert(reboot_calls == 0 && strcmp(events, "CM") == 0);
+}
+
+static void test_trial_deadline(int type, bool healthy)
+{
+	stub_swap_type = type;
+	stub_link_healthy = healthy;
+	stub_write_error = -EIO;
+	power_check_boot_success(60000);
+	power_check_boot_success(179999);
+	assert(reboot_calls == 0 && boot_success_calls == 0 && !stub_img_confirmed);
+	assert(write_calls == (healthy ? 2 : 0));
+	power_check_boot_success(180000);
+	assert(swap_type_calls == (type == BOOT_SWAP_TYPE_REVERT ? 1 : 3));
+	assert(reboot_calls == 1 && log_flush_calls == 1);
+	assert(last_reboot_type == SYS_REBOOT_COLD);
+	assert(write_calls == (healthy ? 2 : 0) && boot_success_calls == 0);
+	assert(!stub_img_confirmed && strcmp(events, healthy ? "FFR" : "R") == 0);
+}
+
+static void test_confirmed_after_failure(void)
+{
+	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
+	stub_link_healthy = true;
+	stub_write_error = -EIO;
+	power_check_boot_success(60000);
+	assert(write_calls == 1 && boot_success_calls == 0);
+	stub_img_confirmed = true;
+	stub_link_healthy = false;
+	power_check_boot_success(180000);
+	assert(reboot_calls == 0 && write_calls == 1 && boot_success_calls == 1);
+	assert(strcmp(events, "FM") == 0);
+}
+
+static void test_minimum_deadline(void)
+{
+	assert(CONFIG_MCUBOOT_CONFIRM_LINK_DEADLINE_MS == 61000);
+	stub_swap_type = BOOT_SWAP_TYPE_REVERT;
+	stub_link_healthy = true;
+	stub_write_error = -EIO;
+	power_check_boot_success(59999);
+	assert(write_calls == 0);
+	power_check_boot_success(60000);
+	power_check_boot_success(60900);
+	assert(write_calls == 2 && reboot_calls == 0 && boot_success_calls == 0);
+	power_check_boot_success(61000);
+	assert(reboot_calls == 1 && write_calls == 2 && boot_success_calls == 0);
+	assert(strcmp(events, "FFR") == 0);
+}
+#endif
+
+int main(int argc, char **argv)
+{
+	assert(argc == 2);
+	if (strcmp(argv[1], "shared_bus") == 0) {
+		test_shared_bus_suspend();
+	} else if (strcmp(argv[1], "boot_success") == 0) {
+		test_boot_success();
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	} else if (strcmp(argv[1], "none") == 0) {
+		test_nonrevertible(BOOT_SWAP_TYPE_NONE);
+	} else if (strcmp(argv[1], "test") == 0) {
+		test_nonrevertible(BOOT_SWAP_TYPE_TEST);
+	} else if (strcmp(argv[1], "perm") == 0) {
+		test_nonrevertible(BOOT_SWAP_TYPE_PERM);
+	} else if (strcmp(argv[1], "confirmed_late") == 0) {
+		test_confirmed_late();
+#if IS_ENABLED(CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK)
+	} else if (strcmp(argv[1], "trial_retry") == 0) {
+		test_trial_retry();
+	} else if (strcmp(argv[1], "unknown_revert") == 0) {
+		test_unknown_reclassification(true);
+	} else if (strcmp(argv[1], "unknown_none") == 0) {
+		test_unknown_reclassification(false);
+	} else if (strcmp(argv[1], "unknown_healthy_panic") == 0) {
+		test_unknown_healthy(0xff);
+	} else if (strcmp(argv[1], "unknown_healthy_eio") == 0) {
+		test_unknown_healthy(-EIO);
+	} else if (strcmp(argv[1], "deadline_trial_no_link") == 0) {
+		test_trial_deadline(BOOT_SWAP_TYPE_REVERT, false);
+	} else if (strcmp(argv[1], "deadline_trial_link") == 0) {
+		test_trial_deadline(BOOT_SWAP_TYPE_REVERT, true);
+	} else if (strcmp(argv[1], "deadline_panic_no_link") == 0) {
+		test_trial_deadline(0xff, false);
+	} else if (strcmp(argv[1], "deadline_panic_link") == 0) {
+		test_trial_deadline(0xff, true);
+	} else if (strcmp(argv[1], "deadline_eio_link") == 0) {
+		test_trial_deadline(-EIO, true);
+	} else if (strcmp(argv[1], "deadline_eio_no_link") == 0) {
+		test_trial_deadline(-EIO, false);
+	} else if (strcmp(argv[1], "confirmed_after_failure") == 0) {
+		test_confirmed_after_failure();
+	} else if (strcmp(argv[1], "minimum_deadline") == 0) {
+		test_minimum_deadline();
+#endif
+#endif
+	} else {
+		fprintf(stderr, "Unknown test case: %s\n", argv[1]);
+		return 2;
+	}
+	printf("PASS mcuboot_ota %s (shared_mag_bus=%d)\n", argv[1], HOST_SHARED_MAG_BUS);
 	return 0;
 }

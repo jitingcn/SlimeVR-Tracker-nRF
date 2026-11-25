@@ -95,3 +95,8 @@
 &uart20 {
 	status = "disabled";
 };
+
+/* The tracker uses the board's watchdog0 alias for the task WDT fallback. */
+&wdt31 {
+	status = "okay";
+};
