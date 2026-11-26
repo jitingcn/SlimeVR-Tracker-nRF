@@ -36,7 +36,7 @@ static void *stress_producer(void *arg)
 	for (uint32_t value = 1; value <= STRESS_ITERATIONS; value++) {
 		float q[4] = {value, value, value, value};
 		float a[3] = {value, value, value};
-		sensor_data_snapshot_publish_qa(&ctx->snapshot, q, a, (value & 1U) != 0);
+		sensor_data_snapshot_publish_qa(&ctx->snapshot, q, a, (value & 1U) != 0, value);
 		float m[3] = {value, value, value};
 		sensor_data_snapshot_publish_m(&ctx->snapshot, m);
 	}
@@ -109,7 +109,7 @@ int main(void)
 	if (!(condition)) { fputs("FAIL: " message "\n", stderr); return 1; } \
 } while (0)
 
-	sensor_data_snapshot_publish_qa(&snapshot, q, a, true);
+	sensor_data_snapshot_publish_qa(&snapshot, q, a, true, 0);
 	sensor_data_snapshot_publish_m(&snapshot, m);
 	sensor_data_snapshot_capture(&snapshot, &first);
 	CHECK(vector_is(first.q, 4, 1) && vector_is(first.a, 3, 2)
@@ -128,11 +128,11 @@ int main(void)
 	CHECK(!sensor_data_snapshot_qa_pending(&snapshot) && !sensor_data_snapshot_m_pending(&snapshot),
 	      "QA acceptance did not retire its captured generation");
 
-	sensor_data_snapshot_publish_qa(&snapshot, q, a, true);
+	sensor_data_snapshot_publish_qa(&snapshot, q, a, true, 0);
 	sensor_data_snapshot_publish_m(&snapshot, m);
 	sensor_data_snapshot_capture(&snapshot, &first);
 	q[0] = 4; a[0] = 5;
-	sensor_data_snapshot_publish_qa(&snapshot, q, a, false);
+	sensor_data_snapshot_publish_qa(&snapshot, q, a, false, 0);
 	sensor_data_snapshot_commit(&snapshot, &first, SENSOR_STREAM_QA | SENSOR_STREAM_M);
 	CHECK(sensor_data_snapshot_qa_pending(&snapshot) && !sensor_data_snapshot_m_pending(&snapshot),
 	      "A acceptance consumed newer QA B or failed independent M retirement");
@@ -158,7 +158,7 @@ int main(void)
 
 	snapshot.qa_generation = UINT32_MAX;
 	snapshot.m_generation = UINT32_MAX;
-	sensor_data_snapshot_publish_qa(&snapshot, q, a, false);
+	sensor_data_snapshot_publish_qa(&snapshot, q, a, false, 0);
 	sensor_data_snapshot_publish_m(&snapshot, m);
 	sensor_data_snapshot_capture(&snapshot, &latest);
 	CHECK(latest.qa_generation == UINT64_C(4294967296)

@@ -203,7 +203,7 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 		     (uint32_t)(*cycles - last_progress) >= 10u * 64000000u) ||
 		    (status == OTA_STATUS_VERIFY_OK &&
 		     (uint32_t)(*cycles - activate_start) >= 30u * 64000000u)) {
-			goto recover;
+			goto cancel;
 		}
 
 		/* One STATUS encoder and radio transaction serve every phase. */
@@ -264,7 +264,7 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 		    rx_len == ESB_PONG_LEN && rx_buf[2] == ESB_PONG_TYPE &&
 		    rx_buf[3] == p->tracker_id && rx_buf[9] == ESB_PONG_FLAG_OTA_ABORT) {
 			if (ota_ram_crc8(&rx_buf[2], 12, 0x07) == rx_buf[14]) {
-				goto recover;
+				goto cancel;
 			}
 		}
 
@@ -433,6 +433,12 @@ void ota_ram_engine(const struct ota_ram_engine_params *p)
 		}
 	}
 
+cancel:
+	/* A BEGIN without DATA hasn't touched the application or its settings. */
+	if (!bytes_received) {
+		*gpregret = p->settings_addr ? ADAFRUIT_DFU_MAGIC_SKIP : 0;
+		goto reset;
+	}
 recover:
 	*gpregret = 0x57; /* Existing Adafruit UF2 recovery request. */
 reset:

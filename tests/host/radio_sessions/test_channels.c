@@ -74,6 +74,13 @@ static bool esb_initialized = true, ota_active, idle = true, server_time_synced;
 static int esb_conn_state = 1, status_state;
 static uint32_t ping_failures, ping_success_streak;
 static atomic_t ota_rx_head, ota_rx_tail;
+static bool control_seen, relayed_confirm_seen;
+static uint8_t control_member_history;
+static unsigned maintenance_pong;
+static struct { int8_t receiver_lag; } sync_filter;
+static bool private_staged, private_profile, tdma_enabled = true;
+static uint32_t private_activation;
+static uint8_t private_epoch;
 static bool ping_pending, shutdown_requested;
 static int64_t connection_error_start_time, now, pair_ack_at;
 static uint8_t tracker_id = 3, ping_counter, epoch;
@@ -130,7 +137,31 @@ static unsigned abort_requests;
 static void esb_ota_request_abort(void) { ++abort_requests; }
 static bool esb_is_idle(void) { assert(!irq_depth); return idle; }
 static void esb_clear_time_sync_state(void) { server_time_synced = false; }
-static void tdma_set_enabled(bool enabled) { assert(!irq_depth); if (!enabled) ++tdma_resets; }
+static void tdma_set_enabled(bool enabled) { tdma_enabled = enabled; }
+static void tdma_stage_clear(void) { private_staged = false; }
+static void tdma_session_reset(void) {
+    assert(irq_depth);
+    ++tdma_resets;
+    tdma_enabled = false;
+    private_profile = false;
+    tdma_stage_clear();
+}
+static uint8_t tdma_profile_get(void) {
+    if (private_staged && server_time_synced && (int32_t)((uint32_t)now - private_activation) >= 0) {
+        tdma_enabled = true;
+        private_profile = true;
+        private_staged = false;
+        epoch = private_epoch;
+    }
+    return private_profile;
+}
+static bool tdma_stage_config(uint8_t slot, uint8_t total, uint8_t width, uint8_t staged_epoch, uint32_t activation) {
+    (void)slot; (void)width;
+    private_staged = total & 0x80U;
+    private_epoch = staged_epoch;
+    private_activation = activation;
+    return true;
+}
 static void drop_failed_tx_payload_if_pending(void) {}
 static void esb_flush_tx(void) { assert(idle && !irq_depth); ++tx_flushes; }
 static void esb_flush_rx(void) { assert(idle && !irq_depth); ++rx_flushes; }
@@ -246,13 +277,21 @@ static bool tdma_update_config(uint8_t slot, uint8_t total, uint8_t ticks, uint8
     if (!total || total > 16 || slot >= total || ticks < 16) return false;
     epoch = new_epoch;
     ++schedule_updates; scheduled_slot = slot; scheduled_total = total;
+    tdma_enabled = true;
     return true;
 }
 static void connection_request_ping_resync(void) {}
+#define TDMA_MAX_TRACKERS 16
+static bool tdma_is_enabled(void) { return tdma_enabled; }
+static uint32_t sys_get_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
 void set_status(enum sys_status status, bool value) {
     if (value) status_state |= status; else status_state &= ~status;
 }
 int get_status(enum sys_status status) { return status_state & status; }
+#include "relay_off.h"
 #include "channels.inc"
 /* Model the production stop guard; the native clock tests exercise the real
  * onoff manager and ISR path. */
@@ -342,6 +381,8 @@ static void reset(uint8_t home) {
     pair_retry_attempts = pair_retry_stops = pair_retry_ack_cleared = 0;
     assert(atomic_get(&tx_clock_users) == 0);
     radio_user_disabled = own_pong_seen = server_time_synced = false;
+    private_staged = private_profile = false;
+    tdma_enabled = true;
     address_writes = schedule_updates = 0;
     metadata_echo_pending = false; acked_remote_command = received_remote_command = 0;
     esb_wom_reset();
@@ -567,7 +608,8 @@ static void pong_age(void) {
 }
 static void visit(uint8_t target) {
     assert(esb_channel_search_poll(false));
-    for (unsigned i = 0; radio_channel != target && i < channel_candidate_count(search_home); ++i) {
+    /* Home revisits (LINK_SEARCH_HOME_EVERY) stretch one candidate wrap. */
+    for (unsigned i = 0; radio_channel != target && i < 2U * channel_candidate_count(search_home); ++i) {
         now = search_deadline; assert(esb_channel_search_poll(false));
     }
     assert(radio_channel == target && writes == 0);
@@ -947,6 +989,104 @@ static void legacy_compatibility(void) {
     assert(memcmp(storage.paired_addr, paired_addr, 8) == 0);
 }
 
+/* A running profile-0 member told of a staged 0->1 switch keeps sending on its
+ * current layout until activation. Before this, every own PONG in the 3.5 s
+ * announcement marked the layout stale and the fleet's uplink stopped. */
+static void staged_profile_keeps_layout(void) {
+    struct {
+        uint8_t tuple_epoch, pending_epoch; bool stale_before, wait_normal, keep;
+    } cases[] = {
+        {41, 42, false, false, true},  /* staged 0->1: keep the current layout */
+        {42, 42, false, false, false}, /* running-profile join announcement */
+        {40, 42, false, false, false}, /* tuple names a layout we do not run */
+        {41, 42, true, false, false},  /* already stale stays stale */
+        {41, 42, false, true, false},  /* acquisition is unchanged */
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        reset(84); ping_failures = 0; server_time_synced = true;
+        epoch = 41; layout_stale = cases[i].stale_before;
+        channel_wait_normal = cases[i].wait_normal;
+        layout_confirm_seen = false;
+        normal_packet(2, 11); rx_payload.data[11] = cases[i].tuple_epoch; packet_crc();
+        own_trailer = (struct relay_pong_trailer){.epoch = cases[i].tuple_epoch,
+            .member_mask = 0x7ff, .pending = true,
+            .pending_epoch = cases[i].pending_epoch,
+            .pending_total = relay_geometry_code(11, 5), .pending_slot_ticks = 16,
+            .pending_member_mask = 0x7ff, .activation_units = 100};
+        own_trailer_valid = true;
+        unsigned updates = schedule_updates;
+        receive_schedule(ESB_PONG_FLAG_NORMAL);
+        assert(layout_stale == !cases[i].keep);
+        assert(layout_confirm_seen == cases[i].keep);
+        assert(schedule_updates == updates && epoch == 41);
+    }
+    own_trailer_valid = false; layout_stale = false;
+    puts("channels: staged 0->1 switch keeps the profile-0 layout until activation PASS");
+}
+
+static void join_running_private_profile(void) {
+    reset(85);
+    visit(84);
+    dedicated_packet(84);
+    assert(accept_pong() && channel_confirmed);
+    assert(channel_wait_normal && !atomic_get(&channel_found));
+    record_ping_admission(ping_counter);
+    normal_packet(0xff, 0);
+    relay_put_be32(&rx_payload.data[3], (uint32_t)now);
+    packet_crc();
+    struct relay_pong_trailer trailer = {
+        .pending = true, .pending_epoch = 42,
+        .pending_total = relay_geometry_code(11, 5), .pending_slot_ticks = 16,
+        .pending_member_mask = 0x7ff, .activation_units = 1,
+    };
+    rx_payload.length += relay_trailer_encode(rx_payload.data + ESB_PONG_LEN, &trailer);
+    assert(accept_pong());
+    assert(relay_trailer_decode_len(rx_payload.data + ESB_PONG_LEN,
+        rx_payload.length - ESB_PONG_LEN, &own_trailer));
+    own_trailer_valid = true;
+    server_time_synced = true; /* Successful PONG timing sample. */
+    receive_schedule(ESB_PONG_FLAG_NORMAL);
+    own_trailer_valid = false;
+    assert(private_staged && atomic_get(&channel_found) && channel_wait_normal);
+    now += RELAY_ACTIVATION_UNIT_TICKS; /* A different owner sees activation before search polls. */
+    assert(tdma_profile_get() && epoch == 42);
+    unsigned previous_probes = probes;
+    assert(!esb_channel_search_poll(false));
+    assert(!channel_wait_normal && !channel_search && !atomic_get(&channel_found));
+    assert(!esb_channel_search_poll(false) && probes == previous_probes);
+    assert(writes == 1 && storage.rf_channel == ESB_RF_CHANNEL_DEFAULT);
+
+    /* Turning the radio off with another private layout queued must not
+     * resurrect either schedule when a later session gets clock sync. */
+    trailer.pending_epoch = 43;
+    esb_stage_from_trailer(&trailer, (uint32_t)now);
+    assert(tdma_profile_get() && private_staged);
+    esb_deinitialize();
+    assert(!esb_initialized && !control_seen && !layout_confirm_seen);
+    assert(storage.rf_channel == ESB_RF_CHANNEL_DEFAULT);
+    server_time_synced = true;
+    now += RELAY_ACTIVATION_UNIT_TICKS;
+    assert(!tdma_profile_get() && !private_staged);
+
+    esb_initialize(true);
+    channel_wait_normal = false;
+    channel_confirmed = true;
+    esb_stage_from_trailer(&trailer, (uint32_t)now);
+    now += RELAY_ACTIVATION_UNIT_TICKS;
+    assert(tdma_profile_get());
+
+    /* A queued redirect is still owned by the idle connection producer. */
+    channel_confirmed = false;
+    record_ping_admission(ping_counter);
+    dedicated_packet(86);
+    assert(!accept_pong() && atomic_get(&channel_redirect_pending));
+    idle = false;
+    assert(esb_channel_search_poll(false) && radio_channel == 84 && tdma_profile_get());
+    idle = true;
+    assert(esb_channel_search_poll(false) && radio_channel == 86 && !tdma_profile_get());
+    assert(!atomic_get(&channel_redirect_pending) && channel_wait_normal);
+}
+
 static void ota_status_abort(void) {
     for (unsigned pending = 0; pending < 2; ++pending) {
         for (unsigned invalid = 0; invalid < 5; ++invalid) {
@@ -1080,21 +1220,27 @@ static void scan_sequences(void) {
         for (unsigned ch = 0; ch <= 100; ++ch)
             assert(seen[ch] == (!(ch & 1) || ch == home));
 
-        /* Observe actual owner PING submissions through two complete wraps. */
+        /* Observe actual owner PING submissions over two candidate wraps.
+         * Every LINK_SEARCH_HOME_EVERY-th probe revisits home (a body over
+         * the receiver looks exactly like a channel move); the others walk
+         * the candidate list in order. */
         reset(home);
         for (unsigned i = 0; i <= count * 2; ++i) {
             if (i) now = search_deadline;
             unsigned before = probes;
+            unsigned index = link_search_step_is_home(i) ? 0
+                : link_search_step_candidate(i, count);
             assert(esb_channel_search_poll(false));
-            assert(probes == before + 1 && last_probe_channel == expected[i % count]);
-            assert(search_index == i % count);
+            assert(probes == before + 1 && last_probe_channel == expected[index]);
+            assert(search_index == index);
         }
         assert(changes == count * 2 && !writes && !address_writes);
         /* OTA freezes the active sweep, including an explicit odd home. */
         ota_active = true; now = search_deadline;
         unsigned old_probes = probes, old_changes = changes;
+        uint8_t frozen = radio_channel;
         assert(!esb_channel_search_poll(false));
-        assert(probes == old_probes && changes == old_changes && radio_channel == home);
+        assert(probes == old_probes && changes == old_changes && radio_channel == frozen);
 
         /* Actual discovery sends three bursts per candidate; model no peer
          * and interrupt via the existing lifecycle generation after two wraps. */
@@ -1135,6 +1281,8 @@ int main(void) {
     advertised_channels();
     proof_during_channel_hold();
     legacy_compatibility();
+    staged_profile_keeps_layout();
+    join_running_private_profile();
     ota_status_abort();
     restart_same_epoch();
     owner_command_arguments();

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile current OTA/power bodies with hardware leaves stubbed, not copied logic."""
 
+import argparse
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,11 @@ from c_extract import extract_block as block
 
 HERE = Path(__file__).resolve().parent
 SRC = Path(os.environ.get("TRACKER_SOURCE_ROOT", HERE.parents[2] / "src"))
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--ota-paths", action="store_true",
+                    help="exercise staging, MCUboot and the RAM engine without sweeping sensor policies")
+args = parser.parse_args()
 
 
 def function(source, name):
@@ -79,6 +85,8 @@ flash_header = (SRC / "system/esb_ota_flash.h").read_text()
 parts.append(block(flash_header, r"^struct esb_ota_page_buf \{", True))
 parts.append("static int esb_ota_flash_flush_page_buf(struct esb_ota_page_buf *pb);")
 parts.append(block(ota, r"^static struct esb_ota_page_buf ota_page_buf_view\(void\)\n\{"))
+# Firmware-info scheduling has its own host regression in relay/run_review3.py.
+parts.append("static void ota_service_fw_info(void) {}")
 for name in ("esb_ota_is_active", "esb_ota_get_status", "ota_update_led", "esb_ota_handle_data",
              "esb_ota_handle_verify", "ota_activate_impl", "esb_ota_handle_activate",
              "esb_ota_request_abort", "ota_abort", "esb_ota_service",
@@ -94,7 +102,7 @@ parts.append("#if OTA_USE_RAM_ENGINE\n" +
 connection = (SRC / "connection/connection.c").read_text()
 thread = function(connection, "connection_thread")
 loop = thread[thread.index("\twhile (1) {"):thread.index("\t\tesb_process_ota_rx_queue();")]
-parts.append("static void connection_no_transport_iteration(void) {\n" +
+parts.append("static void connection_no_transport_iteration(void) {\n\tbool stream_clock_held = false;\n" +
              loop.replace("while (1)", "for (int step = 0; step < 1; step++)", 1) +
              "\nassert(!\"no-transport fixture unexpectedly admitted transport\");\n}\n}")
 # Exercise the actual power-loop dispatch, including its completion semantics.
@@ -173,7 +181,7 @@ static inline void k_spin_unlock(struct k_spinlock *lock, int key) {
     (void)key; assert(lock->locked); lock->locked = false;
 }
 """)
-    for variant in range(130):
+    for variant in ((1, 3, 33) if args.ota_paths else range(130)):
         mcuboot, imu_int = (variant // 2) % 2, variant % 2 if variant < 128 else 1
         low_power_2 = (variant // 4) % 2
         active_delay = 5000 if (variant // 8) % 2 else 90000

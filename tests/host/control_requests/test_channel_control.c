@@ -10,7 +10,7 @@
 #define SLIMENRF_SYSTEM
 #define RF_CHANNEL_ID 31
 int sys_write(uint16_t id, void *ptr, const void *data, size_t len);
-void esb_channel_control_begin(void) {}
+int esb_channel_control_begin(void) { return 0; }
 void esb_channel_control_end(void) {}
 #include "../../../src/connection/channel_control.c"
 

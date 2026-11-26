@@ -48,6 +48,8 @@ ota_production += "\n" + re.search(r"^#define OTA_FLASH_PAGE_SIZE +.*$", ota_fla
 ota_production += "\n" + declaration(ota, "ota_state") + "\n" + declaration(ota, "ota_context")
 ota_production += "\nstatic struct ota_context ota;\nstatic atomic_t ota_reboot_pending;\nstatic atomic_t ota_abort_requested;\n"
 ota_production += "\n".join(re.findall(r"^static (?:struct led_token ota_feedback|uint32_t ota_feedback_revision|bool ota_feedback_terminal|enum led_semantic ota_feedback_state);", ota, re.MULTILINE))
+# Firmware-info scheduling is covered by relay/run_review3.py.
+ota_production += "\nstatic void ota_service_fw_info(void) {}\n"
 for name in ("esb_ota_is_active", "ota_update_led", "ota_activate_impl", "esb_ota_handle_activate",
              "esb_ota_request_abort", "ota_abort", "esb_ota_service"):
     ota_production += "\n" + function(ota, name)

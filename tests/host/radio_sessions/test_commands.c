@@ -148,6 +148,14 @@ static int connection_set_data_collection_batch(bool enabled, uint16_t rate)
     return batch_result;
 }
 static void test_mode_set(bool active) { test_mode_changes++; }
+static unsigned char private_profile;
+static unsigned char tdma_profile_get(void) { return private_profile; }
+static bool private_staged;
+static bool tdma_profile_staged(void) { return private_staged; }
+#ifndef HOST_CAPABILITY_MATRIX
+static unsigned data_collect_calls;
+static void connection_set_data_collection(bool enable) { (void)enable; data_collect_calls++; }
+#endif
 static void reboot_counter_write(int count) {}
 static bool sys_exit_feedback_allowed(bool reboot) { (void)reboot; return false; }
 static int sys_request_system_off(void)
@@ -184,7 +192,7 @@ static uint16_t connection_get_data_collection_batch_rate(void) { return 100; }
 static void esb_wom_receive(uint16_t minutes, uint16_t token);
 static void esb_wom_reset(void);
 static void esb_clear_time_sync_state(void) {}
-static void tdma_set_enabled(bool enabled) { (void)enabled; }
+static void esb_presence_reset(void) {}
 static void connection_request_ping_resync(void) {}
 static uint16_t wom_timeout_get_minutes(void) { ++wom_queries; return wom_minutes; }
 static int wom_timeout_set_minutes(uint16_t minutes)
@@ -203,6 +211,7 @@ static int wom_timeout_set_minutes(uint16_t minutes)
     wom_minutes = minutes ? minutes : wom_default_minutes;
     return 0;
 }
+#include "relay_off.h"
 #include "commands.inc"
 
 static void run_shutdown(unsigned rejected)
@@ -545,6 +554,27 @@ int main(void)
     now_ms += 100; feeds = 0;
     if (setjmp(thread_stop) == 0) esb_thread();
     assert(!batch_active && test_mode_changes == 1);
+
+#ifndef HOST_CAPABILITY_MATRIX
+    /* A collection start refused in the relay profile is consumed once
+     * and does not start by itself after the profile ends. */
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    receive_control(ESB_PONG_FLAG_DATA_COLLECT_ON);
+    now_ms += 100; feeds = 0; stop_after = 3; private_profile = 1;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(acked_remote_command == ESB_PONG_FLAG_DATA_COLLECT_ON && !data_collect_calls);
+    private_profile = 0; now_ms += 100; feeds = 0;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(!data_collect_calls && test_mode_changes == 1);
+    /* A staged private layout refuses too: collection must not straddle activation. */
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    receive_control(ESB_PONG_FLAG_DATA_COLLECT_ON);
+    now_ms += 100; feeds = 0; private_staged = true;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(acked_remote_command == ESB_PONG_FLAG_DATA_COLLECT_ON && !data_collect_calls);
+    private_staged = false;
+    puts("commands: collection start refused in (or staged into) the relay profile is final");
+#endif
 
     /* A newer PONG may replace a refused shutdown during its next LED delay. */
     receive_control(ESB_PONG_FLAG_NORMAL);

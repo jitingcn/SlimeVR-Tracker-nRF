@@ -14,6 +14,8 @@ static uint64_t now_ticks;
 static bool locked, change_on_unlock, refresh_on_unlock;
 static unsigned irq_depth;
 static bool server_time_synced, channel_wait_normal;
+static bool control_seen, relayed_confirm_seen;
+static uint8_t control_member_history;
 static atomic_t channel_redirect_pending;
 static int esb_conn_state, status_bits;
 static int64_t g_last_sync_timestamp;
@@ -26,6 +28,8 @@ struct esb_sync_filter {
 	int32_t skew_ppb;
 	uint32_t update_count;
 	bool initialized;
+	int8_t receiver_lag;
+	int16_t ack_delay16;
 };
 static struct esb_sync_filter sync_filter;
 
@@ -131,9 +135,12 @@ int main(void)
 	filter_arithmetic();
 	g_min_rtt_age = 119;
 	g_min_rtt_ticks = 17;
+	control_seen = relayed_confirm_seen = true;
+	control_member_history = 0x1f;
 	esb_clear_time_sync_state();
 	assert(g_min_rtt_age == 119 && g_min_rtt_ticks == 10);
 	assert(!sync_filter.initialized && !server_time_synced && sync_filter.update_count == 0);
+	assert(!control_seen && !relayed_confirm_seen && !control_member_history);
 	assert(net_ticks_from_ms_near32(1) == 33);
 	assert(net_ticks_from_ms_near32(15) == 492);
 	assert(net_ticks_from_ms_near32(1000) == 32768);

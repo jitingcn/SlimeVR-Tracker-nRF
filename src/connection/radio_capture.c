@@ -36,6 +36,8 @@ BUILD_ASSERT((CAPTURE_QUEUE_SIZE & (CAPTURE_QUEUE_SIZE - 1U)) == 0,
 
 struct capture_metric {
 	uint32_t samples;
+	uint32_t success;
+	uint32_t completion_lag_max_us;
 	uint32_t address_samples;
 	uint32_t ready_to_end[DURATION_BUCKETS];
 	uint32_t address_to_end[DURATION_BUCKETS];
@@ -79,6 +81,8 @@ struct capture_record {
 	uint64_t ready_us;
 	uint64_t address_us;
 	uint64_t end_us;
+	uint64_t observed_us;
+	bool success;
 	uint8_t payload_length;
 };
 
@@ -87,7 +91,7 @@ static volatile uint8_t capture_head;
 static volatile uint8_t capture_tail;
 static atomic_t capture_queue_drops;
 static atomic_t capture_incomplete[CAPTURE_METRICS];
-static atomic_t capture_enabled = ATOMIC_INIT(1);
+static atomic_t capture_enabled;
 static struct capture_metric metrics[CAPTURE_METRICS];
 static struct ping_capture_metric ping_metric;
 static struct ping_capture_record ping_queue[CAPTURE_QUEUE_SIZE];
@@ -103,6 +107,8 @@ static bool ping_transaction_schedule_valid;
 static atomic_t ping_transaction_pending;
 static bool user_capture_active;
 static bool capture_initialized;
+static bool diagnostics_available;
+static bool rx_capture_owned;
 static K_MUTEX_DEFINE(capture_metrics_lock);
 
 static uint8_t metric_index(uint8_t payload_length)
@@ -315,60 +321,114 @@ static uint64_t capture_platform_now(void)
 }
 #endif
 
-int radio_capture_init(void)
+/* Lifecycle changes and raw capture setup are serialized with the RADIO ISR
+ * and with each other. Both owners share the same physical capture channels. */
+static int capture_init_locked(void)
 {
 	if (capture_initialized) {
 		return 0;
 	}
 	int err = capture_platform_init();
-	if (err == 0) {
-		capture_initialized = true;
-		atomic_set(&capture_enabled, 1);
-	}
+	capture_initialized = err == 0;
 	return err;
+}
+
+static void capture_release_idle_locked(void)
+{
+	if (capture_initialized && !rx_capture_owned && !atomic_get(&capture_enabled)) {
+		capture_platform_deinit();
+		capture_initialized = false;
+	}
+}
+
+int radio_capture_init(void)
+{
+	unsigned key = irq_lock();
+	int err = capture_init_locked();
+	diagnostics_available = err == 0;
+	atomic_set(&capture_enabled, diagnostics_available);
+	irq_unlock(key);
+	return err;
+}
+
+int radio_capture_rx_acquire(void)
+{
+	unsigned key = irq_lock();
+	int err = capture_init_locked();
+	if (!err) {
+		rx_capture_owned = true;
+		/* Discard any previous capture and rearm the DPPI capture tasks
+		 * before putting RADIO into the raw window. */
+		struct capture_record previous;
+		(void)capture_platform_read(&previous);
+	}
+	irq_unlock(key);
+	return err;
+}
+
+void radio_capture_rx_release(void)
+{
+	unsigned key = irq_lock();
+	rx_capture_owned = false;
+	capture_release_idle_locked();
+	irq_unlock(key);
+}
+
+bool radio_capture_rx_end(uint32_t *kernel_ticks)
+{
+	struct capture_record record;
+	/* Pair the TIMER age with kernel time without an interrupt between
+	 * them. Otherwise ISR latency is added to the hardware END timestamp. */
+	unsigned key = irq_lock();
+	if (!capture_initialized || !capture_platform_read(&record)) {
+		irq_unlock(key);
+		return false;
+	}
+	uint64_t now = capture_platform_now();
+	uint32_t ticks = (uint32_t)k_uptime_ticks();
+	irq_unlock(key);
+#if defined(CONFIG_SOC_SERIES_NRF52)
+	uint32_t age = (uint32_t)now - (uint32_t)record.end_us;
+#else
+	uint64_t age = now - record.end_us;
+#endif
+	if (age > 1000U) {
+		return false;
+	}
+	*kernel_ticks = ticks - k_us_to_ticks_floor32(age);
+	return true;
 }
 
 void radio_capture_deinit(void)
 {
-	if (!capture_initialized) {
-		return;
-	}
-	capture_platform_deinit();
+	unsigned key = irq_lock();
+	diagnostics_available = false;
+	user_capture_active = false;
+	rx_capture_owned = false;
 	atomic_set(&capture_enabled, 0);
-	capture_initialized = false;
-}
-
-void radio_capture_set_enabled(bool enabled)
-{
-	if (!capture_initialized) {
-		return;
-	}
-	for (size_t i = 0; i < capture_conn_count; i++) {
-		if (enabled) {
-			nrfx_gppi_conn_enable(capture_conn[i]);
-		} else {
-			nrfx_gppi_conn_disable(capture_conn[i]);
-		}
-	}
-	atomic_set(&capture_enabled, enabled ? 1 : 0);
-#if defined(CONFIG_SOC_SERIES_NRF54L)
-	if (enabled) {
-		capture_platform_rearm();
-	}
-#endif
+	atomic_set(&ping_transaction_pending, 0);
+	capture_release_idle_locked();
+	irq_unlock(key);
 }
 
 int radio_capture_user_set_enabled(bool enabled)
 {
-	if (!capture_initialized) {
-		led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
-		return -ENODEV;
+	unsigned key = irq_lock();
+	int err = diagnostics_available ? (enabled ? capture_init_locked() : 0) : -ENODEV;
+	if (!err) {
+		atomic_set(&capture_enabled, enabled);
+		if (!enabled) {
+			atomic_set(&ping_transaction_pending, 0);
+			capture_release_idle_locked();
+		}
+		user_capture_active = enabled;
 	}
-	radio_capture_set_enabled(enabled);
-	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_SUCCESS);
-	user_capture_active = enabled;
-	connection_feedback_maintenance_update();
-	return 0;
+	irq_unlock(key);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), err ? LED_REJECTED : LED_SUCCESS);
+	if (!err) {
+		connection_feedback_maintenance_update();
+	}
+	return err;
 }
 
 bool radio_capture_user_active(void)
@@ -378,7 +438,7 @@ bool radio_capture_user_active(void)
 
 bool radio_capture_is_enabled(void)
 {
-	return capture_initialized && atomic_get(&capture_enabled) != 0;
+	return atomic_get(&capture_enabled) != 0;
 }
 
 void radio_capture_record(
@@ -412,6 +472,8 @@ void radio_capture_record(
 		.payload_length = payload_length,
 	};
 	bool complete = capture_platform_read(&record);
+	record.observed_us = capture_platform_now();
+	record.success = success;
 	if (!no_ack) {
 		if (packet_type != ESB_PING_TYPE) {
 			return;
@@ -571,6 +633,9 @@ void radio_capture_process(void)
 		k_mutex_lock(&capture_metrics_lock, K_FOREVER);
 		struct capture_metric *metric = &metrics[index];
 		metric->samples++;
+		metric->success += record.success;
+		uint32_t completion_lag = (uint32_t)(record.observed_us - record.end_us);
+		metric->completion_lag_max_us = MAX(metric->completion_lag_max_us, completion_lag);
 		metric->ready_to_end[duration_bucket(ready_to_end_us)]++;
 		metric->ready_to_end_max_us = MAX(metric->ready_to_end_max_us, ready_to_end_us);
 		if (record.address_us != 0) {
@@ -610,6 +675,9 @@ void radio_capture_print_stats(void)
 			metric->address_samples, address_p50_us, address_p99_us, metric->address_to_end_max_us,
 			ready_p50, ready_p99, end_p99, metric->crossed_slot_end
 		);
+		LOG_INF("RADIO completion %s success=%u failed=%u lag_max_us=%u",
+			names[i], metric->success, metric->samples - metric->success,
+			metric->completion_lag_max_us);
 		k_mutex_unlock(&capture_metrics_lock);
 	}
 	int32_t ping_start_p50

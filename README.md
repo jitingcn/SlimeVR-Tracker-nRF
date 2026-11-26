@@ -20,6 +20,7 @@ Changes are driven by real playtesting, user needs, and normal software engineer
 - More sensor calibration options and features
 - Custom sdk-nrf fork with more features and fixes
 - Different TDMA radio scheduling, clock sync methods
+- [Peer relay](docs/relay.md)
 - OTA support via BLE/ESB
 - Configurable IMU/mag sensor driver whitelist
 - Resting state policy refinements, Different WoM policy

@@ -25,6 +25,7 @@ flash = (SRC / "system/esb_ota_flash.c").read_text()
 header = (SRC / "system/esb_ota.h").read_text()
 parts = [block(esb, r"^static struct \{(?=\n\tuint16_t minutes, token;)") + " wom_command;",
          function(esb, "esb_wom_reset"),
+         function(esb, "esb_presence_reset"),
          function(esb, "esb_deinitialize"), function(esb, "esb_initialize"),
          function(connection, "connection_next_deadline_ms"),
          function(connection, "connection_idle_wait"),
@@ -40,8 +41,8 @@ if not legacy:
 with tempfile.TemporaryDirectory(prefix="radio-ota-findings-") as directory:
     temporary = Path(directory)
     (temporary / "production.inc").write_text("\n\n".join(parts))
-    for diagnostics in (0, 1):
-        binary = temporary / f"test-{diagnostics}"
+    for diagnostics, relay in ((0, 0), (1, 0), (0, 1)):
+        binary = temporary / f"test-{diagnostics}-{relay}"
         command = shlex.split(os.environ.get("CC", "cc")) + [
             "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
             "-g", "-O1", "-fsanitize=address,undefined", "-fno-pie", "-no-pie",
@@ -51,6 +52,8 @@ with tempfile.TemporaryDirectory(prefix="radio-ota-findings-") as directory:
             str(HERE / "test.c"), "-o", str(binary)]
         if diagnostics:
             command.append("-DCONFIG_TDMA_DIAGNOSTICS=1")
+        if relay:
+            command.append("-DCONFIG_CONNECTION_RELAY=1")
         subprocess.run(command, check=True)
         cases = os.environ.get("RADIO_OTA_CASES", "init deadline crc16" + ("" if legacy else " copy")).split()
         for case in cases:

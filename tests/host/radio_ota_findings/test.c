@@ -7,8 +7,9 @@
 #include <errno.h>
 #include "../led_feedback_stub.h"
 #include "../harness/include/atomic.h"
-static unsigned irq_lock(void) { return 0; }
-static void irq_unlock(unsigned key) { (void)key; }
+static unsigned irq_depth;
+static unsigned irq_lock(void) { return irq_depth++; }
+static void irq_unlock(unsigned key) { assert(irq_depth == key + 1); irq_depth = key; }
 #define ESB_ST_PAIRING 0
 #define LOG_INF(...) ((void)0)
 #define LOG_WRN(...) ((void)0)
@@ -31,16 +32,24 @@ struct esb_config {
     void (*event_handler)(void), (*tx_capture_handler)(void);
 };
 static void event_handler(void) {}
+#if defined(CONFIG_TDMA_DIAGNOSTICS) || defined(CONFIG_CONNECTION_RELAY)
+static unsigned capture_live;
 #ifdef CONFIG_TDMA_DIAGNOSTICS
 static void radio_capture_record(void) {}
-static unsigned capture_live;
 static int radio_capture_init(void) { capture_live = 1; return 0; }
-static void radio_capture_deinit(void) { capture_live = 0; }
+#endif
+static unsigned capture_teardowns;
+static void radio_capture_deinit(void) { capture_live = 0; ++capture_teardowns; }
+#ifdef CONFIG_CONNECTION_RELAY
+static void radio_capture_rx_release(void) { assert(irq_depth); capture_live = 0; }
+#endif
 #endif
 static int esb_radio_lock, lock_depth;
 static void k_mutex_lock(int *lock, int timeout) { lock_depth++; }
 static void k_mutex_unlock(int *lock) { assert(lock_depth > 0); lock_depth--; }
-static bool esb_initialized, own_pong_seen, channel_search, channel_wait_normal;
+static bool esb_initialized, own_pong_seen, channel_search, channel_wait_normal, layout_confirm_seen;
+static bool receiver_heard_seen, control_seen, relayed_confirm_seen, layout_stale, own_trailer_valid;
+static uint8_t control_member_history;
 static atomic_t channel_found, channel_heard, channel_redirect_pending;
 static bool ping_pending, pair_provisional, pair_ack_pending, pairing_search_active;
 static bool channel_confirm_capable, channel_confirmed, channel_legacy_peer, ping_channel_confirm_sent;
@@ -63,7 +72,24 @@ static int esb_set_prefixes(uint8_t *prefix, size_t count) { return step(); }
 static void esb_disable(void) { assert(driver_live); driver_live = false; disable_calls++; }
 static void set_status(int mask, bool value) { connection_error = value; }
 static void esb_clear_time_sync_state(void) {}
-static void tdma_set_enabled(bool enabled) {}
+/* Model the raw radio and TDMA leaves, retaining the production session reset. */
+static int raw_rx_blocked_depth;
+static bool raw_rx_active;
+static int esb_raw_rx_quiesce(void) {
+    if (raw_rx_active) return -ETIMEDOUT;
+    raw_rx_blocked_depth++;
+    return 0;
+}
+static void esb_raw_rx_resume(void) { assert(raw_rx_blocked_depth > 0); raw_rx_blocked_depth--; }
+static bool private_profile, private_stage, private_grant;
+static void tdma_session_reset(void) {
+    assert(irq_depth && raw_rx_blocked_depth);
+    private_profile = private_stage = false;
+}
+static void relay_reset(void) {
+    assert(irq_depth && raw_rx_blocked_depth);
+    private_grant = false;
+}
 static int64_t now_ms;
 static int64_t k_uptime_get(void) { return now_ms; }
 static atomic_t next_ping_deadline_ms;
@@ -160,7 +186,32 @@ static void test_initialization(void)
             assert(esb_initialize(false) == 0);
             assert(esb_initialized && driver_live && steps == 5 && lock_depth == 0);
             assert(radio_channel == (retained_channel ? 42 : RADIO_RF_CHANNEL));
+            own_pong_seen = layout_confirm_seen = receiver_heard_seen = true;
+            control_seen = relayed_confirm_seen = layout_stale = own_trailer_valid = true;
+            control_member_history = 1;
+            private_profile = private_stage = private_grant = true;
+#if defined(CONFIG_TDMA_DIAGNOSTICS) || defined(CONFIG_CONNECTION_RELAY)
+            unsigned prior_teardowns = capture_teardowns;
+#endif
+#ifdef CONFIG_CONNECTION_RELAY
+            capture_live = 1; /* Acquired by a private raw RX window. */
+            raw_rx_active = true;
             esb_deinitialize();
+            assert(capture_live && esb_initialized && driver_live && !raw_rx_blocked_depth);
+            assert(capture_teardowns == prior_teardowns);
+            assert(own_pong_seen && layout_confirm_seen && control_seen);
+            assert(private_profile && private_stage && private_grant);
+            raw_rx_active = false;
+#endif
+            esb_deinitialize();
+            assert(!esb_initialized && !driver_live && !lock_depth && !raw_rx_blocked_depth && !irq_depth);
+            assert(!own_pong_seen && !layout_confirm_seen && !receiver_heard_seen && !control_seen);
+            assert(!relayed_confirm_seen && !layout_stale && !own_trailer_valid && !control_member_history);
+            assert(!private_profile && !private_stage && !private_grant);
+            assert(storage.rf_channel == (retained_channel ? 42 : ESB_RF_CHANNEL_DEFAULT));
+#if defined(CONFIG_TDMA_DIAGNOSTICS) || defined(CONFIG_CONNECTION_RELAY)
+            assert(!capture_live && capture_teardowns == prior_teardowns + 1);
+#endif
         }
     }
     steps = 0;

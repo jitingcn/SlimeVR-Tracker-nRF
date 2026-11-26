@@ -16,7 +16,7 @@ HOST = Path(__file__).resolve().parents[1]
 
 
 def function(source, name):
-    return block(source, rf"^(?:static\s+)?(?:const struct sub_packet_desc \*|bool|void|int|uint8_t|uint32_t)\s*{re.escape(name)}\([^;{{]*\)\s*\{{")
+    return block(source, rf"^(?:static\s+)?(?:const struct sub_packet_desc \*|bool|void|int|uint8_t|uint16_t|uint32_t)\s*{re.escape(name)}\([^;{{]*\)\s*\{{")
 
 
 PREFIX = r'''
@@ -29,15 +29,59 @@ PREFIX = r'''
 #include <errno.h>
 #include <math.h>
 #include "connection/tracker_events.h"
+#include "connection/relay_protocol.h"
+#include "connection/tdma.h"
+#include "system/test_mode.h"
+static bool stream_enabled, stream_granted, stream_clock_held, stream_lost;
+static uint32_t stream_target, stream_wait_target;
+static uint8_t stream_slot;
+static bool (*stream_next_hook)(uint32_t *, bool *);
+static bool (*stream_control_hook)(uint32_t);
+static void (*stream_wait_hook)(uint32_t), (*stream_send_hook)(size_t);
+bool tdma_wait_network_tick(uint32_t t) {
+    stream_wait_target=t;
+    if (stream_wait_hook) stream_wait_hook(t);
+    return true;
+}
+bool tdma_layout_get(struct tdma_layout *l) {
+    *l=(struct tdma_layout){.profile=1,.slot_index=stream_slot,.slot_ticks=RELAY_SLOT_TICKS,.epoch=1};
+    return true;
+}
+uint8_t tdma_profile_get(void) { return stream_enabled; }
+bool tdma_is_enabled(void) { return stream_enabled; }
+uint16_t tdma_frame_ticks_get(void) { return RELAY_DIRECT_SLOTS * RELAY_SLOT_TICKS; }
+bool tdma_stream_next(uint32_t *target, bool *control) {
+    if (stream_next_hook) return stream_next_hook(target,control);
+    *target=stream_target; *control=false;
+    return true;
+}
+static bool esb_layout_granted(void) { return stream_granted; }
+static bool esb_relay_profile_lost(void) { return stream_lost; }
+void tdma_profile_drop(void) { stream_enabled=stream_lost=false; }
+static int esb_relay_clock(bool enable) { (void)enable; return 0; }
+static bool esb_relay_control_window(uint32_t target) {
+    assert(stream_control_hook);
+    return stream_control_hook(target);
+}
+static bool relay_next_maintenance(uint32_t *t) { (void)t; return false; }
+static bool relay_next_repair(uint32_t *t, uint8_t *s) { (void)t; (void)s; return false; }
+static int esb_write_maintenance(uint8_t *p) { (void)p; assert(false); return -EINVAL; }
+static int esb_write_relay(void) { assert(false); return -EINVAL; }
+static void relay_control_serviced(void) {}
+#if defined(CONFIG_CONNECTION_RELAY)
+static bool relay_native_test_requested;
+#endif
+static uint32_t k_uptime_get_32(void);
 #include "connection/sensor_data_snapshot.h"
 #include "util.h"
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
 #define BIT(x) (1U << (x))
+#define CLAMP(x, lo, hi) ((x) < (lo) ? (lo) : (x) > (hi) ? (hi) : (x))
 #define CONFIG_CONNECTION_OVER_HID 1
 #define SYS_STATUS_CONNECTION_ERROR 1
 #define SYS_STATUS_USB_CONNECTED 2
 #define LOG_WRN(...) ((void)0)
-#define LOG_INF(...) ((void)0)
+#define LOG_INF(...) do { if (0) printf(__VA_ARGS__); } while (0)
 #define PING_QUEUE_RETRY_MS 10
 #define FW_BOARD 7
 #define FW_MCU 8
@@ -92,8 +136,11 @@ static void k_msleep(int x) { last_sleep_ms=x; sleeps++; }
 static void k_usleep(int x) { (void)x; sleeps++; }
 static bool esb_ready(void) { return radio; }
 static bool esb_ota_is_active(void) { return ota; }
+/* This fixture covers the direct producer; relay scheduling is exercised in
+ * tests/host/relay using its real worker and TDMA admission. */
+static size_t relay_diag_build(uint8_t *buf, size_t capacity, uint8_t id) { (void)buf; (void)capacity; (void)id; return 0; }
 static bool get_status(int x) { return x==SYS_STATUS_USB_CONNECTED ? usb : error; }
-static bool test_mode_get(void) { return test_enabled; }
+bool test_mode_get(void) { return test_enabled; }
 static bool rotation_type(uint8_t type) { return type==1 || type==2 || type==4; }
 static unsigned wire_body_len(uint8_t type) {
     switch (type) {
@@ -128,6 +175,16 @@ static int esb_write(uint8_t *p, bool noack, size_t n) {
     if (send_error==0) record_radio_rotations(p,n);
     return send_error;
 }
+struct esb_source_guard { unsigned key; bool active; };
+static bool esb_source_begin(struct esb_source_guard *g, uint32_t target) {
+ g->active=true;return tdma_wait_network_tick(target-4U);
+}
+static void esb_source_end(struct esb_source_guard *g) { g->active=false; }
+static int esb_source_write(struct esb_source_guard *g,uint8_t *data,size_t len) {
+ if (stream_send_hook) stream_send_hook(len);
+ esb_source_end(g);return esb_write(data,true,len);
+}
+
 static bool hid_write_packet_n(const uint8_t *p) {
     assert(mirrors<ARRAY_SIZE(mirrored)); memcpy(mirrored[mirrors++],p,16);
     if (hid_hook) { void (*hook)(void)=hid_hook; hid_hook=NULL; hook(); }
@@ -152,9 +209,9 @@ static struct { atomic_t due, attempts, queue_ok, queue_fail, retry_deferred; } 
 static void atomic_inc(atomic_t *v) { __atomic_fetch_add(v,1,__ATOMIC_SEQ_CST); }
 static bool atomic_cas(atomic_t *v,int a,int b) { return __atomic_compare_exchange_n(v,&a,b,false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST); }
 static uint32_t get_ping_interval_ms(void) { return 1000; }
-static bool tdma_ping_wake_delay_ms(uint32_t *p) { (void)p; return false; }
+bool tdma_ping_wake_delay_ms(uint32_t *p) { (void)p; return false; }
 static bool tdma_stalled;
-static bool tdma_admission_stalled(void) { return tdma_stalled; }
+bool tdma_admission_stalled(void) { return tdma_stalled; }
 static uint32_t ping_server_phase_delay_ms(uint32_t x) { (void)x; return 0; }
 static uint8_t connection_get_id(void) { return tracker_id; }
 static uint8_t esb_get_ping_ack_flag(void) { return 0; }
@@ -165,7 +222,7 @@ static uint32_t ping_next_periodic_deadline(uint32_t p,uint32_t n,uint32_t i) { 
 static void esb_ota_periodic_status(void) {}
 static bool connection_raw_collection_active(void) { return raw; }
 static bool connection_process_raw_data(void) { raw_calls++; return raw_pending; }
-static uint16_t test_mode_effective_tps(void) { return test_enabled ? target_tps : 0; }
+uint16_t test_mode_get_target_tps(void) { return target_tps; }
 static void connection_idle_wait(int64_t x) { (void)x; }
 '''
 
@@ -173,11 +230,11 @@ TESTS = r'''
 static void set_clock(uint64_t us) { clock_us=us; now_ms=us/1000; }
 static void publish_a(void) {
     const float q[]={0.5f,0.5f,-0.5f,0.5f}, a[]={1.25f,-2.5f,0.125f};
-    sensor_data_snapshot_publish_qa(&sensor_data_snapshot,q,a,true);
+    sensor_data_snapshot_publish_qa(&sensor_data_snapshot,q,a,true,k_uptime_get_32());
 }
 static void publish_zero(void) {
     const float q[]={1,0,0,0}, a[]={0,0,0};
-    sensor_data_snapshot_publish_qa(&sensor_data_snapshot,q,a,true);
+    sensor_data_snapshot_publish_qa(&sensor_data_snapshot,q,a,true,k_uptime_get_32());
 }
 static void publish_m(void) {
     const float m[]={0.25f,-0.5f,1.5f};
@@ -193,6 +250,12 @@ static bool qa_pending(void) { return sensor_data_snapshot_qa_pending(&sensor_da
 static bool m_pending(void) { return sensor_data_snapshot_m_pending(&sensor_data_snapshot); }
 static void reset(void) {
     radio=usb=event_due=true; test_enabled=ota=error=raw=raw_pending=false;
+    stream_enabled=stream_clock_held=stream_lost=false; stream_granted=true;
+    stream_slot=0; stream_target=stream_wait_target=0;
+    stream_next_hook=NULL; stream_control_hook=NULL; stream_wait_hook=NULL; stream_send_hook=NULL;
+#if defined(CONFIG_CONNECTION_RELAY)
+    relay_native_test_requested=false;
+#endif
     sensor_ids_set=tdma_stalled=false; connection_set_ota_suppressed(false);
     memset(&sensor_data_snapshot,0,sizeof(sensor_data_snapshot));
     publish_zero(); sensor_data_capture_t value=capture();
@@ -254,7 +317,7 @@ static void assert_zero_bytes(void) {
     assert(body && memcmp(body,expected,sizeof(expected))==0);
 }
 static uint8_t send_builder(struct composite_builder *b) {
-    sensor_data_capture_t value=capture(); return send_composite_or_single(b,&value);
+    sensor_data_capture_t value=capture(); return send_composite_or_single(b,&value,0,NULL);
 }
 static void test_protocol_events(void) {
     struct composite_builder b;
@@ -297,7 +360,7 @@ static void test_protocol_events(void) {
         assert(selects==0 && completes==0 && sent[2]==4 && sent_len==51);
     } else {
         assert(selects==1 && completes==1 && completion_success && sent[2]==5 && sent_len==67);
-        assert(body_for(TRACKER_EVENT_ESB_TYPE) && sent[66]==19);
+        assert(body_for(TRACKER_EVENT_ESB_TYPE) && sent[sent_len-1]==19);
     }
     reset(); publish_a(); composite_builder_reset(&b); assert(composite_try_add(&b,1));
     send_error=-EAGAIN; assert(send_builder(&b)==0);
@@ -319,7 +382,7 @@ static void test_numerical_encoders(void) {
     const uint8_t mag[]={0,64,0,192,0,64,0,64,0,1,0,254,0,6};
     assert(memcmp(body_for(4),mag,sizeof(mag))==0);
     reset(); event_due=false; const float q[]={1,0,0,0}, a[]={1.25f,-2.5f,0.125f};
-    sensor_data_snapshot_publish_qa(&sensor_data_snapshot,q,a,false);
+    sensor_data_snapshot_publish_qa(&sensor_data_snapshot,q,a,false,k_uptime_get_32());
     sensor_ids_set=true; last_info_time=0; radio_hook=publish_zero; iteration();
     const uint8_t compact[]={60,94,133,0,2,16,128,160,0,192,254,16,0};
     assert(body_for(2) && memcmp(body_for(2),compact,sizeof(compact))==0);
@@ -510,7 +573,7 @@ static void test_low_rate_fair_sharing(void) {
 }
 static void delay_acceptance(void) { set_clock(clock_us+25000); }
 static void test_exact_rates(void) {
-    const unsigned rates[]={3,128};
+    const unsigned rates[]={3,120,128,130};
     for (unsigned r=0;r<ARRAY_SIZE(rates);++r) {
         reset(); test_enabled=true; target_tps=rates[r]; next_ping_deadline_ms=1000000; event_due=false;
         publish_a(); test_rate_schedule_sync(clock_us);
@@ -588,14 +651,19 @@ def build_source(source=None):
     constants = "\n".join(re.findall(r"^#define (?:ESB_|SUB_PACKET_)[^\n]*", header, re.MULTILINE))
     constants += "\n" + "\n".join(re.findall(r"^#define SEND_RETRY_[^\n]*", source, re.MULTILINE))
     utility = (ROOT / "src/util.c").read_text()
+    test_mode = (ROOT / "src/system/test_mode.c").read_text()
     parts = [constants, PREFIX, function(utility, "q_fem"), function(utility, "q_epsilon"),
              function(source, "connection_update_sensor_data")]
     start = source.index("enum sub_packet_type {")
     end = source.index("\nstatic uint8_t get_server_constant_imu_id(", start)
     parts.append(source[start:end])
+    parts.append(re.search(r"^#define TEST_MODE_RATE_QUANTUM_TPS [^\n]*", test_mode, re.MULTILINE)[0])
+    parts.append(function(test_mode, "test_mode_effective_tps"))
     parts.append(block(source, r"^static struct \{(?=\n\s*uint64_t next_due_us;)") + " test_rate_schedule;")
-    for name in ("test_rate_schedule_sync", "test_rate_due", "test_rate_advance"):
+    for name in ("test_rate_select_transport", "test_rate_schedule_sync", "test_rate_due", "test_rate_step",
+                 "test_rate_advance", "test_rate_stream_due", "test_rate_stream_advance"):
         parts.append(function(source, name))
+    parts.append("#if defined(CONFIG_CONNECTION_RELAY)\n" + function(source, "connection_update_native_test_request") + "\n#endif")
     start = source.index("#define COMPOSITE_LOOKAHEAD_MS")
     end = source.index("\nstatic void connection_signal_wake(", start)
     parts.append(source[start:end])
@@ -607,9 +675,10 @@ def build_source(source=None):
     for name in ("connection_set_ota_suppressed", "connection_get_ota_suppressed",
                  "connection_ota_suppression_active"):
         parts.append(function(source, name))
+    parts.append(function(source, "ping_build"))
     parts.append(function(source, "connection_service_ping"))
     thread = function(source, "connection_thread")
-    start = thread.index("\t\tif (radio_ready) {")
+    start = thread.index("\t\tbool in_test_mode =")
     end = thread.rindex("\n\t}")
     parts.append("#define sensor_data_snapshot_capture capture_with_hook\n"
                  + "static void iteration(void) { int64_t now=now_ms; bool radio_ready=esb_ready(); do {\n"
@@ -648,6 +717,7 @@ def run():
                 "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-sign-compare", "-g", "-O1",
                 "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie",
                 f"-DCONFIG_ESB_MAX_PAYLOAD_LENGTH={payload_length}",
+                "-DCONFIG_CONNECTION_TDMA=1",
                 "-DCONFIG_CONNECTION_RAW_COLLECTION=1", "-DCONFIG_SENSOR_USE_MAGNETOMETER=1",
                 "-I", str(HOST / "concurrency"),
                 "-I", str(ROOT / "src"), str(c), "-lm", "-o", str(binary)], check=True)

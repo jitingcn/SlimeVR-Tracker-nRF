@@ -815,6 +815,23 @@ config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
     bool "Enable RC oscillator calibration for K32SRC"
     default n
 
+config CONNECTION_RELAY
+    bool "Receiver-coordinated peer relay"
+    default y
+    depends on CONNECTION_TDMA
+    depends on ESB_MAX_PAYLOAD_LENGTH >= 72
+    depends on ESB_HAS_RX_METADATA
+    select ESB_RX_METADATA
+    help
+        Receiver-coordinated peer relay. On by default whenever TDMA is on
+        and the SDK provides ESB RX metadata; the receiver's runtime relay
+        mode decides when relay engages.
+        Normal direct TDMA has no helper overhead. When the receiver engages
+        relay, its control frames assign watch windows; the tracker caches
+        overheard poses and resends them only in repair slots granted by
+        the current control frame. Overheard receiver PONGs also keep slot
+        and time sync while the own uplink fails.
+
 menu "TDMA diagnostics"
 
 config TDMA_DIAGNOSTICS
@@ -827,8 +844,11 @@ config TDMA_DIAGNOSTICS
         and removes the capture hook from the ESB transmit path.
         TDMA scheduling itself stays fully functional without this
         option; only measurement instrumentation is removed at compile
-        time. The admission/guard counters shown by "tdma stats" are
-        also compiled out with this option.
+        time. Basic admission/refusal, control frame error and repair funnel counters
+        remain available in production. Detailed DWT probes require
+        RELAY_CYCLE_DIAGNOSTICS; frame ledgers and detailed ledger timing
+        have their own separate options. Hardware RX END timestamps remain
+        enabled where relay clock and capture correctness require them.
 
 endmenu
 
@@ -845,3 +865,33 @@ rsource "Kconfig.sensors_drivers"
 rsource "Kconfig.heater"
 
 source "Kconfig.zephyr"
+
+config RELAY_CYCLE_DIAGNOSTICS
+    bool "Detailed relay CPU cycle diagnostics"
+    depends on CPU_CORTEX_M_HAS_DWT
+    default n
+    help
+        Measure relay processing with DWT. Production omits these probes.
+
+config RELAY_ACQUISITION_TRACE
+    bool "Log passive layout acquisition timestamps"
+    depends on CONNECTION_RELAY
+    default n
+
+config RELAY_PRODUCER_DIAGNOSTICS
+    bool "Relay producer generation and age diagnostics"
+    default n
+    help
+        Count attempted, queued and repeated snapshots and log their age.
+
+config RELAY_IRQ_DIAGNOSTICS
+    bool "Whole relay IRQ lock duration probes"
+    depends on CPU_CORTEX_M_HAS_DWT
+    default n
+    help
+        Diagnostic-only DWT maxima for complete source or coordinator locks.
+        Retains all production guards. Never enable for acceptance images.
+
+config RELAY_RUNTIME_LAYOUT
+    bool
+    default y
