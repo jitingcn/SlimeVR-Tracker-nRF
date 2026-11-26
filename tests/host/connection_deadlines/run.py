@@ -21,7 +21,7 @@ esb_header = (root / "src/connection/esb.h").read_text()
 
 
 def function(source, name):
-    return extract_block(source, rf"^(?:static )?(?:inline )?(?:enum tdma_ping_admission|void|bool|int64_t|uint64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
+    return extract_block(source, rf"^(?:static )?(?:inline )?(?:enum tdma_ping_admission|void|bool|int64_t|int32_t|uint64_t|uint32_t|uint16_t|uint8_t) {re.escape(name)}\([^;{{]*\)\s*\{{")
 
 prefix = r'''
 #include <assert.h>
@@ -43,6 +43,8 @@ prefix = r'''
 #define TDMA_SLOT_TICKS 22
 #define TDMA_FRAME_TICKS (TDMA_NUM_TRACKERS * TDMA_SLOT_TICKS)
 #define K_NO_WAIT 0
+#define CONFIG_SYS_CLOCK_TICKS_PER_SEC 1000000U
+#define K_TIMEOUT_ABS_TICKS(t) ((uint64_t)(t) | (1ULL << 63))
 #define K_USEC(x) ((uint64_t)(x))
 #define K_MSEC(x) ((uint64_t)(x) * 1000)
 typedef int64_t atomic_t;
@@ -69,6 +71,8 @@ struct esb_sync_filter {
 	int32_t skew_ppb;
 	uint32_t update_count;
 	bool initialized;
+	int8_t receiver_lag;
+	int16_t ack_delay16;
 };
 static struct esb_sync_filter sync_filter;
 
@@ -83,9 +87,11 @@ static uint64_t k_ticks_to_ms_floor64(uint64_t ticks) { return ticks / 1000; }
 static uint64_t net_ticks_from_kernel64(uint64_t ticks) { return ticks * 32768 / 1000000; }
 static uint64_t k_ticks_to_us_floor64(uint64_t ticks) { return ticks; }
 static void k_sleep(uint64_t us) {
+    bool absolute = us >> 63;
+    if (absolute) { us &= ~(1ULL << 63); us = us > virtual_us ? us - virtual_us : 0; }
     if (sleep_calls++ == 0) first_sleep_us = us;
     /* Ceil timeout conversion plus one kernel tick models phase uncertainty. */
-    uint64_t kticks = (us * kernel_hz + 999999) / 1000000 + 1;
+    uint64_t kticks = (us * kernel_hz + 999999) / 1000000 + !absolute;
     if (!freeze_clock) virtual_us += (kticks * 1000000 + kernel_hz - 1) / kernel_hz;
     if (invalidate_on_sleep) sync_age = -1;
     if (change_layout_on_sleep) tdma_cfg_pack ^= 1UL << 24;
@@ -116,6 +122,10 @@ parts = [prefix, function(network_ticks, "net_ticks_to_us_ceil64"),
          function(network_ticks, "net_ticks_to_ms_floor32"), extract_block(esb_header, r"^struct esb_network_clock \{", True),
          function(esb, "esb_project_network_ticks"),
          function(esb, "esb_get_network_clock"), function(esb, "esb_get_sync_age_ms"),
+         # Promotion into profile 1 moves the clock to receiver time, and out of
+         # it back to the ACK RX reference.
+         *(function(esb, name) for name in ("esb_adopt_receiver_time", "esb_restore_ack_reference")
+           if f"\nint32_t {name}(void)\n{{" in esb),
          tdma[tdma.index("#define TDMA_ENABLED_BIT"):tdma.index("\nvoid tdma_init(")],
          tdma[tdma.index("#define TDMA_LEN17_RESERVE_TICKS"):tdma.index("\nvoid tdma_note_radio_busy")],
          function(tdma, "tdma_admission_stalled"), function(tdma, "tdma_update_config"),
@@ -543,7 +553,7 @@ case = sys.argv[1] if len(sys.argv) > 1 else "all"
 with tempfile.TemporaryDirectory(prefix="slimenrf-deadline-smoke-") as directory:
     temp = Path(directory)
     source = temp / "deadline.c"
-    source.write_text("\n\n".join(parts))
+    source.write_text(('#include "' + str(root / "src/connection/relay_protocol.h") + '"\n') + "\nstatic bool esb_layout_granted(void) { return true; } static bool esb_relay_granted_at(uint32_t tick) { (void)tick; return true; }\n" + "\n\n".join(parts))
     binary = temp / "deadline"
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable",

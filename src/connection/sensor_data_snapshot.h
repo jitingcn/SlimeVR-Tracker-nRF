@@ -19,6 +19,9 @@ typedef struct {
 	float m[3];
 #endif
 	uint64_t qa_generation;
+#ifdef CONFIG_RELAY_PRODUCER_DIAGNOSTICS
+	uint32_t qa_published_ms;
+#endif
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	uint64_t m_generation;
 #endif
@@ -34,6 +37,9 @@ typedef struct {
 	float m[3];
 #endif
 	uint64_t qa_generation;
+#ifdef CONFIG_RELAY_PRODUCER_DIAGNOSTICS
+	uint32_t qa_published_ms;
+#endif
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	uint64_t m_generation;
 #endif
@@ -60,7 +66,8 @@ static inline void sensor_data_snapshot_publish_qa(
 	sensor_data_snapshot_t *state,
 	const float q[4],
 	const float a[3],
-	bool precise
+	bool precise,
+	uint32_t published_ms
 )
 {
 	k_spinlock_key_t key = k_spin_lock(&state->lock);
@@ -68,6 +75,11 @@ static inline void sensor_data_snapshot_publish_qa(
 	memcpy(state->a, a, sizeof(state->a));
 	state->precise = precise;
 	state->qa_generation++;
+#ifdef CONFIG_RELAY_PRODUCER_DIAGNOSTICS
+	state->qa_published_ms = published_ms;
+#else
+	(void)published_ms;
+#endif
 	atomic_set(&state->qa_pending, 1);
 	k_spin_unlock(&state->lock, key);
 }
@@ -98,6 +110,9 @@ static inline void sensor_data_snapshot_capture(
 	memcpy(capture->m, state->m, sizeof(capture->m));
 #endif
 	capture->qa_generation = state->qa_generation;
+#ifdef CONFIG_RELAY_PRODUCER_DIAGNOSTICS
+	capture->qa_published_ms = state->qa_published_ms;
+#endif
 #if CONFIG_SENSOR_USE_MAGNETOMETER
 	capture->m_generation = state->m_generation;
 #endif

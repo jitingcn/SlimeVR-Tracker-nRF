@@ -72,6 +72,7 @@ static bool test_mode_get(void) {return false;}
 static bool esb_ota_is_active(void) {return false;}
 static bool connection_get_ota_suppressed(void) {return false;}
 static bool esb_ready(void) {return true;}
+static uint8_t tdma_profile_get(void) {return 0;}
 #ifndef MAX
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif

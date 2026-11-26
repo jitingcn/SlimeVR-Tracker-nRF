@@ -51,6 +51,7 @@
 #include "globals.h"
 #include "build_defines.h"
 #include "connection/esb.h"
+#include "connection/tdma.h"
 #include "connection/connection.h"
 #include "system/power.h"
 #include "system/watchdog.h"
@@ -201,7 +202,9 @@ BUILD_ASSERT(sizeof(((struct ota_context *)0)->page_buf) >= OTA_FLASH_PAGE_SIZE,
 
 /* ── Forward declarations ────────────────────────────────────────── */
 static void ota_send_status(void);
-static void ota_send_fw_info(void);
+static int ota_send_fw_info(void);
+static bool fw_info_pending;
+static int64_t fw_info_retry_time;
 static struct esb_ota_page_buf ota_page_buf_view(void);
 
 #if OTA_USE_RAM_ENGINE
@@ -233,7 +236,8 @@ static uint8_t esb_ota_get_status(void)
 void esb_ota_handle_query_info(void)
 {
 	LOG_INF("OTA: Firmware info requested");
-	ota_send_fw_info();
+	fw_info_pending = true;
+	fw_info_retry_time = 0;
 }
 
 static int ota_begin_impl(const uint8_t *data, size_t len, uint32_t request)
@@ -411,6 +415,17 @@ static int ota_begin_impl(const uint8_t *data, size_t len, uint32_t request)
 	if (admission_err) {
 		return admission_err;
 	}
+#if OTA_USE_RAM_ENGINE
+	/* Do not advertise an in-place writer until it can take the radio. */
+	int radio_err = esb_raw_rx_quiesce();
+	if (radio_err) {
+		ota.state = OTA_STATE_ERROR;
+		ota.error_code = OTA_STATUS_ERROR;
+		sys_ota_reboot_resolve(false);
+		ota_send_status();
+		return radio_err;
+	}
+#endif
 
 	/* Initialize OTA state */
 	memset(&ota, 0, sizeof(ota));
@@ -451,6 +466,9 @@ static int ota_begin_impl(const uint8_t *data, size_t len, uint32_t request)
 		sensor_err = sensor_shutdown(NULL);
 	}
 	if (sensor_err) {
+#if OTA_USE_RAM_ENGINE
+		esb_raw_rx_resume();
+#endif
 		LOG_ERR("OTA BEGIN: sensor shutdown failed: %d", sensor_err);
 		ota.state = OTA_STATE_ERROR;
 		ota.error_code = OTA_STATUS_ERROR;
@@ -802,6 +820,9 @@ static void ota_abort(void)
 		ota.state, ota.bytes_written, ota.image_size);
 
 	atomic_set(&ota_reboot_pending, 1);
+#if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
+	bool recover = ota.bytes_written != 0 || ota.state == OTA_STATE_ERROR;
+#endif
 	memset(&ota, 0, sizeof(ota));
 	if (!ota_feedback_terminal && ota_feedback.session) {
 		led_result(ota_feedback, led_event_id(), LED_CANCELLED);
@@ -811,21 +832,33 @@ static void ota_abort(void)
 	 * session before the reserved recovery reboot has actually executed. */
 	ota_send_status();
 
-#if OTA_USE_MCUBOOT
-	LOG_WRN("OTA: Discarding the partial secondary image and rebooting...");
-#else
-	LOG_WRN("OTA: Rebooting to the bootloader recovery path...");
-#endif
+	LOG_WRN("OTA: Rebooting after cancellation");
 	k_msleep(200);
 
 #if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
-	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	if (recover) {
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	}
 #endif
 	sys_ota_reboot_resolve(true);
 }
 
+static void ota_service_fw_info(void)
+{
+	/* The receiver stages profile 0 for QUERY_INFO. Its 66-byte reliable
+	 * reply cannot fit a private direct slot, including the final slot. */
+	int64_t now = k_uptime_get();
+	if (fw_info_pending && !tdma_profile_get() && now >= fw_info_retry_time) {
+		int err = ota_send_fw_info();
+		fw_info_pending = err != 0;
+		fw_info_retry_time = now + 100;
+		if (err) LOG_WRN("OTA: Firmware info deferred: %d", err);
+	}
+}
+
 void esb_ota_service(void)
 {
+	ota_service_fw_info();
 	if (atomic_cas(&ota_abort_requested, 1, 0)) {
 		ota_abort();
 		return;
@@ -853,7 +886,9 @@ void esb_ota_service(void)
 
 	k_msleep(200);
 #if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
-	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	if (failed || ota.bytes_written) {
+		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
+	}
 #endif
 	sys_ota_reboot_resolve(true);
 }
@@ -950,7 +985,7 @@ static void ota_send_status(void)
 	ota.last_status_time = k_uptime_get();
 }
 
-static void ota_send_fw_info(void)
+static int ota_send_fw_info(void)
 {
 	uint8_t pkt[OTA_FW_INFO_PACKET_SIZE];
 	memset(pkt, 0, sizeof(pkt));
@@ -998,7 +1033,7 @@ static void ota_send_fw_info(void)
 
 	pkt[65] = esb_ota_crc8(pkt, 65);
 
-	esb_write(pkt, false, OTA_FW_INFO_PACKET_SIZE);
+	return esb_write(pkt, false, OTA_FW_INFO_PACKET_SIZE);
 }
 
 
@@ -1072,6 +1107,7 @@ static void ota_launch_ram_engine(void)
 
 	/* Stop ESB driver. */
 	LOG_WRN("OTA: Stopping ESB driver");
+	/* BEGIN already excluded raw RX; the engine keeps ownership through reset. */
 	esb_disable();
 	k_msleep(50);
 

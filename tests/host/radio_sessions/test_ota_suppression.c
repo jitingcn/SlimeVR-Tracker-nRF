@@ -15,6 +15,42 @@ static void set_clock(int64_t value) { __atomic_store_n(&clock_ms, value, __ATOM
 
 #include "suppression.inc"
 
+#if defined(__APPLE__)
+/* macOS lacks POSIX barriers: a minimal mutex/condvar equivalent. */
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    unsigned count, waiting, generation;
+} pthread_barrier_t;
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+static int pthread_barrier_init(pthread_barrier_t *b, const void *attr, unsigned count)
+{
+    (void)attr;
+    b->count = count; b->waiting = 0; b->generation = 0;
+    pthread_mutex_init(&b->lock, NULL);
+    return pthread_cond_init(&b->cond, NULL);
+}
+static int pthread_barrier_destroy(pthread_barrier_t *b)
+{
+    pthread_cond_destroy(&b->cond);
+    return pthread_mutex_destroy(&b->lock);
+}
+static int pthread_barrier_wait(pthread_barrier_t *b)
+{
+    pthread_mutex_lock(&b->lock);
+    unsigned generation = b->generation;
+    if (++b->waiting == b->count) {
+        b->waiting = 0; b->generation++;
+        pthread_cond_broadcast(&b->cond);
+        pthread_mutex_unlock(&b->lock);
+        return PTHREAD_BARRIER_SERIAL_THREAD;
+    }
+    while (generation == b->generation) pthread_cond_wait(&b->cond, &b->lock);
+    pthread_mutex_unlock(&b->lock);
+    return 0;
+}
+#endif
+
 static pthread_barrier_t start_barrier, finish_barrier;
 #define RACE_ITERATIONS 2000
 

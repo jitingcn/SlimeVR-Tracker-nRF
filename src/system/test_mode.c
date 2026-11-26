@@ -4,6 +4,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
 #if defined(CONFIG_CONNECTION_TDMA)
+#include "../connection/relay_protocol.h"
 #include "../connection/tdma.h"
 #endif
 
@@ -59,7 +60,10 @@ uint16_t test_mode_effective_tps(void)
 	}
 	uint16_t max_tps = 1000;
 #if defined(CONFIG_CONNECTION_TDMA)
-	if (tdma_is_enabled()) {
+	if (tdma_profile_get()) {
+		/* Private frames already include their control/repair budget. */
+		max_tps = relay_geometry_current()->tps;
+	} else if (tdma_is_enabled()) {
 		uint16_t frame_ticks = tdma_frame_ticks_get();
 		if (frame_ticks > 0) {
 			uint16_t capacity_tps = (uint16_t)(32768U / frame_ticks);

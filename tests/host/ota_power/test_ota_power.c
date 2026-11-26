@@ -25,6 +25,7 @@ static bool timeout_reported;
 #define ADAFRUIT_BOOTLOADER 0
 #endif
 #define CONFIG_DISABLE_SENSOR_GPIOS_ON_SHUTDOWN 0
+#define DT_NODE_HAS_PROP(node, prop) 0 /* fixture board has no external regulator */
 #define CHARGER_STAT_EXISTS 0
 static unsigned irq_depth;
 static bool irq_locked;
@@ -161,6 +162,8 @@ static unsigned ram_launches;
 static void ota_launch_ram_engine(void);
 static bool ram_engine_irq_disabled;
 static unsigned radio_disables;
+static int raw_quiesce_error;
+static bool raw_quiesced;
 static struct { uint32_t CTRL; } mpu_registers;
 static struct {
 	uint32_t FREQUENCY, MODE, PCNF0, PCNF1, CRCCNF, CRCPOLY, CRCINIT;
@@ -179,13 +182,22 @@ static void irq_unlock(unsigned key)
 static void __DSB(void) {}
 static void __ISB(void) {}
 static uint8_t connection_get_id(void) { return 3; }
-static void esb_disable(void) { radio_disables++; }
+static int esb_raw_rx_quiesce(void)
+{
+	assert(!raw_quiesced);
+	raw_quiesced = !raw_quiesce_error;
+	return raw_quiesce_error;
+}
+static void esb_raw_rx_resume(void) { assert(raw_quiesced); raw_quiesced = false; }
+static void esb_disable(void) { assert(raw_quiesced); radio_disables++; }
 #endif
 static uint8_t notice_phase, notice_detail;
 static int wom_pin;
 static unsigned wom_setup_calls;
 static bool link_ready = true;
 static bool esb_ready(void) { return link_ready; }
+static uint8_t tdma_profile_get(void) { return 0; }
+static int esb_relay_clock(bool hold) { assert(!hold); return 0; }
 static bool status_ready(void) { return link_ready; }
 #if IMU_INT_EXISTS
 static void sensor_calibration_online_mag_retained_save(void) { wom_mag_saves++; }
@@ -434,6 +446,8 @@ static void fixture(void)
 #if OTA_USE_RAM_ENGINE
 	ram_engine_irq_disabled = false;
 	radio_disables = 0;
+	raw_quiesced = false;
+	raw_quiesce_error = 0;
 	MPU->CTRL = 1;
 #endif
 #if CONFIG_SENSOR_TCAL_HEATED
@@ -742,6 +756,9 @@ static void abort_preserves_recovery_ownership(void)
 	assert(!sys_system_off());
 	power_iteration();
 	assert(physical_reboots == 1 && physical_offs == 0);
+#if !OTA_USE_MCUBOOT
+	assert(NRF_POWER->GPREGRET == ADAFRUIT_DFU_MAGIC_UF2_RESET);
+#endif
 }
 
 static void physical_shutdown_wins(void)
@@ -1470,6 +1487,19 @@ static void receiving_and_verified_timeouts(void)
 	}
 }
 
+static void begin_timeout_boots_intact_application(void)
+{
+	idle_fixture();
+	uint8_t packet[OTA_BEGIN_PACKET_SIZE];
+	begin_packet(packet, 4);
+	assert(esb_ota_handle_begin(packet, sizeof(packet)) == 0);
+	now_ms = ota.last_data_time + OTA_TIMEOUT_MS + 1;
+	esb_ota_service();
+	power_iteration();
+	assert(esb_ota_get_status() == OTA_STATUS_TIMEOUT && ota.bytes_written == 0);
+	assert(physical_reboots == 1 && NRF_POWER->GPREGRET != ADAFRUIT_DFU_MAGIC_UF2_RESET);
+}
+
 static void committed_off_rejects_begin(void)
 {
 	idle_fixture();
@@ -1510,6 +1540,7 @@ static void begin_serializes_remote_abort(void)
 	assert(esb_ota_handle_begin(packet, sizeof(packet)) == -EALREADY);
 	power_iteration();
 	assert(physical_reboots == 1 && physical_offs == 0);
+	assert(NRF_POWER->GPREGRET != ADAFRUIT_DFU_MAGIC_UF2_RESET);
 }
 #else
 static unsigned launcher_sleep_index, abort_at_sleep;
@@ -1542,10 +1573,17 @@ static void ram_handoff_serializes_abort(void)
 		assert(esb_ota_handle_begin(packet, sizeof(packet)) == -EALREADY);
 		power_iteration();
 		assert(physical_reboots == 1 && physical_offs == 0);
+		assert(NRF_POWER->GPREGRET != ADAFRUIT_DFU_MAGIC_UF2_RESET);
 	}
 	idle_fixture();
 	uint8_t packet[OTA_BEGIN_PACKET_SIZE];
 	begin_packet(packet, 4);
+	raw_quiesce_error = -ETIMEDOUT;
+	assert(esb_ota_handle_begin(packet, sizeof(packet)) == -ETIMEDOUT);
+	assert(!esb_ota_is_active() && !sensor_shutdown_calls && !raw_quiesced);
+	assert(!radio_disables && !ram_launches && !atomic_get(&ota_reboot_pending));
+	assert(esb_ota_handle_data(packet, sizeof(packet)) == -EINVAL && !flash_mutations);
+	raw_quiesce_error = 0;
 	assert(esb_ota_handle_begin(packet, sizeof(packet)) == 0);
 	assert(ram_launches == 1 && ram_engine_irq_disabled && MPU->CTRL == 0);
 	assert(!atomic_get(&ota_reboot_pending));
@@ -1812,6 +1850,7 @@ int main(void)
 	rejected_begin_does_not_own_hardware();
 	admitted_errors_recover_without_transport();
 	receiving_and_verified_timeouts();
+	begin_timeout_boots_intact_application();
 	committed_off_rejects_begin();
 #if !OTA_USE_RAM_ENGINE
 	begin_serializes_remote_abort();
