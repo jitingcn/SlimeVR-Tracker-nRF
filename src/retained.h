@@ -75,8 +75,6 @@ struct retained_data {
 
 	uint8_t fusion_id; // fusion_data_stored
 #if CONFIG_SENSOR_USE_VQF
-	/* VQF v3 uses 840 bytes; retain the default prior VQF layout's capacity
-	 * so following retained fields do not move. */
 	uint8_t fusion_data[904];
 #else
 	uint8_t fusion_data[840]; // Other fusion implementations

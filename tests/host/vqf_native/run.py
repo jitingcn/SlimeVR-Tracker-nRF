@@ -45,9 +45,40 @@ bool sensor_get_mag_available(void) { return host_mag_available; }
 bool sensor_get_mag_enabled(void) { return host_mag_enabled; }
 void vqf_get_quat(float *q);
 ''' + source + r'''
-_Static_assert(VQF_MEM_SIZE == 840, "Persisted VQF payload changed");
+_Static_assert(VQF_MEM_SIZE <= 904, "Persisted VQF payload exceeds retained capacity");
 _Static_assert(sizeof(((struct retained_data *)0)->fusion_data) == 904,
                "Retained VQF storage capacity changed");
+static void retained_motion_filter_pair(void) {
+    enum { cases=4 };
+    const int samples[cases]={0,1,2,500}; /* cold, two averaging counts, running */
+    const float dt=.01f,acc[3]={0,0,9.8f};
+    unsigned char saved[cases][VQF_MEM_SIZE],mixed[VQF_MEM_SIZE];
+    const size_t bias_lp_offset=sizeof(vqf_saved_header_t)+offsetof(vqf_state_t,motionBiasEstBiasLpState);
+    const size_t bias_lp_size=sizeof(state.motionBiasEstBiasLpState);
+    for(int i=0;i<cases;i++) {
+        vqf_init(dt,dt,dt);
+        for(int n=0;n<samples[i];n++) updateAcc(&params,&state,&coeffs,acc);
+        const vqf_double_t *r=state.motionBiasEstRLpState,*b=state.motionBiasEstBiasLpState;
+        if(i==0) {
+            assert(vqf_double_nan(r[1]) && vqf_double_nan(b[1]));
+        } else if(i<cases-1) {
+            assert(vqf_double_nan(r[0]) && vqf_double_nan(b[0]));
+            assert(r[1]==samples[i] && b[1]==samples[i]);
+        } else {
+            assert(vqf_double_finite(r[0]) && vqf_double_finite(b[0]));
+            assert(r[1]!=b[1]); /* running delays are allowed to differ */
+        }
+        state.bias[0]=.01f; /* distinguish a successful restore from cold init */
+        vqf_save(saved[i]);
+    }
+    for(int i=0;i<cases;i++) for(int j=0;j<cases;j++) {
+        memcpy(mixed,saved[i],sizeof(mixed));
+        memcpy(mixed+bias_lp_offset,saved[j]+bias_lp_offset,bias_lp_size);
+        vqf_load(mixed,dt,dt,dt);
+        assert(state.bias[0]==(i==j ? .01f:0.0f));
+    }
+}
+
 static void scalar_filter_native(void) {
     /* A separate native gyro-LP instance is the oracle, not a duplicated
      * Butterworth formula. Exercise startup, steady recurrence and re-init. */
@@ -194,9 +225,13 @@ static void retained_motion_cache(void) {
         memset(&saved,0xA5,sizeof(saved));vqf_save(saved.data);
         for(int j=0;j<16;j++) assert(saved.before[j]==0xA5 && saved.after[j]==0xA5);
         vqf_saved_header_t header;memcpy(&header,saved.data,sizeof(header));
-        assert(header.magic==VQF_SAVED_MAGIC && header.version==VQF_SAVED_VERSION && header.size==VQF_MEM_SIZE);
-        vqf_init(.01f,.01f,.01f);vqf_load(saved.data,.01f,.01f,.01f);
-        assert(params.tauAcc==3.294f);
+        assert(header.magic==VQF_SAVED_MAGIC && header.version==VQF_SAVED_VERSION
+               && header.size==VQF_MEM_SIZE
+               && header.oscillation_dwell_s==VQF_SAVED_OSCILLATION_DWELL_S);
+        /* Simulate a new process, not merely another init in the old one. */
+        memset(&state,0,sizeof(state));memset(&coeffs,0,sizeof(coeffs));memset(&params,0,sizeof(params));
+        vqf_load(saved.data,.01f,.01f,.01f);
+        assert(params.tauAcc==3.264f && !memcmp(&expected,&state,sizeof(state)));
         assert(!memcmp(&expected_c,&coeffs,sizeof(coeffs)));
         assert(!memcmp(expected.motionBiasEstLastR,state.motionBiasEstLastR,sizeof(state.motionBiasEstLastR)));
         assert(!memcmp(expected.motionBiasEstLastBiasLp,state.motionBiasEstLastBiasLp,sizeof(state.motionBiasEstLastBiasLp)));
@@ -207,14 +242,15 @@ static void retained_motion_cache(void) {
     }
     /* All envelope fields gate payload interpretation. Legacy identity-
      * quaternion raw blocks must be rejected without reading a new payload. */
-    for(int field=0;field<3;field++) {
+    for(int field=0;field<4;field++) {
         vqf_saved_header_t header;memcpy(&header,saved.data,sizeof(header));
         if(field==0) header.magic^=1;
-        if(field==1) header.version++;
+        if(field==1) header.version=5;
         if(field==2) header.size--;
+        if(field==3) header.oscillation_dwell_s^=1;
         unsigned char invalid[VQF_MEM_SIZE];memcpy(invalid,saved.data,sizeof(invalid));
         memcpy(invalid,&header,sizeof(header));vqf_load(invalid,.01f,.01f,.01f);
-        assert_motion_cache_cold(&state);assert(state.bias[0]==0 && params.tauAcc==3.294f);
+        assert_motion_cache_cold(&state);assert(state.bias[0]==0 && params.tauAcc==3.264f);
     }
     unsigned char legacy[784]={0};float identity=1;
     memcpy(legacy,&identity,sizeof(identity));vqf_load(legacy,.01f,.01f,.01f);
@@ -225,21 +261,198 @@ static void retained_motion_cache(void) {
     memcpy(saved.data+sizeof(vqf_saved_header_t),&poisoned,sizeof(poisoned));vqf_load(saved.data,.01f,.01f,.01f);
     assert_motion_cache_cold(&state);
 }
-static void fixed_parameters(void) {
-    vqf_init(.0025f,.01f,.02f);
-    assert(params.tauAcc==3.294f && params.biasClip==5.0f);
-    assert(params.biasForgettingTime==235.58f && params.biasSigmaInit==.6585f);
-    assert(params.biasSigmaMotion==.1118f && params.biasSigmaRest==.0028f);
-    assert(params.biasVerticalForgettingFactor==.0003f);
-    assert(params.motionBiasEstEnabled && params.restBiasEstEnabled);
-    assert(params.restFilterTau==2.278f && params.restMinT==.118f);
-    assert(params.restThGyr==.486f && params.restThAcc==.186f);
-    assert(params.magDistRejectionEnabled && params.tauMag==9.f);
-    assert(params.magCurrentTau==.20f && params.magNormTh==.10f && params.magDipTh==5.f);
-    assert(params.magRefTau==10.f && params.magNewTime==15.f && params.magNewFirstTime==5.f);
-    assert(params.magNewMinGyr==10.f && params.magMinUndisturbedTime==.5f);
-    assert(params.magMaxRejectionTime==60.f && params.magRejectionFactor==1000.f);
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+static void retained_invalid_controls(void) {
+    unsigned char saved[VQF_MEM_SIZE], bad[VQF_MEM_SIZE];
+    float g[3]={0,0,.1f}, a[3]={0,0,1};
+    vqf_init(.01f,.01f,.02f);
+    for(int i=0;i<500;i++) { vqf_update_gyro(g,.01f);vqf_update_accel(a,.01f); }
+    vqf_save(saved);
+    for(int kind=0;kind<11;kind++) {
+        memcpy(bad,saved,sizeof(bad));
+        unsigned char *payload=bad+sizeof(vqf_saved_header_t);
+        vqf_state_t poisoned;memcpy(&poisoned,payload,sizeof(poisoned));
+        switch(kind) {
+        case 0: poisoned.riskAge=NAN;break;
+        case 1: poisoned.riskAge=-1;break;
+        case 2: poisoned.profileAge=INFINITY;break;
+        case 3: poisoned.profileSinceFlip=-1;break;
+        case 4: poisoned.profileFlips[0]=5;break;
+        case 5: poisoned.profileSign[0]=2;break;
+        case 6: poisoned.profileGyrState[0]=INFINITY;break;
+        case 7: poisoned.profileAccState[1]=INFINITY;break;
+        }
+        memcpy(payload,&poisoned,sizeof(poisoned));
+        if(kind==8) payload[offsetof(vqf_state_t,riskActive)]=2;
+        if(kind==9) payload[offsetof(vqf_state_t,profileActive)]=255;
+        if(kind==10) { float nan=NAN;memcpy(payload+sizeof(state)+sizeof(float),&nan,sizeof(nan)); }
+        vqf_load(bad,.01f,.01f,.02f);
+        assert_motion_cache_cold(&state);
+        assert(state.riskAge==0 && !state.riskActive && state.profileAge==0 && !state.profileActive);
+        assert(coeffs.gyrTs==.01f && coeffs.accTs==.01f && coeffs.magTs==.02f);
+    }
 }
+#endif
+
+static void resume_and_compare(void) {
+    unsigned char saved[VQF_MEM_SIZE];
+    vqf_state_t expected=state;
+    vqf_params_t expected_p=params;
+    vqf_coeffs_t expected_c=coeffs;
+    vqf_save(saved);
+    memset(&state,0,sizeof(state));memset(&params,0,sizeof(params));memset(&coeffs,0,sizeof(coeffs));
+    vqf_load(saved,.01f,.01f,.02f);
+    assert(!memcmp(&state,&expected,sizeof(state)));
+    assert(!memcmp(&coeffs,&expected_c,sizeof(coeffs)));
+    for(int i=0;i<800;i++) {
+        float g[3]={.03f,-.02f,.8f*sinf(i*.0314159265f)};
+        if(i==50) g[2]=4.f; /* gyro-side rest exit */
+        float gr[3];for(int j=0;j<3;j++) gr[j]=g[j]*DEG_TO_RAD;
+        vqf_update_gyro(g,.01f);updateGyr(&expected_p,&expected,&expected_c,gr);
+        assert(!memcmp(&state,&expected,sizeof(state)));
+        float a[3]={0,0,i==100 ? 1.5f:1.f}, ar[3];
+        for(int j=0;j<3;j++) ar[j]=a[j]*CONST_EARTH_GRAVITY;
+        vqf_update_accel(a,.01f);updateAcc(&expected_p,&expected,&expected_c,ar);
+        assert(!memcmp(&state,&expected,sizeof(state)));
+#if CONFIG_SENSOR_USE_MAGNETOMETER
+        if(i%3==0) {
+            float mag[3]={.3f,.2f,.4f},dt=i%2 ? .031f:.047f;
+            uint64_t ts=expected.lastMagTsUs+(uint64_t)(dt*1e6f);
+            if(!ts) ts=1;
+            vqf_update_mag(mag,dt);updateMagTs(&expected_p,&expected,&expected_c,mag,ts);
+            assert(!memcmp(&state,&expected,sizeof(state)));
+        }
+#endif
+    }
+}
+static int snapshot_case(const char *action,const char *path) {
+    unsigned char saved[904]={0};
+    const float dt=.01f;
+    if(!strcmp(action,"save")) {
+        float acc[3]={0,0,1};
+        vqf_init(dt,dt,.02f);
+        for(int i=0;i<8500;i++) {
+            float g[3]={0,0,.8f*sinf(i*.0314159265f)};
+            vqf_update_gyro(g,dt);vqf_update_accel(acc,dt);
+        }
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+        assert(state.profileAge>84.f && state.profileAge<86.f && !state.profileActive);
+#endif
+        state.bias[0]=.02f; /* distinguish continuation from a cold reset */
+        vqf_save(saved);
+        vqf_saved_header_t header;memcpy(&header,saved,sizeof(header));
+        assert(header.oscillation_dwell_s==VQF_SAVED_OSCILLATION_DWELL_S);
+        FILE *f=fopen(path,"wb");assert(f);
+        assert(fwrite(saved,1,sizeof(saved),f)==sizeof(saved));assert(!fclose(f));
+        return 0;
+    }
+    FILE *f=fopen(path,"rb");assert(f);
+    assert(fread(saved,1,sizeof(saved),f)==sizeof(saved));assert(!fclose(f));
+    vqf_init(dt,dt,.02f);
+    vqf_state_t cold;memcpy(&cold,&state,sizeof(cold));
+    state.bias[0]=.2f;
+    vqf_load(saved,dt,dt,.02f);
+    if(!strcmp(action,"reject")) {
+        assert(!memcmp(&cold,&state,sizeof(state)));
+        assert(coeffs.gyrTs==dt && coeffs.accTs==dt && coeffs.magTs==.02f);
+        return 0;
+    }
+    assert(!strcmp(action,"accept"));
+    vqf_saved_header_t header;memcpy(&header,saved,sizeof(header));
+    assert(header.oscillation_dwell_s==VQF_SAVED_OSCILLATION_DWELL_S);
+    vqf_state_t expected;memcpy(&expected,saved+sizeof(header),sizeof(expected));
+    assert(!memcmp(&expected,&state,sizeof(state)) && state.bias[0]==.02f);
+    vqf_params_t expected_p=params;vqf_coeffs_t expected_c=coeffs;
+    for(int i=0;i<900;i++) {
+        float g[3]={0,0,.8f*sinf((i+8500)*.0314159265f)};
+        float gr[3]={0,0,g[2]*DEG_TO_RAD},a[3]={0,0,1};
+        float ar[3]={0,0,CONST_EARTH_GRAVITY};
+        vqf_update_gyro(g,dt);updateGyr(&expected_p,&expected,&expected_c,gr);
+        vqf_update_accel(a,dt);updateAcc(&expected_p,&expected,&expected_c,ar);
+        assert(!memcmp(&state,&expected,sizeof(state)));
+    }
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+    if(VQF_OSCILLATION_DWELL_S==90) assert(state.profileActive);
+    if(VQF_OSCILLATION_DWELL_S==120) assert(!state.profileActive);
+#endif
+    return 0;
+}
+
+
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+static void retained_policy_resume(void) {
+    float zero[3]={0,0,0},acc[3]={0,0,1},bias[3]={0,0,-2};
+    vqf_init(.01f,.01f,.02f);
+    vqf_set_gyro_bias(bias);
+    for(int i=0;i<200 && !state.riskActive;i++) {
+        vqf_update_gyro(zero,.01f);vqf_update_accel(acc,.01f);
+    }
+    /* First selected rest correction, with a large innovation and the
+     * initial high covariance, must be inside the innovation-floor window. */
+    assert(state.restDetected && state.riskActive && state.riskAge>0 && state.riskAge<.02f);
+    assert(fabsf(state.restLastGyrLp[2]-state.bias[2])>DEG_TO_RAD);
+    float e=state.restLastGyrLp[2]-state.bias[2],e2=e*e,th2=DEG_TO_RAD*DEG_TO_RAD;
+    assert(state.biasP[8]*300.f*(e2-th2)/(e2+th2)>coeffs.biasRestW);
+    /* The two-second early-rest floor actually changes the native update;
+     * an otherwise identical state just past the window is the control. */
+    vqf_state_t early=state,late=state;
+    late.riskAge=2.f;
+    const float gravity[3]={0,0,CONST_EARTH_GRAVITY};
+    updateAcc(&params,&early,&coeffs,gravity);
+    updateAcc(&params,&late,&coeffs,gravity);
+    assert(early.riskAge<2.f && late.riskAge>2.f);
+    assert(early.bias[2]>state.bias[2] && late.bias[2]>early.bias[2]);
+    resume_and_compare();
+
+    vqf_init(.01f,.01f,.02f);
+    for(int i=0;i<(VQF_OSCILLATION_DWELL_S+10)*100;i++) {
+        float g[3]={0,0,.8f*sinf(i*.0314159265f)};
+        vqf_update_gyro(g,.01f);vqf_update_accel(acc,.01f);
+    }
+    assert(state.profileActive && state.profileAge==(float)VQF_OSCILLATION_DWELL_S && state.restDetected);
+    resume_and_compare();
+}
+
+static void bounded_rock_step(int i) {
+    float g[3]={0,0,.8f*sinf(i*.0314159265f)},a[3]={0,0,1};
+    vqf_update_gyro(g,.01f);vqf_update_accel(a,.01f);
+}
+static void bounded_rock_until_active(void) {
+    const int dwell_ticks=VQF_OSCILLATION_DWELL_S*100;
+    /* The float accumulator can differ from wall time by a few ticks at
+     * the alternate 120-second setting. The default must not fire early. */
+    const int earliest=dwell_ticks-(VQF_OSCILLATION_DWELL_S==90 ? 0 : 5);
+    int first=0;
+    for(int i=0;i<dwell_ticks+200;i++) {
+        bounded_rock_step(i);
+        if(i+1<earliest) assert(!state.profileActive);
+        if(state.profileActive) { first=i+1;break; }
+    }
+    assert(first>=earliest && first<=dwell_ticks+20);
+    assert(state.profileAge==(float)VQF_OSCILLATION_DWELL_S && state.profileFlips[2]>=4);
+}
+static void bounded_oscillation_dwell(void) {
+    if(VQF_OSCILLATION_DWELL_S!=90 && VQF_OSCILLATION_DWELL_S!=120) return;
+    vqf_init(.01f,.01f,.02f);
+    bounded_rock_until_active();
+    float abort[3]={0,0,10};
+    vqf_update_gyro(abort,.01f);
+    assert(!state.profileActive && state.profileAge==0 && state.profileFlips[2]==0);
+    for(int i=0;i<5000;i++) bounded_rock_step(i);
+    assert(!state.profileActive && state.profileAge>49.f);
+    vqf_update_gyro(abort,.01f);
+    assert(!state.profileActive && state.profileAge==0 && state.profileFlips[2]==0);
+    /* A broken 50-second run contributes nothing to the next dwell. */
+    bounded_rock_until_active();
+    /* A quiet pause can outlast the admission dwell without discarding
+     * the verified reversals; a long absence of reversals still expires. */
+    float quiet[3]={0};
+    for(int i=0;i<12000;i++) vqf_update_gyro(quiet,.01f);
+    assert(state.profileActive);
+    for(int i=0;i<4000;i++) vqf_update_gyro(quiet,.01f);
+    assert(!state.profileActive && state.profileFlips[2]==0);
+}
+#endif
 static void native_inclination(void) {
     const float cases[][3]={
         {0,0,-1},{1e-4f,0,-1},{-1e-4f,0,-1},{0,1e-4f,-1},{0,-1e-4f,-1},
@@ -314,12 +527,21 @@ static void check_covariance(void) {
         +p[2]*(p[3]*p[7]-p[4]*p[6]);
     assert(det>=-1e-5);
 }
-int main(void) {
+int main(int argc,char **argv) {
+    if(argc!=1) {
+        assert(argc==3);
+        return snapshot_case(argv[1],argv[2]);
+    }
     scalar_filter_native();
     coefficient_change_constant();
     motion_output_cache();
     retained_motion_cache();
-    fixed_parameters();
+    retained_motion_filter_pair();
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+    retained_invalid_controls();
+    retained_policy_resume();
+    bounded_oscillation_dwell();
+#endif
     native_inclination();
     public_quat_and_linear_accel();
     float g[3]={0,0,80},a[3]={0,0,1},invalid[3]={NAN,0,0},zero[3]={0,0,0};
@@ -327,7 +549,7 @@ int main(void) {
     for (int i=0;i<12000;i++) {
         vqf_update_gyro(g,.0025f);
         if (i%4==0) vqf_update_accel(a,.01f);
-        assert(params.tauAcc==3.294f);
+        assert(params.tauAcc==3.264f);
         if (i%100==0) check_covariance();
     }
     vqf_state_t before=state;
@@ -339,7 +561,7 @@ int main(void) {
     assert(!memcmp(&state,&before,sizeof(state)));
     unsigned char saved[VQF_MEM_SIZE];vqf_save(saved);
     vqf_load(saved,.0025f,.01f,.01f);
-    assert(!memcmp(&before,&state,sizeof(state)) && params.tauAcc==3.294f);
+    assert(!memcmp(&before,&state,sizeof(state)) && params.tauAcc==3.264f);
     float replacement[3]={.01f,.02f,.03f};
     vqf_set_gyro_bias(replacement);
     assert(!memcmp(before.biasP,state.biasP,sizeof(state.biasP)));
@@ -350,12 +572,12 @@ int main(void) {
     before.bias[0]=NAN;
     memcpy(saved+sizeof(vqf_saved_header_t),&before,sizeof(before));
     vqf_load(saved,.0025f,.01f,.01f);
-    assert(state.bias[0]==0 && params.tauAcc==3.294f);
+    assert(state.bias[0]==0 && params.tauAcc==3.264f);
     for (int rate=100;rate<=400;rate*=2) {
         float dt=1.f/rate;
         vqf_init(dt,dt,dt);
         for (int i=0;i<40*rate;i++) { vqf_update_gyro(zero,dt);vqf_update_accel(a,dt); }
-        assert(params.tauAcc==3.294f && vqf_get_rest_detected());
+        assert(params.tauAcc==3.264f && vqf_get_rest_detected());
     }
     puts("native VQF parameters, core LP adaptation, retained state, rates, 6D/9D and inclination passed");
     return 0;
@@ -364,6 +586,7 @@ int main(void) {
 
 FAST_MATH_TEST = r'''
 int main(void) {
+    retained_motion_filter_pair();
     const uint32_t bad_values[]={UINT32_C(0x7fc00001),UINT32_C(0x7f800000),UINT32_C(0xff800000)};
     vqf_init(.01f,.01f,.01f);
     for (int axis=0;axis<3;axis++) for (int kind=0;kind<3;kind++) {
@@ -380,6 +603,16 @@ int main(void) {
            &bad_values[0],sizeof(float));
     vqf_load(saved,.01f,.01f,.01f);
     assert(state.bias[1]==0);
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+    vqf_init(.01f,.01f,.01f);vqf_save(saved);
+    memcpy(saved+sizeof(vqf_saved_header_t)+offsetof(vqf_state_t,riskAge),&bad_values[0],sizeof(float));
+    vqf_load(saved,.01f,.01f,.01f);
+    assert(state.riskAge==0 && !state.riskActive);
+    vqf_save(saved);
+    saved[sizeof(vqf_saved_header_t)+offsetof(vqf_state_t,profileActive)]=2;
+    vqf_load(saved,.01f,.01f,.01f);
+    assert(!state.profileActive && state.profileAge==0);
+#endif
     puts("fast-math nonfinite samples and retained-state rejection passed");
     return 0;
 }
@@ -392,11 +625,19 @@ def main():
         source = directory / 'wrapper.c'
         source.write_text(translation_unit())
         cc = ['rtk', 'proxy', *shlex.split(os.environ.get('CC') or 'cc')]
-        for mag in (0, 1):
-            binary = directory / f'check-{mag}'
+        variants = [('90-mag0', 0, 90), ('90-mag1', 1, 90),
+                    ('120-mag0', 0, 120), ('off-mag0', 0, None)]
+        binaries = {}
+        for name, mag, dwell in variants:
+            binary = directory / f'check-{name}'
+            binaries[name] = binary
             common = ['-std=gnu11', '-O2', '-fsanitize=undefined', '-fno-sanitize-recover=all',
-                      f'-DCONFIG_SENSOR_USE_MAGNETOMETER={mag}', '-DCONFIG_CONNECTION_RAW_COLLECTION=1',
+                      f'-DCONFIG_SENSOR_USE_MAGNETOMETER={mag}',
+                      '-DCONFIG_CONNECTION_RAW_COLLECTION=1',
                       '-I'+str(ROOT/'vqf-c/src')]
+            if dwell is not None:
+                common += ['-DVQF_BOUNDED_OSCILLATION_REST',
+                           f'-DVQF_OSCILLATION_DWELL_S={dwell}']
             subprocess.run(cc + common + [str(source), str(ROOT/'vqf-c/src/vqf.c'),
                                          '-lm', '-o', str(binary)], check=True)
             subprocess.run(['rtk', 'proxy', str(binary)], check=True)
@@ -404,14 +645,24 @@ def main():
             fast_source = directory / 'fast-wrapper.c'
             fast_source.write_text(translation_unit().split('static void scalar_filter_native(void)', 1)[0]
                                    + FAST_MATH_TEST)
-            core = directory / f'core-{mag}.o'
-            wrapper = directory / f'fast-wrapper-{mag}.o'
-            fast_binary = directory / f'fast-check-{mag}'
+            core = directory / f'core-{name}.o'
+            wrapper = directory / f'fast-wrapper-{name}.o'
+            fast_binary = directory / f'fast-check-{name}'
             subprocess.run(cc + common + ['-c', str(ROOT/'vqf-c/src/vqf.c'), '-o', str(core)], check=True)
             subprocess.run(cc + common + ['-ffast-math', '-c', str(fast_source),
                                           '-o', str(wrapper)], check=True)
             subprocess.run(cc + common + [str(wrapper), str(core), '-lm', '-o', str(fast_binary)], check=True)
             subprocess.run(['rtk', 'proxy', str(fast_binary)], check=True)
+
+        # Real snapshots move between independently compiled instances. Same
+        # dwell continues exactly; changing dwell or toggling the policy must
+        # cold-initialize rather than consume a different causal history.
+        for source_name, _, source_dwell in variants:
+            snapshot = directory / f'{source_name}.bin'
+            subprocess.run(['rtk', 'proxy', str(binaries[source_name]), 'save', str(snapshot)], check=True)
+            for target_name, _, target_dwell in variants:
+                action = 'accept' if source_dwell == target_dwell else 'reject'
+                subprocess.run(['rtk', 'proxy', str(binaries[target_name]), action, str(snapshot)], check=True)
 
 
 if __name__ == '__main__':

@@ -23,6 +23,7 @@
 #include "util.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <zephyr/sys/printk.h>
 #if defined(CONFIG_VQF_BENCH)
 #include <zephyr/kernel.h>
@@ -57,12 +58,21 @@ typedef struct {
 	uint32_t magic;
 	uint16_t version;
 	uint16_t size;
+	uint32_t oscillation_dwell_s; /* zero when the policy is disabled */
 } vqf_saved_header_t;
 #define VQF_SAVED_MAGIC 0x32465156u /* "VQF2" */
-#define VQF_SAVED_VERSION 3u
-#define VQF_MEM_SIZE (sizeof(vqf_saved_header_t) + sizeof(vqf_state_t) + sizeof(vqf_coeffs_t))
-BUILD_ASSERT(sizeof(vqf_saved_header_t) == 8, "VQF retained header ABI changed");
-BUILD_ASSERT(VQF_MEM_SIZE == 840, "VQF retained ABI changed");
+#define VQF_SAVED_VERSION 6u /* v5 filter histories used different bias gains and oscillation coefficients */
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+#define VQF_SAVED_OSCILLATION_DWELL_S VQF_OSCILLATION_DWELL_S
+BUILD_ASSERT(VQF_OSCILLATION_DWELL_S > 0 && VQF_OSCILLATION_DWELL_S <= UINT32_MAX,
+	     "VQF oscillation dwell must fit the retained identity");
+#else
+#define VQF_SAVED_OSCILLATION_DWELL_S 0u
+#endif
+/* Coefficients are derived from the fixed policy and these three periods. */
+#define VQF_MEM_SIZE (sizeof(vqf_saved_header_t) + sizeof(vqf_state_t) + 3 * sizeof(vqf_real_t))
+BUILD_ASSERT(sizeof(vqf_saved_header_t) == 12, "VQF retained header ABI changed");
+BUILD_ASSERT(sizeof(bool) == 1, "VQF retained boolean ABI changed");
 
 static float last_a[3] = {0};
 #if defined(CONFIG_VQF_BENCH)
@@ -186,17 +196,81 @@ static ALWAYS_INLINE bool vqf_vec3_finite(const float v[3])
 	return vqf_float_finite(v[0]) && vqf_float_finite(v[1]) && vqf_float_finite(v[2]);
 }
 
+static ALWAYS_INLINE bool vqf_double_finite(vqf_double_t x)
+{
+#if defined(VQF_SINGLE_PRECISION)
+	return vqf_float_finite(x);
+#else
+	uint64_t bits;
+	memcpy(&bits, &x, sizeof(bits));
+	return (bits & UINT64_C(0x7ff0000000000000)) != UINT64_C(0x7ff0000000000000);
+#endif
+}
+
+static ALWAYS_INLINE bool vqf_double_nan(vqf_double_t x)
+{
+#if defined(VQF_SINGLE_PRECISION)
+	uint32_t bits;
+	memcpy(&bits, &x, sizeof(bits));
+	return (bits & 0x7fffffffu) > 0x7f800000u;
+#else
+	uint64_t bits;
+	memcpy(&bits, &x, sizeof(bits));
+	return (bits & UINT64_C(0x7fffffffffffffff)) > UINT64_C(0x7ff0000000000000);
+#endif
+}
+
+/* filterVec uses all-NaN before the first sample, [NaN,count,sums,...]
+ * while averaging, and finite delay elements once the filter is running. */
+static bool vqf_lp_state_valid(const vqf_double_t *lp, size_t dimensions)
+{
+	if (vqf_double_finite(lp[0])) {
+		for (size_t i = 1; i < 2 * dimensions; i++) {
+			if (!vqf_double_finite(lp[i])) {
+				return false;
+			}
+		}
+		return true;
+	}
+	if (!vqf_double_nan(lp[0])) {
+		return false;
+	}
+	if (vqf_double_nan(lp[1])) {
+		for (size_t i = 2; i < 2 * dimensions; i++) {
+			if (!vqf_double_nan(lp[i])) {
+				return false;
+			}
+		}
+		return true;
+	}
+	if (!vqf_double_finite(lp[1]) || lp[1] < 1) {
+		return false;
+	}
+	for (size_t i = 2; i < 2 * dimensions; i++) {
+		if (!vqf_double_finite(lp[i]) &&
+		    (i < 2 + dimensions || !vqf_double_nan(lp[i]))) {
+			return false;
+		}
+	}
+	return true;
+}
+
 
 static bool vqf_loaded_state_valid(void)
 {
-	/* Reject NaN/inf retained state: it propagates permanently (clip()
-	 * and the Kalman update carry NaN). LP filter *states* are excluded:
-	 * they legitimately hold NaN markers during initialization. */
+	/* LP histories have legitimate NaN sentinels; control values do not. */
 	for (size_t i = 0; i < 3; i++) {
 		if (!vqf_float_finite(state.bias[i]) || !vqf_float_finite(state.restLastGyrLp[i])
 		    || !vqf_float_finite(state.restLastAccLp[i]) || !vqf_float_finite(state.lastAccLp[i])) {
 			return false;
 		}
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+		if (!vqf_float_finite(state.profileGyr[i]) || !vqf_float_finite(state.profileAcc[i])
+		    || !vqf_float_finite(state.profileAngle[i]) || state.profileSign[i] < -1
+		    || state.profileSign[i] > 1 || state.profileFlips[i] > 4) {
+			return false;
+		}
+#endif
 	}
 	for (size_t i = 0; i < 4; i++) {
 		if (!vqf_float_finite(state.gyrQuat[i]) || !vqf_float_finite(state.accQuat[i])) {
@@ -220,9 +294,52 @@ static bool vqf_loaded_state_valid(void)
 		}
 	}
 #endif
-	return vqf_float_finite(coeffs.gyrTs) && coeffs.gyrTs > 0.0f
-	       && vqf_float_finite(coeffs.accTs) && coeffs.accTs > 0.0f
-	       && vqf_float_finite(coeffs.magTs);
+	if (!vqf_float_finite(state.delta) || !vqf_float_finite(state.lastAccCorrAngularRate)
+	    || !vqf_float_finite(state.kMagInit) || !vqf_float_finite(state.lastMagDisAngle)
+	    || !vqf_float_finite(state.lastMagCorrAngularRate)
+	    || !vqf_float_finite(state.restT) || state.restT < 0.0f
+	    || !vqf_float_finite(state.restLastSquaredDeviations[0])
+	    || !vqf_float_finite(state.restLastSquaredDeviations[1])
+	    || state.restLastSquaredDeviations[0] < 0.0f || state.restLastSquaredDeviations[1] < 0.0f
+	    || !vqf_float_finite(state.magRefNorm) || !vqf_float_finite(state.magRefDip)
+	    || !vqf_float_finite(state.magUndisturbedT) || !vqf_float_finite(state.magRejectT)
+	    || !vqf_float_finite(state.magCandidateNorm) || !vqf_float_finite(state.magCandidateDip)
+	    || !vqf_float_finite(state.magCandidateT) || !vqf_float_finite(state.magNormDip[0])
+	    || !vqf_float_finite(state.magNormDip[1])) {
+		return false;
+	}
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+	if (!vqf_float_finite(state.profileAge) || state.profileAge < 0.0f
+	    || !vqf_float_finite(state.profileSinceFlip) || state.profileSinceFlip < 0.0f
+	    || !vqf_float_finite(state.riskAge) || state.riskAge < 0.0f
+	    || !vqf_lp_state_valid(state.profileGyrState, 3)
+	    || !vqf_lp_state_valid(state.profileAccState, 3)) {
+		return false;
+	}
+#endif
+	const vqf_double_t *rotation_lp = state.motionBiasEstRLpState;
+	const vqf_double_t *bias_lp = state.motionBiasEstBiasLpState;
+	if (!vqf_lp_state_valid(rotation_lp, 9) || !vqf_lp_state_valid(bias_lp, 2)) {
+		return false;
+	}
+	/* Both filters advance on the same samples; only averaging stores a count. */
+	const bool rotation_initializing = vqf_double_nan(rotation_lp[0]);
+	const bool bias_initializing = vqf_double_nan(bias_lp[0]);
+	if (rotation_initializing != bias_initializing) {
+		return false;
+	}
+	if (rotation_initializing) {
+		const bool rotation_averaging = vqf_double_finite(rotation_lp[1]);
+		const bool bias_averaging = vqf_double_finite(bias_lp[1]);
+		if (rotation_averaging != bias_averaging ||
+		    (rotation_averaging && rotation_lp[1] != bias_lp[1])) {
+			return false;
+		}
+	}
+	return vqf_lp_state_valid(state.accLpState, 3)
+	       && vqf_lp_state_valid(state.restGyrLpState, 3)
+	       && vqf_lp_state_valid(state.restAccLpState, 3)
+	       && vqf_lp_state_valid(state.magNormDipLpState, 2);
 }
 
 
@@ -231,32 +348,53 @@ void vqf_load(const void *data, float g_time, float a_time, float m_time)
 	rest_observation_pending = false;
 	BUILD_ASSERT(
 		VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
-		"VQF state+coeffs exceeds fusion_data buffer in retained memory"
+		"VQF state and periods exceed fusion_data buffer in retained memory"
 	);
 	vqf_saved_header_t header;
 	memcpy(&header, data, sizeof(header));
 	if (header.magic != VQF_SAVED_MAGIC || header.version != VQF_SAVED_VERSION
-	    || header.size != VQF_MEM_SIZE) {
+	    || header.size != VQF_MEM_SIZE
+	    || header.oscillation_dwell_s != VQF_SAVED_OSCILLATION_DWELL_S) {
 		/* Never interpret another version/configuration's payload layout. */
 		printk("VQF: rejecting incompatible retained layout, reinitializing\n");
 		vqf_init(g_time, a_time, m_time);
 		return;
 	}
 	const uint8_t *payload = (const uint8_t *)data + sizeof(header);
-	memcpy(&coeffs, payload + sizeof(state), sizeof(coeffs));
-	/* Match the normalization performed by initVqf, including disabled mag. */
+	vqf_real_t periods[3];
+	memcpy(periods, payload + sizeof(state), sizeof(periods));
+	/* Match initVqf's normalization, including the disabled-mag fallback. */
 	float gyr_ts = g_time > 0.0f ? g_time : 0.01f;
 	float acc_ts = a_time > 0.0f ? a_time : gyr_ts;
 	float mag_ts = m_time > 0.0f ? m_time : gyr_ts;
-	if (coeffs.gyrTs != gyr_ts || coeffs.accTs != acc_ts || coeffs.magTs != mag_ts) {
+	if (!vqf_float_finite(periods[0]) || !vqf_float_finite(periods[1])
+	    || !vqf_float_finite(periods[2]) || periods[0] <= 0.0f
+	    || periods[1] <= 0.0f || periods[2] <= 0.0f
+	    || periods[0] != gyr_ts || periods[1] != acc_ts || periods[2] != mag_ts) {
 		printk("VQF: rejecting retained sampling periods, reinitializing\n");
 		vqf_init(g_time, a_time, m_time);
 		return;
 	}
+	/* Inspect representations before loading bool objects: invalid _Bool
+	 * bytes are undefined behavior even when merely read for validation. */
+	if (payload[offsetof(vqf_state_t, restDetected)] > 1
+	    || payload[offsetof(vqf_state_t, magDistDetected)] > 1
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+	    || payload[offsetof(vqf_state_t, profileActive)] > 1
+	    || payload[offsetof(vqf_state_t, riskActive)] > 1
+#endif
+	) {
+		printk("VQF: rejecting invalid retained controls, reinitializing\n");
+		vqf_init(g_time, a_time, m_time);
+		return;
+	}
 	set_params();
+	/* setup() rebuilds every fixed and profile coefficient, including mag.
+	 * Restore the causal histories only after setup has reset the instance. */
+	initVqf(&params, &state, &coeffs, periods[0], periods[1], periods[2]);
 	memcpy(&state, payload, sizeof(state));
 	if (!vqf_loaded_state_valid()) {
-		printk("VQF: rejecting non-finite retained state, reinitializing\n");
+		printk("VQF: rejecting invalid retained state, reinitializing\n");
 		vqf_init(g_time, a_time, m_time);
 		return;
 	}
@@ -275,17 +413,19 @@ void vqf_save(void *data)
 {
 	BUILD_ASSERT(
 		VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
-		"VQF state+coeffs exceeds fusion_data buffer in retained memory"
+		"VQF state and periods exceed fusion_data buffer in retained memory"
 	);
 	const vqf_saved_header_t header = {
 		.magic = VQF_SAVED_MAGIC,
 		.version = VQF_SAVED_VERSION,
 		.size = VQF_MEM_SIZE,
+		.oscillation_dwell_s = VQF_SAVED_OSCILLATION_DWELL_S,
 	};
 	memcpy(data, &header, sizeof(header));
 	uint8_t *payload = (uint8_t *)data + sizeof(header);
 	memcpy(payload, &state, sizeof(state));
-	memcpy(payload + sizeof(state), &coeffs, sizeof(coeffs));
+	const vqf_real_t periods[3] = {coeffs.gyrTs, coeffs.accTs, coeffs.magTs};
+	memcpy(payload + sizeof(state), periods, sizeof(periods));
 }
 
 void vqf_update_gyro(float *g, float time)
@@ -437,6 +577,9 @@ void vqf_rebase_gyro_bias(const float delta_dps[3])
 		delta[i] = delta_dps[i] * DEG_TO_RAD;
 		state.bias[i] += delta[i];
 		state.restLastGyrLp[i] += delta[i];
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+		state.profileGyr[i] += delta[i];
+#endif
 	}
 
 	/* filterVec initially stores [NaN, count, sums...], then switches to
@@ -455,6 +598,23 @@ void vqf_rebase_gyro_bias(const float delta_dps[3])
 			state.restGyrLpState[2 * i + 1] += (vqf_double_t)delta[i] * (coeffs.restGyrLpB[2] - coeffs.restGyrLpA[1]);
 		}
 	}
+
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+	/* The context gyro LP uses the same input coordinates. Its gate stores
+	 * integrated deviations, signs and flips, which do not translate. */
+	if (!vqf_double_finite(state.profileGyrState[0])) {
+		if (vqf_double_finite(state.profileGyrState[1])) {
+			for (int i = 0; i < 3; i++) {
+				state.profileGyrState[2 + i] += state.profileGyrState[1] * (vqf_double_t)delta[i];
+			}
+		}
+	} else {
+		for (int i = 0; i < 3; i++) {
+			state.profileGyrState[2 * i] += (vqf_double_t)delta[i] * ((vqf_double_t)1 - coeffs.profileGyrB[0]);
+			state.profileGyrState[2 * i + 1] += (vqf_double_t)delta[i] * (coeffs.profileGyrB[2] - coeffs.profileGyrA[1]);
+		}
+	}
+#endif
 
 	/* LP(R*b) becomes LP(R*b) + LP(R)*delta. Both native filters advance
 	 * together, including their averaging/count initialization. Translate

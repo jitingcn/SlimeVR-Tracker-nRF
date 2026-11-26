@@ -530,6 +530,28 @@ config SENSOR_USE_EQF
 
 endchoice
 
+config SENSOR_VQF_BOUNDED_OSCILLATION_REST
+    bool "VQF rest-bias estimation during bounded oscillation"
+    depends on SENSOR_USE_VQF
+    default y
+    help
+        Use a slower rest reference during sustained, small back-and-forth
+        motion. Also limit the influence of a large gyro bias observation
+        during the first two seconds of each rest episode. Disable to use
+        ordinary VQF rest-bias estimation with the same parameter table.
+
+config SENSOR_VQF_OSCILLATION_DWELL_S
+    int "Minimum duration of bounded oscillation (seconds)"
+    depends on SENSOR_VQF_BOUNDED_OSCILLATION_REST
+    default 90
+    range 1 3600
+    help
+        Minimum qualifying motion after the last detector reset before
+        switching to the slower rest reference. Angular speed above 7.4 deg/s
+        or accumulated angular excursion above 9.2 degrees resets this timer.
+        Reversals are still required. Ordinary rest detection and its
+        two-second entry protection do not wait for this timer.
+
 config VQF_BENCH
     bool "Enable VQF benchmark console command"
     default n

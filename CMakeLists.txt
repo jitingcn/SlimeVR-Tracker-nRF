@@ -143,6 +143,9 @@ endif()
 
 # NORDIC SDK APP START
 FILE(GLOB_RECURSE app_sources src/*.c)
+if(NOT CONFIG_SENSOR_USE_VQF)
+  list(FILTER app_sources EXCLUDE REGEX ".*/sensor/fusion/vqf/vqf\\.c$")
+endif()
 if(NOT CONFIG_CONNECTION_OVER_HID)
   list(FILTER app_sources EXCLUDE REGEX ".*/hid\\.c$")
 endif()
@@ -250,16 +253,19 @@ if(_slimenrf_imu_drv_count EQUAL 0)
 endif()
 # NORDIC SDK APP END
 
-FILE(GLOB_RECURSE files vqf-c/src/*.c)
-target_sources(app PRIVATE ${files})
-set_property(
-  SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/vqf-c/src/vqf.c
-  APPEND PROPERTY COMPILE_OPTIONS
-  -Wno-double-promotion
-)
+if(CONFIG_SENSOR_USE_VQF)
+  if(CONFIG_SENSOR_VQF_BOUNDED_OSCILLATION_REST)
+    # The wrapper and the native core share the vqf_state_t layout.
+    target_compile_definitions(app PRIVATE
+      VQF_BOUNDED_OSCILLATION_REST
+      VQF_OSCILLATION_DWELL_S=${CONFIG_SENSOR_VQF_OSCILLATION_DWELL_S})
+  endif()
+  target_sources(app PRIVATE vqf-c/src/vqf.c)
+  target_include_directories(app PRIVATE vqf-c/src)
+  set_property(SOURCE vqf-c/src/vqf.c APPEND PROPERTY COMPILE_OPTIONS -Wno-double-promotion)
+endif()
 
 target_include_directories(app PRIVATE src)
-target_include_directories(app PRIVATE vqf-c/src)
 
 # Force recompile for updated build timestamp
 add_custom_target(touch_util_h ALL

@@ -20,6 +20,7 @@ def function(source, name):
 preamble = '''
 #include <assert.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <math.h>
 #include <string.h>
@@ -49,10 +50,13 @@ static float rest_total_s, rest_last_enter_time, rest_last_duration_s, uptime_s;
 static bool prev_rest_detected;
 static uint8_t rest_event_idx, rest_event_total;
 ''' + '\n'.join(function(vqf, name) for name in (
-    'set_params', 'vqf_float_finite', 'vqf_vec3_finite', 'vqf_loaded_state_valid',
+    'set_params', 'vqf_float_finite', 'vqf_vec3_finite', 'vqf_double_finite',
+    'vqf_double_nan', 'vqf_lp_state_valid', 'vqf_loaded_state_valid',
     'vqf_init', 'vqf_load', 'vqf_save', 'vqf_update_gyro', 'vqf_update_accel',
     'vqf_get_rest_detected', 'vqf_take_rest_observation', 'vqf_rebase_mag',
     'vqf_rebase_gyro_bias')) + r'''
+enum { PROFILE_GYR_LP_TICKS = 1200 }; /* 12 s at .01 s per gyro update */
+
 static void check_gyro_rebase(int warmup) {
     vqf_init(.01f,.01f,.01f);
     /* The native moving vertical-bias prior is anchored at zero, not
@@ -73,16 +77,35 @@ static void check_gyro_rebase(int warmup) {
         updateGyr(&params,&shifted,&coeffs,translated);
         updateAcc(&params,&shifted,&coeffs,a);
     }
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+    if(warmup==PROFILE_GYR_LP_TICKS-1) {
+        assert(isnan(state.profileGyrState[0]));
+        assert(state.profileGyrState[1]==warmup);
+    } else if(warmup==PROFILE_GYR_LP_TICKS+1) {
+        assert(isfinite(state.profileGyrState[0]));
+    }
+#endif
     vqf_state_t before=state;
     vqf_rebase_gyro_bias(delta_dps);
     assert(!memcmp(before.gyrQuat,state.gyrQuat,sizeof(state.gyrQuat)));
     assert(!memcmp(before.accQuat,state.accQuat,sizeof(state.accQuat)));
     assert(!memcmp(before.biasP,state.biasP,sizeof(state.biasP)));
     assert(before.restDetected==state.restDetected && before.restT==state.restT);
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+    assert(before.profileAge==state.profileAge && before.profileSinceFlip==state.profileSinceFlip);
+    assert(before.profileActive==state.profileActive && before.riskActive==state.riskActive);
+    assert(before.riskAge==state.riskAge);
+    assert(!memcmp(before.profileAngle,state.profileAngle,sizeof(state.profileAngle)));
+    assert(!memcmp(before.profileSign,state.profileSign,sizeof(state.profileSign)));
+    assert(!memcmp(before.profileFlips,state.profileFlips,sizeof(state.profileFlips)));
+#endif
     assert(!memcmp(before.restLastSquaredDeviations,state.restLastSquaredDeviations,
                    sizeof(state.restLastSquaredDeviations)));
     if(!warmup) {
         assert(!memcmp(before.restGyrLpState,state.restGyrLpState,sizeof(state.restGyrLpState)));
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+        assert(!memcmp(before.profileGyrState,state.profileGyrState,sizeof(state.profileGyrState)));
+#endif
         assert(!memcmp(before.motionBiasEstBiasLpState,state.motionBiasEstBiasLpState,
                        sizeof(state.motionBiasEstBiasLpState)));
     } else {
@@ -90,6 +113,13 @@ static void check_gyro_rebase(int warmup) {
             assert((isnan(state.restGyrLpState[j]) && isnan(shifted.restGyrLpState[j]))
                    || fabs(state.restGyrLpState[j]-shifted.restGyrLpState[j])<2e-5);
         }
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+        for(int j=0;j<6;j++) {
+            assert((isnan(state.profileGyrState[j]) && isnan(shifted.profileGyrState[j]))
+                   || fabs(state.profileGyrState[j]-shifted.profileGyrState[j])<2e-5);
+        }
+        for(int j=0;j<3;j++) assert(fabs(state.profileGyr[j]-shifted.profileGyr[j])<2e-5);
+#endif
         for(int j=0;j<4;j++) {
             assert((isnan(state.motionBiasEstBiasLpState[j]) && isnan(shifted.motionBiasEstBiasLpState[j]))
                    || fabs(state.motionBiasEstBiasLpState[j]-shifted.motionBiasEstBiasLpState[j])<2e-5);
@@ -122,6 +152,41 @@ static void check_gyro_rebase(int warmup) {
         assert(fabs(state.restLastSquaredDeviations[0]-shifted.restLastSquaredDeviations[0])<1e-8);
     }
 }
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+static void check_active_context_rebase(void) {
+    const float delta_dps[3]={.3f,-.2f,.1f};
+    const float acc[3]={0,0,9.80665f};
+    vqf_init(.01f,.01f,.01f);
+    params.motionBiasEstEnabled=false;
+    for(int i=0;i<12500;i++) {
+        float gyr[3]={0,0,.8f*sinf(i*.0314159265f)*DEG_TO_RAD};
+        updateGyr(&params,&state,&coeffs,gyr);updateAcc(&params,&state,&coeffs,acc);
+    }
+    assert(state.profileActive && state.restDetected);
+    vqf_state_t control=state;
+    vqf_rebase_gyro_bias(delta_dps);
+    assert(state.profileActive==control.profileActive && state.profileAge==control.profileAge);
+    assert(state.riskActive==control.riskActive && state.riskAge==control.riskAge);
+    assert(!memcmp(state.profileAngle,control.profileAngle,sizeof(state.profileAngle)));
+    assert(!memcmp(state.profileSign,control.profileSign,sizeof(state.profileSign)));
+    assert(!memcmp(state.profileFlips,control.profileFlips,sizeof(state.profileFlips)));
+    for(int i=0;i<1500;i++) {
+        float gyr[3]={0,0,.8f*sinf((i+12500)*.0314159265f)*DEG_TO_RAD},shifted[3];
+        for(int j=0;j<3;j++) shifted[j]=gyr[j]+delta_dps[j]*DEG_TO_RAD;
+        updateGyr(&params,&state,&coeffs,shifted);updateAcc(&params,&state,&coeffs,acc);
+        updateGyr(&params,&control,&coeffs,gyr);updateAcc(&params,&control,&coeffs,acc);
+        assert(state.profileActive==control.profileActive && state.restDetected==control.restDetected);
+        assert(state.riskActive==control.riskActive && state.riskAge==control.riskAge);
+        for(int j=0;j<3;j++) {
+            assert(state.profileSign[j]==control.profileSign[j]);
+            assert(state.profileFlips[j]==control.profileFlips[j]);
+            assert(fabsf(state.profileAngle[j]-control.profileAngle[j])<2e-5f);
+            assert(fabsf(state.profileGyr[j]-control.profileGyr[j]-delta_dps[j]*DEG_TO_RAD)<2e-5f);
+            assert(fabsf(state.bias[j]-control.bias[j]-delta_dps[j]*DEG_TO_RAD)<2e-5f);
+        }
+    }
+}
+#endif
 static void check_static_baseline_handoff(void) {
     /* Production parameters, raw z=.4 dps, old offset=.1, new offset=.3.
      * Warm the real native observer for 30 s before the -.2 dps handoff. */
@@ -160,18 +225,21 @@ static void check_current_period_restore(void) {
     vqf_params_t p; vqf_state_t s; vqf_coeffs_t c;
     set_params(); p=params; initVqf(&p,&s,&c,.0025f,.005f,.02f);
     s.bias[0]=.125f;
-    vqf_saved_header_t header={VQF_SAVED_MAGIC,VQF_SAVED_VERSION,VQF_MEM_SIZE};
+    vqf_saved_header_t header={
+        .magic=VQF_SAVED_MAGIC,.version=VQF_SAVED_VERSION,.size=VQF_MEM_SIZE,
+        .oscillation_dwell_s=VQF_SAVED_OSCILLATION_DWELL_S};
     memcpy(saved,&header,sizeof(header));
     memcpy(saved+sizeof(header),&s,sizeof(s));
-    memcpy(saved+sizeof(header)+sizeof(s),&c,sizeof(c));
-    assert(header.version==3 && header.size==840);
+    const vqf_real_t periods[3]={c.gyrTs,c.accTs,c.magTs};
+    memcpy(saved+sizeof(header)+sizeof(s),periods,sizeof(periods));
+    assert(header.size<=904);
     /* This is the first wrapper call, as on a retained reboot. */
     vqf_load(saved,.0025f,.005f,.02f);
     assert(state.bias[0]==.125f && coeffs.gyrTs==.0025f);
-    for (int old_version=1;old_version<=2;old_version++) {
+    for (int old_version=1;old_version<=5;old_version++) {
         vqf_saved_header_t old_header=header;
         old_header.version=old_version;
-        old_header.size=old_version==2 ? 904 : 840;
+        old_header.size=old_version>=4 ? VQF_MEM_SIZE : (old_version==2 ? 904 : 840);
         memcpy(saved,&old_header,sizeof(old_header));
         vqf_load(saved,.0025f,.005f,.02f);
         assert(state.bias[0]==0 && coeffs.gyrTs==.0025f);
@@ -195,13 +263,17 @@ static void check_current_period_restore(void) {
 int main(void) {
     check_current_period_restore();
     check_static_baseline_handoff();
+#ifdef VQF_BOUNDED_OSCILLATION_REST
+    check_active_context_rebase();
+#endif
     check_gyro_rebase(0);   /* no samples: preserve native NaN sentinels */
     check_gyro_rebase(1);   /* partial initialization: translate sums */
-    check_gyro_rebase(227); /* just before rest-LP initialization boundary */
-    check_gyro_rebase(229); /* just after rest-LP initialization boundary */
-    check_gyro_rebase(329); /* just before motion-LP initialization boundary */
-    check_gyro_rebase(331); /* just after motion-LP initialization boundary */
-    check_gyro_rebase(350); /* mature native biquad histories */
+    check_gyro_rebase(260); /* just before rest-LP initialization boundary */
+    check_gyro_rebase(262); /* just after rest-LP initialization boundary */
+    check_gyro_rebase(326); /* just before motion-LP initialization boundary */
+    check_gyro_rebase(328); /* just after motion-LP initialization boundary */
+    check_gyro_rebase(PROFILE_GYR_LP_TICKS-1); /* profile gyro LP still averaging */
+    check_gyro_rebase(PROFILE_GYR_LP_TICKS+1); /* profile gyro LP running */
     vqf_init(.01f,.01f,.01f);
     float large_delta[3]={50,-60,70};
     vqf_rebase_gyro_bias(large_delta);
@@ -772,7 +844,9 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix='mag-handoff-') as tmp:
     tmp = Path(tmp)
     cc = shlex.split(os.environ.get('CC', 'cc'))
-    jobs = [('vqf', vqf_test, ['-I'+str(ROOT/'vqf-c/src'), str(ROOT/'vqf-c/src/vqf.c')]),
+    jobs = [('vqf', vqf_test, ['-DVQF_BOUNDED_OSCILLATION_REST', '-DVQF_OSCILLATION_DWELL_S=90',
+                               '-I'+str(ROOT/'vqf-c/src'), str(ROOT/'vqf-c/src/vqf.c')]),
+            ('vqf_off', vqf_test, ['-I'+str(ROOT/'vqf-c/src'), str(ROOT/'vqf-c/src/vqf.c')]),
             ('eqf', eqf_test, []), ('eqf_fast', eqf_test, ['-ffast-math']), ('periods', period_test, [])]
     for n in (1, 4):
         jobs.append((f'transition{n}', transition_test,
